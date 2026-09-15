@@ -1,230 +1,229 @@
 # Agentic Review Dashboard
 
-This application is the React 19 and Material UI 9 operations console for
-Agentic Review. Vite builds the application, React Router owns navigation, and
-the shared Material shell provides repository scope and operator session controls.
+The dashboard is the React 19 and Material UI 9 interface for structured PR and
+Issue investigations. Vite builds the application, React Router provides static
+page registration, and TanStack Query manages server data. The Material shell
+provides repository selection, light and dark themes, and session controls.
 
-The standalone `typecheck` and `build` scripts first build the shared contracts
-package. The dashboard consumes its package-exported declarations instead of
-redirecting the TypeScript project reference to source files; this preserves
-TypeBox's ESM symbol identity across the package boundary.
-Run `pnpm --filter @agentic-review/dashboard dev` after building the contracts
-package. The development server binds to `127.0.0.1:8000` and uses sample adapters.
+The current application follows `WorkItem -> Task -> Attempt / LoopCheckpoint ->
+Report`. Its entry point uses the implementation in `src/investigation/` and the
+new investigation contracts. Retired Jobs, Workers, configuration, notification,
+and evaluation pages are not registered in the current shell. Their remaining
+source files do not provide a compatibility API or a migration path.
 
-## Interface design
+## Pages and navigation
 
-The interface uses [Material UI](https://mui.com/material-ui/) components and
-Material Design interaction patterns. Native controls, tabs, dialogs, tables,
-and typed forms share the theme in `src/theme.tsx`; product CSS handles layout
-and content wrapping. There is no compatibility layer for the previous UI framework.
+| Route | Current behavior |
+| --- | --- |
+| `/pull-requests` | Lists registered pull requests; `workItemId` opens the item, its tasks, and available actions. |
+| `/issues` | Lists registered issues and opens their investigations, including Bug and Feature assessments. |
+| `/tasks` | Lists tasks; `taskId` opens attempts, the saved checkpoint, the latest report, and linked tasks. |
+| `/reports` | Opens the immutable report identified by `reportId`; reached from an item or task. |
+| `/repositories` | Lists repositories shared with the account and offers scoped PR/Issue import when permitted. |
 
-The interface follows Material 3's baseline color roles, typography, and geometry.
-A full-width app bar and standard light navigation drawer use pale blue-gray surfaces;
-blue identifies actions and selection against white content surfaces. Locally bundled
-Roboto uses regular and medium weights, with Roboto Mono for identifiers and code. Buttons, chips, form
-controls, and dialogs share the Material scale. Page gutters are 24px on desktop
-and 16px on mobile. Light and dark themes preserve semantic colors and keyboard focus.
+`/` and `/work-items` redirect to `/pull-requests`. The `repositoryId` query
+parameter preserves repository selection. A report link can also specify
+`section=validation`, `section=evidence`, or `section=changes` to open the evidence
+section. Retired and unknown routes show an unavailable page.
 
-The application shell fills the viewport and keeps the app bar in place. The main
-workspace scrolls within the remaining height instead of extending the document.
-Navigation uses 48px targets and scrolls independently only when its items exceed
-the available height. Both regions use thin native scrollbars without hiding
-overflowing content; narrow screens retain the temporary navigation drawer.
+PR and Issue details can create a full investigation task. A static Issue
+investigation uses its imported snapshot; source-based Issue investigation
+requires an explicitly chosen commit SHA. Repository execution is prepared from
+a saved follow-up plan, rather than inferred from an Issue's text or a default
+branch.
 
-Primary pages use `components/PageHeader` and the `--app-*` aliases in
-`src/global.css`. Pull requests and issues use a single Material list with a
-filled search bar, progress filter, and trailing actions. Rows open the full
-detail drawer; request context appears in an expansion panel. Jobs and Workers
-use tables for comparison. Detail drawers group results, validation, and execution using native
-tabs and semantic description lists. Result counts come from adapter responses,
-never inferred from the current page of records. See the
-[Material Design reset](../../docs/design/2026-09-10-material-design-reset.md).
+Queued or running tasks can be cancelled when the account permits it. Stopped
+tasks can resume from their checkpoint. The resume dialog shows saved limits and
+consumption, allows explicit budget increases, and preserves the frozen source,
+scope, profile, and prompt. The server rejects budget reductions, exhausted
+unchanged limits, or increases beyond its resource limits.
 
-## Data boundary
+## Structured reports
 
-Operational pages use `ReviewControlAdapter` in
-`src/services/review-control/adapter.ts`. Repository management and versioned
-configuration use the separate `RepositoryAdapter` and `ConfigurationAdapter`
-interfaces. Development builds select their sample adapters explicitly;
-production builds always select the HTTP implementations and never fall back
-to sample data. Configuration adapters validate the shared contract DTOs,
-including distinct summary and full-content responses.
+The interface distinguishes execution outcome, report completeness, review
+conclusion, and actual validation. A completed investigation does not certify
+that the code is correct or that required E2E checks passed. A checkpoint or
+partial report retains findings, evidence, limitations, and remaining work.
 
-The HTTP adapter reads these same-origin endpoints:
+Reports provide:
 
-- `GET /api/v1/dashboard/work-items`
-- `GET /api/v1/dashboard/jobs`
-- `GET /api/v1/dashboard/jobs/:jobId`
-- `GET /api/v1/dashboard/workers`
-- `GET /api/v1/dashboard/system`
-- `GET /api/v1/operator/worker-nodes`
+- PR review conclusions and an independent E2E assessment.
+- Bug conclusions, missing information, hypotheses, and separate reproduction status.
+- Feature requirements, feasibility, decisions, saved plans, and acceptance criteria.
+- Findings with P0-P3 priority, trigger conditions, impact, root cause, evidence,
+  final recheck information, repair advice, and an editable independent feedback draft.
+- Coverage units, all retained candidates, loop progress, and pending rechecks.
+- Exact original PR, Issue snapshot, source commit, local patch, and remote branch subjects.
+- Actual validation checks, evidence provenance, artifact availability, and diagnostics.
 
-The Workers page also manages the per-worker bearer credential lifecycle through
-three narrowly allowlisted same-origin mutations:
+Findings use cursor pagination with 25 items per page. The displayed total comes
+from the complete server collection, not the visible page. Header, page, and
+export responses are checked against report identity, version, digest, and
+collection totals. The complete JSON export also supplies evidence and saved
+plans and can be downloaded from the report. Registered available artifacts use
+the authenticated content endpoint; missing sample artifacts have no fake
+download destination.
 
-- `POST /api/v1/operator/worker-nodes`
-- `POST /api/v1/operator/worker-nodes/:workerNodeId/token/rotate`
-- `POST /api/v1/operator/worker-nodes/:workerNodeId/revoke`
+The investigation workflow must cover the declared scope and recheck candidates
+before final delivery. Pagination is presentation only; it is not a top-k limit
+on analysis or the retained findings collection.
 
-Dashboard list endpoints accept `page`, `pageSize`, and `search`. Filters use
-their contract field names and repeat the query key for OR semantics. The
-operator worker-node roster and runtime Worker inventory are each read in
-strict 200-record pages and aggregated up to 10,000 records. Aggregation fails
-closed if the reported total changes, a worker repeats, or pagination stops
-making progress. Both aggregations request immutable identity ordering so
-heartbeats and credential lifecycle updates cannot reorder records across
-offset pages. The
-authenticated credential scope allows 300 requests per
-minute so a maximum-size roster can be loaded and refreshed without exhausting
-the route budget. Requests use
-`credentials: include`, reject redirects, and have a 15-second absolute
-deadline. Response bodies are streamed through a 2 MiB limit before JSON is
-parsed. Every successful response is structurally validated and explicitly
-mapped from the shared Server contract into the page-facing model.
+## Decisions, preparation, and confirmation
 
-The Job detail response exposes only the structured persisted result projection. It does not repeat
-the canonical raw result JSON, so the detail endpoint remains inside the same bounded response
-channel. Review-run evidence is read through a separate attempt-scoped manifest and content API.
+The server's `ActionContextV1` separates recommendations from fixed operation
+availability. PR operations include Comment, Approve, code suggestion comments,
+Request changes, Close, Merge, and Trigger CI. Issue Comment and Close remain
+independent of classification-specific suggestions.
 
-The Workers table paginates the cached merged snapshot locally with 50 rows by
-default and a hard maximum of 200 rows. Page and filter changes do not repeat
-the full network aggregation. Explicit refreshes and successful credential
-mutations invalidate the snapshot; failed loads are not retained.
+Only a confirmed, unresolved P0 on the current original PR revision creates the
+specified content prohibition on Approve. P1 findings, incomplete analysis, or
+missing required E2E evidence can change the recommendation without creating
+that prohibition. Merge uses its own permissions and target conditions. Actual
+account permissions, source identity, target state, installed handlers, and
+unresolved submissions still apply to every operation.
 
-Created and rotated worker tokens are held only in component memory and shown
-in a one-time credential panel that prevents accidental dismissal. The
-dashboard never writes a token to logs, URLs, or browser storage. Explicitly
-closing the panel clears the token from application state; it cannot be
-recovered from the dashboard afterward.
+Valid suggestions are selected by default using the server's complete selection
+context. Selection survives pagination and preserves explicit deselection.
+Preparing feedback includes only selected findings and independent drafts,
+including any edits. Mixed text and code suggestions can be combined. Clearing
+selection restores the recommendation's default operation only when the user
+has not explicitly selected an operation. A code suggestion does not implicitly
+choose Request changes. A P0 outside the loaded page cannot be bypassed by
+clearing or changing the selection.
 
-Token rotation sends the roster record's `updatedAt` value as a compare-and-set
-precondition. A stale dashboard therefore cannot replace a token created by a
-newer concurrent rotation.
+Follow-up operations come from persisted, validated `nextActions` and exact saved
+plans. `canPrepare` allows reviewing and completing a preparation form;
+`readyToExecute` and the returned guards describe execution prerequisites.
+Issue follow-up work can require an explicit source commit. Selecting a plan or
+entering a SHA does not assert that other prerequisites have been satisfied.
 
-The legacy `ReviewControlAdapter` approval, publication, work-item requeue, job cancellation,
-and worker drain methods remain unsupported in HTTP mode and raise
-`ReviewControlUnsupportedOperationError`. Connected decision and publication workflows use
-their dedicated adapters. Unsupported legacy calls never report fixture mutations as successful.
+Preparation saves an `ActionIntent` and opens its exact payload, target, expected
+SHA/revision, and guards. Execution requires a separate confirmation bound to the
+intent version and payload digest. The server performs fresh checks before
+dispatch. An `executing` or `unknown` submission can be reconciled without
+resubmitting the operation. Read-only next actions navigate to the existing
+report or evidence. Creating a PR requires an existing verified remote branch;
+the dashboard does not implicitly commit or push changes.
 
-## Workspaces and routes
+## Production API and session boundary
 
-- `/pull-requests` tracks code reviews and the revision under review.
-- `/issues` tracks issue triage, suggested labels, and missing information.
-- `/jobs` monitors execution, retries, and failures across both workflows.
-- `/repositories` manages repository identity, authorization, and connection checks.
-- `/prompts` manages prompt drafts, immutable published versions, and workflow bindings.
-- `/validation-profiles` manages versioned validation configuration for one repository.
-- `/workers` manages the worker inventory and credential lifecycle.
-- `/system` shows component health, processing activity, and runtime details.
+The production bundle uses the same-origin typed HTTP client in
+`src/investigation/api.ts`. Successful responses are validated against TypeBox
+contracts. Requests include the session cookie, disable caching, and reject
+redirects. Failed or malformed responses surface errors; they never fall back to
+sample data or fabricated success.
 
-Pull requests and issues have separate navigation entries and request their
-own server-filtered, paginated lists. Opening an item shows its latest job by
-identity. Results appear first; Validation separates model-reported checks
-from worker-captured evidence, and Execution contains attempts, failure
-details, and diagnostics. Items without a job explain how to request work on
-GitHub. Older revision results are explicitly marked as superseded.
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/auth/session` | Read the authenticated identity, repository grants, permissions, and action capabilities. |
+| `POST /api/auth/login` | Start loopback or OIDC sign-in. |
+| `POST /api/auth/logout` | End the session. |
+| `GET /api/auth/callback` | Complete the server's OIDC callback. |
+| `GET /api/repositories` | List accessible repositories. |
+| `POST /api/repositories/:id/import-work-item` | Import a PR or Issue snapshot and complete comment history through read-only upstream requests. |
+| `GET /api/work-items` and `GET /api/work-items/:id` | Read registered items. |
+| `GET /api/tasks` and `GET /api/tasks/:id` | Read tasks, attempts, checkpoints, and linked work. |
+| `POST /api/tasks` | Create an investigation with server-frozen inputs. |
+| `POST /api/tasks/:id/resume` and `POST /api/tasks/:id/cancel` | Resume with an idempotency key and optional increased budget, or cancel execution. |
+| `GET /api/reports/:id` | Read a report header. |
+| `GET /api/reports/:id/findings` | Read a cursor-based findings page. |
+| `GET /api/reports/:id/export` | Read the complete structured result. |
+| `GET /api/artifacts/:id/content` | Download authorized registered artifact bytes. |
+| `GET /api/work-items/:id/action-context` | Obtain current recommendations, selection defaults, and operation guards. |
+| `POST /api/action-intents` | Prepare an exact operation preview. |
+| `GET /api/action-intents/:id` | Read an operation's recorded status. |
+| `POST /api/action-intents/:id/confirm` | Confirm the reviewed version and payload digest. |
+| `POST /api/action-intents/:id/reconcile` | Resolve an executing or unknown submission from its existing receipt. |
 
-The root route and legacy `/work-items` route redirect to `/pull-requests`.
-The `repositoryId` query parameter preserves repository selection across navigation.
-Pull requests, issues, and jobs apply it to server-side queries and counts; changing
-the selection resets pagination. Invalid or unknown selections display an error
-instead of silently opening an all-repository view.
-The `/approvals` prototype remains hidden from primary navigation. The
-`/publications` page exposes the connected publication outbox and its permission
-checks. Development previews are labeled as sample data; operations without a
-sample adapter explicitly require a connected server.
-No framework demo dashboard, mock server, account center, or analytics sample is included.
+Repository and operation authorization comes from the authenticated server
+session. Logout immediately removes protected views and suspends outstanding and
+new investigation requests before clearing the cache. Late session responses
+cannot restore a signed-out identity. Changes to repository grants or action
+permissions replace the protected workspace and its cached data. If logout
+fails, the dashboard checks the session again and reports the failure.
 
-## Versioned configuration
+Production serves `apps/dashboard/dist` through the investigation server at the
+same origin as these APIs. Configure the public origin, authentication,
+repository grants, and upstream access using the [server guide](../server/README.md).
+Real external writes require the server's explicit write configuration as well
+as the normal prepared and confirmed operation flow. A standalone Vite preview
+of the production bundle does not supply these backend endpoints.
 
-Configuration pages use the authenticated same-origin `/api/v1/operator` routes
-for prompts, prompt bindings, and repository validation profiles. The HTTP client
-allowlists each method and path, rejects redirected requests, bounds request and
-response bodies to 2 MiB, and validates repository, workflow, template, and version
-identity in responses. Prompt content has an additional 256 KiB UTF-8 limit.
+## Development preview
 
-Prompt drafts are editable. Saving and publishing use the template's `version`
-as a compare-and-set precondition. Published content is read-only: a rollback
-changes the selected binding to an older published version. Global prompt
-bindings use an explicit null repository scope; repository bindings take
-precedence, while an absent repository binding inherits the global binding.
-Binding updates use their own version precondition. A conflict requires loading
-current state and reviewing the operator's intended change again.
+Only `NODE_ENV=development` selects `createSampleInvestigationApi()`. The sample
+factory uses the pure shared `createInvestigationPreview` helper and owns isolated
+in-memory state. Production pages and the API selector use static imports; sample
+initialization remains inside the removable development branch. Do not add
+dynamic loaders, eagerly instantiate sample state at module scope, or import
+test-only bridges from production modules.
 
-Validation profiles require a concrete repository selection. Editing an existing
-profile publishes a new immutable version without changing its workflow or
-execution target. Each stage contains structured executable, argument, directory,
-environment, timeout, and requirement settings. The JSON editor changes configuration
-only; it does not execute commands. Static issue triage must have no setup, build,
-test, launch, or cleanup commands. UI and issue-validation workflows require a
-matching execution driver. Publishing or enabling a profile is not evidence that
-tests have run or passed.
+The repository selector contains `moooyo/PowerToys` as `repo-powertoys-fork`.
+Open `/pull-requests?repositoryId=repo-powertoys-fork` to inspect these five
+synthetic investigations:
 
-Prompt preview is a server-rendered operation and can fail independently of draft
-saving. It includes the template workflow and optionally one exact work-item ID.
-The preview digest hashes the rendered content; a published version's digest hashes
-its stored prompt body. If the server does not provide rendering, the page reports
-the service error instead of presenting sample output as a production preview.
+| Sample | Behavior to inspect |
+| --- | --- |
+| PR #2101 | A P1 with required, unrun E2E checks; mixed suggestion and text feedback; manual Approve remains available. |
+| PR #2102 | 26 findings with the P0 on page two; Approve is blocked before that page loads while Merge retains its independent guards. |
+| PR #2103 | An interrupted, partial investigation with a preserved checkpoint and resume controls. |
+| Bug Issue #3101 | `needs_verification`, separate reproduction status, and a saved follow-up plan requiring a chosen source SHA. |
+| Feature Issue #3102 | `ready` with an implementation plan and acceptance criteria; readiness does not imply maintainer acceptance. |
 
-## Review runs and validation reports
+Titles are marked `[Sample]`. Repository numeric IDs, item numbers, commits,
+findings, reports, and execution records are synthetic, not actual GitHub or
+validation results. State resets when the page reloads. Source import is disabled
+in sample mode. Confirming an external sample operation records that no GitHub
+action was dispatched. Confirming an eligible internal sample plan only queues a
+synthetic child task; it does not start a Worker. No real credentials or GitHub
+writes are needed to browse the examples.
 
-Each pull request and issue offers `View runs`; its detail view and run history
-offer `Run validation`. Run creation sends the current 64-character revision key,
-not a Git head SHA, and a client-generated activation ID. Retrying an unchanged
-creation intent reuses that ID. Enabled profile bindings resolve to their published
-versions before selection; required profiles cannot be removed. The server still
-rechecks authorization, required profiles, and current configuration atomically.
+## Running and verification
 
-An issue-validation request requires an exact source commit and explicit operator
-acknowledgement that code at that commit may execute. Static issue triage does not
-infer a source commit. A missing GitHub authorization epoch or unavailable profile
-configuration prevents submission and explains the next action. Creation can return
-a blocked plan; it is not a claim that validation ran or passed.
+The package requires Node.js `>=24.20.0 <25` and pnpm `>=11.24.0 <12`.
+Its build and typecheck scripts consume the built shared contracts package,
+including the package-exported declarations and TypeBox ESM symbols.
 
-The `ReviewRunAdapter` uses `/api/v1/operator/repositories/:repositoryId/review-runs`
-for paginated history and run details. Creation uses
-`/api/v1/operator/repositories/:repositoryId/work-items/:workItemId/review-runs`.
-Request job history and one selected saved result use nested
-`/:reviewRunId/requests/:requestId/jobs` and `/:jobId/result` paths. Every response
-is validated against its repository, run, request, and job scope. A run detail
-contains only bounded result previews; full reports load when a job is selected.
+Use the authorized execution environment for the commands below. Tests, type
+checks, builds used for verification, browser smoke tests, and runtime probes
+must run on `test-env` unless the user explicitly authorizes local verification
+for the current task. Connect with:
 
-The report separates execution state, required check outcomes, expected and actual
-behavior, model recommendations, and policy eligibility. Missing results do not
-imply success. Issue policy eligibility is not applicable. Frozen source commits,
-profile and prompt versions, superseded revisions, lifecycle blockers, and job
-history remain inspectable.
+```powershell
+ssh test-env
+```
 
-Each request offers `Rerun profile` after its current job finishes, and `Cancel execution`
-while its latest job can still be stopped. Both use repository/run/request-scoped POST
-routes; cancellation also binds the exact job ID. The rerun confirmation retains its
-activation ID after a failed response, so retries reuse the same server-side intent.
-Successful actions refresh the run and its history. The server remains authoritative
-for current revision, authorization, and execution readiness.
+From the repository checkout on that host, prepare and start the development
+preview with:
 
-Evidence files use `/api/v1/operator/repositories/:repositoryId/review-runs/:runId/jobs/:jobId/attempts/:runAttemptId/evidence`.
-Manifest identity is checked against the request, profile, revision, and plan as well as
-the URL scope. Referenced but absent files are marked missing; retired files cannot be opened.
-Before opening content, the client refreshes its manifest, requires the exact media type
-and byte count, and verifies SHA-256. Downloads have a 60-second absolute content deadline
-and remain bounded by the manifest's 64 MiB asset ceiling (16 MiB for PNG screenshots).
-Only PNG content is previewed inline through a temporary object URL; every other format is
-downloaded. Preview URLs are released when the view closes or changes scope.
+```powershell
+pnpm --filter @agentic-review/contracts build
+pnpm --filter @agentic-review/dashboard dev
+```
 
-Sample mode presents reference IDs without uploaded content and disables rerun/cancel controls.
-It never sends these execution actions or evidence content requests to the real API.
+Vite binds to `127.0.0.1:8000` on the host where it runs and uses the development
+samples. For a production bundle and dashboard verification, run from the same
+approved checkout:
 
-Evidence verification can finish after a report is read. A response with
-`evidenceVerificationPending: true` retains the original runner checks while showing
-`Evidence verification pending`; its current `evidenceComplete` must be false.
-Required pending evidence withholds policy eligibility. Optional pending evidence remains
-visible without blocking otherwise complete required validation. Verification and availability
-are mutable read metadata and are excluded from immutable report-preview comparisons.
-Visible run and selected-result views refresh pending verification with 5, 10, 20, then
-30-second delays, stopping after six refreshes or a read error. Hidden pages and inactive
-verification views do not poll. Explicit refresh starts a new bounded window; completed
-execution discovered by the existing run polling loads its saved report automatically.
+```powershell
+pnpm --filter @agentic-review/contracts build
+pnpm --filter @agentic-review/dashboard typecheck:only
+pnpm --filter @agentic-review/dashboard test:only
+pnpm --filter @agentic-review/dashboard build:only
+```
 
-The validation profile JSON editor accepts typed `ui` scenarios and validates their
-target against the profile's execution target. Web navigation and Windows ownership
-constraints remain part of the shared schema and semantic validation.
+Also run the repository's production-source boundary checks when changing
+imports, entry points, or preview helpers. Browser verification should cover both
+development samples and the production bundle with a real test session, including
+report pagination, preparation versus confirmation, logout, and narrow layouts.
+If `test-env` is unavailable, report verification as blocked; do not fall back to
+local testing.
+
+Automated verification must use mocked upstream responses, isolated synthetic
+data, or read-only live checks. Access to `test-env` is not authorization to
+create or mutate a repository's actual PRs or Issues. Live writes require the
+user's explicit approval of the exact targets, operations, content, and execution
+scope.
+
+The product contract and loop design are documented in
+[Structured investigation results and loop](../../docs/design/2026-09-15-structured-investigation-results-and-loop.md).

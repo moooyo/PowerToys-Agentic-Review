@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse, resolve, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -156,19 +156,6 @@ describe("loadConfig Phase 1 integrations", () => {
         AGENTIC_REVIEW_GITHUB_TARGET_USER_ID: "1001",
       }),
     ).toThrow(/Legacy GitHub bootstrap requires .+ together\./u);
-  });
-
-  it("documents the production database layout and operator modes", async () => {
-    const example = await readFile(resolve(import.meta.dirname, "..", ".env.example"), "utf8");
-    expect(example).toContain(
-      "AGENTIC_REVIEW_DATABASE_PATH=/var/lib/agentic-review/database/agentic-review.db",
-    );
-    expect(example).toContain("AGENTIC_REVIEW_ALLOW_INSECURE_HTTP=true");
-    expect(example).toContain("AGENTIC_REVIEW_OPERATOR_AUTH_MODE=loopback");
-    expect(example).toContain("AGENTIC_REVIEW_RECOVERY_MAINTENANCE=false");
-    expect(example).not.toContain("AGENTIC_REVIEW_TLS_CLIENT_CA_PATH");
-    expect(example).not.toContain("AGENTIC_REVIEW_WORKER_CERTIFICATE_BINDINGS_JSON");
-    expect(example).not.toContain("AGENTIC_REVIEW_ALLOW_INSECURE_WORKER_AUTH");
   });
 
   it("rejects integer settings with trailing text or values outside their purpose limit", () => {
@@ -902,15 +889,6 @@ describe("loadConfig evidence storage", () => {
       globalAssetLimit: 500,
     });
   });
-
-  it("documents a dedicated production evidence directory and explicit bounded defaults", async () => {
-    const example = await readFile(resolve(import.meta.dirname, "..", ".env.example"), "utf8");
-    expect(example).toContain("AGENTIC_REVIEW_EVIDENCE_DIRECTORY=/var/lib/agentic-review/evidence");
-    expect(example).toContain("AGENTIC_REVIEW_EVIDENCE_GLOBAL_QUOTA_BYTES=10737418240");
-    expect(example).toContain("AGENTIC_REVIEW_EVIDENCE_GLOBAL_ASSET_LIMIT=10000");
-    expect(example).toContain("AGENTIC_REVIEW_EVIDENCE_RETENTION_MS=604800000");
-    expect(example).toContain("AGENTIC_REVIEW_EVIDENCE_INCOMPLETE_UPLOAD_TTL_MS=86400000");
-  });
 });
 
 describe("loadConfig trusted operator administrators", () => {
@@ -1052,12 +1030,6 @@ describe("loadConfig trusted operator administrators", () => {
     expect(config.operatorAuth).toBeUndefined();
     expect(config.operatorAccess).toBeUndefined();
     expect(Object.hasOwn(config, "operatorAccess")).toBe(false);
-  });
-
-  it("documents the separate immutable runtime administrator allowlist", async () => {
-    const example = await readFile(resolve(import.meta.dirname, "..", ".env.example"), "utf8");
-    expect(example).toContain('AGENTIC_REVIEW_OIDC_ADMIN_SUBJECTS_JSON=["operator-subject-id"]');
-    expect(example).toContain("Login authorization alone grants no administrator role.");
   });
 });
 

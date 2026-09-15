@@ -1,0 +1,225 @@
+{
+  "schemaVersion": "TaskReportRefactorVerificationV1",
+  "completedAtUtc": "2026-09-15T12:44:03.975901+00:00",
+  "source": {
+    "snapshot": "snapshot-006",
+    "formattedArchiveSha256": "7f7b7df09b9fc74fae68ddb8289ddf33558ca9fc35c8ba78be099edad1d90315",
+    "archive": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/snapshots/snapshot-006/formatted-source.tar.gz",
+    "sourceFileCount": 1206
+  },
+  "environment": {
+    "host": "test-env",
+    "os": "Linux",
+    "node": "24.20.0",
+    "pnpm": "11.24.0",
+    "vitest": "4.1.11",
+    "playwright": "1.63.0",
+    "chromium": "153.0.8010.12",
+    "network": "Isolated network namespace with loopback only"
+  },
+  "packages": [
+    {
+      "package": "@agentic-review/contracts",
+      "tests": {
+        "passed": 1660,
+        "failed": 0,
+        "skipped": 0
+      },
+      "files": {
+        "passed": 41,
+        "failed": 0,
+        "skipped": 0
+      },
+      "durationSeconds": 11.33,
+      "testExitCode": 0,
+      "typecheckExitCode": 0,
+      "testCommand": "vitest run --maxWorkers=2 --no-file-parallelism",
+      "testLog": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/logs/snapshot-006/full-contracts.log"
+    },
+    {
+      "package": "@agentic-review/domain",
+      "tests": {
+        "passed": 337,
+        "failed": 0,
+        "skipped": 0
+      },
+      "files": {
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0
+      },
+      "durationSeconds": 2.47,
+      "testExitCode": 0,
+      "typecheckExitCode": 0,
+      "testCommand": "vitest run --maxWorkers=2 --no-file-parallelism",
+      "testLog": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/logs/snapshot-006/full-domain.log"
+    },
+    {
+      "package": "@agentic-review/codex",
+      "tests": {
+        "passed": 222,
+        "failed": 0,
+        "skipped": 0
+      },
+      "files": {
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0
+      },
+      "durationSeconds": 1.5,
+      "testExitCode": 0,
+      "typecheckExitCode": 0,
+      "testCommand": "vitest run --maxWorkers=2 --no-file-parallelism",
+      "testLog": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/logs/snapshot-006/full-codex.log"
+    },
+    {
+      "package": "@agentic-review/server",
+      "tests": {
+        "passed": 5927,
+        "failed": 0,
+        "skipped": 1
+      },
+      "files": {
+        "passed": 169,
+        "failed": 0,
+        "skipped": 0
+      },
+      "durationSeconds": 525.15,
+      "testExitCode": 0,
+      "typecheckExitCode": 0,
+      "testCommand": "vitest run --maxWorkers=2 --no-file-parallelism",
+      "testLog": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/logs/snapshot-006/full-server.log"
+    },
+    {
+      "package": "@agentic-review/worker",
+      "tests": {
+        "passed": 2492,
+        "failed": 0,
+        "skipped": 60
+      },
+      "files": {
+        "passed": 51,
+        "failed": 0,
+        "skipped": 3
+      },
+      "durationSeconds": 25.76,
+      "testExitCode": 0,
+      "typecheckExitCode": 0,
+      "testCommand": "vitest run src --maxWorkers=2 --no-file-parallelism",
+      "testLog": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/logs/snapshot-006/full-worker.log"
+    },
+    {
+      "package": "@agentic-review/dashboard",
+      "tests": {
+        "passed": 3668,
+        "failed": 0,
+        "skipped": 0
+      },
+      "files": {
+        "passed": 123,
+        "failed": 0,
+        "skipped": 0
+      },
+      "durationSeconds": 42.27,
+      "testExitCode": 0,
+      "typecheckExitCode": 0,
+      "testCommand": "vitest run src --maxWorkers=2 --no-file-parallelism",
+      "testLog": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/logs/snapshot-006/full-dashboard.log"
+    }
+  ],
+  "totals": {
+    "tests": {
+      "passed": 14306,
+      "failed": 0,
+      "skipped": 61
+    },
+    "files": {
+      "passed": 403,
+      "failed": 0,
+      "skipped": 3
+    }
+  },
+  "builds": {
+    "shared": {
+      "command": "pnpm run build:shared",
+      "exitCode": 0
+    },
+    "server": {
+      "command": "pnpm --filter @agentic-review/server build:only",
+      "exitCode": 0
+    },
+    "root": {
+      "command": "pnpm build",
+      "exitCode": 0
+    },
+    "notes": [
+      "The production Vite build emitted its standard advisory for a minified chunk larger than 500 kB."
+    ]
+  },
+  "lint": {
+    "command": "pnpm exec biome check <110 changed TypeScript/JavaScript files>",
+    "files": 110,
+    "exitCode": 0,
+    "errors": 0,
+    "warnings": 383,
+    "infos": 2,
+    "automaticEdits": "Formatting and import organization only; no unsafe or linter fixes"
+  },
+  "browser": {
+    "productionEntryPassed": true,
+    "developmentEntryPassed": true,
+    "productionBundlePassed": true,
+    "pageErrors": 0,
+    "consoleWarningsOrErrors": 0,
+    "priorScenarioRegressionSnapshot": "snapshot-004"
+  },
+  "roundtrip": {
+    "logEntries": [
+      "\u2713 src/investigation/worker-roundtrip.test.ts (1 test) 3094ms"
+    ],
+    "scope": "The real isolated Server and Worker protocol test resumed 137 durable synthetic hypotheses after interruption and Server restart, sealed the report, and paged the complete large result."
+  },
+  "sharedDist": {
+    "copiedToLocal": [
+      "packages/contracts/dist",
+      "packages/domain/dist",
+      "packages/codex/dist"
+    ],
+    "archiveSha256": "53563583863257b078af38f57c1b9f759f1037e4440483befe69e614784da119",
+    "files": 288,
+    "matchesFinalRootBuild": true,
+    "localOperation": "Archive SHA and destination paths checked; same-volume staged directory replacement. No local build or runtime probe."
+  },
+  "example": {
+    "file": "docs/design/examples/investigation-result-v1.example.json",
+    "resultSchema": "passed",
+    "resultSemantics": "passed",
+    "actionContextSchema": "passed",
+    "synthetic": true,
+    "log": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/logs/snapshot-006/contract-example.log"
+  },
+  "scope": {
+    "localRepositoryTestsBuildsOrRuntimeProbes": false,
+    "localFilesystemChecksumChecks": true,
+    "realGitHubWrites": 0,
+    "realModelInvocations": 0,
+    "productionBrowserData": "Directly seeded synthetic fixture in a dedicated temporary SQLite database; real HTTP authentication and pagination. This is UI/API verification, not a production investigation execution.",
+    "temporaryBrowserServicesAndDatabasesCleaned": true,
+    "skips": "61 existing platform/opt-in skips remained. No verification-only test exclusions or skip flags were added.",
+    "excludedFromSnapshots": "Credentials, private runtime data, artifact directories, dependencies/build outputs, and the unrelated Worker temporary directory."
+  },
+  "evidence": {
+    "remoteLogs": "/var/tmp/powertoys-task-report-loop-20260915-0a4b2ad2acb94707874b4b95838ec1d4/logs/snapshot-006",
+    "localLogs": "C:\\Users\\moooyo\\AppData\\Local\\Temp\\powertoys-task-report-loop-0a4b2ad2acb94707874b4b95838ec1d4\\snapshot-006",
+    "compactFiles": [
+      "verification.json",
+      "summary.md",
+      "bundle-check.json",
+      "production-page-check.json",
+      "development-page-check.json",
+      "scenario-regressions.json",
+      "production-report.png",
+      "development-report.png"
+    ]
+  }
+}

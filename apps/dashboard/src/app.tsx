@@ -1,28 +1,18 @@
 import {
   AccountTreeRounded,
-  ArrowOutwardRounded,
-  AssignmentTurnedInOutlined,
   CloseRounded,
   DarkModeOutlined,
-  DashboardCustomizeOutlined,
   FactCheckOutlined,
   FolderOutlined,
   GitHub,
   LightModeOutlined,
   LogoutRounded,
   MenuRounded,
-  NotificationsOutlined,
   PlayCircleOutlineRounded,
-  SettingsOutlined,
-  SourceOutlined,
-  TerminalRounded,
-  TuneRounded,
-  WidgetsOutlined,
 } from "@mui/icons-material";
 import {
   Alert,
   AppBar,
-  Avatar,
   Box,
   Button,
   Chip,
@@ -33,8 +23,6 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
-  Menu,
-  MenuItem,
   Stack,
   Toolbar,
   Tooltip,
@@ -42,189 +30,63 @@ import {
   useMediaQuery,
   useTheme,
 } from "@mui/material";
-import { type ComponentType, lazy, Suspense, useEffect, useState } from "react";
-import { BrowserRouter, Link, Route, Routes, useLocation } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type ComponentType, Suspense, useEffect, useState } from "react";
+import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import routeDefinitions from "../config/routes";
-import accessForSession from "./access";
-import { NotificationBell } from "./components/NotificationBell";
-import { NotificationSession } from "./components/NotificationBell/access";
-import { OperatorSessionBoundary } from "./components/OperatorSession";
+import ReportPage from "./investigation/report-workspace";
+import RepositoriesPage from "./investigation/repositories-page";
 import {
-  RepositoryScopedLink,
-  RepositorySelector,
-  useRepositoryScope,
-} from "./components/RepositoryScope";
-import { NotificationsHost } from "./components/ui";
-import { SessionProvider, useOperatorSession } from "./state/session";
+  InvestigationRepositorySelector,
+  useInvestigationRepositoryScope,
+} from "./investigation/repository-scope";
+import { InvestigationSessionProvider, useInvestigationSession } from "./investigation/session";
+import TasksPage from "./investigation/task-workspace";
+import IssuesPage from "./pages/Issues";
+import PullRequestsPage from "./pages/PullRequests";
 import { MaterialTheme, useColorMode } from "./theme";
 import "./global.css";
 
-export type { InitialState } from "./state/session";
-export { getInitialState } from "./state/session";
-
 const pages: Record<string, ComponentType> = {
-  "./WorkspaceRedirect": lazy(() => import("./pages/WorkspaceRedirect")),
-  "./PullRequests": lazy(() => import("./pages/PullRequests")),
-  "./Issues": lazy(() => import("./pages/Issues")),
-  "./Jobs": lazy(() => import("./pages/Jobs")),
-  "./Repositories": lazy(() => import("./pages/Repositories")),
-  "./Prompts": lazy(() => import("./pages/Prompts")),
-  "./ValidationProfiles": lazy(() => import("./pages/ValidationProfiles")),
-  "./Workers": lazy(() => import("./pages/Workers")),
-  "./Evaluations": lazy(() => import("./pages/Evaluations")),
-  "./Approvals": lazy(() => import("./pages/Approvals")),
-  "./Publications": lazy(() => import("./pages/Publications")),
-  "./Notifications": lazy(() => import("./pages/Notifications")),
-  "./System": lazy(() => import("./pages/System")),
-  "./SignedOut": lazy(() => import("./pages/SignedOut")),
-  "./NotFound": lazy(() => import("./pages/NotFound")),
+  "./PullRequests": PullRequestsPage,
+  "./Issues": IssuesPage,
+  "./InvestigationTasks": TasksPage,
+  "./InvestigationReport": ReportPage,
+  "./InvestigationRepositories": RepositoriesPage,
 };
-const navIcons: Record<string, ComponentType<{ fontSize?: "small" }>> = {
+const icons: Record<string, ComponentType> = {
   "/pull-requests": AccountTreeRounded,
   "/issues": FactCheckOutlined,
-  "/jobs": PlayCircleOutlineRounded,
-  "/workers": TerminalRounded,
-  "/publications": ArrowOutwardRounded,
-  "/notifications": NotificationsOutlined,
-  "/system": SettingsOutlined,
+  "/tasks": PlayCircleOutlineRounded,
   "/repositories": FolderOutlined,
-  "/prompts": SourceOutlined,
-  "/validation-profiles": TuneRounded,
-  "/evaluations": DashboardCustomizeOutlined,
-  "/approvals": AssignmentTurnedInOutlined,
 };
-const sections = [
-  { label: "Review", paths: ["/pull-requests", "/issues"] },
-  {
-    label: "Operations",
-    paths: ["/jobs", "/workers", "/publications", "/notifications", "/system"],
-  },
-  {
-    label: "Configuration",
-    paths: ["/repositories", "/prompts", "/validation-profiles", "/evaluations"],
-  },
-];
-const sidebarWidth = 280;
-
-function PageLoading() {
-  return (
-    <Box role="status" aria-label="Loading page" sx={{ p: 4 }}>
-      <Typography color="text.secondary">Loading workspace…</Typography>
-    </Box>
-  );
-}
-
-function RouteContent({ component, permission }: { component: string; permission?: string }) {
-  const { initialState } = useOperatorSession();
-  const allowed = accessForSession(initialState);
-  const Page = pages[component];
-  if (!Page) return null;
-  if (permission && allowed[permission as keyof typeof allowed] !== true)
-    return (
-      <Alert severity="info">
-        This page requires additional access. Contact your platform administrator.
-      </Alert>
-    );
-  return <Page />;
-}
 
 function ApplicationShell() {
-  const { initialState, refresh } = useOperatorSession();
-  const repositoryScope = useRepositoryScope();
   const location = useLocation();
   const desktop = useMediaQuery(useTheme().breakpoints.up("lg"));
-  const [desktopOpen, setDesktopOpen] = useState(true);
+  const [navigationOpen, setNavigationOpen] = useState(true);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [accountAnchor, setAccountAnchor] = useState<HTMLElement | null>(null);
+  const [error, setError] = useState<string>();
   const { mode, toggle } = useColorMode();
-  const allowed = accessForSession(initialState);
-  const preview = process.env.NODE_ENV === "development";
+  const { session, logout } = useInvestigationSession();
+  const scope = useInvestigationRepositoryScope();
+  const sample = process.env.NODE_ENV === "development";
   const active = routeDefinitions.find((route) => route.path === location.pathname);
-  const barePage = active?.layout === false || !active;
+  const scopeQuery = scope.repositoryId
+    ? `?repositoryId=${encodeURIComponent(scope.repositoryId)}`
+    : "";
   useEffect(() => {
-    document.title = (active?.name ?? "Workspace") + " · Agentic Review";
+    document.title = `${active?.name ?? "Workspace"} · Agentic Review`;
     setMobileOpen(false);
-    setAccountAnchor(null);
   }, [active?.name]);
-
-  const routeTree = (
-    <Suspense fallback={<PageLoading />}>
-      <Routes>
-        {routeDefinitions.map((route) => (
-          <Route
-            key={route.path}
-            path={route.path}
-            element={<RouteContent component={route.component} permission={route.access} />}
-          />
-        ))}
-      </Routes>
-    </Suspense>
-  );
-  if (barePage) return routeTree;
-  if (!initialState?.authenticated)
-    return (
-      <Box sx={{ maxWidth: 620, mx: "auto", pt: 12, px: 3 }}>
-        <Alert severity={initialState?.apiConnected ? "info" : "error"} sx={{ mb: 3 }}>
-          {initialState?.apiConnected
-            ? "Sign in to open your review workspace."
-            : "The review service is unavailable. Check the connection and try again."}
-        </Alert>
-        <Stack direction="row" spacing={1}>
-          <Button variant="contained" onClick={() => void refresh()}>
-            Try again
-          </Button>
-          <Button component={Link} to="/signed-out">
-            Sign in
-          </Button>
-        </Stack>
-      </Box>
-    );
-
-  const displayName = initialState.currentUser.displayName;
-  const initials = displayName
-    .split(/\s+/u)
-    .slice(0, 2)
-    .map((word) => word[0])
-    .join("");
-  const status = (
-    <Chip
-      label={preview ? "Sample data" : initialState.apiConnected ? "Connected" : "Disconnected"}
-      variant="outlined"
-      sx={{ color: "text.secondary", borderColor: "divider", flexShrink: 0 }}
-    />
-  );
-  const githubShortcut = repositoryScope.repository ? (
-    <Tooltip title={"Open " + repositoryScope.repository.fullName + " on GitHub"}>
-      <IconButton
-        component="a"
-        href={"https://github.com/" + repositoryScope.repository.fullName}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={"Open " + repositoryScope.repository.fullName + " on GitHub"}
-      >
-        <GitHub />
-      </IconButton>
-    </Tooltip>
-  ) : null;
   const navigation = (
     <Box
       component="nav"
       aria-label="Main navigation"
-      sx={{
-        height: "100%",
-        minHeight: 0,
-        display: "flex",
-        flexDirection: "column",
-        px: 1.5,
-        pb: 1,
-      }}
+      sx={{ height: "100%", display: "flex", flexDirection: "column", p: 1.5 }}
     >
       {!desktop && (
-        <Stack
-          direction="row"
-          sx={{ alignItems: "center", minHeight: 72, flexShrink: 0, px: 1, gap: 2 }}
-        >
-          <AccountTreeRounded color="primary" />
+        <Stack direction="row" sx={{ minHeight: 56, px: 1, alignItems: "center" }}>
           <Typography variant="h6" sx={{ flex: 1 }}>
             Agentic Review
           </Typography>
@@ -233,172 +95,130 @@ function ApplicationShell() {
           </IconButton>
         </Stack>
       )}
-      <Box
-        className="material-scroll-region"
-        sx={{ flex: 1, minHeight: 0, overflowY: "auto", pt: desktop ? 0.5 : 0, pb: 1 }}
-      >
-        {sections.map((section) => {
-          const routes = routeDefinitions.filter(
-            (route) =>
-              section.paths.includes(route.path) &&
-              !route.hideInMenu &&
-              (!route.access || allowed[route.access as keyof typeof allowed]),
-          );
-          return routes.length ? (
-            <Box key={section.label} sx={{ mb: 1, "&:last-child": { mb: 0 } }}>
-              <Typography variant="subtitle2" sx={{ color: "text.secondary", px: 2, py: 1 }}>
-                {section.label}
-              </Typography>
-              <List disablePadding>
-                {routes.map((route) => {
-                  const Icon = navIcons[route.path] ?? WidgetsOutlined;
-                  const selected = location.pathname === route.path;
-                  return (
-                    <ListItemButton
-                      key={route.path}
-                      component={RepositoryScopedLink}
-                      to={route.path}
-                      selected={selected}
-                      aria-current={selected ? "page" : undefined}
-                      onClick={() => setMobileOpen(false)}
-                      sx={{
-                        minHeight: 48,
-                        borderRadius: 100,
-                        px: 2,
-                        color: "text.secondary",
-                        "&.Mui-selected": {
-                          bgcolor: "var(--app-secondary-container)",
-                          color: "var(--app-on-secondary-container)",
-                          "&:hover": { bgcolor: "var(--app-secondary-container)" },
-                        },
-                      }}
-                    >
-                      <ListItemIcon sx={{ minWidth: 40, color: "inherit" }}>
-                        <Icon />
-                      </ListItemIcon>
-                      <ListItemText
-                        primary={route.name}
-                        slotProps={{
-                          primary: { sx: { fontSize: 14, lineHeight: "20px", fontWeight: 500 } },
-                        }}
-                      />
-                    </ListItemButton>
-                  );
-                })}
-              </List>
-            </Box>
-          ) : null;
-        })}
-      </Box>
-      <Divider sx={{ mx: 2, mb: 1, flexShrink: 0 }} />
-      <Typography variant="body2" sx={{ px: 2, color: "text.secondary", flexShrink: 0 }}>
-        {preview ? "Local preview" : "Review workspace"}
+      <Typography variant="subtitle2" color="text.secondary" sx={{ px: 2, py: 1 }}>
+        Workspace
+      </Typography>
+      <List disablePadding sx={{ flex: 1 }}>
+        {routeDefinitions
+          .filter((route) => !route.hideInMenu && route.name)
+          .map((route) => {
+            const Icon = icons[route.path] ?? FolderOutlined;
+            return (
+              <ListItemButton
+                key={route.path}
+                component={Link}
+                to={route.path + scopeQuery}
+                selected={location.pathname === route.path}
+                aria-current={location.pathname === route.path ? "page" : undefined}
+                sx={{
+                  borderRadius: 100,
+                  px: 2,
+                  minHeight: 48,
+                  color: "text.secondary",
+                  "&.Mui-selected": {
+                    bgcolor: "var(--app-secondary-container)",
+                    color: "var(--app-on-secondary-container)",
+                    "&:hover": { bgcolor: "var(--app-secondary-container)" },
+                  },
+                }}
+              >
+                <ListItemIcon sx={{ minWidth: 40, color: "inherit" }}>
+                  <Icon />
+                </ListItemIcon>
+                <ListItemText
+                  primary={route.name}
+                  slotProps={{ primary: { sx: { fontSize: 14, fontWeight: 500 } } }}
+                />
+              </ListItemButton>
+            );
+          })}
+      </List>
+      <Divider sx={{ mb: 1 }} />
+      <Typography variant="body2" color="text.secondary" sx={{ px: 2 }}>
+        {sample ? "Sample workspace" : session.user?.displayName}
       </Typography>
     </Box>
   );
-
   return (
     <Box sx={{ height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      <AppBar position="static" sx={{ flexShrink: 0 }}>
-        <Toolbar sx={{ minHeight: 64, px: { xs: 1.5, md: 2 }, gap: { xs: 0.5, sm: 1 } }}>
-          <Tooltip title={desktop && desktopOpen ? "Close navigation" : "Open navigation"}>
-            <IconButton
-              aria-label={desktop && desktopOpen ? "Close navigation" : "Open navigation"}
-              onClick={() => (desktop ? setDesktopOpen((value) => !value) : setMobileOpen(true))}
-            >
-              <MenuRounded />
-            </IconButton>
-          </Tooltip>
-          <RepositoryScopedLink
+      <AppBar position="static">
+        <Toolbar sx={{ gap: 1, px: { xs: 1, md: 2 } }}>
+          <IconButton
+            aria-label={navigationOpen && desktop ? "Close navigation" : "Open navigation"}
+            onClick={() => (desktop ? setNavigationOpen((value) => !value) : setMobileOpen(true))}
+          >
+            <MenuRounded />
+          </IconButton>
+          <Box
+            component={Link}
+            to={`/pull-requests${scopeQuery}`}
             className="material-brand"
-            to="/pull-requests"
-            aria-label="Agentic Review home"
+            sx={{ minWidth: 0, flexShrink: 1 }}
           >
             <AccountTreeRounded
               sx={{ color: "primary.main", display: { xs: "none", sm: "block" } }}
             />
-            <Typography component="span" variant="h6" sx={{ fontSize: { xs: 20, sm: 22 } }}>
+            <Typography component="span" variant="h6" noWrap sx={{ fontSize: { xs: 18, sm: 20 } }}>
               Agentic Review
             </Typography>
-          </RepositoryScopedLink>
+          </Box>
           <Box sx={{ flex: 1 }} />
-          {desktop && (
-            <>
-              <RepositorySelector />
-              {githubShortcut}
-              <Box sx={{ mx: 1 }}>{status}</Box>
-            </>
+          {desktop && <InvestigationRepositorySelector />}
+          {desktop && scope.repository && (
+            <Tooltip title={`Open ${scope.repository.fullName} on GitHub`}>
+              <IconButton
+                component="a"
+                href={`https://github.com/${scope.repository.fullName}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Open repository on GitHub"
+              >
+                <GitHub />
+              </IconButton>
+            </Tooltip>
           )}
-          <Tooltip title={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}>
-            <IconButton
-              aria-label={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}
-              onClick={toggle}
-            >
-              {mode === "light" ? <DarkModeOutlined /> : <LightModeOutlined />}
-            </IconButton>
-          </Tooltip>
-          <NotificationBell />
-          <Tooltip title={displayName}>
-            <IconButton
-              aria-label="Open account menu"
-              aria-controls={accountAnchor ? "account-menu" : undefined}
-              aria-haspopup="true"
-              aria-expanded={Boolean(accountAnchor)}
-              onClick={(event) => setAccountAnchor(event.currentTarget)}
-            >
-              <Avatar sx={{ width: 32, height: 32, fontSize: 14 }}>{initials}</Avatar>
-            </IconButton>
-          </Tooltip>
+          <Chip
+            label={sample ? "Sample data" : "Connected"}
+            variant="outlined"
+            size="small"
+            sx={{ display: { xs: "none", sm: "flex" }, flexShrink: 0 }}
+          />
+          <IconButton
+            aria-label={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}
+            onClick={toggle}
+          >
+            {mode === "light" ? <DarkModeOutlined /> : <LightModeOutlined />}
+          </IconButton>
+          {!sample && (
+            <Tooltip title={`Sign out ${session.user?.displayName}`}>
+              <IconButton
+                aria-label="Sign out"
+                onClick={() => {
+                  void logout().catch((cause: unknown) =>
+                    setError(cause instanceof Error ? cause.message : "Sign out failed."),
+                  );
+                }}
+              >
+                <LogoutRounded />
+              </IconButton>
+            </Tooltip>
+          )}
         </Toolbar>
       </AppBar>
-      <Menu
-        id="account-menu"
-        anchorEl={accountAnchor}
-        open={Boolean(accountAnchor)}
-        onClose={() => setAccountAnchor(null)}
-      >
-        <Box sx={{ px: 2, py: 1.5, minWidth: 220 }}>
-          <Typography variant="subtitle1">{displayName}</Typography>
-          <Typography variant="body2" color="text.secondary">
-            {preview ? "Sample workspace" : "Signed in"}
-          </Typography>
-        </Box>
-        {!preview && <Divider />}
-        {!preview && (
-          <MenuItem
-            onClick={() => {
-              void fetch("/api/v1/auth/logout", {
-                credentials: "include",
-                method: "POST",
-                redirect: "error",
-              })
-                .catch(() => undefined)
-                .finally(() => globalThis.location?.assign("/signed-out"));
-            }}
-          >
-            <ListItemIcon>
-              <LogoutRounded />
-            </ListItemIcon>
-            Sign out
-          </MenuItem>
-        )}
-      </Menu>
       <Box sx={{ display: "flex", flex: 1, minHeight: 0 }}>
         <Drawer
           variant={desktop ? "persistent" : "temporary"}
-          open={desktop ? desktopOpen : mobileOpen}
+          open={desktop ? navigationOpen : mobileOpen}
           onClose={() => setMobileOpen(false)}
-          sx={{ width: desktop && desktopOpen ? sidebarWidth : 0, flexShrink: 0 }}
+          sx={{ width: desktop && navigationOpen ? 260 : 0, flexShrink: 0 }}
           slotProps={{
             paper: {
               sx: {
-                width: sidebarWidth,
-                border: 0,
-                bgcolor: "background.default",
+                width: 260,
                 position: desktop ? "relative" : "fixed",
                 height: "100%",
-                overflow: "hidden",
-                borderRadius: desktop ? 0 : "0 16px 16px 0",
+                border: 0,
+                bgcolor: "background.default",
               },
             },
           }}
@@ -412,31 +232,32 @@ function ApplicationShell() {
             flex: 1,
             minWidth: 0,
             minHeight: 0,
-            pr: { xs: 0, lg: 2 },
-            pb: { xs: 0, lg: 2 },
+            pr: { lg: 2 },
+            pb: { lg: 2 },
           }}
         >
           {!desktop && (
-            <Stack
-              direction="row"
-              sx={{ alignItems: "center", flexShrink: 0, px: 2, pt: 1, pb: 2, gap: 1 }}
-            >
-              <RepositorySelector fullWidth />
-              {githubShortcut}
-              {status}
+            <Stack direction="row" spacing={1} sx={{ px: 2, pb: 2, alignItems: "center" }}>
+              <InvestigationRepositorySelector fullWidth />
+              {scope.repository && (
+                <IconButton
+                  component="a"
+                  href={`https://github.com/${scope.repository.fullName}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="Open repository on GitHub"
+                >
+                  <GitHub />
+                </IconButton>
+              )}
             </Stack>
           )}
           <Box
-            key={location.pathname}
             component="main"
             className="material-main material-scroll-region"
             aria-label="Workspace"
-            tabIndex={0}
             sx={{
               flex: 1,
-              width: "100%",
-              maxWidth: 1600,
-              mx: "auto",
               minHeight: 0,
               overflow: "auto",
               bgcolor: "background.paper",
@@ -445,7 +266,47 @@ function ApplicationShell() {
               pb: 5,
             }}
           >
-            {routeTree}
+            {error && (
+              <Alert severity="error" onClose={() => setError(undefined)} sx={{ mb: 2 }}>
+                {error}
+              </Alert>
+            )}
+            <Suspense
+              fallback={
+                <Typography color="text.secondary" role="status">
+                  Loading workspace…
+                </Typography>
+              }
+            >
+              <Routes>
+                {routeDefinitions.map((route) => {
+                  const Page = pages[route.component];
+                  return (
+                    <Route
+                      key={route.path}
+                      path={route.path}
+                      element={
+                        route.component === "./WorkspaceRedirect" ? (
+                          <Navigate to={`/pull-requests${scopeQuery}`} replace />
+                        ) : Page ? (
+                          <Page />
+                        ) : (
+                          <Stack spacing={2}>
+                            <Typography variant="h4">Page unavailable</Typography>
+                            <Typography>
+                              This page is not part of the current investigation workspace.
+                            </Typography>
+                            <Button component={Link} to={`/pull-requests${scopeQuery}`}>
+                              Open pull requests
+                            </Button>
+                          </Stack>
+                        )
+                      }
+                    />
+                  );
+                })}
+              </Routes>
+            </Suspense>
           </Box>
         </Box>
       </Box>
@@ -454,18 +315,21 @@ function ApplicationShell() {
 }
 
 export default function App() {
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+      }),
+  );
   return (
     <MaterialTheme>
-      <SessionProvider>
-        <BrowserRouter>
-          <OperatorSessionBoundary>
-            <NotificationSession>
-              <ApplicationShell />
-              <NotificationsHost />
-            </NotificationSession>
-          </OperatorSessionBoundary>
-        </BrowserRouter>
-      </SessionProvider>
+      <QueryClientProvider client={queryClient}>
+        <InvestigationSessionProvider>
+          <BrowserRouter>
+            <ApplicationShell />
+          </BrowserRouter>
+        </InvestigationSessionProvider>
+      </QueryClientProvider>
     </MaterialTheme>
   );
 }

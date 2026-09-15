@@ -159,11 +159,8 @@ beforeEach(() => {
 });
 
 describe("evaluation management page scope and information architecture", () => {
-  it("registers a repository-readable management entry", () => {
-    expect(routes.find((route) => route.path === "/evaluations")).toMatchObject({
-      access: "canRead",
-      component: "./Evaluations",
-    });
+  it("does not expose the retired evaluation API through the investigation workspace", () => {
+    expect(routes.find((route) => route.path === "/evaluations")).toBeUndefined();
   });
   it("shows separate PR and Issue groups containing only their real item kind", () => {
     const html = renderToStaticMarkup(<EvaluationsPage />);

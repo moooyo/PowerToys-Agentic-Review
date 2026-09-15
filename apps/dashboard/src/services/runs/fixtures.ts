@@ -24,6 +24,12 @@ const prRunId = "sample-run-pr-41982";
 const issueRunId = "sample-run-issue-41876";
 const prPlanDigest = "a".repeat(64);
 const issuePlanDigest = "b".repeat(64);
+const forkPullRequest = workItem("wi-fork-pr-1003");
+const forkIssue = workItem("wi-fork-issue-1006");
+const forkPrRunId = "sample-run-fork-pr-1003";
+const forkIssueRunId = "sample-run-fork-issue-1006";
+const forkPrPlanDigest = "c".repeat(64);
+const forkIssuePlanDigest = "d".repeat(64);
 
 function resultSummary(result: DashboardReviewRunResult): DashboardValidationResultSummary {
   const checks: DashboardValidationOutcomeCounts = {
@@ -310,6 +316,126 @@ const issueValidationResult: DashboardReviewRunResult = {
   },
 };
 
+const forkPrResult: DashboardReviewRunResult = {
+  ...prResult,
+  id: "sample-result-fork-pr-1003-build",
+  repositoryId: forkPullRequest.repositoryId,
+  reviewRunId: forkPrRunId,
+  workItemId: forkPullRequest.id,
+  requestId: "sample-profile-fork-pr-build",
+  jobId: "sample-job-fork-pr-1003-build",
+  runAttemptId: "sample-attempt-fork-pr-1003-build-1",
+  revisionKey: forkPullRequest.revisionKey,
+  planDigest: forkPrPlanDigest,
+  profileVersionId: "sample-profile-fork-pr-build-v1",
+  promptVersionId: "sample-prompt-fork-pr-build-v1",
+  resultDigest: "7".repeat(64),
+  report: {
+    schemaVersion: "ValidationReportV1",
+    source: "worker",
+    workItemKind: "pull_request",
+    sourceState: "original",
+    summary:
+      "Sample data for moooyo/PowerToys: static analysis and the release build passed, but review found an unchecked monitor handle during layout restoration. These are synthetic results; no repository code was executed.",
+    checks: [
+      {
+        id: "sample-profile-fork-pr-build-v1:static-analysis",
+        name: "Static analysis",
+        kind: "static",
+        required: true,
+        outcome: "passed",
+        summary: "Sample data: no static analysis errors were reported.",
+        expected: "No static analysis errors.",
+        actual: "No errors in the synthetic FancyZones diagnostic output.",
+        evidenceIds: ["sample-evidence-fork-pr-1003-static-log"],
+        source: "runner",
+      },
+      {
+        id: "sample-profile-fork-pr-build-v1:release-build",
+        name: "Release build",
+        kind: "build",
+        required: true,
+        outcome: "passed",
+        summary: "Sample data: the FancyZones release target compiled successfully.",
+        expected: "The release build exits with code 0.",
+        actual: "The synthetic build output records exit code 0.",
+        evidenceIds: ["sample-evidence-fork-pr-1003-build-log"],
+        source: "runner",
+      },
+    ],
+  },
+  execution: {
+    blockers: [],
+    diagnostics: [
+      {
+        stepId: "sample-profile-fork-pr-build-v1:release-build",
+        phase: "build",
+        outcome: "passed",
+        exitCode: 0,
+        summary: "Synthetic build diagnostic; no command was executed by this dashboard.",
+        stdout: "Sample FancyZones release build completed successfully.",
+        stderr: "",
+      },
+    ],
+    cleanupState: "completed",
+  },
+  modelReview: {
+    execution: null,
+    state: "completed",
+    summary:
+      "Sample review: validate the monitor handle before restoring a saved FancyZones layout after reconnect.",
+    recommendation: "request_changes",
+    findings: [
+      {
+        findingId: "sample-finding-fork-pr-1003-monitor-handle",
+        ordinal: 0,
+        priority: 1,
+        title: "Check the monitor handle before restoring the layout",
+        body: "Sample finding: a reconnect can invalidate the monitor handle before layout restoration. Check that the handle is still valid before using it to restore the saved layout.",
+        path: "src/modules/fancyzones/FancyZonesLib/FancyZones.cpp",
+        line: 142,
+        endLine: null,
+        confidence: 0.94,
+      },
+    ],
+    observations: [],
+    issueTriage: null,
+    reproductionConclusion: null,
+    error: null,
+  },
+};
+
+const forkIssueTriageResult: DashboardReviewRunResult = {
+  ...issueTriageResult,
+  id: "sample-result-fork-issue-1006-triage",
+  repositoryId: forkIssue.repositoryId,
+  reviewRunId: forkIssueRunId,
+  workItemId: forkIssue.id,
+  requestId: "sample-profile-fork-issue-triage",
+  jobId: "sample-job-fork-issue-1006-triage",
+  runAttemptId: "sample-attempt-fork-issue-1006-triage-1",
+  revisionKey: forkIssue.revisionKey,
+  planDigest: forkIssuePlanDigest,
+  profileVersionId: "sample-profile-fork-issue-triage-v1",
+  promptVersionId: "sample-prompt-fork-issue-triage-v1",
+  resultDigest: "8".repeat(64),
+  report: {
+    schemaVersion: "ValidationReportV1",
+    source: "worker",
+    workItemKind: "issue",
+    sourceState: "original",
+    summary:
+      "Sample data for moooyo/PowerToys: Keyboard Manager may lose editor focus after target selection. Triage requests version and display details; no repository code was executed or reproduction confirmed.",
+    reproductionConclusion: "needs_information",
+    checks: [],
+  },
+  modelReview: {
+    ...issueTriageResult.modelReview,
+    summary:
+      "Sample triage: open the remap editor, choose a target, and check whether keyboard input stays in the editor. Request the PowerToys version and display scaling before attempting reproduction.",
+  },
+};
+
 function completedRequest(
   result: DashboardReviewRunResult,
   workflowKind: DashboardReviewRunRequest["workflowKind"],
@@ -382,11 +508,29 @@ const issueRequests: DashboardReviewRunRequest[] = [
     "Sample Keyboard Manager reproduction",
   ),
 ];
+const forkPrRequests: DashboardReviewRunRequest[] = [
+  completedRequest(
+    forkPrResult,
+    "pr_static_build",
+    "headless",
+    "Sample fork static analysis and build",
+  ),
+];
+const forkIssueRequests: DashboardReviewRunRequest[] = [
+  completedRequest(
+    forkIssueTriageResult,
+    "issue_triage",
+    "headless",
+    "Sample fork Keyboard Manager triage",
+  ),
+];
 
 export const sampleReviewRunResults: readonly DashboardReviewRunResult[] = [
   prResult,
   issueTriageResult,
   issueValidationResult,
+  forkPrResult,
+  forkIssueTriageResult,
 ];
 
 export const sampleReviewRuns: readonly DashboardReviewRunDetail[] = [
@@ -476,6 +620,88 @@ export const sampleReviewRuns: readonly DashboardReviewRunDetail[] = [
     testedSourceRevision: { kind: "commit", headSha: "e".repeat(40) },
     requiredCheckIds: issueRequests.flatMap((request) => request.requiredCheckIds),
     requests: issueRequests,
+    policy: {
+      policyVersion: "required-checks-and-p0-p1-v1",
+      applicable: false,
+      eligible: null,
+      reasons: [],
+      reasonCount: 0,
+      reasonsTruncated: false,
+      blockingFindingCount: 0,
+    },
+  },
+  {
+    id: forkPrRunId,
+    repositoryId: forkPullRequest.repositoryId,
+    repository: forkPullRequest.repository,
+    workItemId: forkPullRequest.id,
+    workItemKind: "pull_request",
+    number: forkPullRequest.number,
+    title: forkPullRequest.title,
+    revisionKey: forkPullRequest.revisionKey,
+    currentRevisionKey: forkPullRequest.revisionKey,
+    freshness: "current",
+    planDigest: forkPrPlanDigest,
+    activationId: "sample-activation-fork-pr-1003",
+    createdAt,
+    requestCount: forkPrRequests.length,
+    requiredRequestCount: forkPrRequests.length,
+    execution: {
+      missing: 0,
+      awaitingAdmission: 0,
+      queued: 0,
+      active: 0,
+      succeeded: 1,
+      failed: 0,
+      cancelled: 0,
+    },
+    requestEpochId: "epoch-fork-pr-1003",
+    testedSourceRevision: {
+      kind: "pull_request",
+      baseSha: "1".repeat(40),
+      headSha: forkPullRequest.headSha ?? "",
+    },
+    requiredCheckIds: forkPrRequests.flatMap((request) => request.requiredCheckIds),
+    requests: forkPrRequests,
+    policy: {
+      policyVersion: "required-checks-and-p0-p1-v1",
+      applicable: true,
+      eligible: false,
+      reasons: [{ code: "blocking_findings" }],
+      reasonCount: 1,
+      reasonsTruncated: false,
+      blockingFindingCount: 1,
+    },
+  },
+  {
+    id: forkIssueRunId,
+    repositoryId: forkIssue.repositoryId,
+    repository: forkIssue.repository,
+    workItemId: forkIssue.id,
+    workItemKind: "issue",
+    number: forkIssue.number,
+    title: forkIssue.title,
+    revisionKey: forkIssue.revisionKey,
+    currentRevisionKey: forkIssue.revisionKey,
+    freshness: "current",
+    planDigest: forkIssuePlanDigest,
+    activationId: "sample-activation-fork-issue-1006",
+    createdAt,
+    requestCount: forkIssueRequests.length,
+    requiredRequestCount: forkIssueRequests.length,
+    execution: {
+      missing: 0,
+      awaitingAdmission: 0,
+      queued: 0,
+      active: 0,
+      succeeded: 1,
+      failed: 0,
+      cancelled: 0,
+    },
+    requestEpochId: "epoch-fork-issue-1006",
+    testedSourceRevision: null,
+    requiredCheckIds: forkIssueRequests.flatMap((request) => request.requiredCheckIds),
+    requests: forkIssueRequests,
     policy: {
       policyVersion: "required-checks-and-p0-p1-v1",
       applicable: false,

@@ -8,6 +8,7 @@ import {
   type RepositoryAccessGrant,
   RepositoryAccessGrantSchema,
 } from "@agentic-review/contracts";
+import { sampleRepositories } from "../repositories/mock-adapter";
 import { ReviewControlHttpError, ReviewControlRequestError } from "../review-control/errors";
 import type { AccessAdapter, AccessPageQuery } from "./adapter";
 import {
@@ -101,7 +102,9 @@ export class MockAccessAdapter implements AccessAdapter {
         "repositoryIds",
         "Use either fixed repository IDs or a repository existence callback.",
       );
-    this.repositories = new Set(options.repositoryIds ?? ["repo-powertoys", "repo-terminal"]);
+    this.repositories = new Set(
+      options.repositoryIds ?? sampleRepositories.map((repository) => repository.id),
+    );
     for (const repositoryId of this.repositories) validateAccessId(repositoryId, operation);
     this.repositoryExists =
       options.repositoryExists ?? ((repositoryId) => this.repositories.has(repositoryId));

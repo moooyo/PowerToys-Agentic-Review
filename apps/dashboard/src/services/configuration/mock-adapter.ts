@@ -823,21 +823,23 @@ export class MockConfigurationAdapter implements ConfigurationAdapter {
         request.target,
         "initialize sample validation profiles",
       );
-      const published = await this.publishProfileVersion(
-        "repo-powertoys",
-        request,
-        "initialize sample validation profiles",
-      );
-      this.setProfileBinding(
-        "repo-powertoys",
-        published.profileId,
-        {
-          expectedVersion: 0,
-          profileVersionId: published.id,
-          enabled: true,
-        },
-        "initialize sample validation profile bindings",
-      );
+      for (const repositoryId of ["repo-powertoys", "repo-powertoys-fork"]) {
+        const published = await this.publishProfileVersion(
+          repositoryId,
+          request,
+          "initialize sample validation profiles",
+        );
+        this.setProfileBinding(
+          repositoryId,
+          published.profileId,
+          {
+            expectedVersion: 0,
+            profileVersionId: published.id,
+            enabled: true,
+          },
+          "initialize sample validation profile bindings",
+        );
+      }
     }
   }
 }

@@ -64,41 +64,22 @@ import {
 } from "./execution/validation-runtime-config.js";
 import { ValidationSummaryExecutor } from "./execution/validation-summary-executor.js";
 import { ProductionWorkspaceDiskBudget } from "./execution/workspace-disk-budget.js";
+import { createInvestigationExecutionRuntime } from "./investigation/runtime.js";
+import { loadInvestigationWorkerRuntimeConfig } from "./investigation/runtime-config.js";
 import { ConsoleJsonLogger } from "./logging/logger.js";
-import { WorkerApiError } from "./server-client/errors.js";
 import { HttpWorkerEvidenceApi } from "./server-client/evidence-api.js";
-import { HttpWorkerApi } from "./server-client/http-worker-api.js";
 import type { ModelSummaryInputApi } from "./server-client/summary-input-api.js";
-import { WorkerService } from "./worker-service.js";
 
 async function main(): Promise<void> {
   if (process.platform !== "win32") {
     throw new Error("Agentic Review Worker can run only on Windows.");
   }
 
-  const config = loadWorkerConfig();
-  await mkdir(config.dataDirectory, { recursive: true });
+  const config = loadInvestigationWorkerRuntimeConfig();
   const logger = new ConsoleJsonLogger(config.logLevel, {
-    component: "worker",
-    workerNodeId: config.workerNodeId,
+    component: "investigation-worker",
   });
-  const api = new HttpWorkerApi(config, logger);
-  const runtime = await createExecutionRuntime(config, logger, api);
-  const { processHost, executor } = runtime;
-  let service: WorkerService;
-  try {
-    service = new WorkerService(
-      { ...config, capabilities: runtime.capabilities },
-      api,
-      executor,
-      processHost,
-      logger,
-      runtime.canAcceptWork,
-    );
-  } catch (error) {
-    await closeAfterStartupFailure(processHost, logger);
-    throw error;
-  }
+  const runtime = await createInvestigationExecutionRuntime(config, logger);
   let shutdownRequested = false;
 
   const requestShutdown = (signal: string): void => {
@@ -107,33 +88,29 @@ async function main(): Promise<void> {
     }
     shutdownRequested = true;
     logger.info("Operating system requested worker shutdown.", { signal });
-    void service.stop(`signal:${signal}`).catch((error: unknown) => {
-      logger.error("Worker shutdown failed.", { error });
+    void runtime.stop().catch(() => {
+      logger.error("Investigation Worker shutdown did not confirm complete process closure.");
       process.exitCode = 1;
     });
   };
 
+  const handlers = new Map<NodeJS.Signals, () => void>();
   for (const signal of ["SIGINT", "SIGTERM", "SIGBREAK"] as const) {
-    process.once(signal, () => requestShutdown(signal));
+    const handler = () => requestShutdown(signal);
+    handlers.set(signal, handler);
+    process.once(signal, handler);
   }
 
   try {
-    await service.run();
-  } catch (error) {
-    if (shutdownRequested) {
-      await service.stop("operating_system_shutdown");
-      return;
+    await runtime.run();
+  } catch {
+    if (!shutdownRequested) {
+      logger.error("The investigation Worker stopped because of an unrecoverable error.");
+      process.exitCode = 1;
     }
-    if (error instanceof WorkerApiError && error.isWorkerInstanceSuperseded) {
-      logger.warn("Worker stopped because a newer process instance owns this node.");
-      await service.stop("instance_superseded");
-      return;
-    }
-    logger.error("Worker stopped because of an unrecoverable error.", { error });
-    process.exitCode = 1;
-    await service.stop("fatal_error").catch((shutdownError: unknown) => {
-      logger.error("Cleanup after fatal error failed.", { error: shutdownError });
-    });
+  } finally {
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    await runtime.stop();
   }
 }
 

@@ -1,0 +1,118 @@
+{
+  "snapshot": "snapshot-006",
+  "syntheticFixture": true,
+  "executionValidation": false,
+  "externalWritesEnabled": false,
+  "transportWrites": 0,
+  "checks": [
+    {
+      "name": "Repository API requires a real authenticated session",
+      "passed": true,
+      "detail": 401
+    },
+    {
+      "name": "Login issues an HttpOnly session cookie",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Production bundle uses connected mode",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Production report renders the seeded complete report",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Mock transport performs no external action",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Production static entry has no unhandled errors",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "Production static entry has no console warnings or errors",
+      "passed": true,
+      "detail": []
+    }
+  ],
+  "pageErrors": [],
+  "consoleMessages": [],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/work-items",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/work-items/synthetic-pr-work-item",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/tasks",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/work-items/synthetic-pr-work-item/action-context",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/synthetic-pr-report/export",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/synthetic-pr-report",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/synthetic-pr-report/export",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/reports/synthetic-pr-report/findings",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/work-items/synthetic-pr-work-item",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/work-items/synthetic-pr-work-item/action-context",
+      "status": 200
+    }
+  ]
+}

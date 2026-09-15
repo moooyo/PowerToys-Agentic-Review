@@ -1,6 +1,55 @@
 # Implementation Status
 
-Current architecture as of 2026-09-10: each independent VM runs one long-lived Worker and multiple
+## Task / Report refactor, 2026-09-15
+
+The production Server, Windows Worker, and Dashboard entry points now select the native
+Task/Attempt/LoopCheckpoint/Report path described in the
+[current design](./design/2026-09-15-structured-investigation-results-and-loop.md).
+Legacy API compatibility, dual writes, database conversion, and migration scripts are not part
+of this delivery. New databases use the investigation initialization schema.
+
+Implemented scope includes structured PR/Bug/Feature reports, complete discovery/recheck loops,
+trusted full-diff coverage, durable partial results and budget-aware recovery, whole-report
+pagination/export, separate recommendations and operation guards, saved-plan follow-ups,
+explicit Issue source selection, controlled model edits, and registered Windows/Web UI execution.
+The new Dashboard exposes PR, Issue, Task, Report, and repository flows; prior management routes
+are not served as compatibility endpoints. Runtime configuration uses `INVESTIGATION_*` and
+`INVESTIGATION_WORKER_*`; see the Server and Worker READMEs.
+
+The final isolated `test-env` snapshot passed **14,306 tests**, with **61 existing platform or
+opt-in skips** and **zero failures**. All six package type checks, shared/Server builds, and the
+complete root `pnpm build` passed. Biome checked 110 changed source files with zero errors;
+383 warnings and two informational diagnostics remain. The production build retains a Vite
+large-chunk advisory. Native-entry tests replace obsolete startup and environment-documentation
+assumptions.
+
+| Package | Passed | Skipped | Failed |
+| --- | ---: | ---: | ---: |
+| Contracts | 1,660 | 0 | 0 |
+| Domain | 337 | 0 | 0 |
+| Codex | 222 | 0 | 0 |
+| Server | 5,927 | 1 | 0 |
+| Worker | 2,492 | 60 | 0 |
+| Dashboard | 3,668 | 0 | 0 |
+
+Integration coverage includes a real HTTP Worker/Server round trip with file-backed SQLite,
+shutdown/reopen/resume, 137 findings, a report larger than 2 MiB, and complete pagination/export.
+Browser checks covered the development samples and a production bundle with an isolated
+authenticated Server and mocked upstream transport. The final entry-point checks produced zero
+browser console or page errors; production runtime JavaScript contained none of the seven checked
+preview markers. The remotely built shared packages were copied to the existing local preview;
+no local test, type check, build verification, or runtime probe was used.
+
+See the [verification summary](../artifacts/task-report-refactor-20260915/summary.md) and
+[machine-readable receipt](../artifacts/task-report-refactor-20260915/verification.json) for the
+frozen snapshot, commands, artifact hashes, and exact scope. Documentation closeout follows that
+code snapshot. This evidence does not establish a real Windows deployment, real CLI-model or
+OIDC-provider acceptance, or a new PowerToys UI scenario. No live repository PR/Issue mutations
+were performed. Historical receipts below retain their original scope.
+
+## Retained architecture baseline, 2026-09-10
+
+Architecture as of 2026-09-10: each independent VM runs one long-lived Worker and multiple
 successive tasks. The [VM deployment decision](./design/2026-09-10-single-worker-vm.md) assigns
 isolation to deployment and retires the unused WindowsAttempt protected-journal, OS-adapter,
 signed-evidence and execution-admission design. Ordinary Job quotas, capabilities, leases,
@@ -19,7 +68,7 @@ Historical schema numbers describe their original snapshots. Existing data and h
 remain unchanged. Automated suites use isolated synthetic data; the explicitly
 authorized real CLI probes and controlled-fixture workflow acceptance below are separately scoped.
 
-## Current branch verification
+## Retained branch verification before the refactor
 
 The dashboard now uses Material UI 9, Vite, React Router, and the
 [Material 3 presentation](./design/2026-09-10-material-design-reset.md). Its final verification on
@@ -216,6 +265,13 @@ for closing this controlled-fixture milestone.
 
 This is the current backlog and acceptance boundary. Historical milestone limitations below do
 not override later accepted scopes, and retired designs are not queued implementation work.
+
+The 2026-09-15 [structured investigation refactor](./design/2026-09-15-structured-investigation-results-and-loop.md)
+is implemented and verified within the automated and browser scope recorded above. Its native
+contracts, storage, complete Worker loop, operation handlers, and Dashboard are the active path.
+Legacy compatibility, dual writes, data backfills, and migration scripts are not pending work.
+Actual deployment and scenario acceptance remain scoped below; automated verification does not
+authorize writes to actual repository PRs or issues.
 
 - **Worker deployment:** accept full Worker `main.ts` startup and consecutive tasks on the intended
   Windows VM, including account/session setup, credentials, restart, cancellation and cleanup.

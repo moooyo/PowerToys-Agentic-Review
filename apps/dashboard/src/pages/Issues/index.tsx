@@ -1,5 +1,5 @@
-import { WorkItemWorkspace } from "@/components/WorkItemWorkspace";
+import { WorkItemsPage } from "@/investigation/work-items-page";
 
 export default function IssuesPage() {
-  return <WorkItemWorkspace key="issue" kind="issue" />;
+  return <WorkItemsPage key="issue" kind="issue" />;
 }

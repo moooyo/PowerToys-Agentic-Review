@@ -21,6 +21,7 @@ import {
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { BrowserContext, Frame, Locator, Page, Route, WebSocketRoute } from "playwright-core";
+import { assertWindowsLocalAbsolutePath } from "../execution/process-host-protocol.js";
 
 export const webDriverMaximumInputBytes = 512 * 1_024;
 export const webDriverMaximumOutputBytes = 512 * 1_024;
@@ -240,7 +241,15 @@ class DriverFailure extends Error {
   }
 }
 
-export function parseWebDriverRequest(value: unknown): WebDriverRequest {
+export interface WebDriverRequestValidationOptions {
+  /** Worker protocol validation may occur on another host; driver execution remains native. */
+  readonly pathPlatform?: "native" | "windows";
+}
+
+export function parseWebDriverRequest(
+  value: unknown,
+  options: WebDriverRequestValidationOptions = {},
+): WebDriverRequest {
   if (
     !Value.Check(WebDriverRequestSchema, value) ||
     !hasWellFormedStrings(value) ||
@@ -248,7 +257,10 @@ export function parseWebDriverRequest(value: unknown): WebDriverRequest {
   ) {
     throw new TypeError("Invalid Web driver request.");
   }
-  if (!isAbsolute(value.evidenceDirectory) || !isAbsolute(value.browserExecutablePath)) {
+  if (options.pathPlatform === "windows") {
+    assertWindowsLocalAbsolutePath(value.evidenceDirectory, "Web evidence directory", false);
+    assertWindowsLocalAbsolutePath(value.browserExecutablePath, "Web browser executable", true);
+  } else if (!isAbsolute(value.evidenceDirectory) || !isAbsolute(value.browserExecutablePath)) {
     throw new TypeError("Web driver paths must be absolute Worker-owned paths.");
   }
   if (value.observationProtocol === "UiAssertionCaptureV1" && value.evidence.trace !== "off")
@@ -287,8 +299,12 @@ export function serializeWebDriverResult(result: WebDriverResult): string {
   return serialized;
 }
 
-export function parseWebDriverResult(stdout: string, input: WebDriverRequest): WebDriverResult {
-  const request = parseWebDriverRequest(input);
+export function parseWebDriverResult(
+  stdout: string,
+  input: WebDriverRequest,
+  options: WebDriverRequestValidationOptions = {},
+): WebDriverResult {
+  const request = parseWebDriverRequest(input, options);
   if (
     typeof stdout !== "string" ||
     !stdout.isWellFormed() ||

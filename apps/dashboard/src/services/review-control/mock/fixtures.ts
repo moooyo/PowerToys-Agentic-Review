@@ -1,5 +1,6 @@
 import type { JobAdmission } from "@agentic-review/contracts";
 import type { Approval, Job, Publication, SystemSnapshot, WorkerNode, WorkItem } from "../types";
+import { forkJobs, forkWorkers, forkWorkItems } from "./fork-fixtures";
 
 const ago = (minutes: number): string => new Date(Date.now() - minutes * 60_000).toISOString();
 const later = (seconds: number): string => new Date(Date.now() + seconds * 1_000).toISOString();
@@ -250,31 +251,33 @@ const rawWorkItems: Array<
   },
 ];
 
-export const workItems: WorkItem[] = rawWorkItems.map((item, index) => ({
-  ...item,
-  latestJobAttemptCount: item.latestJobId ? (sampleAttempts[item.latestJobId] ?? null) : null,
-  latestJobAdmission: item.latestJobId ? (sampleAdmission[item.latestJobId] ?? null) : null,
-  stage: !item.latestJobId
-    ? "not_scheduled"
-    : sampleAdmission[item.latestJobId]?.state === "pending"
-      ? "awaiting_admission"
-      : item.stage,
-  revisionKey: (index + 1).toString(16).padStart(64, "0"),
-  activeRequestEpoch:
-    item.trigger !== "not_requested" &&
-    item.freshness === "current" &&
-    (item.authorization === "self" || item.authorization === "allowlisted")
-      ? {
-          requestEpochId: `epoch-${item.id}`,
-          requestKind: item.trigger === "assigned" ? "assignment" : "review_request",
-          sequence: 1,
-          status: "active",
-          authorization: item.authorization,
-          openedAt: item.updatedAt,
-          closedAt: null,
-        }
-      : null,
-}));
+export const workItems: WorkItem[] = rawWorkItems
+  .map<WorkItem>((item, index) => ({
+    ...item,
+    latestJobAttemptCount: item.latestJobId ? (sampleAttempts[item.latestJobId] ?? null) : null,
+    latestJobAdmission: item.latestJobId ? (sampleAdmission[item.latestJobId] ?? null) : null,
+    stage: !item.latestJobId
+      ? "not_scheduled"
+      : sampleAdmission[item.latestJobId]?.state === "pending"
+        ? "awaiting_admission"
+        : item.stage,
+    revisionKey: (index + 1).toString(16).padStart(64, "0"),
+    activeRequestEpoch:
+      item.trigger !== "not_requested" &&
+      item.freshness === "current" &&
+      (item.authorization === "self" || item.authorization === "allowlisted")
+        ? {
+            requestEpochId: `epoch-${item.id}`,
+            requestKind: item.trigger === "assigned" ? "assignment" : "review_request",
+            sequence: 1,
+            status: "active",
+            authorization: item.authorization,
+            openedAt: item.updatedAt,
+            closedAt: null,
+          }
+        : null,
+  }))
+  .concat(forkWorkItems);
 
 const rawJobs: Array<Omit<Job, "admission">> = [
   {
@@ -426,11 +429,13 @@ const rawJobs: Array<Omit<Job, "admission">> = [
   },
 ];
 
-export const jobs: Job[] = rawJobs.map((job) => ({
-  ...job,
-  admission: sampleAdmission[job.id] ?? null,
-  stage: sampleAdmission[job.id]?.state === "pending" ? "awaiting_admission" : job.stage,
-}));
+export const jobs: Job[] = rawJobs
+  .map<Job>((job) => ({
+    ...job,
+    admission: sampleAdmission[job.id] ?? null,
+    stage: sampleAdmission[job.id]?.state === "pending" ? "awaiting_admission" : job.stage,
+  }))
+  .concat(forkJobs);
 
 export const workers: WorkerNode[] = [
   {
@@ -493,6 +498,7 @@ export const workers: WorkerNode[] = [
     lastHeartbeatAt: ago(46),
     diskFreeGb: 61,
   },
+  ...forkWorkers,
 ];
 
 export const approvals: Approval[] = [
@@ -582,8 +588,8 @@ export const systemSnapshot: SystemSnapshot = {
   queuedJobs: jobs.filter((job) => job.admission?.state === "admitted").length,
   awaitingAdmissionJobs: jobs.filter((job) => job.admission?.state === "pending").length,
   pendingValidationRequests: 1,
-  activeWorkers: 3,
-  activeLeases: 3,
+  activeWorkers: workers.filter((worker) => worker.status === "online").length,
+  activeLeases: workers.reduce((total, worker) => total + worker.activeSlots, 0),
   pendingApprovals: 2,
   health: [
     {
@@ -604,7 +610,7 @@ export const systemSnapshot: SystemSnapshot = {
       id: "worker-pool",
       name: "Windows worker pool",
       status: "degraded",
-      summary: "One registered worker is offline; three remain available.",
+      summary: "One sample worker is offline; five remain available.",
       checkedAt: ago(0),
     },
   ],

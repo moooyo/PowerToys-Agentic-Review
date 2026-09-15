@@ -23,6 +23,7 @@ import {
   workers as workerFixtures,
   workItems as workItemFixtures,
 } from "./fixtures";
+import { forkReviewResults } from "./fork-fixtures";
 
 const latencyMs = 90;
 const workerTokenExposurePattern = /arw1_[A-Za-z0-9_-]{43}/u;
@@ -210,96 +211,99 @@ export class MockReviewControlAdapter implements ReviewControlAdapter {
     if (job === undefined) {
       return null;
     }
+    const forkReviewResult = forkReviewResults[job.id];
     const reviewResult =
       job.status !== "succeeded"
         ? null
-        : job.title.toLowerCase().includes("issue")
-          ? {
-              reviewResultId: `result-${job.id}`,
-              schemaId: "IssueTriageV2" as const,
-              resultDigest: "a".repeat(64),
-              summary:
-                "Keyboard Manager loses focus after a remap target is selected. This appears to be a UI focus regression; a short recording and diagnostic logs would help confirm the cause.",
-              requestedRecipeIds: [],
-              createdAt: job.createdAt,
-              verification: {
-                status: "not_run" as const,
-                summary: "Triage used the issue description; no verification commands were run.",
-                commands: [],
-              },
-              executionEvidence: {
-                schemaVersion: "ReviewExecutionEvidenceV1" as const,
-                source: "worker" as const,
-                commandCapture: "complete" as const,
-                commands: [],
-                worktree: { status: "unknown" as const, source: "not_observed" as const },
-              },
-              prReview: null,
-              issueTriage: {
-                category: "bug" as const,
-                priority: 1 as const,
-                confidence: 0.92,
-                suggestedLabels: ["Issue-Bug", "Product-Keyboard Manager"],
-                missingInformation: [
-                  "A short recording showing the target selection and loss of focus.",
-                  "PowerToys version and diagnostic logs from the affected session.",
-                ],
-                duplicateCandidates: [],
-              },
-            }
-          : {
-              reviewResultId: `result-${job.id}`,
-              schemaId: "PrReviewPlanV2" as const,
-              resultDigest: "b".repeat(64),
-              summary:
-                job.workItemId === "wi-pr-41793"
-                  ? "The previous revision guards malformed Awake expiration payloads without introducing an actionable regression. A newer revision still needs review."
-                  : "The layout restoration change needs a guard for missing monitor handles after resume. One medium-priority finding needs attention before approval.",
-              requestedRecipeIds: ["powertoys.static-check"],
-              createdAt: job.createdAt,
-              verification: {
-                status: "not_run" as const,
-                summary: "Static review completed. The affected Windows tests were not run.",
-                commands: [],
-              },
-              executionEvidence: {
-                schemaVersion: "ReviewExecutionEvidenceV1" as const,
-                source: "worker" as const,
-                commandCapture: "complete" as const,
-                commands: [
-                  {
-                    itemId: "mock-command-1",
-                    command: "git diff --stat",
-                    status: "completed" as const,
-                    exitCode: 0,
-                  },
-                ],
-                worktree: { status: "clean" as const, source: "git_status" as const },
-              },
-              prReview: {
-                assessment:
+        : forkReviewResult !== undefined
+          ? clone(forkReviewResult)
+          : job.title.toLowerCase().includes("issue")
+            ? {
+                reviewResultId: `result-${job.id}`,
+                schemaId: "IssueTriageV2" as const,
+                resultDigest: "a".repeat(64),
+                summary:
+                  "Keyboard Manager loses focus after a remap target is selected. This appears to be a UI focus regression; a short recording and diagnostic logs would help confirm the cause.",
+                requestedRecipeIds: [],
+                createdAt: job.createdAt,
+                verification: {
+                  status: "not_run" as const,
+                  summary: "Triage used the issue description; no verification commands were run.",
+                  commands: [],
+                },
+                executionEvidence: {
+                  schemaVersion: "ReviewExecutionEvidenceV1" as const,
+                  source: "worker" as const,
+                  commandCapture: "complete" as const,
+                  commands: [],
+                  worktree: { status: "unknown" as const, source: "not_observed" as const },
+                },
+                prReview: null,
+                issueTriage: {
+                  category: "bug" as const,
+                  priority: 1 as const,
+                  confidence: 0.92,
+                  suggestedLabels: ["Issue-Bug", "Product-Keyboard Manager"],
+                  missingInformation: [
+                    "A short recording showing the target selection and loss of focus.",
+                    "PowerToys version and diagnostic logs from the affected session.",
+                  ],
+                  duplicateCandidates: [],
+                },
+              }
+            : {
+                reviewResultId: `result-${job.id}`,
+                schemaId: "PrReviewPlanV2" as const,
+                resultDigest: "b".repeat(64),
+                summary:
                   job.workItemId === "wi-pr-41793"
-                    ? ("approve" as const)
-                    : ("request_changes" as const),
-                findings:
-                  job.workItemId === "wi-pr-41793"
-                    ? []
-                    : [
-                        {
-                          findingId: `${job.id}-finding-1`,
-                          ordinal: 0,
-                          priority: 2 as const,
-                          title: "Guard null monitor handles",
-                          body: "The code path can dereference a missing monitor handle after resume.",
-                          path: "src/modules/FancyZones/LayoutRestore.cs",
-                          line: 233,
-                          endLine: 239,
-                          confidence: 0.88,
-                        },
-                      ],
-              },
-              issueTriage: null,
-            };
+                    ? "The previous revision guards malformed Awake expiration payloads without introducing an actionable regression. A newer revision still needs review."
+                    : "The layout restoration change needs a guard for missing monitor handles after resume. One medium-priority finding needs attention before approval.",
+                requestedRecipeIds: ["powertoys.static-check"],
+                createdAt: job.createdAt,
+                verification: {
+                  status: "not_run" as const,
+                  summary: "Static review completed. The affected Windows tests were not run.",
+                  commands: [],
+                },
+                executionEvidence: {
+                  schemaVersion: "ReviewExecutionEvidenceV1" as const,
+                  source: "worker" as const,
+                  commandCapture: "complete" as const,
+                  commands: [
+                    {
+                      itemId: "mock-command-1",
+                      command: "git diff --stat",
+                      status: "completed" as const,
+                      exitCode: 0,
+                    },
+                  ],
+                  worktree: { status: "clean" as const, source: "git_status" as const },
+                },
+                prReview: {
+                  assessment:
+                    job.workItemId === "wi-pr-41793"
+                      ? ("approve" as const)
+                      : ("request_changes" as const),
+                  findings:
+                    job.workItemId === "wi-pr-41793"
+                      ? []
+                      : [
+                          {
+                            findingId: `${job.id}-finding-1`,
+                            ordinal: 0,
+                            priority: 2 as const,
+                            title: "Guard null monitor handles",
+                            body: "The code path can dereference a missing monitor handle after resume.",
+                            path: "src/modules/FancyZones/LayoutRestore.cs",
+                            line: 233,
+                            endLine: 239,
+                            confidence: 0.88,
+                          },
+                        ],
+                },
+                issueTriage: null,
+              };
 
     return {
       ...clone(job),

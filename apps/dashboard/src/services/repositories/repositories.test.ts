@@ -19,7 +19,7 @@ import { MockRepositoryAdapter, sampleRepositories } from "./mock-adapter";
 
 const [firstSample, secondSample] = sampleRepositories;
 if (firstSample === undefined || secondSample === undefined) {
-  throw new Error("The repository tests require the two fixed sample repositories.");
+  throw new Error("The repository tests require the original fixed sample repositories.");
 }
 const repository = structuredClone(firstSample);
 const otherRepository = structuredClone(secondSample);
@@ -360,7 +360,7 @@ describe("repository HTTP path boundaries", () => {
 describe("sample repository adapter", () => {
   it("uses the same 50-item page limit as the repository API", async () => {
     const adapter = new MockRepositoryAdapter();
-    await expect(adapter.list({ pageSize: 50 })).resolves.toMatchObject({ total: 2 });
+    await expect(adapter.list({ pageSize: 50 })).resolves.toMatchObject({ total: 3 });
     await expect(adapter.list({ pageSize: 51 })).rejects.toBeInstanceOf(ReviewControlRequestError);
   });
 
@@ -368,15 +368,19 @@ describe("sample repository adapter", () => {
     const adapter = new MockRepositoryAdapter();
     const first = await adapter.list({ pageSize: 1 });
     const second = await adapter.list({ pageSize: 1, page: 2 });
-    expect(first.total).toBe(2);
+    expect(first.total).toBe(3);
     expect(first.items[0]?.id).toBe("repo-powertoys");
     expect(second.items[0]?.id).toBe("repo-terminal");
     expect(first.items[0]).not.toHaveProperty("authorizationPolicy");
     await expect(adapter.list({ search: "POWERTOYS" })).resolves.toMatchObject({
-      total: 1,
-      items: [{ id: "repo-powertoys" }],
+      total: 2,
+      items: [{ id: "repo-powertoys" }, { id: "repo-powertoys-fork" }],
     });
-    await expect(adapter.list({ page: 3, pageSize: 1 })).resolves.toEqual({ items: [], total: 2 });
+    await expect(adapter.list({ page: 3, pageSize: 1 })).resolves.toMatchObject({
+      items: [{ id: "repo-powertoys-fork" }],
+      total: 3,
+    });
+    await expect(adapter.list({ page: 4, pageSize: 1 })).resolves.toEqual({ items: [], total: 3 });
   });
 
   it("only resolves fixed sample metadata without pretending unknown repositories were checked", async () => {

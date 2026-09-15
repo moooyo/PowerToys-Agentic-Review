@@ -232,9 +232,11 @@ describe("admission filters and honest sample groups", () => {
     const result = await new MockReviewControlAdapter().listJobs({
       filters: { admission: ["pending", "admitted"] },
     });
-    expect(result.total).toBe(2);
+    expect(result.total).toBe(4);
     expect(result.items.map((value) => value.id).sort()).toEqual([
       "job-01JPR41925",
+      "job-fork-issue-1007",
+      "job-fork-pr-1002",
       "job-terminal-pr-21042",
     ]);
     expect(workItems.find((value) => value.id === "wi-issue-41903")).toMatchObject({
@@ -244,8 +246,8 @@ describe("admission filters and honest sample groups", () => {
     });
     const snapshot = await new MockReviewControlAdapter().getSystemSnapshot();
     expect(snapshot).toMatchObject({
-      queuedJobs: 1,
-      awaitingAdmissionJobs: 1,
+      queuedJobs: 2,
+      awaitingAdmissionJobs: 2,
       pendingValidationRequests: 1,
     });
   });

@@ -1,0 +1,302 @@
+{
+  "snapshot": "snapshot-004",
+  "development": {
+    "snapshot": "snapshot-004",
+    "checks": [
+      {
+        "name": "P0 still blocks Approve",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "P0 alone no longer blocks Merge",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "All mobile header controls fit the viewport",
+        "passed": true,
+        "detail": [
+          {
+            "label": "Open navigation",
+            "text": "",
+            "left": 8,
+            "right": 48
+          },
+          {
+            "label": null,
+            "text": "Agentic Review",
+            "left": 56,
+            "right": 179
+          },
+          {
+            "label": "Switch to dark theme",
+            "text": "",
+            "left": 342,
+            "right": 382
+          }
+        ]
+      },
+      {
+        "name": "Mobile theme control remains reachable",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Resume displays all frozen budget limits and consumed values",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Resume rejects a reduced budget",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Explicit budget increase resumes only the synthetic task",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "No browser page errors",
+        "passed": true,
+        "detail": []
+      },
+      {
+        "name": "No browser console warnings or errors",
+        "passed": true,
+        "detail": []
+      },
+      {
+        "name": "No external network requests from sample mode",
+        "passed": true,
+        "detail": []
+      }
+    ],
+    "pageErrors": [],
+    "consoleMessages": [],
+    "externalRequests": [],
+    "observations": {
+      "headerControls": [
+        {
+          "label": "Open navigation",
+          "text": "",
+          "left": 8,
+          "right": 48
+        },
+        {
+          "label": null,
+          "text": "Agentic Review",
+          "left": 56,
+          "right": 179
+        },
+        {
+          "label": "Switch to dark theme",
+          "text": "",
+          "left": 342,
+          "right": 382
+        }
+      ]
+    }
+  },
+  "production": {
+    "snapshot": "snapshot-004",
+    "syntheticFixture": true,
+    "executionValidation": false,
+    "externalWritesEnabled": false,
+    "transportWrites": 0,
+    "checks": [
+      {
+        "name": "Repository API requires a real authenticated session",
+        "passed": true,
+        "detail": 401
+      },
+      {
+        "name": "Login issues an HttpOnly session cookie",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Production bundle uses connected mode",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Production report renders the seeded complete report",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Production mobile header controls fit the viewport",
+        "passed": true,
+        "detail": [
+          {
+            "label": "Open navigation",
+            "text": "",
+            "left": 8,
+            "right": 48
+          },
+          {
+            "label": null,
+            "text": "Agentic Review",
+            "left": 56,
+            "right": 179
+          },
+          {
+            "label": "Switch to dark theme",
+            "text": "",
+            "left": 294,
+            "right": 334
+          },
+          {
+            "label": "Sign out",
+            "text": "",
+            "left": 342,
+            "right": 382
+          }
+        ]
+      },
+      {
+        "name": "Production mobile sign-out remains reachable",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Logout returns 204 through the real authenticated endpoint",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Logout does not refetch the old repository or report scope",
+        "passed": true,
+        "detail": [
+          {
+            "method": "POST",
+            "path": "/api/auth/logout",
+            "status": 204
+          },
+          {
+            "method": "GET",
+            "path": "/api/auth/session",
+            "status": 200
+          }
+        ]
+      },
+      {
+        "name": "Logout still revokes report export access",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Mock transport performs no external action",
+        "passed": true,
+        "detail": null
+      },
+      {
+        "name": "Production page has no unhandled errors",
+        "passed": true,
+        "detail": []
+      },
+      {
+        "name": "Production page has no console warnings or errors",
+        "passed": true,
+        "detail": []
+      }
+    ],
+    "pageErrors": [],
+    "consoleMessages": [],
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/auth/session",
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "path": "/api/auth/login",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/auth/session",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/repositories",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/repositories",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/work-items",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/work-items/synthetic-pr-work-item",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/tasks",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/work-items/synthetic-pr-work-item/action-context",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/reports/synthetic-pr-report/export",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/reports/synthetic-pr-report",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/reports/synthetic-pr-report/export",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/reports/synthetic-pr-report/findings",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/work-items/synthetic-pr-work-item",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/work-items/synthetic-pr-work-item/action-context",
+        "status": 200
+      },
+      {
+        "method": "GET",
+        "path": "/api/repositories",
+        "status": 200
+      },
+      {
+        "method": "POST",
+        "path": "/api/auth/logout",
+        "status": 204
+      },
+      {
+        "method": "GET",
+        "path": "/api/auth/session",
+        "status": 200
+      }
+    ]
+  },
+  "scope": "P0/Approve and independent Merge, mobile header controls, budget resume form, and authenticated logout without stale-scope requests. Later changes were static import and fixture module isolation changes, covered by snapshot-006 entry checks."
+}

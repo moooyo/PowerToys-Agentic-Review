@@ -1,0 +1,966 @@
+{
+  "description": "Synthetic example generated from createInvestigationFixture and the current action-policy evaluator. The nested result and actionContext conform to the implemented InvestigationResultV1 and ActionContextV1 schemas. This fictional PR has confirmed P1 findings and required E2E evidence that has not been collected. No repository, model, runtime validation, GitHub operation, or action handler was executed to create this example.",
+  "status": "synthetic_validated_contract_example",
+  "digestNotice": "SHA and digest values supplied by the fixture are illustrative placeholders, not integrity proofs for real source or execution. Action capabilities are synthetic evaluator inputs, not evidence of any real account permissions.",
+  "validation": {
+    "resultSchema": "InvestigationResultV1",
+    "resultSemantics": "passed",
+    "actionContextSchema": "ActionContextV1"
+  },
+  "result": {
+    "schemaVersion": "InvestigationResultV1",
+    "id": "synthetic-pr-report",
+    "version": 1,
+    "context": {
+      "repository": {
+        "id": "synthetic-powertoys-repository",
+        "fullName": "moooyo/PowerToys",
+        "githubRepositoryId": 9000001
+      },
+      "workItem": {
+        "id": "synthetic-pr-work-item",
+        "kind": "pull_request",
+        "number": 101,
+        "title": "[Synthetic] Settings cancellation review"
+      },
+      "task": {
+        "id": "synthetic-pr-task",
+        "kind": "pr-review",
+        "parentTaskId": null,
+        "subjectRef": "synthetic-pr-subject"
+      },
+      "attempt": {
+        "id": "synthetic-pr-attempt-1",
+        "number": 1
+      },
+      "adoptedAttemptIds": [
+        "synthetic-pr-attempt-1"
+      ],
+      "subjects": [
+        {
+          "id": "synthetic-pr-subject",
+          "kind": "original_pr",
+          "repositoryId": "synthetic-powertoys-repository",
+          "workItemId": "synthetic-pr-work-item",
+          "revisionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "baseSha": "dddddddddddddddddddddddddddddddddddddddd",
+          "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "profileRef": {
+        "id": "synthetic-pr-profile",
+        "version": 1,
+        "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "promptRef": {
+        "id": "synthetic-pr-prompt",
+        "version": 1,
+        "digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "parentReportRef": null
+    },
+    "outcome": "completed",
+    "report": {
+      "id": "synthetic-pr-report",
+      "version": 1,
+      "delivery": "final",
+      "completeness": "complete",
+      "summary": "Synthetic investigation delivered all 2 retained findings after individual rechecks.",
+      "logicalContentDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "coverage": {
+        "scopeManifest": {
+          "id": "synthetic-pr-scope",
+          "version": 1,
+          "digest": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "includedUnits": [
+          {
+            "id": "synthetic-pr-snapshot-unit",
+            "subjectRef": "synthetic-pr-subject",
+            "kind": "input_snapshot",
+            "paths": [],
+            "requiredWork": "Freeze the supplied work item and source identity before analysis.",
+            "status": "completed",
+            "evidenceRefs": [
+              "synthetic-pr-snapshot-evidence"
+            ]
+          },
+          {
+            "id": "synthetic-pr-analysis-unit",
+            "subjectRef": "synthetic-pr-subject",
+            "kind": "investigation",
+            "paths": [],
+            "requiredWork": "Investigate every frozen scope unit and recheck every retained finding.",
+            "status": "completed",
+            "evidenceRefs": [
+              "synthetic-pr-snapshot-evidence",
+              "synthetic-pr-finding-evidence-1",
+              "synthetic-pr-finding-evidence-2"
+            ]
+          }
+        ],
+        "exclusions": [],
+        "completedUnitRefs": [
+          "synthetic-pr-snapshot-unit",
+          "synthetic-pr-analysis-unit"
+        ],
+        "unresolvedUnitRefs": []
+      },
+      "recheck": {
+        "finalFindingCount": 2,
+        "validFinalVersionRecheckCount": 2,
+        "pendingFindingIds": [],
+        "records": [
+          {
+            "id": "synthetic-pr-recheck-1",
+            "findingId": "synthetic-pr-finding-1",
+            "findingVersion": 1,
+            "subjectRef": "synthetic-pr-subject",
+            "round": 3,
+            "evidenceRefs": [
+              "synthetic-pr-finding-evidence-1"
+            ],
+            "conclusion": "The final finding remains supported by the frozen snapshot and is distinct from the other findings.",
+            "unresolvedQuestions": []
+          },
+          {
+            "id": "synthetic-pr-recheck-2",
+            "findingId": "synthetic-pr-finding-2",
+            "findingVersion": 1,
+            "subjectRef": "synthetic-pr-subject",
+            "round": 3,
+            "evidenceRefs": [
+              "synthetic-pr-finding-evidence-2"
+            ],
+            "conclusion": "The final finding remains supported by the frozen snapshot and is distinct from the other findings.",
+            "unresolvedQuestions": []
+          }
+        ]
+      },
+      "loop": {
+        "checkpointId": "synthetic-pr-checkpoint",
+        "checkpointVersion": 3,
+        "completedRounds": 3,
+        "candidates": [
+          {
+            "id": "synthetic-pr-candidate-1",
+            "subjectRef": "synthetic-pr-subject",
+            "title": "Cancellation can persist stale settings in scenario 1",
+            "discoveredRound": 1,
+            "status": "confirmed",
+            "findingId": "synthetic-pr-finding-1",
+            "findingVersion": 1,
+            "mergedIntoCandidateId": null,
+            "rationale": "Confirmed and individually rechecked before final delivery.",
+            "evidenceRefs": [
+              "synthetic-pr-finding-evidence-1"
+            ]
+          },
+          {
+            "id": "synthetic-pr-candidate-2",
+            "subjectRef": "synthetic-pr-subject",
+            "title": "Cancellation can persist stale settings in scenario 2",
+            "discoveredRound": 1,
+            "status": "confirmed",
+            "findingId": "synthetic-pr-finding-2",
+            "findingVersion": 1,
+            "mergedIntoCandidateId": null,
+            "rationale": "Confirmed and individually rechecked before final delivery.",
+            "evidenceRefs": [
+              "synthetic-pr-finding-evidence-2"
+            ]
+          }
+        ],
+        "stopReason": "complete",
+        "budget": {
+          "maxRounds": 8,
+          "maxDurationMs": 300000,
+          "maxTokens": 64000,
+          "maxReportBytes": 8388608
+        },
+        "consumed": {
+          "rounds": 3,
+          "durationMs": 3000,
+          "tokens": 2800,
+          "reportBytes": 12288
+        }
+      },
+      "limitations": [
+        {
+          "id": "synthetic-pr-synthetic-limitation",
+          "description": "This is isolated synthetic fixture data, not evidence of a live investigation.",
+          "impact": "No runtime behavior or upstream repository state has been verified.",
+          "evidenceRefs": [
+            "synthetic-pr-snapshot-evidence"
+          ]
+        }
+      ],
+      "collections": {
+        "findings": 2,
+        "verificationEvidence": 3,
+        "artifacts": 1,
+        "plans": 1,
+        "nextActions": 2,
+        "candidates": 2,
+        "rechecks": 2
+      }
+    },
+    "findings": [
+      {
+        "id": "synthetic-pr-finding-1",
+        "version": 1,
+        "ordinal": 0,
+        "priority": "P1",
+        "title": "Cancellation can persist stale settings in scenario 1",
+        "trigger": {
+          "conditions": [
+            "A settings operation is cancelled before persistence."
+          ],
+          "inputs": [
+            "Synthetic scenario 1"
+          ],
+          "steps": [
+            "Start a settings update.",
+            "Cancel before persistence completes."
+          ]
+        },
+        "impact": {
+          "description": "Cancelled work can overwrite persisted settings and mislead the caller about the saved state.",
+          "affectedParties": [
+            "Users updating PowerToys settings"
+          ]
+        },
+        "rootCause": {
+          "status": "established",
+          "explanation": "The persistence boundary does not inspect the cancellation token before committing state.",
+          "evidenceRefs": [
+            "synthetic-pr-finding-evidence-1"
+          ]
+        },
+        "subjectRef": "synthetic-pr-subject",
+        "locations": [
+          {
+            "kind": "source",
+            "subjectRef": "synthetic-pr-subject",
+            "path": "src/settings-ui/Settings.UI/Services/SyntheticScenario1.cs",
+            "startLine": 42,
+            "endLine": 42
+          }
+        ],
+        "evidenceRefs": [
+          "synthetic-pr-finding-evidence-1"
+        ],
+        "confirmation": {
+          "status": "confirmed",
+          "rationale": "The final finding version was rechecked against the frozen source snapshot.",
+          "evidenceRefs": [
+            "synthetic-pr-finding-evidence-1"
+          ],
+          "recheckRef": "synthetic-pr-recheck-1"
+        },
+        "fixRecommendation": {
+          "summary": "Check cancellation immediately before persistence and preserve the existing settings on cancellation.",
+          "constraints": [
+            "Do not claim runtime verification from static or reporter evidence."
+          ],
+          "planRef": {
+            "id": "synthetic-pr-plan",
+            "version": 1,
+            "digest": "2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        },
+        "feedbackDraft": {
+          "id": "synthetic-pr-finding-draft-1",
+          "body": "Scenario 1 can commit settings after cancellation. Check cancellation before persisting state and verify that cancellation leaves the previous values intact.",
+          "suggestion": {
+            "subjectRef": "synthetic-pr-subject",
+            "path": "src/settings-ui/Settings.UI/Services/SyntheticScenario1.cs",
+            "startLine": 42,
+            "endLine": 42,
+            "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "originalContentDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "replacement": "cancellationToken.ThrowIfCancellationRequested();\nawait SaveSettingsAsync(settings, cancellationToken);"
+          }
+        }
+      },
+      {
+        "id": "synthetic-pr-finding-2",
+        "version": 1,
+        "ordinal": 1,
+        "priority": "P1",
+        "title": "Cancellation can persist stale settings in scenario 2",
+        "trigger": {
+          "conditions": [
+            "A settings operation is cancelled before persistence."
+          ],
+          "inputs": [
+            "Synthetic scenario 2"
+          ],
+          "steps": [
+            "Start a settings update.",
+            "Cancel before persistence completes."
+          ]
+        },
+        "impact": {
+          "description": "Cancelled work can overwrite persisted settings and mislead the caller about the saved state.",
+          "affectedParties": [
+            "Users updating PowerToys settings"
+          ]
+        },
+        "rootCause": {
+          "status": "established",
+          "explanation": "The persistence boundary does not inspect the cancellation token before committing state.",
+          "evidenceRefs": [
+            "synthetic-pr-finding-evidence-2"
+          ]
+        },
+        "subjectRef": "synthetic-pr-subject",
+        "locations": [
+          {
+            "kind": "source",
+            "subjectRef": "synthetic-pr-subject",
+            "path": "src/settings-ui/Settings.UI/Services/SyntheticScenario2.cs",
+            "startLine": 42,
+            "endLine": 42
+          }
+        ],
+        "evidenceRefs": [
+          "synthetic-pr-finding-evidence-2"
+        ],
+        "confirmation": {
+          "status": "confirmed",
+          "rationale": "The final finding version was rechecked against the frozen source snapshot.",
+          "evidenceRefs": [
+            "synthetic-pr-finding-evidence-2"
+          ],
+          "recheckRef": "synthetic-pr-recheck-2"
+        },
+        "fixRecommendation": {
+          "summary": "Check cancellation immediately before persistence and preserve the existing settings on cancellation.",
+          "constraints": [
+            "Do not claim runtime verification from static or reporter evidence."
+          ],
+          "planRef": {
+            "id": "synthetic-pr-plan",
+            "version": 1,
+            "digest": "2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        },
+        "feedbackDraft": {
+          "id": "synthetic-pr-finding-draft-2",
+          "body": "Scenario 2 can commit settings after cancellation. Check cancellation before persisting state and verify that cancellation leaves the previous values intact.",
+          "suggestion": {
+            "subjectRef": "synthetic-pr-subject",
+            "path": "src/settings-ui/Settings.UI/Services/SyntheticScenario2.cs",
+            "startLine": 42,
+            "endLine": 42,
+            "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "originalContentDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "replacement": "cancellationToken.ThrowIfCancellationRequested();\nawait SaveSettingsAsync(settings, cancellationToken);"
+          }
+        }
+      }
+    ],
+    "assessment": {
+      "kind": "pr",
+      "subjectRef": "synthetic-pr-subject",
+      "summary": "Synthetic source review is complete; required runtime validation remains outstanding.",
+      "evidenceRefs": [
+        "synthetic-pr-snapshot-evidence",
+        "synthetic-pr-finding-evidence-1",
+        "synthetic-pr-finding-evidence-2"
+      ],
+      "reviewConclusion": {
+        "status": "changes-requested",
+        "rationale": "The original PR contains confirmed high-priority findings."
+      },
+      "e2eAssessment": {
+        "level": "required",
+        "rationale": "Cancellation correctness requires a runtime observation of persistence behavior.",
+        "planRef": {
+          "id": "synthetic-pr-plan",
+          "version": 1,
+          "digest": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "scenarioIds": [
+          "synthetic-pr-scenario"
+        ],
+        "prerequisiteRefs": [
+          "synthetic-pr-environment"
+        ],
+        "linkedValidationReportRefs": []
+      }
+    },
+    "validation": {
+      "checks": [
+        {
+          "id": "synthetic-pr-check",
+          "scenarioId": "synthetic-pr-scenario",
+          "subjectRef": "synthetic-pr-subject",
+          "planRef": {
+            "id": "synthetic-pr-plan",
+            "version": 1,
+            "digest": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "required": true,
+          "description": "Open Settings, cancel an in-progress operation, and record the resulting state.",
+          "status": "not_run",
+          "executor": null,
+          "evidenceRefs": [],
+          "authoritativeAttemptId": null
+        }
+      ],
+      "summary": "This synthetic fixture includes no executed runtime checks."
+    },
+    "verificationEvidence": [
+      {
+        "id": "synthetic-pr-snapshot-evidence",
+        "subjectRef": "synthetic-pr-subject",
+        "source": "source_snapshot",
+        "authority": "worker",
+        "summary": "Synthetic frozen input snapshot; this fixture has not contacted GitHub or executed repository code.",
+        "artifactRefs": [
+          "synthetic-pr-source-artifact"
+        ],
+        "evidenceRefs": [],
+        "provenance": {
+          "taskId": "synthetic-pr-task",
+          "attemptId": "synthetic-pr-attempt-1",
+          "producer": "synthetic-fixture",
+          "recordedAt": "2026-09-15T02:00:00.000Z"
+        }
+      },
+      {
+        "id": "synthetic-pr-finding-evidence-1",
+        "subjectRef": "synthetic-pr-subject",
+        "source": "static_analysis",
+        "authority": "model",
+        "summary": "Synthetic static analysis 1 identifies a missing cancellation guard in the frozen source snapshot.",
+        "artifactRefs": [],
+        "evidenceRefs": [
+          "synthetic-pr-snapshot-evidence"
+        ],
+        "provenance": {
+          "taskId": "synthetic-pr-task",
+          "attemptId": "synthetic-pr-attempt-1",
+          "producer": "synthetic-fixture",
+          "recordedAt": "2026-09-15T02:00:03.000Z"
+        }
+      },
+      {
+        "id": "synthetic-pr-finding-evidence-2",
+        "subjectRef": "synthetic-pr-subject",
+        "source": "static_analysis",
+        "authority": "model",
+        "summary": "Synthetic static analysis 2 identifies a missing cancellation guard in the frozen source snapshot.",
+        "artifactRefs": [],
+        "evidenceRefs": [
+          "synthetic-pr-snapshot-evidence"
+        ],
+        "provenance": {
+          "taskId": "synthetic-pr-task",
+          "attemptId": "synthetic-pr-attempt-1",
+          "producer": "synthetic-fixture",
+          "recordedAt": "2026-09-15T02:00:03.000Z"
+        }
+      }
+    ],
+    "diagnostics": [],
+    "artifacts": [
+      {
+        "id": "synthetic-pr-source-artifact",
+        "taskId": "synthetic-pr-task",
+        "attemptId": "synthetic-pr-attempt-1",
+        "subjectRef": "synthetic-pr-subject",
+        "kind": "source",
+        "name": "synthetic-input.json",
+        "mediaType": "application/json",
+        "digest": "5555555555555555555555555555555555555555555555555555555555555555",
+        "byteLength": 0,
+        "availability": "available"
+      }
+    ],
+    "plans": [
+      {
+        "id": "synthetic-pr-plan",
+        "version": 1,
+        "digest": "2222222222222222222222222222222222222222222222222222222222222222",
+        "state": "saved",
+        "sourceReportRef": {
+          "id": "synthetic-pr-report",
+          "version": 1
+        },
+        "kind": "verification",
+        "subjectRef": "synthetic-pr-subject",
+        "title": "Verify Settings cancellation behavior",
+        "rationale": "Runtime behavior requires evidence tied to the original PR SHA.",
+        "prerequisites": [
+          {
+            "id": "synthetic-pr-environment",
+            "kind": "environment",
+            "description": "Provide an authorized, restorable Windows test environment with an interactive desktop."
+          }
+        ],
+        "steps": [
+          {
+            "id": "synthetic-pr-plan-step",
+            "description": "Open Settings, cancel an in-progress operation, and record the resulting state.",
+            "expectedObservation": "Cancelled work does not commit state or report success.",
+            "checkIds": [
+              "synthetic-pr-check"
+            ]
+          }
+        ],
+        "acceptanceCriteria": [
+          "Cancellation leaves persisted settings unchanged.",
+          "Evidence identifies the tested head SHA."
+        ]
+      }
+    ],
+    "nextActions": [
+      {
+        "id": "synthetic-pr-follow-up",
+        "action": "reviews.verify",
+        "taskKind": "pr-verify",
+        "label": "Verify the original PR",
+        "reason": "Runtime behavior requires evidence tied to the original PR SHA.",
+        "recommended": false,
+        "subjectRef": "synthetic-pr-subject",
+        "planRef": {
+          "id": "synthetic-pr-plan",
+          "version": 1,
+          "digest": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "draftRef": null,
+        "validationReportRef": null,
+        "prerequisiteRefs": [
+          "synthetic-pr-environment"
+        ],
+        "state": "saved",
+        "sourceReportRef": {
+          "id": "synthetic-pr-report",
+          "version": 1
+        }
+      },
+      {
+        "id": "synthetic-pr-feedback",
+        "action": "request-changes",
+        "taskKind": null,
+        "label": "Prepare feedback",
+        "reason": "Review the draft before submitting any external feedback.",
+        "recommended": true,
+        "subjectRef": "synthetic-pr-subject",
+        "planRef": null,
+        "draftRef": "synthetic-pr-summary-draft",
+        "validationReportRef": null,
+        "prerequisiteRefs": [],
+        "state": "saved",
+        "sourceReportRef": {
+          "id": "synthetic-pr-report",
+          "version": 1
+        }
+      }
+    ],
+    "feedbackDrafts": [
+      {
+        "id": "synthetic-pr-summary-draft",
+        "suggestion": null,
+        "body": "Please review the confirmed findings and the saved cancellation verification plan."
+      }
+    ]
+  },
+  "actionContext": {
+    "schemaVersion": "ActionContextV1",
+    "repositoryId": "synthetic-powertoys-repository",
+    "workItemId": "synthetic-pr-work-item",
+    "actor": {
+      "id": "synthetic-example-operator",
+      "displayName": "Synthetic Example Operator"
+    },
+    "target": {
+      "kind": "pull_request",
+      "state": "open",
+      "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "revisionKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "reportRef": {
+      "id": "synthetic-pr-report",
+      "version": 1,
+      "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "recommendedActionId": "synthetic-pr-feedback",
+    "recommendation": {
+      "action": "request-changes",
+      "reason": "Provide feedback and repair the confirmed P1 findings; manual approval remains available."
+    },
+    "hardContentBlockers": [],
+    "fixedActions": [
+      {
+        "action": "comment",
+        "allowed": true,
+        "reason": "Available for explicit preparation and confirmation.",
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          }
+        ]
+      },
+      {
+        "action": "approve",
+        "allowed": true,
+        "reason": "Available for explicit preparation and confirmation.",
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          },
+          {
+            "code": "no_confirmed_current_p0",
+            "satisfied": true,
+            "message": "A confirmed unresolved P0 on the current original revision prohibits approval."
+          }
+        ]
+      },
+      {
+        "action": "suggestion-comment",
+        "allowed": true,
+        "reason": "Available for explicit preparation and confirmation.",
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          }
+        ]
+      },
+      {
+        "action": "request-changes",
+        "allowed": true,
+        "reason": "Available for explicit preparation and confirmation.",
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          }
+        ]
+      },
+      {
+        "action": "close",
+        "allowed": true,
+        "reason": "Available for explicit preparation and confirmation.",
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          }
+        ]
+      },
+      {
+        "action": "merge",
+        "allowed": true,
+        "reason": "Available for explicit preparation and confirmation.",
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          }
+        ]
+      },
+      {
+        "action": "trigger-ci",
+        "allowed": true,
+        "reason": "Available for explicit preparation and confirmation.",
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          }
+        ]
+      }
+    ],
+    "suggestionSelectionDefaults": [
+      {
+        "findingId": "synthetic-pr-finding-1",
+        "draftId": "synthetic-pr-finding-draft-1",
+        "valid": true,
+        "selectedByDefault": true,
+        "reason": "The exact original-PR replacement has been independently validated; the user may deselect it."
+      },
+      {
+        "findingId": "synthetic-pr-finding-2",
+        "draftId": "synthetic-pr-finding-draft-2",
+        "valid": true,
+        "selectedByDefault": true,
+        "reason": "The exact original-PR replacement has been independently validated; the user may deselect it."
+      }
+    ],
+    "nextActions": [
+      {
+        "id": "synthetic-pr-follow-up",
+        "action": "reviews.verify",
+        "taskKind": "pr-verify",
+        "label": "Verify the original PR",
+        "reason": "Runtime behavior requires evidence tied to the original PR SHA.",
+        "recommended": false,
+        "subjectRef": "synthetic-pr-subject",
+        "planRef": {
+          "id": "synthetic-pr-plan",
+          "version": 1,
+          "digest": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "draftRef": null,
+        "validationReportRef": null,
+        "prerequisiteRefs": [
+          "synthetic-pr-environment"
+        ],
+        "state": "saved",
+        "sourceReportRef": {
+          "id": "synthetic-pr-report",
+          "version": 1
+        },
+        "allowed": false,
+        "canPrepare": true,
+        "readyToExecute": false,
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          },
+          {
+            "code": "current_report_binding",
+            "satisfied": true,
+            "message": "The saved action must bind to the current subject revision."
+          },
+          {
+            "code": "prerequisite:synthetic-pr-environment",
+            "satisfied": false,
+            "message": "Prerequisite synthetic-pr-environment must be satisfied."
+          }
+        ]
+      },
+      {
+        "id": "synthetic-pr-feedback",
+        "action": "request-changes",
+        "taskKind": null,
+        "label": "Prepare feedback",
+        "reason": "Review the draft before submitting any external feedback.",
+        "recommended": true,
+        "subjectRef": "synthetic-pr-subject",
+        "planRef": null,
+        "draftRef": "synthetic-pr-summary-draft",
+        "validationReportRef": null,
+        "prerequisiteRefs": [],
+        "state": "saved",
+        "sourceReportRef": {
+          "id": "synthetic-pr-report",
+          "version": 1
+        },
+        "allowed": true,
+        "canPrepare": true,
+        "readyToExecute": true,
+        "guards": [
+          {
+            "code": "actor_permission",
+            "satisfied": true,
+            "message": "The current actor must have permission for this operation."
+          },
+          {
+            "code": "operation_supported",
+            "satisfied": true,
+            "message": "An installed handler must support this operation."
+          },
+          {
+            "code": "target_state",
+            "satisfied": true,
+            "message": "The current work item state must support this operation."
+          },
+          {
+            "code": "prior_submission",
+            "satisfied": true,
+            "message": "Resolve the previous unknown submission before preparing another write."
+          },
+          {
+            "code": "current_source",
+            "satisfied": true,
+            "message": "The current PR source identity must be known."
+          },
+          {
+            "code": "current_report_binding",
+            "satisfied": true,
+            "message": "The saved action must bind to the current subject revision."
+          }
+        ]
+      }
+    ],
+    "pendingSubmission": null,
+    "generatedAt": "2026-09-15T02:00:04.000Z"
+  }
+}

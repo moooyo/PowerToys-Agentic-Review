@@ -1,4 +1,4 @@
-import type { InitialState } from "./app";
+import type { InitialState } from "./state/session";
 
 export default function access(initialState: InitialState | undefined) {
   const authenticated = initialState?.authenticated === true;

@@ -1,0 +1,8 @@
+{
+  "snapshot": "snapshot-006",
+  "url": "http://127.0.0.1:18303/reports?reportId=sample-pr-p1-report&repositoryId=repo-powertoys-fork",
+  "sampleReportRendered": true,
+  "independentE2eRendered": true,
+  "pageErrors": [],
+  "consoleMessages": []
+}

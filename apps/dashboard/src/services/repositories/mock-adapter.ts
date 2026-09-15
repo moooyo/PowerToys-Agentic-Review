@@ -51,6 +51,21 @@ export const sampleRepositories: readonly ManagedRepository[] = [
     createdAt: sampleTimestamp,
     updatedAt: sampleTimestamp,
   },
+  {
+    id: "repo-powertoys-fork",
+    githubRepositoryId: 1299518756,
+    fullName: "moooyo/PowerToys",
+    enabled: true,
+    version: 1,
+    reviewerGithubUserId: null,
+    reviewerGithubLogin: null,
+    authorizationPolicy: null,
+    schedulingLimits: { maxActiveLeases: 2, maxQueuedJobs: 3 },
+    connectionStatus: "ready",
+    connectionMessage: sampleConnectionMessage,
+    createdAt: sampleTimestamp,
+    updatedAt: sampleTimestamp,
+  },
 ];
 
 export interface MockRepositoryAdapterOptions {
@@ -137,7 +152,7 @@ export class MockRepositoryAdapter implements RepositoryAdapter {
       throw httpError(
         operation,
         404,
-        "Sample mode supports only microsoft/PowerToys and microsoft/terminal. Connect the control plane to resolve other repositories.",
+        "Sample mode supports only microsoft/PowerToys, microsoft/terminal, and moooyo/PowerToys. Connect the control plane to resolve other repositories.",
       );
     return sampleMetadata(sample);
   }

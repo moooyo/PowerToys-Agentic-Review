@@ -1,0 +1,82 @@
+import { describe, expect, it, vi } from "vitest";
+import { createInvestigationApi } from "./api";
+import { createSampleInvestigationApi } from "./sample-adapter";
+import { createHttpTransport } from "./transport";
+
+describe("typed investigation HTTP operations", () => {
+  it("imports a source snapshot using a scoped repository route without sending feedback", async () => {
+    const sample = createSampleInvestigationApi();
+    const workItem = await sample.workItem("sample-bug-work-item");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        workItem,
+        snapshotRef: { id: "snapshot-import", digest: "1".repeat(64) },
+        commentsCount: 3,
+      }),
+    );
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    await api.importWorkItem("repo-powertoys-fork", { kind: "issue", number: 6 });
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/repositories/repo-powertoys-fork/import-work-item",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ kind: "issue", number: 6 }),
+      }),
+    );
+  });
+
+  it("passes an explicitly chosen Issue source commit to task creation", async () => {
+    const sample = createSampleInvestigationApi();
+    const { task } = await sample.task("sample-bug-task");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(task));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    const sourceCommit = "a".repeat(40);
+    await api.createTask({
+      workItemId: task.workItem.id,
+      kind: "issue-investigate",
+      executionMode: "source_read",
+      sourceCommit,
+      idempotencyKey: "explicit-commit",
+    });
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/tasks",
+      expect.objectContaining({
+        body: JSON.stringify({
+          workItemId: task.workItem.id,
+          kind: "issue-investigate",
+          executionMode: "source_read",
+          sourceCommit,
+          idempotencyKey: "explicit-commit",
+        }),
+      }),
+    );
+  });
+
+  it("does not confirm an action when a preparation request succeeds", async () => {
+    const sample = createSampleInvestigationApi();
+    const workItem = await sample.workItem("sample-pr-p1-work-item");
+    const context = await sample.actionContext(workItem.id);
+    const input = {
+      workItemId: workItem.id,
+      action: "comment" as const,
+      subjectRef: workItem.subject.id,
+      expectedRevisionKey: context.target.revisionKey,
+      expectedHeadSha: context.target.headSha,
+      reportRef: context.reportRef,
+      idempotencyKey: "prepare-only",
+      payload: {
+        kind: "feedback" as const,
+        body: "A reviewed comment",
+        findingIds: [],
+        drafts: [],
+      },
+    };
+    const intent = await sample.prepareAction(input);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(intent));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    expect((await api.prepareAction(input)).state).toBe("prepared");
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/action-intents");
+  });
+});

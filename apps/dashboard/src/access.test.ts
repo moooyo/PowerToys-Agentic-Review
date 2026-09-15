@@ -1,7 +1,7 @@
 import type { OperatorAccessContext } from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
 import access from "./access";
-import type { InitialState } from "./app";
+import type { InitialState } from "./state/session";
 
 const principal = { issuer: "https://issuer.example", subject: "viewer" };
 function state(context: OperatorAccessContext | null): InitialState {

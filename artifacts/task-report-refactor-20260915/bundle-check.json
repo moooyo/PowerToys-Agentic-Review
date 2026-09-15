@@ -1,0 +1,16 @@
+{
+  "snapshot": "snapshot-006",
+  "runtimeJavaScriptBundles": 1,
+  "excludesSourceMaps": true,
+  "markers": [
+    "[Sample] Cancellation persists stale Settings values",
+    "[Sample] Review with a P0 finding on page two",
+    "Sample mode: no GitHub action was dispatched.",
+    "Synthetic investigation reports for moooyo/PowerToys",
+    "sample-pr-p1",
+    "sample-pr-p0",
+    "synthetic-powertoys-repository"
+  ],
+  "matches": [],
+  "passed": true
+}

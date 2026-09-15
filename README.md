@@ -1,160 +1,91 @@
 # PowerToys Agentic Review
 
-PowerToys Agentic Review is a TypeScript control plane and Windows execution worker for multiple
-GitHub repositories, issue triage, and pull request review with Codex CLI or GitHub Copilot CLI.
-The product is unreleased. It does not preserve compatibility with the earlier split-worker or
-artifact-storage prototypes.
+Agentic Review investigates GitHub pull requests and issues, produces complete structured
+reports, and prepares explicit follow-up actions. The application is unreleased. Its active
+execution model uses `Task`, `Attempt`, `LoopCheckpoint`, `Report`, and `ActionIntent`.
+The refactor does not provide legacy API compatibility, dual writes, data conversion, or
+migration scripts.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md),
-[docs/IMPLEMENTATION_STATUS.md](./docs/IMPLEMENTATION_STATUS.md), and
-[ADR 0029](./docs/adr/0029-trusted-code-single-worker-and-shared-worktrees.md) for the current
-baseline.
+The [current design](./docs/design/2026-09-15-structured-investigation-results-and-loop.md)
+describes the result contract, complete investigation loop, and action rules. Design documents
+are written in Chinese; code, configuration examples, and operational instructions use English.
 
-## Workspace
+## Runtime components
 
-- `apps/server`: Linux control plane, GitHub ingestion, scheduling, fenced leases, operator
-  authentication, and SQLite persistence.
-- `apps/worker`: one outbound-only Windows Worker that prepares worktrees, runs the selected CLI and validation,
-  and submits an inline structured result.
-- `apps/dashboard`: React and Material UI operator dashboard with Vite and React Router.
-- `packages/contracts`: runtime schemas and shared protocol types.
-- `packages/domain`: pure state-transition and scheduling policy logic.
-- `packages/codex`: shell-free model CLI launch specifications, structured output parsing, and result schemas.
-- `native/process-host`: Windows Job Object process-tree and resource-control adapter.
-- `config/prompts`: trusted, versioned prompts loaded outside reviewed repositories.
-- `migrations`: ordered SQL initialization definitions for the current schema, version `31`.
-- `deploy/worker`: manual trusted deployment guidance for the unpublished Worker.
+- `apps/server`: the new SQLite-backed Task/Report API, scoped operator sessions, OIDC,
+  Worker credentials, immutable checkpoints and reports, action preparation, and delivery.
+- `apps/worker`: an outbound Windows Worker using the new task protocol. ProcessHost owns
+  process trees; disposable workspaces hold exact source, model inputs, and captured artifacts.
+- `apps/dashboard`: the Material UI PR, Issue, Task, Report, and repository workspaces.
+- `packages/contracts`: runtime schemas and semantic validators for the new protocol.
+- `packages/domain`: investigation loop transitions, completion rules, action recommendations,
+  and permissions computed from the complete result collection.
+- `packages/codex`: shared low-level CLI launch and output handling.
+- `native/process-host`: managed Windows process lifetime and resource enforcement.
 
-## Current execution model
+The production Server starts through `apps/server/src/main.ts`; the Worker starts through
+`apps/worker/src/main.ts`, bundled as `dist/worker.mjs`. Both select the new investigation
+runtime. Older source modules and acceptance receipts describe their original scope and
+are not alternate production endpoints or migration inputs.
 
-Admitted repository revisions are trusted execution inputs. Pull request jobs use one persistent
-shared Git object store per configured public repository. Before each job, the Worker fetches the
-immutable `baseSha` and pull request head with full history, verifies both SHAs and their merge base,
-and creates a detached per-attempt worktree. Any PR base branch is supported; there is no `main`
-assumption or fallback. Fetch disables Git auto-maintenance so the Worker owns maintenance timing.
-Repeated reviews therefore transfer only missing Git objects.
-The Worker enforces a separate shared-cache byte limit and free-space guard, performs conservative
-age-based Git maintenance only when worktree metadata is inactive, and drains if reclamation cannot
-restore the configured budget.
+## Structured investigations
 
-The selected CLI runs with workspace write access and outbound network access so it can inspect, edit, build,
-and test inside the disposable worktree. ProcessHost and Windows Job Objects still enforce lifetime,
-process-count, memory, timeout, and output limits. Worker and Server credentials are not propagated
-to child processes.
+PR and Issue investigation use a persistent discovery and recheck loop. Every retained finding
+contains its priority, trigger, impact, root cause or explicit uncertainty, evidence, repair
+advice, feedback draft, and final-version recheck. Priorities order presentation; they never
+silently limit the final report to top-k findings.
 
-Model execution selects `WORKER_CLI_ENGINE=codex` or `copilot` and an absolute
-`WORKER_CLI_EXECUTABLE_PATH`. `WORKER_CLI_HOME` and `WORKER_CLI_MODEL` are optional. Log in through
-the selected CLI under the Worker account and intended CLI home. The CLI owns its authentication,
-provider selection, configuration and network requests; the project does not inspect or copy its
-authentication/provider files. Startup detects the CLI version with a bounded `--version` call,
-without a manually supplied CLI version. `WORKER_CLI_SHA256` is an optional binary pin; it is not
-required. Worker capabilities report nullable
-`cliEngine` and `cliVersion`.
+Completion requires handled coverage and candidate records, valid final rechecks, and a sealed
+report. Budget exhaustion, cancellation, unavailable inputs, and protocol failures produce
+explicit partial outcomes. A successful CLI exit does not establish investigation completeness.
+Checkpoints support continuation without discarding confirmed findings or replaying uncertain
+execution steps.
 
-There is no global provider registry, model HTTP relay or provider request/response ledger in the
-active architecture. The project records CLI configuration, process exit and schema-validated
-structured output, without claiming independently verified provider model identity. See the
-[CLI-owned model execution design](./docs/design/2026-09-10-cli-owned-model-execution.md).
+Reports distinguish original PR revisions, Issue snapshots, explicitly selected commits, local
+patches, and verified remote branches. Verification results preserve their exact subject and
+evidence. Passing checks on a local patch do not certify the original PR or an upstream fix.
 
-ProcessHost also holds a Windows global mutex derived from the resolved Worker data root, preventing
-overlapping execution Workers from mutating the same cache or workspace tree.
-If initialization fails after ProcessHost starts, the Worker closes it before reporting the error.
+## Recommendations and actions
 
-Results use bounded inline, schema-validated completion payloads. Profile validation additionally
-uses M16 bounded evidence upload and authenticated delivery for screenshots, traces, and structured
-test evidence. There is no general-purpose artifact distribution service; see
-[ADR 0031](./docs/adr/0031-profile-validation-runs-and-bounded-evidence.md).
+The Server computes recommendations separately from current operation permissions. A confirmed,
+unresolved P0 on the current original PR blocks Approve. P1 findings, missing required E2E,
+and incomplete analysis change the recommendation but do not add that content prohibition.
+Actual actor permissions, target state, SHA, and unresolved delivery are checked independently.
 
-Current result contracts separate model-reported verification from Worker-observed commands,
-exit codes and final Git worktree state. Envelope versions and result versions are distinct;
-ordinary and Evaluation workflows can use different result versions. Failures retain bounded,
-redacted diagnostics. The unreleased product maintains schema 31 directly through the existing
-SQL initialization machinery. This does not require old-version upgrades, database resets, data
-conversion or compatibility migration work, and it does not authorize changing existing data.
+Saved plans and validated `nextActions` drive follow-up preparation. Missing source or environment
+inputs can be supplied in a preparation form; execution still requires real prerequisites.
+Linked verification preserves the parent report and selected scenarios instead of repeating a
+full review. Implementation produces separately identified edits and patches. Creating a PR
+requires an existing, verified remote branch and never implicitly commits or pushes.
 
-Pull request execution defaults to authorization of the exact base/head revision in an explicit
-webhook request. Polling still reconciles state and withdrawals but cannot approve a current SHA
-using an old timeline actor. Operators that intentionally trust future commits of an authorized PR
-can set `AGENTIC_REVIEW_GITHUB_NEW_REVISION_POLICY=inherit_authorized_epoch`.
-Issue triage retains its snapshot-based workflow. See [ADR 0030](./docs/adr/0030-explicit-pull-request-execution-authorization.md).
+GitHub writes require a prepared and confirmed action intent. Unknown delivery is reconciled
+with read-only requests, not automatically resent. The default Server configuration disables
+external writes. Automated tests must not write to real PRs or issues; see [AGENTS.md](./AGENTS.md).
 
-## Accepted scope and remaining work
+## Configuration and development
 
-[M39](./docs/handoff/2026-09-10-cli-workflow-handoff.md) accepted six real CLI PR review/Evaluation
-tasks through complete Codex and Copilot sequences. M40 accepted six headless Issue summaries with
-independent semantic review and confirmed cleanup. [M41](./docs/handoff/2026-09-10-approved-acceptance-handoff.md)
-accepted the explicitly approved live publication workflow on `moooyo/PowerToys`: one production
-PR review and one Issue comment, acknowledgement-loss reconciliation without duplicate POSTs,
-and independently confirmed target cleanup and settings restoration. M42 installed the approved
-Spectre components, passed the pinned PowerToys Restore/Runner/Settings UI build, and passed seven
-selected Settings serialization/mocked-storage tests.
+Use Node.js 24.20.x and pnpm 11.24.x. The Server uses `INVESTIGATION_*` configuration; the Worker
+uses `INVESTIGATION_WORKER_*`. Read the [Server instructions](./apps/server/README.md) and
+[Worker instructions](./apps/worker/README.md) before starting a deployment. New databases are
+initialized directly with the investigation schema; an incompatible existing database is rejected.
 
-Remaining scope includes full Worker `main.ts` on the intended Windows VM, real PowerToys/UI
-profiles, Issue triage and deployed OIDC. The seven tests do not establish full unit-test coverage;
-no native PowerToys UI has been launched for this acceptance.
-M40's three small quality cases do not establish broad review coverage or a general benchmark.
-See [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) for CI, exact evidence, retained failures
-and remaining work; each new live target or publication payload still requires its own authorization.
-
-## Authentication
-
-Each Worker uses a node-scoped Bearer Token. Operator authentication supports either:
-
-- `loopback` for a loopback-only local deployment; or
-- `oidc` for externally reachable deployments.
-
-GitHub OIDC is not required. GitHub webhook verification and/or a read token are separate ingestion
-credentials.
-
-Operator access is scoped by repository with viewer, reviewer, maintainer, and admin roles. An
-authenticated login without grants sees an empty repository directory. Platform administrators
-come from trusted startup configuration. OIDC deployments must explicitly configure
-`AGENTIC_REVIEW_OIDC_ADMIN_SUBJECTS_JSON` as a nonempty subset of authorized login subjects;
-loopback mode uses its configured development identity. See
-[repository access design](./docs/design/2026-09-07-operator-repository-access.md).
-
-Run reports keep model advice, validation policy, and recorded human decisions separate. Operators
-can record an exact-revision decision, a comment, or a withdrawal; maintainers can record a qualified
-exception approval. Reruns and source changes make earlier decisions historical. These records
-stay within the platform and do not publish GitHub reviews or comments. See
-[the human decision workflow](./docs/design/2026-09-07-run-human-decisions.md).
-
-The connected result drawer also records finding disposition and compares explicitly selected
-results. Complete original findings remain available after acceptance, dismissal, resolution, or
-reopening. Current policy distinguishes reported P0/P1 findings from unresolved blockers; finding
-changes invalidate approvals of the old basis. A finding that is not observed again is not
-automatically resolved. See [the finding lifecycle](./docs/design/2026-09-07-finding-lifecycle.md).
-
-## Development
-
-The repository requires Node.js 24.20.x and pnpm 11.24.x.
-Run verification on `test-env` by default; local verification requires explicit authorization for
-the current task. The 2026-09-05 Windows runtime E2E exercise passed; its tested configuration,
-evidence, and environment closeout are recorded in the
-[live validation handoff](./docs/handoff/2026-09-05-windows-e2e-live-validation.md).
-Historical acceptance receipts apply to their recorded source and scope; they are not a claim that
-the current branch's CI gates have passed.
-
-Automated verification must not write to any repository's PRs or issues without the user's
-explicit approval of the targets, operations, and content. This includes comments, reviews,
-labels, assignments, review requests, and state changes, even in a test repository. Use isolated
-fixtures or read-only live checks by default; see [the repository instructions](./AGENTS.md).
+The Dashboard development server uses clearly labeled synthetic data, including PowerToys PR,
+Bug, Feature, incomplete-report, and page-two P0 examples:
 
 ```powershell
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm lint
+pnpm --filter @agentic-review/dashboard dev
 ```
 
-The Windows Worker deployment and credential-file layout are documented in
-[apps/worker/README.md](./apps/worker/README.md) and
-[deploy/worker/README.md](./deploy/worker/README.md).
+Production Dashboard requests use the authenticated new API and never fall back to sample data.
 
-## Database recovery maintenance
+Run verification on `ssh test-env` unless the user explicitly authorizes local verification for
+the current task. Standard package build, typecheck, test, and lint scripts remain available;
+opt-in live-model and publication acceptance harnesses are separate from ordinary tests.
+Tests should use mocked transports and isolated databases, with no real repository mutations.
 
-Whole-database rollback uses `AGENTIC_REVIEW_RECOVERY_MAINTENANCE=true` with a loopback-only
-listener. The Server keeps liveness available, reports not-ready, rejects Worker routes, suppresses
-GitHub ingestion and lease reaping, and exposes only the operator recovery surface. Follow
-[docs/operations/worker-token-recovery.md](./docs/operations/worker-token-recovery.md).
+## Evidence and project status
+
+[Implementation Status](./docs/IMPLEMENTATION_STATUS.md) distinguishes this refactor from historical
+milestones. M39/M40 model workflows, M41 publication acceptance, M42 selected PowerToys tests, and
+the later fork build receipts retain their exact recorded revisions and scope. They do not by
+themselves accept the new Task protocol, a new Windows deployment, or a new model/UI scenario.
