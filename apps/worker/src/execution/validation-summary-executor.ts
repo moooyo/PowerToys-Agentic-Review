@@ -34,6 +34,7 @@ import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { registerWorkerContractFormats } from "../contracts-formats.js";
 import { LeaseLostError } from "../leases/errors.js";
+import type { Logger } from "../logging/logger.js";
 import type { ModelSummaryInputApi } from "../server-client/summary-input-api.js";
 import { freezeSummaryInput } from "./freeze-summary-input.js";
 import type { JobExecutionContext } from "./job-executor.js";
@@ -52,6 +53,14 @@ export const maximumValidationSummaryContextBytes = 256 * 1_024;
 const maximumCombinedPromptBytes = 512 * 1_024;
 const minimumCliTimeoutMs = 10_000;
 const noProgressSubmissionSafetyMs = 5_000;
+type SummaryPhase =
+  | "input_validation"
+  | "freeze_input"
+  | "prepare_workspace"
+  | "verify_source"
+  | "cli"
+  | "verify_final_source"
+  | "validate_result";
 const evidenceSchema = Type.Object(
   {
     assets: Type.Array(EvidenceAssetManifestSchema, { maxItems: 256 }),
@@ -88,6 +97,7 @@ export interface ValidationSummaryExecutorOptions {
   readonly sensitiveValues?: readonly string[];
   readonly now?: () => number;
   readonly summaryInputApi?: ModelSummaryInputApi;
+  readonly logger?: Logger;
 }
 
 export type ValidationSummaryAttempt =
@@ -134,7 +144,7 @@ export class ValidationSummaryExecutor {
   readonly #secrets: readonly string[];
 
   public constructor(private readonly options: ValidationSummaryExecutorOptions) {
-    this.#maximumTimeout = options.maximumSummaryTimeoutMs ?? 60_000;
+    this.#maximumTimeout = options.maximumSummaryTimeoutMs ?? 150_000;
     this.#reserve = options.completionReserveMs ?? 30_000;
     this.#teardownTimeout = options.teardownTimeoutMs ?? 5_000;
     this.#now = options.now ?? Date.now;
@@ -163,6 +173,55 @@ export class ValidationSummaryExecutor {
     let timer: NodeJS.Timeout | undefined;
     let nodeFault = false;
     let cleanupUnconfirmed = false;
+    let phase: SummaryPhase = "input_validation";
+    let phaseStartedAt = this.#now();
+    let budgetStartedAt = phaseStartedAt;
+    let summaryBudgetMs: number | undefined;
+    let cliRunnerInvoked = false;
+    let cliProcessObserved = false;
+    let cliObservedAt: number | undefined;
+    let cliReportedIdleAt: number | undefined;
+    const timing = () => {
+      const current = this.#now();
+      return {
+        phase,
+        summaryBudgetMs,
+        elapsedMs: Math.max(0, current - budgetStartedAt),
+        phaseElapsedMs: Math.max(0, current - phaseStartedAt),
+        cliRunnerInvoked,
+        cliProcessObserved,
+        cliObservedElapsedMs:
+          cliObservedAt === undefined
+            ? null
+            : Math.max(0, (cliReportedIdleAt ?? current) - cliObservedAt),
+      };
+    };
+    const record = (message: string, fields: Readonly<Record<string, unknown>> = {}): void => {
+      if (summaryBudgetMs === undefined) return;
+      try {
+        this.options.logger?.info(message, {
+          jobId: input.envelope.lease.jobId,
+          runAttemptId: input.envelope.lease.runAttemptId,
+          ...timing(),
+          ...fields,
+        });
+      } catch {
+        // Diagnostic logging cannot change runner facts or prevent supervised cleanup.
+      }
+    };
+    const enterPhase = (next: SummaryPhase): void => {
+      const previous = timing();
+      phase = next;
+      phaseStartedAt = this.#now();
+      record("Validation summary phase started.", {
+        previousPhase: previous.phase,
+        previousPhaseElapsedMs: previous.phaseElapsedMs,
+      });
+    };
+    const describeTiming = (): string => {
+      const observed = timing();
+      return `phase=${observed.phase}; elapsedMs=${observed.elapsedMs}; phaseElapsedMs=${observed.phaseElapsedMs}; cliRunnerInvoked=${observed.cliRunnerInvoked}; cliProcessObserved=${observed.cliProcessObserved}; cliObservedElapsedMs=${observed.cliObservedElapsedMs ?? "unobserved"}`;
+    };
     const reportNodeHealthFault = (error: Error): void => {
       nodeFault = true;
       const code = (error as Error & { readonly code?: unknown }).code;
@@ -246,10 +305,26 @@ export class ValidationSummaryExecutor {
           "The Worker cannot retain model workspace cleanup through terminal reporting.",
         );
       }
+      summaryBudgetMs = budget;
+      budgetStartedAt = this.#now();
+      const summaryDeadline = budgetStartedAt + budget;
+      const remainingBudget = (): number => {
+        const current = this.#now();
+        return Math.floor(
+          Math.min(
+            budget,
+            summaryDeadline - current,
+            deadline - current - this.#reserve - this.#teardownTimeout,
+          ),
+        );
+      };
       timer = setTimeout(
         () =>
           child.abort(
-            failure("SUMMARY_TIMEOUT", "The optional summary exhausted its execution budget."),
+            failure(
+              "SUMMARY_TIMEOUT",
+              `The optional summary exhausted its ${budget} ms total budget (${describeTiming()}).`,
+            ),
           ),
         budget,
       );
@@ -257,6 +332,7 @@ export class ValidationSummaryExecutor {
       if (context.signal.aborted) cancel();
       child.signal.throwIfAborted();
       if (envelope.validation.schemaVersion === "ValidationJobContextV2") {
+        enterPhase("freeze_input");
         if (this.options.summaryInputApi === undefined)
           throw failure(
             "SUMMARY_INPUT_UNAVAILABLE",
@@ -287,6 +363,7 @@ export class ValidationSummaryExecutor {
         });
         return cleanup;
       });
+      enterPhase("prepare_workspace");
       const prepared = await this.options.workspaceProvider.prepare(
         envelope,
         {
@@ -317,14 +394,49 @@ export class ValidationSummaryExecutor {
           "SUMMARY_NODE_FAULT",
           "A Worker health fault prevents safe summary execution.",
         );
+      enterPhase("verify_source");
       await requireOriginalModelSource(workspace, child.signal);
+      const cliBudget = remainingBudget();
+      if (!Number.isSafeInteger(cliBudget) || cliBudget < minimumCliTimeoutMs)
+        throw failure(
+          "SUMMARY_BUDGET_UNAVAILABLE",
+          `Only ${cliBudget} ms remains after summary preparation; at least ${minimumCliTimeoutMs} ms is required, so the CLI was not started (${describeTiming()}).`,
+        );
+      cliRunnerInvoked = true;
+      enterPhase("cli");
       const result = await this.options.outputRunner.run({
         workspace,
-        context: { ...context, signal: child.signal, attemptSignal, reportNodeHealthFault },
+        context: {
+          ...context,
+          signal: child.signal,
+          attemptSignal,
+          reportNodeHealthFault,
+          reportProgress: (progress) => {
+            if (
+              progress.phase === "cli_review" &&
+              progress.processCount === 1 &&
+              !cliProcessObserved
+            ) {
+              cliProcessObserved = true;
+              cliObservedAt = this.#now();
+              record("Validation summary CLI process observed.");
+            }
+            if (
+              progress.phase === "cli_review" &&
+              progress.processCount === 0 &&
+              cliProcessObserved &&
+              cliReportedIdleAt === undefined
+            ) {
+              cliReportedIdleAt = this.#now();
+              record("Validation summary CLI activity ended.");
+            }
+            context.reportProgress(progress);
+          },
+        },
         authoritativeSchema: authority,
         prompt,
-        hardTimeoutMs: budget,
-        noProgressTimeoutMs: Math.min(envelope.executionPolicy.noProgressTimeoutMs, budget),
+        hardTimeoutMs: cliBudget,
+        noProgressTimeoutMs: Math.min(envelope.executionPolicy.noProgressTimeoutMs, cliBudget),
         correlationId: envelope.lease.runAttemptId,
         launchPolicy: "summary_read_only",
         teardownTimeoutMs: this.#teardownTimeout,
@@ -359,6 +471,7 @@ export class ValidationSummaryExecutor {
         cliExecution: structuredClone(result.cliExecution),
       };
       const originalEvidence = structuredClone(result.commandEvidence);
+      enterPhase("verify_final_source");
       const modelWorktree = await requireOriginalModelSource(workspace, child.signal);
       if (result.observedFileChange) {
         throw failure(
@@ -366,6 +479,7 @@ export class ValidationSummaryExecutor {
           "Model workspace changes invalidate the optional advice.",
         );
       }
+      enterPhase("validate_result");
       const summary: unknown = originalOutput.result;
       if (
         !Value.Check(authority.resultSchema, summary) ||
@@ -427,6 +541,7 @@ export class ValidationSummaryExecutor {
           "SUMMARY_NODE_FAULT",
           "A Worker health fault invalidates the optional summary.",
         );
+      record("Validation summary completed.");
       return Object.freeze({
         state: "completed",
         summary: freeze(structuredClone(summary)),
@@ -441,6 +556,9 @@ export class ValidationSummaryExecutor {
         child.signal.aborted && child.signal.reason instanceof SummaryFailure
           ? child.signal.reason
           : error;
+      record("Validation summary failed.", {
+        code: known instanceof SummaryFailure ? known.code : "SUMMARY_EXECUTION_FAILED",
+      });
       return known instanceof SummaryFailure
         ? {
             state: "failed",

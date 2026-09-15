@@ -839,7 +839,7 @@ describe("optional ValidationSummary executor", () => {
       expect(f.capture).toHaveBeenCalledTimes(2);
       expect(f.run.mock.calls[0]?.[0]).toMatchObject({
         launchPolicy: "summary_read_only",
-        hardTimeoutMs: 60_000,
+        hardTimeoutMs: 85_000,
         correlationId: "attempt",
       });
       expect(f.run.mock.calls[0]?.[0].context.signal).not.toBe(f.context.signal);
@@ -1135,6 +1135,167 @@ describe("optional ValidationSummary executor", () => {
     expect(f.prepare).not.toHaveBeenCalled();
   });
 
+  it("defaults the complete summary lifecycle to 150 seconds when the parent budget permits it", async () => {
+    const f = fixture();
+    f.input.envelope.executionDeadlineAt = "2026-09-08T00:05:00.000Z";
+    f.input.envelope.executionPolicy.hardTimeoutMs = 300_000;
+    f.input.envelope.executionPolicy.noProgressTimeoutMs = 180_000;
+
+    expect((await f.executor.execute(f.input, f.context)).state).toBe("completed");
+    expect(f.run.mock.calls[0]?.[0].hardTimeoutMs).toBe(150_000);
+  });
+
+  it("subtracts workspace and initial source preparation from the CLI budget", async () => {
+    let current = Date.parse(now);
+    const f = fixture(false, { maximumSummaryTimeoutMs: 60_000, now: () => current });
+    f.prepare.mockImplementation(async () => {
+      current += 20_000;
+      return f.model;
+    });
+    f.capture.mockImplementationOnce(async () => {
+      current += 5_000;
+      return "clean";
+    });
+
+    expect((await f.executor.execute(f.input, f.context)).state).toBe("completed");
+    expect(f.run.mock.calls[0]?.[0]).toMatchObject({
+      hardTimeoutMs: 35_000,
+      noProgressTimeoutMs: 35_000,
+      teardownTimeoutMs: 5_000,
+    });
+    expect(f.controller.signal.aborted).toBe(false);
+  });
+
+  it("does not start a CLI when preparation leaves less than its minimum budget", async () => {
+    let current = Date.parse(now);
+    const f = fixture(false, { maximumSummaryTimeoutMs: 60_000, now: () => current });
+    f.prepare.mockImplementation(async () => {
+      current += 45_000;
+      return f.model;
+    });
+    f.capture.mockImplementationOnce(async () => {
+      current += 5_001;
+      return "clean";
+    });
+
+    const result = await f.executor.execute(f.input, f.context);
+    expect(result).toMatchObject({
+      state: "failed",
+      code: "SUMMARY_BUDGET_UNAVAILABLE",
+      message: expect.stringContaining("Only 9999 ms remains"),
+    });
+    if (result.state !== "failed") throw new Error("Expected a budget failure.");
+    expect(result.message).toContain("the CLI was not started");
+    expect(result.message).toContain("phase=verify_source");
+    expect(result.message).toContain("elapsedMs=50001");
+    expect(result.message).toContain("cliRunnerInvoked=false");
+    expect(f.run).not.toHaveBeenCalled();
+    expect(f.input.runnerExecution.blockers).toEqual([]);
+    expect(f.controller.signal.aborted).toBe(false);
+    await f.cleanups[0]?.();
+    expect(f.model.cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("does not restart the shared timeout after workspace preparation finishes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(now));
+    const f = fixture(false, { maximumSummaryTimeoutMs: 60_000, now: Date.now });
+    f.prepare.mockImplementation(
+      async () => new Promise((resolve) => setTimeout(() => resolve(f.model), 20_000)),
+    );
+    f.run.mockImplementation(async (input) => {
+      input.context.reportProgress({ phase: "cli_review", processCount: 1 });
+      return new Promise((_resolve, reject) => {
+        input.context.signal.addEventListener("abort", () => reject(input.context.signal.reason), {
+          once: true,
+        });
+      });
+    });
+
+    const running = f.executor.execute(f.input, f.context);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(f.run.mock.calls[0]?.[0].hardTimeoutMs).toBe(40_000);
+    await vi.advanceTimersByTimeAsync(39_999);
+    expect(f.run.mock.calls[0]?.[0].context.signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await running;
+    expect(result).toMatchObject({ state: "failed", code: "SUMMARY_TIMEOUT" });
+    if (result.state !== "failed") throw new Error("Expected a summary timeout.");
+    expect(result.message).toContain("phase=cli; elapsedMs=60000; phaseElapsedMs=40000");
+    expect(result.message).toContain("cliObservedElapsedMs=40000");
+    expect(f.controller.signal.aborted).toBe(false);
+  });
+
+  it("logs bounded stage timing without counting final verification as observed CLI activity", async () => {
+    let current = Date.parse(now);
+    const info = vi.fn();
+    const f = fixture(false, {
+      maximumSummaryTimeoutMs: 60_000,
+      now: () => current,
+      logger: { info, debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    f.prepare.mockImplementation(async () => {
+      current += 20_000;
+      return f.model;
+    });
+    f.capture
+      .mockImplementationOnce(async () => {
+        current += 5_000;
+        return "clean";
+      })
+      .mockImplementationOnce(async () => {
+        current += 10_000;
+        return "clean";
+      });
+    const originalRun = f.run.getMockImplementation();
+    if (!originalRun) throw new Error("Missing synthetic output runner.");
+    f.run.mockImplementation(async (input) => {
+      input.context.reportProgress({ phase: "cli_review", processCount: 1 });
+      current += 15_000;
+      input.context.reportProgress({ phase: "cli_review", processCount: 0 });
+      return originalRun(input);
+    });
+
+    expect((await f.executor.execute(f.input, f.context)).state).toBe("completed");
+    expect(info).toHaveBeenCalledWith(
+      "Validation summary completed.",
+      expect.objectContaining({
+        jobId: "job",
+        runAttemptId: "attempt",
+        phase: "validate_result",
+        elapsedMs: 50_000,
+        cliRunnerInvoked: true,
+        cliProcessObserved: true,
+        cliObservedElapsedMs: 15_000,
+      }),
+    );
+    expect(info).toHaveBeenCalledWith(
+      "Validation summary phase started.",
+      expect.objectContaining({
+        phase: "verify_source",
+        previousPhase: "prepare_workspace",
+        previousPhaseElapsedMs: 20_000,
+      }),
+    );
+    const log = JSON.stringify(info.mock.calls);
+    expect(log).not.toContain(f.input.envelope.lease.leaseToken);
+    expect(log).not.toContain(f.input.envelope.prompt.renderedPrompt);
+    expect(log).not.toContain(f.model.checkoutDirectory);
+  });
+
+  it("does not change summary results when diagnostic logging fails", async () => {
+    const unavailable = () => {
+      throw new Error("Diagnostic logger is unavailable.");
+    };
+    const f = fixture(false, {
+      logger: { info: unavailable, debug: unavailable, warn: unavailable, error: unavailable },
+    });
+    expect((await f.executor.execute(f.input, f.context)).state).toBe("completed");
+    expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+    await f.cleanups[0]?.();
+    expect(f.model.cleanup).toHaveBeenCalledOnce();
+  });
+
   it("does not restart the frozen job hard-timeout budget after validation has already consumed it", async () => {
     const f = fixture(false, { now: () => Date.parse(now) + 60_000 });
     f.input.envelope.executionDeadlineAt = "2026-09-08T00:10:00.000Z";
@@ -1192,7 +1353,7 @@ describe("optional ValidationSummary executor", () => {
 
   it("times out an optional child without aborting its parent or changing validation facts", async () => {
     vi.useFakeTimers();
-    const f = fixture();
+    const f = fixture(false, { maximumSummaryTimeoutMs: 60_000 });
     f.run.mockImplementation(
       (input) =>
         new Promise((_resolve, reject) =>
@@ -1210,6 +1371,53 @@ describe("optional ValidationSummary executor", () => {
     expect(f.input.runnerReport.checks[0]?.outcome).toBe("failed");
     expect(f.input.runnerExecution.blockers).toStrictEqual([]);
   });
+
+  it.each(["prepare_workspace", "verify_source", "cli", "verify_final_source"] as const)(
+    "retains the actual %s phase when the shared summary budget expires",
+    async (phase) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(now));
+      const f = fixture(false, { maximumSummaryTimeoutMs: 60_000, now: Date.now });
+      const waitForAbort = (signal: AbortSignal): Promise<never> =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      if (phase === "prepare_workspace")
+        f.prepare.mockImplementation((_envelope, context) => waitForAbort(context.signal));
+      else if (phase === "verify_source")
+        f.capture.mockImplementationOnce((signal) => waitForAbort(signal));
+      else {
+        const originalRun = f.run.getMockImplementation();
+        if (!originalRun) throw new Error("Missing synthetic output runner.");
+        f.run.mockImplementation(async (input) => {
+          input.context.reportProgress({ phase: "cli_review", processCount: 1 });
+          if (phase === "cli") return waitForAbort(input.context.signal);
+          input.context.reportProgress({ phase: "cli_review", processCount: 0 });
+          return originalRun(input);
+        });
+        if (phase === "verify_final_source")
+          f.capture
+            .mockResolvedValueOnce("clean")
+            .mockImplementationOnce((signal) => waitForAbort(signal));
+      }
+
+      const running = f.executor.execute(f.input, f.context);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await running;
+      expect(result).toMatchObject({ state: "failed", code: "SUMMARY_TIMEOUT" });
+      if (result.state !== "failed") throw new Error("Expected a summary timeout.");
+      expect(result.message).toContain(`phase=${phase}`);
+      expect(result.message).toContain("elapsedMs=60000");
+      expect(result.message).toContain(
+        `cliRunnerInvoked=${phase === "cli" || phase === "verify_final_source"}`,
+      );
+      expect(result.message).toContain(
+        `cliProcessObserved=${phase === "cli" || phase === "verify_final_source"}`,
+      );
+      expect(f.controller.signal.aborted).toBe(false);
+      expect(f.input.runnerExecution.blockers).toEqual([]);
+    },
+  );
 
   it("propagates actual lease loss rather than converting it to optional failure", async () => {
     const f = fixture();
@@ -1561,7 +1769,7 @@ describe("optional ValidationSummary executor", () => {
 
   it("retains a valid late-prepared workspace for cleanup after optional cancellation", async () => {
     vi.useFakeTimers();
-    const f = fixture();
+    const f = fixture(false, { maximumSummaryTimeoutMs: 60_000 });
     const prepared = Promise.withResolvers<PreparedJobWorkspace>();
     f.prepare.mockReturnValue(prepared.promise);
     const result = f.executor.execute(f.input, f.context);

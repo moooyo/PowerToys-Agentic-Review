@@ -105,6 +105,7 @@ export const ProcessLaunchSpecSchema = Type.Object(
     ),
     interactiveStdin: Type.Optional(Type.Literal(true)),
     captureProcessIdentity: Type.Optional(Type.Literal(true)),
+    captureResourceUsage: Type.Optional(Type.Literal(true)),
     limits: ProcessResourceLimitsSchema,
   },
   { additionalProperties: false },
@@ -314,6 +315,25 @@ export const ProcessTerminatedEventSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const ProcessResourceUsageSchema = Type.Object(
+  {
+    peakJobMemoryBytes: Type.Optional(NonNegativeSafeIntegerSchema),
+    peakProcessMemoryBytes: Type.Optional(NonNegativeSafeIntegerSchema),
+    activeProcesses: Type.Optional(
+      Type.Object(
+        {
+          sampledPeak: Type.Integer({ minimum: 0, maximum: 4_294_967_295 }),
+          sampleCount: PositiveSafeIntegerSchema,
+          sampleIntervalMs: Type.Literal(250),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+  },
+  { additionalProperties: false, minProperties: 1 },
+);
+export type ProcessResourceUsage = Static<typeof ProcessResourceUsageSchema>;
+
 export const ProcessExitedEventSchema = Type.Object(
   {
     protocolVersion: Type.Literal(processHostProtocolVersion),
@@ -328,6 +348,7 @@ export const ProcessExitedEventSchema = Type.Object(
       Type.Null(),
     ]),
     outputTruncated: Type.Boolean(),
+    resourceUsage: Type.Optional(ProcessResourceUsageSchema),
   },
   { additionalProperties: false },
 );

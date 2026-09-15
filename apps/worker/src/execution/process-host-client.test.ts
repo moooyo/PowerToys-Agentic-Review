@@ -4,6 +4,7 @@ import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
   deriveWorkerProcessHostInstanceKey,
+  type ProcessHostExitObservation,
   type ProcessHostSpawn,
   type ProcessHostSpawnOptions,
   StdioProcessHostClient,
@@ -108,6 +109,8 @@ const readyEvent = (maximumConcurrentRequests = 4): ProcessHostEvent => ({
 const defaultInstanceKey = "a".repeat(64);
 
 interface TestTimeoutOptions {
+  readonly captureResourceUsage?: true;
+  readonly onExitObservation?: (observation: ProcessHostExitObservation) => void;
   readonly requestTimeoutMs?: number;
   readonly startTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
@@ -210,6 +213,274 @@ async function closeNormally(
 }
 
 describe("StdioProcessHostClient", () => {
+  it.each([0, 1816])(
+    "observes a real exit code %s once with bounded metadata only",
+    async (exitCode) => {
+      const onExitObservation = vi.fn();
+      const { child, client } = await connect(4, { captureResourceUsage: true, onExitObservation });
+      const { managed, requestId } = await startOne(client, child);
+      child.writeEvent({
+        protocolVersion: processHostProtocolVersion,
+        type: "stderr",
+        requestId,
+        sequence: 0,
+        dataBase64: Buffer.from("secret command output").toString("base64"),
+      });
+      const resourceUsage = {
+        peakJobMemoryBytes: Number.MAX_SAFE_INTEGER,
+        peakProcessMemoryBytes: Number.MAX_SAFE_INTEGER,
+        activeProcesses: {
+          sampledPeak: 4_294_967_295,
+          sampleCount: Number.MAX_SAFE_INTEGER,
+          sampleIntervalMs: 250 as const,
+        },
+      };
+      child.writeEvent({
+        protocolVersion: processHostProtocolVersion,
+        type: "exited",
+        requestId,
+        exitCode,
+        signal: null,
+        outputTruncated: false,
+        resourceUsage,
+      });
+      await expect(managed.completed).resolves.toMatchObject({ exitCode, resourceUsage });
+      expect(onExitObservation).toHaveBeenCalledTimes(1);
+      expect(onExitObservation.mock.calls[0]).toEqual([
+        { requestId, exitCode, outputTruncated: false, limits: launchSpec().limits, resourceUsage },
+      ]);
+      const serialized = JSON.stringify(onExitObservation.mock.calls[0]);
+      expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(1024);
+      expect(serialized).not.toMatch(
+        /secret|executable|arguments|environment|stdout|stderr|signal/u,
+      );
+      await closeNormally(client, child);
+    },
+  );
+
+  it.each(["cancelled", "timeout"] as const)(
+    "retains actual %s exit observations when completion rejects",
+    async (reason) => {
+      const onExitObservation = vi.fn();
+      const { child, client } = await connect(4, { captureResourceUsage: true, onExitObservation });
+      const controller = new AbortController();
+      const starting = client.start(launchSpec(), controller.signal);
+      const request = (await waitForRequests(child, "start")).at(-1);
+      if (request === undefined) throw new Error("Missing start request.");
+      child.writeEvent({
+        protocolVersion: processHostProtocolVersion,
+        type: "started",
+        requestId: request.requestId,
+        processId: 5001,
+      });
+      const managed = await starting;
+      const abortFailure = new Error("secret abort reason must not become metadata");
+      const completion =
+        reason === "cancelled"
+          ? expect(managed.completed).rejects.toBe(abortFailure)
+          : expect(managed.completed).rejects.toMatchObject({ code: "PROCESS_HARD_TIMEOUT" });
+      if (reason === "cancelled") {
+        controller.abort(abortFailure);
+        await waitForRequests(child, "terminate");
+      }
+      child.writeEvent({
+        protocolVersion: processHostProtocolVersion,
+        type: "terminated",
+        requestId: request.requestId,
+        reason,
+      });
+      expect(onExitObservation).not.toHaveBeenCalled();
+      const resourceUsage = { peakJobMemoryBytes: 1048576 };
+      child.writeEvent({
+        protocolVersion: processHostProtocolVersion,
+        type: "exited",
+        requestId: request.requestId,
+        exitCode: 3_221_225_786,
+        signal: null,
+        outputTruncated: false,
+        resourceUsage,
+      });
+      await completion;
+      expect(onExitObservation.mock.calls).toEqual([
+        [
+          {
+            requestId: request.requestId,
+            exitCode: 3_221_225_786,
+            outputTruncated: false,
+            limits: launchSpec().limits,
+            resourceUsage,
+          },
+        ],
+      ]);
+      expect(child.killed).toBe(false);
+      await closeNormally(client, child);
+    },
+  );
+
+  it("deeply isolates immutable observer metadata from launch and completion objects", async () => {
+    const observations: ProcessHostExitObservation[] = [];
+    const mutations: boolean[] = [];
+    const { child, client } = await connect(4, {
+      onExitObservation: (observation) => {
+        observations.push(observation);
+        mutations.push(Reflect.set(observation, "exitCode", 999));
+        mutations.push(Reflect.set(observation.limits, "maximumProcessCount", 999));
+        if (observation.resourceUsage !== undefined) {
+          mutations.push(Reflect.set(observation.resourceUsage, "peakJobMemoryBytes", 999));
+          if (observation.resourceUsage.activeProcesses !== undefined)
+            mutations.push(
+              Reflect.set(observation.resourceUsage.activeProcesses, "sampledPeak", 999),
+            );
+        }
+      },
+    });
+    const spec = launchSpec();
+    const originalLimits = { ...spec.limits };
+    const starting = client.start(spec, new AbortController().signal);
+    const request = (await waitForRequests(child, "start")).at(-1);
+    if (request === undefined) throw new Error("Missing start request.");
+    spec.limits.maximumProcessCount = 256;
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "started",
+      requestId: request.requestId,
+      processId: 5001,
+    });
+    const managed = await starting;
+    const resourceUsage = {
+      peakJobMemoryBytes: 1048576,
+      activeProcesses: { sampledPeak: 2, sampleCount: 3, sampleIntervalMs: 250 as const },
+    };
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "exited",
+      requestId: request.requestId,
+      exitCode: 0,
+      signal: null,
+      outputTruncated: false,
+      resourceUsage,
+    });
+    const completed = await managed.completed;
+    expect(mutations).toEqual([false, false, false, false]);
+    expect(completed).toMatchObject({ exitCode: 0, resourceUsage });
+    expect(observations[0]?.limits).toEqual(originalLimits);
+    expect(observations[0]?.limits).not.toBe(spec.limits);
+    expect(observations[0]?.resourceUsage).not.toBe(completed.resourceUsage);
+    expect(observations[0]?.resourceUsage?.activeProcesses).not.toBe(
+      completed.resourceUsage?.activeProcesses,
+    );
+    if (completed.resourceUsage?.activeProcesses !== undefined)
+      completed.resourceUsage.activeProcesses.sampledPeak = 10;
+    expect(observations[0]?.resourceUsage?.activeProcesses?.sampledPeak).toBe(2);
+    await closeNormally(client, child);
+  });
+
+  it.each(["throw", "reject"] as const)(
+    "does not change completion when an exit observer fails: %s",
+    async (failure) => {
+      const onExitObservation = vi.fn(() => {
+        if (failure === "throw") throw new Error("observer failure");
+        return Promise.reject(new Error("asynchronous observer failure"));
+      });
+      const { child, client } = await connect(4, { onExitObservation });
+      const { managed, requestId } = await startOne(client, child);
+      exitProcess(child, requestId, 1816);
+      await expect(managed.completed).resolves.toMatchObject({ exitCode: 1816 });
+      expect(onExitObservation).toHaveBeenCalledTimes(1);
+      await closeNormally(client, child);
+    },
+  );
+
+  it.each(["start_failure", "host_failure"] as const)(
+    "never fabricates an exit observation after %s",
+    async (failure) => {
+      const onExitObservation = vi.fn();
+      const { child, client } = await connect(4, { onExitObservation });
+      if (failure === "start_failure") {
+        const starting = client.start(launchSpec(), new AbortController().signal);
+        const request = (await waitForRequests(child, "start")).at(-1);
+        if (request === undefined) throw new Error("Missing start request.");
+        child.writeEvent({
+          protocolVersion: processHostProtocolVersion,
+          type: "error",
+          requestId: request.requestId,
+          code: "PROCESS_START_FAILED",
+          message: "secret start failure",
+        });
+        await expect(starting).rejects.toMatchObject({ code: "PROCESS_START_FAILED" });
+        await closeNormally(client, child);
+      } else {
+        const { managed } = await startOne(client, child);
+        const completion = expect(managed.completed).rejects.toBeInstanceOf(
+          ProcessHostProtocolError,
+        );
+        child.closeHost(1, null);
+        await completion;
+        await expect(client.close()).rejects.toBeInstanceOf(ProcessHostProtocolError);
+      }
+      expect(onExitObservation).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { requestId: "process:foreign" },
+    { exitCode: Number.MAX_SAFE_INTEGER },
+    { resourceUsage: { peakJobMemoryBytes: Number.MAX_SAFE_INTEGER + 1 } },
+    {
+      resourceUsage: { activeProcesses: { sampledPeak: 1, sampleCount: 0, sampleIntervalMs: 250 } },
+    },
+    { signal: "SIGKILL" },
+    { outputTruncated: true },
+  ])("never notifies observers for an invalid or inconsistent exit %#", async (overrides) => {
+    const onExitObservation = vi.fn();
+    const { child, client } = await connect(4, { onExitObservation });
+    const { managed, requestId } = await startOne(client, child);
+    const completion = expect(managed.completed).rejects.toBeInstanceOf(ProcessHostProtocolError);
+    child.stdout.write(
+      `${JSON.stringify({ protocolVersion: processHostProtocolVersion, type: "exited", requestId, exitCode: 0, signal: null, outputTruncated: false, ...overrides })}\n`,
+    );
+    await completion;
+    expect(onExitObservation).not.toHaveBeenCalled();
+    await expect(client.close()).rejects.toBeInstanceOf(ProcessHostProtocolError);
+  });
+
+  it.each([false, true])(
+    "adds resource diagnostics only when explicitly configured: %s",
+    async (enabled) => {
+      const { child, client } = await connect(4, enabled ? { captureResourceUsage: true } : {});
+      const { managed, requestId } = await startOne(client, child);
+      const request = child.requests.find((candidate) => candidate.type === "start");
+      if (request?.type !== "start") throw new Error("Missing start request.");
+      if (enabled) expect(request.spec.captureResourceUsage).toBe(true);
+      else expect(request.spec).not.toHaveProperty("captureResourceUsage");
+      const resourceUsage = {
+        peakJobMemoryBytes: 1048576,
+        activeProcesses: { sampledPeak: 2, sampleCount: 3, sampleIntervalMs: 250 as const },
+      };
+      child.writeEvent({
+        protocolVersion: processHostProtocolVersion,
+        type: "exited",
+        requestId,
+        exitCode: 0,
+        signal: null,
+        outputTruncated: false,
+        ...(enabled ? { resourceUsage } : {}),
+      });
+      const completed = await managed.completed;
+      if (enabled) expect(completed.resourceUsage).toEqual(resourceUsage);
+      else expect(completed).not.toHaveProperty("resourceUsage");
+      await closeNormally(client, child);
+    },
+  );
+
+  it("keeps successful completion when requested resource observations are unavailable", async () => {
+    const { child, client } = await connect(4, { captureResourceUsage: true });
+    const { managed, requestId } = await startOne(client, child);
+    exitProcess(child, requestId);
+    await expect(managed.completed).resolves.toMatchObject({ exitCode: 0 });
+    await closeNormally(client, child);
+  });
+
   it("returns exact requested process creation FILETIME without converting it to Number", async () => {
     const { child, client } = await connect();
     const starting = client.start(

@@ -1,12 +1,12 @@
 :root {
-  --app-canvas: var(--mui-palette-background-default, #f7f2fa);
-  --app-surface: var(--mui-palette-background-paper, #fffbfe);
-  --app-text: var(--mui-palette-text-primary, #1d1b20);
-  --app-muted: var(--mui-palette-text-secondary, #49454f);
-  --app-line: var(--mui-palette-divider, #cac4d0);
-  --app-accent: var(--mui-palette-primary-main, #6750a4);
-  --app-accent-soft: var(--app-primary-container, #eaddff);
-  --app-hover: var(--mui-palette-action-hover, rgb(29 27 32 / 8%));
+  --app-canvas: var(--mui-palette-background-default, #f5f8fc);
+  --app-surface: var(--mui-palette-background-paper, #fff);
+  --app-text: var(--mui-palette-text-primary, #172b3a);
+  --app-muted: var(--mui-palette-text-secondary, #465c70);
+  --app-line: var(--mui-palette-divider, #cfd9e4);
+  --app-accent: var(--mui-palette-primary-main, #1565c0);
+  --app-accent-soft: var(--app-primary-container, #e3f2fd);
+  --app-hover: var(--mui-palette-action-hover, rgb(23 43 58 / 8%));
   --app-body-font: "Roboto", "Segoe UI", sans-serif;
   --app-display-font: var(--app-body-font);
   --app-heading-font: var(--app-body-font);
@@ -49,6 +49,14 @@ textarea {
 .material-main,
 .material-main > * {
   min-width: 0;
+}
+.material-scroll-region {
+  overscroll-behavior: contain;
+  scrollbar-color: var(--app-outline) transparent;
+  scrollbar-width: thin;
+}
+.material-main:focus-visible {
+  outline-offset: -3px;
 }
 .mono,
 code,

@@ -19,11 +19,17 @@ and typed forms share the theme in `src/theme.tsx`; product CSS handles layout
 and content wrapping. There is no compatibility layer for the previous UI framework.
 
 The interface follows Material 3's baseline color roles, typography, and geometry.
-A full-width app bar and standard light navigation drawer use tonal surfaces;
-purple identifies actions and selection. Locally bundled Roboto uses regular and
-medium weights, with Roboto Mono for identifiers and code. Buttons, chips, form
+A full-width app bar and standard light navigation drawer use pale blue-gray surfaces;
+blue identifies actions and selection against white content surfaces. Locally bundled
+Roboto uses regular and medium weights, with Roboto Mono for identifiers and code. Buttons, chips, form
 controls, and dialogs share the Material scale. Page gutters are 24px on desktop
 and 16px on mobile. Light and dark themes preserve semantic colors and keyboard focus.
+
+The application shell fills the viewport and keeps the app bar in place. The main
+workspace scrolls within the remaining height instead of extending the document.
+Navigation uses 48px targets and scrolls independently only when its items exceed
+the available height. Both regions use thin native scrollbars without hiding
+overflowing content; narrow screens retain the temporary navigation drawer.
 
 Primary pages use `components/PageHeader` and the `--app-*` aliases in
 `src/global.css`. Pull requests and issues use a single Material list with a

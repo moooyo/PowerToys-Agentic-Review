@@ -24,6 +24,36 @@ The Job Object applies both per-process and total-job memory limits, an active p
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. ProcessHost does not emit `exited` until the root process has
 stopped and the Job Object reports no active processes.
 
+Resource observations are an optional protocol extension. The Worker client enables them only
+when configured with `captureResourceUsage: true`, which adds `spec.captureResourceUsage: true`
+to each start request. The Worker environment switch is
+`WORKER_PROCESS_HOST_RESOURCE_DIAGNOSTICS=true`; it defaults to false. Enable it only with a
+ProcessHost binary built with this extension. An older binary rejects the explicitly requested
+extension. Ordinary start requests and exit events retain their previous format.
+
+For opted-in requests, an `exited.resourceUsage` object can contain:
+
+- `peakJobMemoryBytes`: peak aggregate Job memory reported by Windows.
+- `peakProcessMemoryBytes`: the largest memory peak of any single process ever associated with
+  the Job, including processes that have exited. This is not restricted to the root process.
+- `activeProcesses`: an object with `sampledPeak`, successful `sampleCount`, and
+  `sampleIntervalMs: 250`. The host samples while waiting for the root and once before closing the
+  Job handle. This interval is a target cadence; scheduling and termination can change the actual
+  spacing. The sampled maximum can miss transient peaks.
+
+Memory peaks are queried from `JobObjectExtendedLimitInformation` before the Job handle closes;
+they are maintained by Windows, independently of active-process sampling. Failed queries omit
+the affected observations. If all observations are unavailable, `resourceUsage` is omitted.
+Diagnostic failure never changes the exit code or the existing tree-drain and handle-cleanup
+requirements. These values contain no command text, environment values, or process paths.
+
+The observations do not establish whether a memory or process-count limit was reached. A failed
+allocation can leave the recorded peak below a limit, and an active-process sample can miss a
+brief attempted launch. Do not interpret these memory fields as RSS or working-set measurements.
+See Microsoft's [extended limit information](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information),
+[basic accounting information](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information),
+and [Job query API](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject).
+
 A Job Object is a lifetime and resource-control mechanism, not a security boundary for malicious
 code running under the same Windows token. The current Worker therefore admits only code that the
 deployment treats as trusted. ProcessHost still provides deterministic cleanup and resource limits,

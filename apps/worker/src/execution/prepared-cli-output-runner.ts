@@ -185,7 +185,7 @@ export class PreparedCliOutputRunner {
       },
       sensitiveValues: [...(suppliedInput.sensitiveValues ?? [])],
     };
-    const { workspace, context, authoritativeSchema: authority } = input;
+    const { context, authoritativeSchema: authority } = input;
     context.signal.throwIfAborted();
     if (
       (input.launchPolicy !== "review" && input.launchPolicy !== "summary_read_only") ||
@@ -212,6 +212,35 @@ export class PreparedCliOutputRunner {
         ].flatMap((value) => [value, JSON.stringify(value).slice(1, -1)]),
       ),
     ];
+    const redact = (text: string) => redactExecutionText(text, protectedValues);
+    const diagnostic = new CliProcessDiagnostic(this.options, input, redact);
+    try {
+      const result = await this.#runObserved(
+        input,
+        protectedValues,
+        reportNodeHealthFault,
+        diagnostic,
+      );
+      context.signal.throwIfAborted();
+      diagnostic.outcome = result.outcome;
+      if (result.outcome === "failed") diagnostic.failureCode = result.code;
+      return result;
+    } catch (error) {
+      diagnostic.failureCode = diagnosticErrorCode(error) ?? "CLI_EXECUTION_FAILED";
+      context.signal.throwIfAborted();
+      throw error;
+    } finally {
+      diagnostic.finish(context.signal);
+    }
+  }
+
+  async #runObserved<TOutputSchema extends TSchema>(
+    input: PreparedCliOutputInput<TOutputSchema>,
+    protectedValues: readonly string[],
+    reportNodeHealthFault: (error: Error) => void,
+    diagnostic: CliProcessDiagnostic,
+  ): Promise<PreparedCliOutputResult<Static<TOutputSchema>>> {
+    const { workspace, context, authoritativeSchema: authority } = input;
     const redact = (text: string) => redactExecutionText(text, protectedValues);
     const schemaPath = win32.join(workspace.controlDirectory, "schema.json");
     const resultPath = win32.join(workspace.controlDirectory, "result.json");
@@ -290,7 +319,11 @@ export class PreparedCliOutputRunner {
       throw fault;
     }
     const observerFailure = new AbortController();
-    const processSignal = AbortSignal.any([diskMonitor.signal, observerFailure.signal]);
+    const processSignal = AbortSignal.any([
+      context.signal,
+      diskMonitor.signal,
+      observerFailure.signal,
+    ]);
     let progressError: ReviewExecutionError | undefined;
     const progressContext: JobExecutionContext = {
       ...context,
@@ -309,7 +342,7 @@ export class PreparedCliOutputRunner {
       },
     };
     let managed: ManagedProcess | undefined;
-    const startedAt = new Date().toISOString();
+    diagnostic.launchRequested(launchSpec);
     let startError: unknown;
     try {
       processSignal.throwIfAborted();
@@ -338,10 +371,31 @@ export class PreparedCliOutputRunner {
       reportNodeHealthFault(fault);
       throw fault;
     }
+    const startedAt = diagnostic.started(managed);
+    const processRequestId = managed.requestId;
+    const completion = managed.completed.then(
+      (exit) => {
+        diagnostic.exited(exit, processRequestId);
+        return exit;
+      },
+      (error: unknown) => {
+        diagnostic.completionFailed(error);
+        throw error;
+      },
+    );
     const progressPulse = new CliProgressPulse(progressContext, input.noProgressTimeoutMs);
-    const output: CopilotOutput = { text: "", exceeded: false, failure: null };
+    const output: CopilotOutput = {
+      text: "",
+      exceeded: false,
+      failure: null,
+      diagnostic: null,
+      lastObservedEventIndex: 0,
+      lastObservedEventType: null,
+      resultMarkerSeen: false,
+    };
+    if (this.options.engine === "copilot") diagnostic.copilot = output;
     const settlement = Promise.allSettled([
-      managed.completed,
+      completion,
       this.options.engine === "codex"
         ? collectCliRecords(managed.stdout, () => progressPulse.observeActivity())
         : collectCopilotOutput(
@@ -349,11 +403,9 @@ export class PreparedCliOutputRunner {
             output,
             () => progressPulse.observeActivity(),
             this.options.maximumOutputBytes,
-            (diagnostic) =>
-              this.options.logger?.warn("Copilot JSONL parser rejected an event.", {
-                correlationId: input.correlationId,
-                ...diagnostic,
-              }),
+            (parserDiagnostic) => {
+              output.diagnostic = parserDiagnostic;
+            },
           ),
       drainStream(managed.stderr, () => progressPulse.observeActivity()),
     ] as const);
@@ -367,6 +419,7 @@ export class PreparedCliOutputRunner {
         settlement,
         processSignal,
         input.teardownTimeoutMs ?? 5_000,
+        () => diagnostic.terminationRequested(),
       );
     } catch (error) {
       settlementError = error;
@@ -376,9 +429,13 @@ export class PreparedCliOutputRunner {
       diskError = await closeWorkspaceDiskMonitor(diskMonitor);
     }
     if (settlementError !== undefined) {
+      diagnostic.cleanupFailed(settlementError);
       reportNodeHealthFault(
         settlementError instanceof Error ? settlementError : new Error("CLI cleanup failed."),
       );
+      // Cleanup uncertainty is still a node-health fault, but cannot replace the caller's
+      // timeout or cancellation as the reason this execution stopped.
+      context.signal.throwIfAborted();
       throw settlementError;
     }
     if (progressError !== undefined) throw progressError;
@@ -518,6 +575,10 @@ interface CopilotOutput {
   text: string;
   exceeded: boolean;
   failure: CopilotOutputFailure | null;
+  diagnostic: CopilotParserDiagnostic | null;
+  lastObservedEventIndex: number;
+  lastObservedEventType: CopilotParserDiagnostic["eventType"] | null;
+  resultMarkerSeen: boolean;
 }
 
 type CopilotDiagnosticReason =
@@ -561,6 +622,185 @@ interface CopilotParserDiagnostic {
   readonly eventIndex: number;
   readonly eventType: (typeof copilotDiagnosticEventTypes)[number] | "other" | "unparsed";
 }
+
+function diagnosticErrorCode(error: unknown): string | null {
+  if (error === null || typeof error !== "object") return null;
+  const code = (error as { readonly code?: unknown }).code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,127}$/u.test(code) ? code : null;
+}
+
+/** Retains only bounded metadata; CLI input, environment, and output text never enter this log. */
+class CliProcessDiagnostic {
+  public outcome: "succeeded" | "failed" = "failed";
+  public failureCode: string | null = null;
+  public copilot: CopilotOutput | undefined;
+  readonly #createdAtMs = Date.now();
+  #launchRequestedAt: string | null = null;
+  #startedAtMs: number | null = null;
+  #startedAt: string | null = null;
+  #endedAtMs: number | null = null;
+  #endedAt: string | null = null;
+  #completionSettledAt: string | null = null;
+  #processRequestId: string | null = null;
+  #processCreationTimeFileTime: string | null = null;
+  #limits: CliProcessLaunchSpec["limits"] | null = null;
+  #exit: Static<typeof ProcessExitedEventSchema> | null = null;
+  #completionFailureCode: string | null = null;
+  #cleanupFailureCode: string | null = null;
+  #terminationRequested = false;
+
+  public constructor(
+    private readonly options: PreparedCliOutputRunnerOptions,
+    private readonly input: Pick<PreparedCliOutputInput<TSchema>, "correlationId" | "launchPolicy">,
+    private readonly redact: (text: string) => string,
+  ) {}
+
+  #text(text: string, maximumLength = 128): string {
+    return (
+      this.redact(text)
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: Log identifiers must not contain control characters.
+        .replace(/[\u0000-\u001f\u007f]/gu, " ")
+        .slice(0, maximumLength)
+    );
+  }
+
+  #log(level: "info" | "warn", message: string, fields: Readonly<Record<string, unknown>>): void {
+    try {
+      this.options.logger?.[level](message, fields);
+    } catch {
+      /* A diagnostic sink must not change cancellation, cleanup, or output acceptance. */
+    }
+  }
+
+  #fields(now: number): Readonly<Record<string, unknown>> {
+    return {
+      correlationId: this.#text(this.input.correlationId),
+      engine: this.options.engine,
+      cliVersion: this.#text(this.options.cliVersion),
+      launchPolicy: this.input.launchPolicy,
+      processRequestId: this.#processRequestId,
+      processCreationTimeFileTime: this.#processCreationTimeFileTime,
+      timingSource: "worker_observed_process_host_acknowledgements",
+      launchRequestedAt: this.#launchRequestedAt,
+      startedAt: this.#startedAt,
+      processEndedAt: this.#endedAt,
+      completionSettledAt: this.#completionSettledAt,
+      elapsedMs:
+        this.#startedAtMs === null
+          ? null
+          : Math.max(0, (this.#endedAtMs ?? now) - this.#startedAtMs),
+      totalElapsedMs: Math.max(0, now - this.#createdAtMs),
+      hardTimeoutMs: this.#limits?.hardTimeoutMs ?? null,
+      maximumProcessCount: this.#limits?.maximumProcessCount ?? null,
+      maximumMemoryBytes: this.#limits?.maximumMemoryBytes ?? null,
+      maximumOutputBytes: this.#limits?.maximumOutputBytes ?? null,
+      exitCode: this.#exit?.exitCode ?? null,
+      exitSignal:
+        this.#exit?.signal === null || this.#exit?.signal === undefined
+          ? null
+          : this.#text(this.#exit.signal),
+      outputTruncated: this.#exit?.outputTruncated ?? null,
+      resourceUsage: this.#exit?.resourceUsage ?? null,
+      completionObserved: this.#exit !== null,
+      completionFailureCode: this.#completionFailureCode,
+      cleanupFailureCode: this.#cleanupFailureCode,
+      terminationRequested: this.#terminationRequested,
+      terminationReason: this.#terminationRequested ? "cancelled" : null,
+    };
+  }
+
+  public launchRequested(spec: CliProcessLaunchSpec): void {
+    this.#limits = { ...spec.limits };
+    this.#launchRequestedAt = new Date().toISOString();
+  }
+
+  public started(managed: ManagedProcess): string {
+    this.#processRequestId = this.#text(managed.requestId);
+    const creationTime = managed.processCreationTimeFileTime;
+    this.#processCreationTimeFileTime =
+      typeof creationTime === "string" && /^[1-9][0-9]{0,19}$/u.test(creationTime)
+        ? creationTime
+        : null;
+    this.#startedAtMs = Date.now();
+    this.#startedAt = new Date(this.#startedAtMs).toISOString();
+    this.#log("info", "CLI process started.", this.#fields(this.#startedAtMs));
+    return this.#startedAt;
+  }
+
+  public exited(exit: unknown, requestId: string): void {
+    const now = Date.now();
+    this.#completionSettledAt = new Date(now).toISOString();
+    if (Value.Check(ProcessExitedEventSchema, exit) && exit.requestId === requestId) {
+      this.#endedAtMs = now;
+      this.#endedAt = this.#completionSettledAt;
+      this.#exit = Value.Clone(exit);
+    } else {
+      this.#completionFailureCode = "CLI_PROCESS_COMPLETION_INVALID";
+    }
+  }
+
+  public completionFailed(error: unknown): void {
+    this.#completionSettledAt = new Date().toISOString();
+    this.#completionFailureCode = this.#text(diagnosticErrorCode(error) ?? "CLI_PROCESS_FAILED");
+  }
+
+  public terminationRequested(): void {
+    this.#terminationRequested = true;
+  }
+
+  public cleanupFailed(error: unknown): void {
+    this.#cleanupFailureCode = this.#text(diagnosticErrorCode(error) ?? "CLI_CLEANUP_FAILED");
+  }
+
+  public finish(parentSignal: AbortSignal): void {
+    const now = Date.now();
+    const parentAborted = parentSignal.aborted;
+    const primaryFailureCode = parentAborted
+      ? (diagnosticErrorCode(parentSignal.reason) ?? "CLI_PARENT_SIGNAL_ABORTED")
+      : (this.#completionFailureCode ?? this.failureCode);
+    const parserDiagnostic = this.copilot?.diagnostic ?? null;
+    // EOF after cancellation or a failed/terminated process is secondary evidence, not
+    // a parser failure that replaces the execution's original stopping cause.
+    const parserIsPrimary =
+      !parentAborted &&
+      this.#completionFailureCode === null &&
+      this.#exit?.exitCode === 0 &&
+      this.#exit.signal === null &&
+      [
+        "CLI_INVALID_EVENT_STREAM",
+        "CLI_INCOMPLETE_EVENT_STREAM",
+        "CLI_MULTIPLE_RESULTS",
+        "CLI_COPILOT_REPORTED_ERROR",
+      ].includes(this.failureCode ?? "") &&
+      parserDiagnostic !== null;
+    if (parserIsPrimary) {
+      this.#log("warn", "Copilot JSONL parser rejected an event.", {
+        correlationId: this.#text(this.input.correlationId),
+        ...parserDiagnostic,
+      });
+    }
+    this.#log("info", "CLI process execution finished.", {
+      ...this.#fields(now),
+      completedAt: new Date(now).toISOString(),
+      outcome: parentAborted ? "aborted" : this.outcome,
+      parentSignalAborted: parentAborted,
+      primaryFailureCode: primaryFailureCode === null ? null : this.#text(primaryFailureCode),
+      copilot:
+        this.copilot === undefined
+          ? null
+          : {
+              lastObservedEventIndex: this.copilot.lastObservedEventIndex,
+              lastObservedEventType: this.copilot.lastObservedEventType,
+              resultMarkerSeen: this.copilot.resultMarkerSeen,
+              outputLimitExceeded: this.copilot.exceeded,
+              parserFailure: this.copilot.failure,
+              parserDiagnostic,
+              parserIsPrimary,
+              commandCapture: "incomplete",
+            },
+    });
+  }
+}
 /** Copilot's separate result marker closes the root response, not the session event stream. */
 async function collectCopilotOutput(
   stream: Readable,
@@ -597,6 +837,8 @@ async function collectCopilotOutput(
       return;
     }
     diagnosticEventType = "unparsed";
+    output.lastObservedEventIndex = eventCount;
+    output.lastObservedEventType = diagnosticEventType;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
@@ -615,7 +857,9 @@ async function collectCopilotOutput(
     }
     diagnosticEventType =
       copilotDiagnosticEventTypes.find((type) => type === event.type) ?? "other";
+    output.lastObservedEventType = diagnosticEventType;
     if (event.type === "result") {
+      output.resultMarkerSeen = true;
       if (resultCount !== 0) {
         fail("multiple_results", "duplicate_result");
         return;
@@ -894,6 +1138,7 @@ async function settleSummaryProcess<
   settlement: Promise<T>,
   signal: AbortSignal,
   teardownTimeoutMs: number,
+  onTerminationRequested: () => void,
 ): Promise<T> {
   if (
     !Number.isSafeInteger(teardownTimeoutMs) ||
@@ -915,6 +1160,7 @@ async function settleSummaryProcess<
       // The process may already have exited while its streams are still draining. Its
       // termination request can then reject because the ProcessHost removed the active entry.
       // Observe actual exit and streams independently of that acknowledgement.
+      onTerminationRequested();
       void Promise.resolve()
         .then(() => managed.terminate("cancelled"))
         .catch(() => undefined);

@@ -1,6 +1,6 @@
 .evaluations-page {
   min-width: 0;
-  color: var(--mui-palette-text-primary, #1d1b20);
+  color: var(--mui-palette-text-primary, #172b3a);
   font-size: 16px;
   line-height: 1.5;
 }
@@ -17,7 +17,7 @@
 }
 .evaluation-page-toolbar {
   margin-bottom: 24px;
-  color: var(--mui-palette-text-secondary, #49454f);
+  color: var(--mui-palette-text-secondary, #465c70);
   font-size: 14px;
   line-height: 20px;
 }
@@ -35,7 +35,7 @@
   scroll-margin-top: 24px;
 }
 .evaluation-selected-batch:focus-visible {
-  outline: 2px solid var(--mui-palette-primary-main, #6750a4);
+  outline: 2px solid var(--mui-palette-primary-main, #1565c0);
   outline-offset: 4px;
 }
 .evaluation-editor-area,
@@ -99,7 +99,7 @@
 }
 .evaluation-meta {
   display: block;
-  color: var(--mui-palette-text-secondary, #49454f);
+  color: var(--mui-palette-text-secondary, #465c70);
   font-size: 14px;
   line-height: 20px;
   overflow-wrap: anywhere;
@@ -131,7 +131,7 @@
 .evaluation-finding {
   padding: 20px;
   margin-block: 16px;
-  background: var(--mui-palette-background-default, #f7f2fa);
+  background: var(--mui-palette-background-default, #f5f8fc);
   border-radius: 12px;
 }
 .evaluation-subheading {
@@ -154,7 +154,7 @@
 }
 .evaluation-tonal-card.MuiCard-root {
   min-width: 0;
-  background: var(--mui-palette-background-default, #f7f2fa);
+  background: var(--mui-palette-background-default, #f5f8fc);
   box-shadow: none;
 }
 .evaluation-source-body {
@@ -163,7 +163,7 @@
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  background: var(--mui-palette-background-default, #f7f2fa);
+  background: var(--mui-palette-background-default, #f5f8fc);
   border-radius: 12px;
   font: inherit;
 }

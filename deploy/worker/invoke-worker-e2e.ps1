@@ -49,18 +49,39 @@ function Get-PathObservation {
     }
 }
 
-function Get-AttemptObservation {
-    param([string]$RunAttemptId, [string]$Root)
-    if ([string]::IsNullOrWhiteSpace($RunAttemptId)) {
-        return [ordered]@{ status = 'not-requested'; reason = 'No runAttemptId supplied.' }
-    }
+function Get-AttemptDirectoryName {
+    param([string]$RunAttemptId, [string]$DirectoryNameFormat)
     $hasher = [System.Security.Cryptography.SHA256]::Create()
     try {
         $digest = $hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($RunAttemptId))
-        $name = 'attempt-' + [System.BitConverter]::ToString($digest).Replace('-', '').ToLowerInvariant()
     } finally {
         $hasher.Dispose()
     }
+    if ($DirectoryNameFormat -ceq 'legacy') {
+        return 'attempt-' + [System.BitConverter]::ToString($digest).Replace('-', '').ToLowerInvariant()
+    }
+    # BigInteger consumes signed little-endian bytes; the extra zero byte keeps SHA256 unsigned.
+    $positiveBytes = [byte[]]::new($digest.Length + 1)
+    for ($index = 0; $index -lt $digest.Length; $index++) {
+        $positiveBytes[$index] = $digest[$digest.Length - 1 - $index]
+    }
+    $value = [System.Numerics.BigInteger]::new($positiveBytes)
+    $alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'
+    $digits = [char[]]::new(50)
+    for ($index = $digits.Length - 1; $index -ge 0; $index--) {
+        $remainder = [System.Numerics.BigInteger]::Zero
+        $value = [System.Numerics.BigInteger]::DivRem($value, [System.Numerics.BigInteger]36, [ref]$remainder)
+        $digits[$index] = $alphabet[[int]$remainder]
+    }
+    return 'a1-' + (-join $digits)
+}
+
+function Get-AttemptObservation {
+    param([string]$RunAttemptId, [string]$Root, [string]$DirectoryNameFormat)
+    if ([string]::IsNullOrWhiteSpace($RunAttemptId)) {
+        return [ordered]@{ status = 'not-requested'; reason = 'No runAttemptId supplied.' }
+    }
+    $name = Get-AttemptDirectoryName -RunAttemptId $RunAttemptId -DirectoryNameFormat $DirectoryNameFormat
     $attemptPath = Join-Path $Root $name
     $directory = Get-PathObservation -Path $attemptPath
     $checkout = [ordered]@{ status = 'not-inspected' }
@@ -136,6 +157,14 @@ foreach ($rootKey in @('WORKER_GIT_SHARED_ROOT_DIRECTORY', 'WORKER_WORKSPACE_ROO
         throw "$rootKey must be an absolute path in the configuration."
     }
 }
+$directoryNameFormat = if ($config.ContainsKey('WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT')) {
+    [string]$config['WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT']
+} else {
+    'legacy'
+}
+if ($directoryNameFormat -cnotin @('legacy', 'compact-v1')) {
+    throw 'WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT must be legacy or compact-v1.'
+}
 if (-not [string]::IsNullOrWhiteSpace($CancelAttemptId) -and [string]::IsNullOrWhiteSpace($CancelTaskId)) {
     throw 'CancelTaskId is required when CancelAttemptId is supplied.'
 }
@@ -161,8 +190,8 @@ if ($PSBoundParameters.ContainsKey('RepositoryId')) {
 $attempt = [ordered]@{ status = 'not-inspected'; reason = 'Workspace root is missing, unavailable, or unsupported.' }
 $cancelAttempt = $attempt
 if ($workspaceRootObservation.status -eq 'present' -and $workspaceRootObservation.kind -eq 'directory') {
-    $attempt = Get-AttemptObservation -RunAttemptId $AttemptId -Root $workspaceRoot
-    $cancelAttempt = Get-AttemptObservation -RunAttemptId $CancelAttemptId -Root $workspaceRoot
+    $attempt = Get-AttemptObservation -RunAttemptId $AttemptId -Root $workspaceRoot -DirectoryNameFormat $directoryNameFormat
+    $cancelAttempt = Get-AttemptObservation -RunAttemptId $CancelAttemptId -Root $workspaceRoot -DirectoryNameFormat $directoryNameFormat
 }
 $policyPresence = [ordered]@{}
 foreach ($policyKey in @(
@@ -206,6 +235,7 @@ $report = [ordered]@{
     observations = [ordered]@{
         sharedRoot = $sharedRootObservation
         workspaceRoot = $workspaceRootObservation
+        workspaceDirectoryNameFormat = $directoryNameFormat
         repository = $repository
         attempt = $attempt
         cancelAttempt = $cancelAttempt

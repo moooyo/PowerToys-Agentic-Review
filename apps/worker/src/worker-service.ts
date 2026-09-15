@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   ClaimLeaseResponse,
+  ExecutionPhase,
   JobExecutionEnvelope,
   RunCompletionSubmission,
   RunFailureSubmission,
@@ -422,6 +423,41 @@ export class WorkerService {
       this.#heartbeat.remainingMillisecondsUntil(envelope.executionDeadlineAt),
       this.config.heartbeatSafetyMarginSeconds * 1_000,
     );
+    const executionStartedAt = Date.now();
+    let phaseStartedAt = executionStartedAt;
+    let lastPhase: ExecutionPhase = "preparing";
+    let lastProcessCount = 0;
+    const recordExecution = (
+      level: "info" | "warn",
+      message: string,
+      fields: Readonly<Record<string, unknown>>,
+    ): void => {
+      try {
+        this.logger[level](message, fields);
+      } catch {
+        // Observability cannot change execution, terminal reporting, or cleanup ownership.
+      }
+    };
+    const reportProgress = (phase: ExecutionPhase, processCount?: number): void => {
+      // Keep the interrupted phase stable while the executor drains cancelled processes.
+      if (!controller.signal.aborted) {
+        if (phase !== lastPhase) {
+          const observedAt = Date.now();
+          recordExecution("info", "Run phase changed.", {
+            runAttemptId: envelope.lease.runAttemptId,
+            previousPhase: lastPhase,
+            phase,
+            previousPhaseElapsedMs: Math.max(0, observedAt - phaseStartedAt),
+            elapsedMs: Math.max(0, observedAt - executionStartedAt),
+            effectiveExecutionBudgetMs: Math.floor(remainingMilliseconds),
+          });
+          lastPhase = phase;
+          phaseStartedAt = observedAt;
+        }
+        if (processCount !== undefined) lastProcessCount = processCount;
+      }
+      lease.reportProgress(phase, processCount);
+    };
     let deadlineTimer: NodeJS.Timeout | undefined;
     if (remainingMilliseconds === 0) {
       controller.abort(new ExecutionTimeoutError(remainingMilliseconds));
@@ -436,12 +472,12 @@ export class WorkerService {
       if (controller.signal.aborted) {
         throw controller.signal.reason ?? new Error("Run execution was aborted.");
       }
-      lease.reportProgress("preparing", 0);
+      reportProgress("preparing", 0);
       const result = await this.executor.execute(envelope, {
         signal: controller.signal,
         attemptSignal: controller.signal,
         processHost: this.processHost,
-        reportProgress: ({ phase, processCount }) => lease.reportProgress(phase, processCount),
+        reportProgress: ({ phase, processCount }) => reportProgress(phase, processCount),
         reportNodeHealthFault: (error) => {
           if (nodeHealthFaultReported) return;
           nodeHealthFaultReported = true;
@@ -485,7 +521,7 @@ export class WorkerService {
         return;
       }
 
-      lease.reportProgress("completing", 0);
+      reportProgress("completing", 0);
       if (result.outcome === "succeeded") {
         const submission: RunCompletionSubmission = {
           jobId: envelope.lease.jobId,
@@ -547,7 +583,7 @@ export class WorkerService {
       }
 
       const cancellationAcknowledgement = cancellationReason !== undefined;
-      const submission = this.#createFailureSubmission(
+      const failure = this.#createFailureSubmission(
         envelope,
         cancellationAcknowledgement
           ? "CANCELLED_BY_SERVER"
@@ -559,6 +595,34 @@ export class WorkerService {
         reason instanceof Error ? reason.message : "Worker execution failed.",
         !cancellationAcknowledgement && !(reason instanceof ExecutionTimeoutError),
       );
+      const elapsedMs = Math.max(0, Date.now() - executionStartedAt);
+      const phaseElapsedMs = Math.max(0, Date.now() - phaseStartedAt);
+      const submission: RunFailureSubmission = {
+        ...failure,
+        diagnostics: {
+          category:
+            lastPhase === "preparing"
+              ? "workspace"
+              : lastPhase === "cli_review" || lastPhase === "cli_revision"
+                ? "process"
+                : "internal",
+          exitCode: null,
+          summary:
+            `${failure.code} during ${lastPhase}; elapsed ${elapsedMs} ms; ` +
+            `phase elapsed ${phaseElapsedMs} ms; execution budget ${Math.floor(remainingMilliseconds)} ms; ` +
+            `last reported process count ${lastProcessCount}.`,
+          correlationId: envelope.lease.runAttemptId,
+        },
+      };
+      recordExecution("warn", "Run execution stopped.", {
+        runAttemptId: envelope.lease.runAttemptId,
+        code: submission.code,
+        phase: lastPhase,
+        elapsedMs,
+        phaseElapsedMs,
+        effectiveExecutionBudgetMs: Math.floor(remainingMilliseconds),
+        lastReportedProcessCount: lastProcessCount,
+      });
       await this.#submitTerminalWithRetry(
         "termination",
         (signal) => this.api.failRun(envelope.lease.runAttemptId, submission, signal),

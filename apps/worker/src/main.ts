@@ -25,6 +25,7 @@ import { ProductionManagedProcessRunner } from "./execution/managed-process-runn
 import { PreparedCliOutputRunner } from "./execution/prepared-cli-output-runner.js";
 import {
   deriveWorkerProcessHostInstanceKey,
+  type ProcessHostExitObservation,
   StdioProcessHostClient,
 } from "./execution/process-host-client.js";
 import {
@@ -253,6 +254,19 @@ export async function createExecutionRuntime(
     requestTimeoutMs: execution.processHostRequestTimeoutMs,
     startTimeoutMs: execution.processHostStartTimeoutMs,
     shutdownTimeoutMs: execution.processHostShutdownTimeoutMs,
+    ...(execution.processHostResourceDiagnostics
+      ? {
+          captureResourceUsage: true as const,
+          onExitObservation: (observation: ProcessHostExitObservation) =>
+            logger.info("Managed process exit observed.", {
+              processRequestId: observation.requestId,
+              exitCode: observation.exitCode,
+              outputTruncated: observation.outputTruncated,
+              limits: observation.limits,
+              resourceUsage: observation.resourceUsage ?? null,
+            }),
+        }
+      : {}),
   });
   try {
     const cliEnvironment =
@@ -297,6 +311,7 @@ export async function createExecutionRuntime(
     });
     const workspaceProvider = new ProductionDisposableJobWorkspaceProvider({
       workspaceRootDirectory: execution.workspaceRootDirectory,
+      workspaceDirectoryNameFormat: execution.workspaceDirectoryNameFormat ?? "legacy",
       gitSharedRootDirectory: execution.gitSharedRootDirectory,
       gitExecutable: binaries.gitPath,
       gitWorkingDirectory,
@@ -454,6 +469,7 @@ export async function createExecutionRuntime(
                 if (summaryInputApi === undefined)
                   throw new Error("Evaluation summaries require the summary input API.");
                 return new ValidationSummaryExecutor({
+                  logger,
                   workspaceProvider,
                   outputRunner: new PreparedCliOutputRunner(modelProcessOptions),
                   summaryInputApi,
@@ -464,6 +480,7 @@ export async function createExecutionRuntime(
               }
               if (summaryConfiguration === undefined) return undefined;
               return new ValidationSummaryExecutor({
+                logger,
                 workspaceProvider,
                 outputRunner: new PreparedCliOutputRunner(reviewOptions),
                 maximumSummaryTimeoutMs: summaryConfiguration.maximumTimeoutMs,

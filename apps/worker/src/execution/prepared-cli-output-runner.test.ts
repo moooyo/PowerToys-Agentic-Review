@@ -44,6 +44,12 @@ const copilotResult = (exitCode = 0) => ({
   exitCode,
   usage: {},
 });
+const diagnosticLogger = () => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+});
 function fixture(
   options: {
     engine?: "codex" | "copilot";
@@ -233,6 +239,190 @@ describe("PreparedCliOutputRunner", () => {
       expect(f.monitorClose).toHaveBeenCalledOnce();
     },
   );
+
+  it.each(["codex", "copilot"] as const)(
+    "records observed %s lifecycle metadata and effective limits without CLI content",
+    async (engine) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-14T00:00:00.000Z"));
+      const logger = diagnosticLogger();
+      const f = fixture({
+        engine,
+        ...(engine === "copilot"
+          ? {
+              stdout: copilotLines(copilotFinal('{"message":"Typed summary"}'), copilotResult(), {
+                type: "session.shutdown",
+                data: { content: "private-stream-content" },
+              }),
+            }
+          : {}),
+        settings: {
+          logger,
+          maximumHardTimeoutMs: 40_000,
+          cliEnvironment: { API_KEY: "private-environment-secret" },
+        },
+      });
+      const start = f.start.getMockImplementation();
+      if (start === undefined) throw new Error("Missing fixture start implementation.");
+      const resourceUsage = {
+        peakJobMemoryBytes: 123_456,
+        peakProcessMemoryBytes: 98_765,
+        activeProcesses: { sampledPeak: 3, sampleCount: 2, sampleIntervalMs: 250 as const },
+      };
+      f.start.mockImplementation(async (spec) => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        const managed = await start(spec);
+        return {
+          ...managed,
+          processCreationTimeFileTime: "134022816000000000",
+          completed: managed.completed.then(
+            (exit) =>
+              new Promise((resolve) => setTimeout(() => resolve({ ...exit, resourceUsage }), 20)),
+          ),
+        } as ManagedProcess;
+      });
+      const running = f.runner.run({ ...f.input, prompt: "private-prompt-content" });
+      await vi.advanceTimersByTimeAsync(30);
+      expect(await running).toMatchObject({ outcome: "succeeded" });
+      expect(logger.info).toHaveBeenCalledWith(
+        "CLI process started.",
+        expect.objectContaining({
+          correlationId: "attempt",
+          engine,
+          cliVersion: "1.2.3",
+          processRequestId: "request",
+          processCreationTimeFileTime: "134022816000000000",
+          launchRequestedAt: "2026-09-14T00:00:00.000Z",
+          startedAt: "2026-09-14T00:00:00.010Z",
+          processEndedAt: null,
+          completionObserved: false,
+          hardTimeoutMs: 40_000,
+          maximumProcessCount: 8,
+          maximumMemoryBytes: 512 * 1_024 ** 2,
+          maximumOutputBytes: 4 * 1_024 ** 2,
+        }),
+      );
+      expect(logger.info).toHaveBeenCalledWith(
+        "CLI process execution finished.",
+        expect.objectContaining({
+          outcome: "succeeded",
+          processRequestId: "request",
+          startedAt: "2026-09-14T00:00:00.010Z",
+          processEndedAt: "2026-09-14T00:00:00.030Z",
+          completedAt: "2026-09-14T00:00:00.030Z",
+          elapsedMs: 20,
+          totalElapsedMs: 30,
+          exitCode: 0,
+          exitSignal: null,
+          outputTruncated: false,
+          resourceUsage,
+          completionObserved: true,
+          terminationRequested: false,
+          parentSignalAborted: false,
+          primaryFailureCode: null,
+          copilot:
+            engine === "copilot"
+              ? expect.objectContaining({
+                  lastObservedEventIndex: 3,
+                  lastObservedEventType: "session.shutdown",
+                  resultMarkerSeen: true,
+                  parserFailure: null,
+                  commandCapture: "incomplete",
+                })
+              : null,
+        }),
+      );
+      const logged = JSON.stringify(logger.info.mock.calls);
+      for (const privateText of [
+        "private-environment-secret",
+        "private-prompt-content",
+        "private-stream-content",
+        "Typed summary",
+      ])
+        expect(logged).not.toContain(privateText);
+      expect(logger.warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("redacts and bounds lifecycle identifiers while retaining only known Copilot event types", async () => {
+    const logger = diagnosticLogger();
+    const f = fixture({
+      engine: "copilot",
+      stdout: copilotLines(copilotFinal('{"message":"Typed summary"}'), copilotResult(), {
+        type: "secret-lease-token",
+        data: { content: "untrusted-tail" },
+      }),
+      settings: { logger, cliVersion: "version-secret-lease-token" },
+    });
+    expect(
+      await f.runner.run({
+        ...f.input,
+        correlationId: `attempt-secret-lease-token\n${"x".repeat(3000)}`,
+      }),
+    ).toMatchObject({ outcome: "succeeded" });
+    const finished = logger.info.mock.calls.find(
+      ([message]) => message === "CLI process execution finished.",
+    )?.[1] as { correlationId: string };
+    expect(finished).toMatchObject({
+      cliVersion: "version-[REDACTED]",
+      copilot: {
+        lastObservedEventIndex: 3,
+        lastObservedEventType: "other",
+        resultMarkerSeen: true,
+      },
+    });
+    expect(finished.correlationId).toHaveLength(128);
+    expect(finished.correlationId).not.toContain("\n");
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain("secret-lease-token");
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain("untrusted-tail");
+  });
+
+  it("keeps ordinary Copilot EOF without a result marker as a failed output", async () => {
+    const logger = diagnosticLogger();
+    const f = fixture({
+      engine: "copilot",
+      stdout: copilotLines(copilotFinal('{"message":"not closed"}')),
+      settings: { logger },
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({
+      outcome: "failed",
+      code: "CLI_INCOMPLETE_EVENT_STREAM",
+    });
+    expect(logger.warn).toHaveBeenCalledExactlyOnceWith("Copilot JSONL parser rejected an event.", {
+      correlationId: "attempt",
+      reason: "missing_result_marker",
+      eventIndex: 2,
+      eventType: "unparsed",
+    });
+    expect(logger.info).toHaveBeenCalledWith(
+      "CLI process execution finished.",
+      expect.objectContaining({
+        outcome: "failed",
+        primaryFailureCode: "CLI_INCOMPLETE_EVENT_STREAM",
+        copilot: expect.objectContaining({
+          lastObservedEventType: "assistant.message",
+          lastObservedEventIndex: 1,
+          resultMarkerSeen: false,
+          parserIsPrimary: true,
+        }),
+      }),
+    );
+  });
+
+  it("does not replace successful output when lifecycle logging throws", async () => {
+    const f = fixture({
+      settings: {
+        logger: {
+          ...diagnosticLogger(),
+          info: () => {
+            throw new Error("Diagnostic sink failed");
+          },
+        },
+      },
+    });
+    expect(await f.runner.run(f.input)).toMatchObject({ outcome: "succeeded" });
+    expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+  });
 
   it("passes an optional Codex home and model without overriding provider configuration", async () => {
     const f = fixture({
@@ -830,11 +1020,15 @@ describe("PreparedCliOutputRunner", () => {
   });
 
   it("drains a managed hard timeout without declaring a Worker health fault", async () => {
-    const f = fixture({ engine: "copilot" });
+    const logger = diagnosticLogger();
+    const f = fixture({ engine: "copilot", settings: { logger } });
     const stdoutEnded = vi.fn();
     const stderrEnded = vi.fn();
     f.start.mockImplementation(async () => {
-      const stdout = Readable.from(["Incomplete output"]).once("end", stdoutEnded);
+      const stdout = Readable.from(copilotLines(copilotFinal('{"message":"not closed"}'))).once(
+        "end",
+        stdoutEnded,
+      );
       const stderr = Readable.from(["Process timed out"]).once("end", stderrEnded);
       return {
         requestId: "timed-out",
@@ -855,11 +1049,130 @@ describe("PreparedCliOutputRunner", () => {
     expect(stderrEnded).toHaveBeenCalledOnce();
     expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
     expect(f.monitorClose).toHaveBeenCalledOnce();
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      "CLI process execution finished.",
+      expect.objectContaining({
+        outcome: "failed",
+        primaryFailureCode: "PROCESS_HARD_TIMEOUT",
+        completionFailureCode: "PROCESS_HARD_TIMEOUT",
+        completionObserved: false,
+        processEndedAt: null,
+        copilot: expect.objectContaining({
+          resultMarkerSeen: false,
+          parserIsPrimary: false,
+          parserDiagnostic: expect.objectContaining({ reason: "missing_result_marker" }),
+        }),
+      }),
+    );
   });
 
-  it("bounds cancellation teardown and reports streams that cannot be confirmed drained", async () => {
+  it.each(["before_eof", "after_eof"])(
+    "preserves parent timeout %s and records missing Copilot closure only as secondary evidence",
+    async (stage) => {
+      const logger = diagnosticLogger();
+      const f = fixture({ engine: "copilot", settings: { logger } });
+      const controller = new AbortController();
+      const reason = Object.assign(new Error("secret-lease-token timeout details"), {
+        code: "EXECUTION_TIMEOUT",
+      });
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const stdoutEnded = Promise.withResolvers<void>();
+      stdout.once("end", () => stdoutEnded.resolve());
+      const exited = Promise.withResolvers<Awaited<ManagedProcess["completed"]>>();
+      const started = Promise.withResolvers<void>();
+      const terminate = vi.fn(async () => {
+        stdout.end();
+        stderr.end();
+        exited.resolve({
+          protocolVersion: processHostProtocolVersion,
+          type: "exited",
+          requestId: "parent-timeout",
+          exitCode: null,
+          signal: "SIGTERM",
+          outputTruncated: false,
+        });
+      });
+      f.start.mockImplementation(async () => {
+        started.resolve();
+        return {
+          requestId: "parent-timeout",
+          processId: 2,
+          stdout,
+          stderr,
+          completed: exited.promise,
+          terminate,
+        } as ManagedProcess;
+      });
+      const running = f.runner.run({
+        ...f.input,
+        context: { ...f.context, signal: controller.signal },
+      });
+      const rejected = expect(running).rejects.toBe(reason);
+      await started.promise;
+      stdout.write(copilotLines(copilotFinal('{"message":"not closed"}'))[0]);
+      if (stage === "after_eof") {
+        stdout.end();
+        await stdoutEnded.promise;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(logger.warn).not.toHaveBeenCalled();
+      }
+      controller.abort(reason);
+      await rejected;
+      expect(terminate).toHaveBeenCalledOnce();
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(
+        "CLI process execution finished.",
+        expect.objectContaining({
+          outcome: "aborted",
+          primaryFailureCode: "EXECUTION_TIMEOUT",
+          parentSignalAborted: true,
+          processRequestId: "parent-timeout",
+          exitCode: null,
+          exitSignal: "SIGTERM",
+          completionObserved: true,
+          terminationRequested: true,
+          terminationReason: "cancelled",
+          copilot: expect.objectContaining({
+            lastObservedEventIndex: 1,
+            lastObservedEventType: "assistant.message",
+            resultMarkerSeen: false,
+            parserIsPrimary: false,
+            parserDiagnostic: expect.objectContaining({ reason: "missing_result_marker" }),
+          }),
+        }),
+      );
+      expect(JSON.stringify(logger.info.mock.calls)).not.toContain("secret-lease-token");
+      expect(f.context.reportNodeHealthFault).not.toHaveBeenCalled();
+      expect(f.monitorClose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("logs a failed process launch without inventing a start or an exit", async () => {
+    const logger = diagnosticLogger();
+    const f = fixture({ settings: { logger } });
+    f.start.mockRejectedValueOnce(new Error("private process-start detail"));
+    await expect(f.runner.run(f.input)).rejects.toMatchObject({ code: "CLI_PROCESS_START_FAILED" });
+    expect(logger.info).toHaveBeenCalledExactlyOnceWith(
+      "CLI process execution finished.",
+      expect.objectContaining({
+        outcome: "failed",
+        primaryFailureCode: "CLI_PROCESS_START_FAILED",
+        processRequestId: null,
+        startedAt: null,
+        processEndedAt: null,
+        elapsedMs: null,
+        completionObserved: false,
+      }),
+    );
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain("private process-start detail");
+  });
+
+  it("preserves cancellation while reporting bounded unconfirmed teardown as a health fault", async () => {
     vi.useFakeTimers();
-    const f = fixture();
+    const logger = diagnosticLogger();
+    const f = fixture({ settings: { logger } });
     const controller = new AbortController();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -878,11 +1191,12 @@ describe("PreparedCliOutputRunner", () => {
       context: { ...f.context, signal: controller.signal },
       teardownTimeoutMs: 20,
     });
-    const rejected = expect(running).rejects.toMatchObject({
-      code: "CLI_PROCESS_DRAIN_UNCONFIRMED",
+    const reason = Object.assign(new Error("Optional summary timeout"), {
+      code: "SUMMARY_TIMEOUT",
     });
+    const rejected = expect(running).rejects.toBe(reason);
     await vi.advanceTimersByTimeAsync(0);
-    controller.abort(new Error("Optional summary timeout"));
+    controller.abort(reason);
     await vi.advanceTimersByTimeAsync(20);
     await rejected;
     expect(terminate).toHaveBeenCalledOnce();
@@ -890,6 +1204,16 @@ describe("PreparedCliOutputRunner", () => {
       expect.objectContaining({ code: "CLI_PROCESS_DRAIN_UNCONFIRMED" }),
     );
     expect(f.monitorClose).toHaveBeenCalledOnce();
+    expect(logger.info).toHaveBeenCalledWith(
+      "CLI process execution finished.",
+      expect.objectContaining({
+        outcome: "aborted",
+        primaryFailureCode: "SUMMARY_TIMEOUT",
+        completionObserved: false,
+        processEndedAt: null,
+        terminationRequested: true,
+      }),
+    );
     stdout.end();
     stderr.end();
     exited.resolve({

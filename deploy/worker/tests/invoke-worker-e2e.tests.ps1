@@ -132,6 +132,7 @@ function Assert-Unverified {
     param([object]$Report)
     Assert-Equal -Actual $Report.schemaVersion -Expected 2 -Message 'The report must use the observation schema.'
     Assert-Equal -Actual $Report.acceptanceStatus -Expected 'unverified' -Message 'An observation capture must never certify E2E acceptance.'
+    Assert-True -Condition ($Report.observations.workspaceDirectoryNameFormat -cin @('legacy', 'compact-v1')) -Message 'The report must identify the configured workspace directory name format.'
     Assert-True -Condition (@($Report.checks).Count -gt 0) -Message 'The report must expose the remaining acceptance checks.'
     foreach ($check in $Report.checks) {
         Assert-Equal -Actual $check.status -Expected 'manual' -Message "The $($check.check) check needs independent evidence."
@@ -230,6 +231,7 @@ try {
         $identifiers = @{ AttemptId = 'abc'; CancelAttemptId = 'hello'; CancelTaskId = 'task-cancel'; CaptureStage = 'active' }
         $active = Invoke-Capture -Scenario $scenario -Overrides $identifiers
         Assert-Unverified -Report $active.Report
+        Assert-Equal -Actual $active.Report.observations.workspaceDirectoryNameFormat -Expected 'legacy' -Message 'Omitting the format must preserve the legacy directory layout.'
         foreach ($pair in @(
             @{ Observation = $active.Report.observations.attempt; Id = 'abc'; Path = $attemptPath },
             @{ Observation = $active.Report.observations.cancelAttempt; Id = 'hello'; Path = $cancelPath }
@@ -251,6 +253,62 @@ try {
             Assert-Equal -Actual $observation.gitFile.status -Expected 'not-inspected' -Message 'An absent attempt has no inspectable .git file.'
         }
         Assert-Equal -Actual (Get-Check -Report $after.Report -Name 'workspace-cleanup').status -Expected 'manual' -Message 'Separate captures still require independent cleanup correlation.'
+    }
+
+    Invoke-Case -Name 'compact attempt paths preserve unsigned SHA256 and fixed-width base36 padding' -Body {
+        $scenario = New-Scenario -Name 'compact-attempt-mapping' -CreateRoots
+        $scenario.ConfigValues.WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT = 'compact-v1'
+        Write-TestConfig -Path $scenario.ConfigPath -Values $scenario.ConfigValues
+        # Fixed SHA256 vectors: abc starts with a set sign bit; d requires leading base36 padding.
+        $attemptPath = Join-Path $scenario.WorkspaceRoot 'a1-4nb7oofka9ml8nasnokxxc1unhmtpr1wxsuwhpd9km3vt5as31'
+        $cancelPath = Join-Path $scenario.WorkspaceRoot 'a1-0m4yt6l1bchzc72z3cfqkdxrcx6bb5ssqsn9aedk43hsv7huqs'
+        foreach ($path in @($attemptPath, $cancelPath)) {
+            $checkoutPath = Join-Path $path 'checkout'
+            [void][System.IO.Directory]::CreateDirectory($checkoutPath)
+            [System.IO.File]::WriteAllText((Join-Path $checkoutPath '.git'), 'gitdir: fixture-only')
+        }
+        $legacyPath = Join-Path $scenario.WorkspaceRoot 'attempt-ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $legacyPath 'checkout'))
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $scenario.WorkspaceRoot 'a1-unrelated'))
+        $identifiers = @{ AttemptId = 'abc'; CancelAttemptId = 'd'; CancelTaskId = 'task-cancel'; CaptureStage = 'active' }
+        $active = Invoke-Capture -Scenario $scenario -Overrides $identifiers
+        Assert-Unverified -Report $active.Report
+        Assert-Equal -Actual $active.Report.observations.workspaceDirectoryNameFormat -Expected 'compact-v1' -Message 'The report must retain the selected compact format.'
+        foreach ($pair in @(
+            @{ Observation = $active.Report.observations.attempt; Id = 'abc'; Path = $attemptPath },
+            @{ Observation = $active.Report.observations.cancelAttempt; Id = 'd'; Path = $cancelPath }
+        )) {
+            Assert-Equal -Actual $pair.Observation.runAttemptId -Expected $pair.Id -Message 'Compact naming must preserve the original attempt ID.'
+            Assert-Equal -Actual $pair.Observation.directory.path -Expected $pair.Path -Message 'Compact mapping must match the full fixed-width unsigned SHA256 vector.'
+            Assert-Equal -Actual $pair.Observation.directory.status -Expected 'present' -Message 'The exact compact attempt must be observed.'
+            Assert-Equal -Actual $pair.Observation.checkout.status -Expected 'present' -Message 'Compact attempts must retain the checkout directory.'
+            Assert-Equal -Actual $pair.Observation.gitFile.kind -Expected 'file' -Message 'The compact checkout .git file must be observed.'
+        }
+        Remove-TestPath -Path $attemptPath
+        Remove-TestPath -Path $cancelPath
+        $identifiers.CaptureStage = 'completed'
+        $after = Invoke-Capture -Scenario $scenario -Overrides $identifiers
+        Assert-Unverified -Report $after.Report
+        foreach ($observation in @($after.Report.observations.attempt, $after.Report.observations.cancelAttempt)) {
+            Assert-Equal -Actual $observation.directory.status -Expected 'missing' -Message 'Legacy or unrelated directories must not satisfy a missing compact attempt.'
+            Assert-Equal -Actual $observation.checkout.status -Expected 'not-inspected' -Message 'A missing compact attempt must not inspect another checkout.'
+        }
+        $scenario.ConfigValues.WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT = 'legacy'
+        Write-TestConfig -Path $scenario.ConfigPath -Values $scenario.ConfigValues
+        $legacy = Invoke-Capture -Scenario $scenario -Overrides @{ AttemptId = 'abc' }
+        Assert-Equal -Actual $legacy.Report.observations.workspaceDirectoryNameFormat -Expected 'legacy' -Message 'The collector must accept an explicit legacy setting.'
+        Assert-Equal -Actual $legacy.Report.observations.attempt.directory.path -Expected $legacyPath -Message 'The configured format must select only its exact attempt path.'
+        Assert-Equal -Actual $legacy.Report.observations.attempt.directory.status -Expected 'present' -Message 'The exact legacy directory remains independently observable.'
+    }
+
+    Invoke-Case -Name 'invalid workspace directory name formats are rejected before writing evidence' -Body {
+        foreach ($value in @('', 'compact', 'compact-v2', 'LEGACY', 'COMPACT-V1', ' legacy', 'compact-v1 ')) {
+            $scenario = New-Scenario -Name 'invalid-directory-format' -CreateRoots
+            $scenario.ConfigValues.WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT = $value
+            Write-TestConfig -Path $scenario.ConfigPath -Values $scenario.ConfigValues
+            $parameters = New-CollectorParameters -Scenario $scenario
+            Assert-Rejected -Parameters $parameters -MessagePattern 'WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT must be legacy or compact-v1.'
+        }
     }
 
     Invoke-Case -Name 'repository observations use the exact requested repository ID' -Body {

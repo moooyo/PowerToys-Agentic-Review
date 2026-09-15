@@ -385,13 +385,18 @@ export class HeadlessValidationCheckRunner {
       Array.isArray(input.profile.config?.test) &&
       input.profile.config.test.some((step) => step?.probeOutput !== undefined);
     let cleanupState: HeadlessValidationCheckResult["cleanupState"] = "not_needed";
+    let sourceInspectionRequired = true;
     const finish = (): HeadlessValidationCheckResult => {
       const sourceState: ValidationReportV1["sourceState"] = sourceStates.includes("modified")
         ? "modified"
         : sourceStates.length > 0 && sourceStates.every((state) => state === "clean")
           ? "original"
           : "unknown";
-      if (sourceState !== "original" && !blockers.some((blocker) => blocker.phase === "source")) {
+      if (
+        sourceInspectionRequired &&
+        sourceState !== "original" &&
+        !blockers.some((blocker) => blocker.phase === "source")
+      ) {
         blockers.push({
           code: sourceState === "modified" ? "SOURCE_STATE_MODIFIED" : "SOURCE_STATE_UNKNOWN",
           phase: "source",
@@ -409,7 +414,9 @@ export class HeadlessValidationCheckRunner {
         summary:
           blockers.length > 0
             ? "Validation completed with blockers; inspect the observed checks and lifecycle diagnostics."
-            : "Configured headless commands completed. Their exit status does not establish review approval or issue reproduction.",
+            : sourceInspectionRequired
+              ? "Configured headless commands completed. Their exit status does not establish review approval or issue reproduction."
+              : "Static issue triage uses the frozen issue snapshot. No source revision or execution commands were validated.",
         checks,
       };
       return {
@@ -469,6 +476,13 @@ export class HeadlessValidationCheckRunner {
         "PROFILE_LIMIT_UNSUPPORTED",
         "The requested profile or step timeout exceeds this runner's supported limit.",
       );
+    }
+
+    if (profile.workflowKind === "issue_triage") {
+      // The validated triage profile forbids every command stage and UI scenarios. Its snapshot
+      // workspace has no tested source revision, so leave sourceState unknown without a blocker.
+      sourceInspectionRequired = false;
+      return finish();
     }
 
     const mainDeadline = createDeadline(input.signal, profile.config.hardTimeoutMs);

@@ -1225,12 +1225,15 @@ describe("WorkerService execution deadline", () => {
     const executor: JobExecutor = {
       execute: async (_envelope, context) => {
         executionSignal = context.signal;
+        context.reportProgress({ phase: "cli_review", processCount: 1 });
         context.deferCleanup?.(async () => {
           cleanupCalls += 1;
         });
-        return await new Promise((resolve) => {
+        const result = await new Promise<Awaited<ReturnType<JobExecutor["execute"]>>>((resolve) => {
           resolveExecution = resolve;
         });
+        context.reportProgress({ phase: "validation", processCount: 0 });
+        return result;
       },
     };
 
@@ -1246,7 +1249,18 @@ describe("WorkerService execution deadline", () => {
     resolveExecution?.({ outcome: "succeeded", resultDigest: digest, result: { ok: true } });
     await waitFor(() => failures.length === 1);
     await waitFor(() => cleanupCalls === 1);
-    expect(failures[0]).toMatchObject({ code: "EXECUTION_TIMEOUT", retryable: false });
+    expect(failures[0]).toMatchObject({
+      code: "EXECUTION_TIMEOUT",
+      retryable: false,
+      diagnostics: {
+        category: "process",
+        exitCode: null,
+        summary:
+          "EXECUTION_TIMEOUT during cli_review; elapsed 500 ms; phase elapsed 500 ms; " +
+          "execution budget 500 ms; last reported process count 1.",
+        correlationId: failures[0]?.runAttemptId,
+      },
+    });
     expect(cleanupCalls).toBe(1);
 
     await service.stop("test_complete");

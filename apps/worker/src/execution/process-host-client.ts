@@ -20,6 +20,8 @@ import {
   type ProcessHostRequest,
   type ProcessHostStdinRequest,
   type ProcessLaunchSpec,
+  type ProcessResourceLimits,
+  type ProcessResourceUsage,
   type ProcessStdinResultEvent,
   type ProcessTerminationReason,
   parseProcessHostEventFrame,
@@ -43,6 +45,14 @@ export type ProcessHostSpawn = (
   options: ProcessHostSpawnOptions,
 ) => ChildProcessWithoutNullStreams;
 
+export interface ProcessHostExitObservation {
+  readonly requestId: string;
+  readonly exitCode: number | null;
+  readonly outputTruncated: boolean;
+  readonly limits: Readonly<ProcessResourceLimits>;
+  readonly resourceUsage?: Readonly<ProcessResourceUsage>;
+}
+
 export interface StdioProcessHostClientOptions {
   readonly processHostPath: string;
   readonly instanceKey: string;
@@ -55,6 +65,9 @@ export interface StdioProcessHostClientOptions {
   readonly shutdownTimeoutMs?: number;
   readonly spawnProcess?: ProcessHostSpawn;
   readonly interactiveStdin?: true;
+  readonly captureResourceUsage?: true;
+  /** Receives a deeply frozen metadata snapshot only after a valid, matching exit is observed. */
+  readonly onExitObservation?: (observation: ProcessHostExitObservation) => void;
 }
 
 export class ProcessHostRequestError extends Error {
@@ -110,6 +123,7 @@ interface ActiveProcess {
   readonly requestErrorCodes: Set<string>;
   readonly maximumBufferedOutputBytes: number;
   readonly captureProcessIdentity: boolean;
+  readonly resourceLimits: Readonly<ProcessResourceLimits>;
   readonly interactiveStdin: boolean;
   state: ProcessState;
   processId?: number;
@@ -244,6 +258,8 @@ export class StdioProcessHostClient implements ProcessHostClient {
   readonly #settledTerminationTombstoneLimit: number;
   readonly #hostSignal: AbortSignal | undefined;
   readonly #interactiveStdin: boolean;
+  readonly #captureResourceUsage: boolean;
+  readonly #onExitObservation: StdioProcessHostClientOptions["onExitObservation"];
   readonly #inputResultTimeoutMs: number;
   #hostInteractiveStdin = false;
   #onHostAbort: (() => void) | undefined;
@@ -281,6 +297,12 @@ export class StdioProcessHostClient implements ProcessHostClient {
     if (options.interactiveStdin !== undefined && options.interactiveStdin !== true)
       throw new TypeError("interactiveStdin must be an explicit true opt-in.");
     this.#interactiveStdin = options.interactiveStdin === true;
+    if (options.captureResourceUsage !== undefined && options.captureResourceUsage !== true)
+      throw new TypeError("captureResourceUsage must be an explicit true opt-in.");
+    this.#captureResourceUsage = options.captureResourceUsage === true;
+    if (options.onExitObservation !== undefined && typeof options.onExitObservation !== "function")
+      throw new TypeError("onExitObservation must be a function when provided.");
+    this.#onExitObservation = options.onExitObservation;
     this.#inputResultTimeoutMs =
       processHostInteractiveStdinCapability.writeTimeoutMs + this.#requestTimeoutMs;
     this.#hostSignal = options.hostSignal;
@@ -343,6 +365,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
   public async start(spec: ProcessLaunchSpec, signal: AbortSignal): Promise<ManagedProcess> {
     assertValidProcessLaunchSpec(spec);
     spec = JSON.parse(JSON.stringify(spec)) as ProcessLaunchSpec;
+    if (this.#captureResourceUsage) spec = { ...spec, captureResourceUsage: true };
     await this.#ready.promise;
     this.#assertReadyForStart();
     if (signal.aborted) {
@@ -376,6 +399,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
         maximumClientBufferedOutputBytes,
       ),
       captureProcessIdentity: spec.captureProcessIdentity === true,
+      resourceLimits: Object.freeze({ ...spec.limits }),
       interactiveStdin: spec.interactiveStdin === true,
       state: "start_sent",
       expectedOutputSequence: 0,
@@ -1117,10 +1141,12 @@ export class StdioProcessHostClient implements ProcessHostClient {
     if (terminationSettledByExit) {
       this.#rememberSettledTermination(entry.requestId);
     }
+    const firstObservedExit = entry.exitEvent === undefined;
     entry.exitEvent = event;
     this.#releaseProcessId(entry);
     entry.stdout.end();
     entry.stderr.end();
+    if (firstObservedExit) this.#observeExit(entry, event);
     if (
       entry.input?.pending !== undefined &&
       !entry.input.pending.result.settled &&
@@ -1128,6 +1154,37 @@ export class StdioProcessHostClient implements ProcessHostClient {
     )
       return;
     this.#finalizeExited(entry);
+  }
+
+  #observeExit(entry: ActiveProcess, event: ProcessExitedEvent): void {
+    if (this.#onExitObservation === undefined) return;
+    try {
+      const resourceUsage = event.resourceUsage;
+      const observation: ProcessHostExitObservation = Object.freeze({
+        requestId: event.requestId,
+        exitCode: event.exitCode,
+        outputTruncated: event.outputTruncated,
+        limits: Object.freeze({ ...entry.resourceLimits }),
+        ...(resourceUsage === undefined
+          ? {}
+          : {
+              resourceUsage: Object.freeze({
+                ...(resourceUsage.peakJobMemoryBytes === undefined
+                  ? {}
+                  : { peakJobMemoryBytes: resourceUsage.peakJobMemoryBytes }),
+                ...(resourceUsage.peakProcessMemoryBytes === undefined
+                  ? {}
+                  : { peakProcessMemoryBytes: resourceUsage.peakProcessMemoryBytes }),
+                ...(resourceUsage.activeProcesses === undefined
+                  ? {}
+                  : { activeProcesses: Object.freeze({ ...resourceUsage.activeProcesses }) }),
+              }),
+            }),
+      });
+      void Promise.resolve(this.#onExitObservation(observation)).catch(() => undefined);
+    } catch {
+      // Diagnostics must not change the observed exit, completion failure, or cleanup behavior.
+    }
   }
 
   #finalizeExited(entry: ActiveProcess): void {

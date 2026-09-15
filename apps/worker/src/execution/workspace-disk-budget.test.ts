@@ -1,5 +1,6 @@
 import { win32 } from "node:path";
 import { describe, expect, it } from "vitest";
+import { encodeAttemptDirectoryName } from "./workspace-directory-name.js";
 import {
   type BoundedDirectoryEntries,
   isStrictAttemptDirectoryName,
@@ -312,6 +313,10 @@ function attempt(fill: string): string {
   return win32.join(workspaceRoot, `attempt-${fill.repeat(64)}`);
 }
 
+function compactAttempt(fill: string): string {
+  return win32.join(workspaceRoot, encodeAttemptDirectoryName(fill.repeat(64), "compact-v1"));
+}
+
 function createBudget(
   fileSystem: FakeWorkspaceDiskFileSystem,
   clock = new FakeWorkspaceDiskClock(),
@@ -389,6 +394,61 @@ describe("ProductionWorkspaceDiskBudget", () => {
       attemptDirectory: paths[2],
     });
   });
+
+  it.each([
+    ["legacy to legacy", attempt("a"), attempt("a")],
+    ["compact-v1 to compact-v1", compactAttempt("a"), compactAttempt("a")],
+    ["legacy to compact-v1", attempt("a"), compactAttempt("a")],
+    ["compact-v1 to legacy", compactAttempt("a"), attempt("a")],
+  ] as const)(
+    "refuses an existing digest for %s without reserving or removing it",
+    async (_, existingPath, requestedPath) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const marker = win32.join(existingPath, "marker.txt");
+      fileSystem.addDirectory(existingPath);
+      fileSystem.addFile(marker, 1n);
+      const budget = createBudget(fileSystem);
+
+      await expect(budget.admit(requestedPath)).rejects.toMatchObject({
+        code: "ATTEMPT_ALREADY_EXISTS",
+      });
+
+      const unrelated = await budget.admit(attempt("b"));
+      await unrelated.release();
+      expect(fileSystem.removed).toEqual([]);
+      expect(fileSystem.has(marker)).toBe(true);
+      expect(fileSystem.has(requestedPath)).toBe(requestedPath === existingPath);
+    },
+  );
+
+  it.each([
+    ["legacy to compact-v1", attempt("a"), compactAttempt("a")],
+    ["compact-v1 to legacy", compactAttempt("a"), attempt("a")],
+  ] as const)(
+    "preserves the original reservation when %s requests the same digest before directory creation",
+    async (_, reservedPath, requestedPath) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const budget = createBudget(fileSystem);
+      const original = await budget.admit(reservedPath);
+
+      await expect(budget.admit(requestedPath)).rejects.toMatchObject({
+        code: "ATTEMPT_ALREADY_EXISTS",
+      });
+
+      expect(original.attemptDirectory).toBe(reservedPath);
+      expect(fileSystem.has(reservedPath)).toBe(false);
+      expect(fileSystem.has(requestedPath)).toBe(false);
+      const unrelated = await budget.admit(attempt("b"));
+      await expect(budget.hasCapacity()).resolves.toBe(false);
+      await unrelated.release();
+      await original.release();
+
+      const replacement = await budget.admit(requestedPath);
+      expect(replacement.attemptDirectory).toBe(requestedPath);
+      await replacement.release();
+      expect(fileSystem.removed).toEqual([]);
+    },
+  );
 
   it("cancels an exclusive-queue waiter without waiting for the current native I/O", async () => {
     const fileSystem = new FakeWorkspaceDiskFileSystem();
@@ -470,55 +530,60 @@ describe("ProductionWorkspaceDiskBudget", () => {
     await reservation.release();
   });
 
-  it("removes only its fixed checkout identity and keeps the reservation active", async () => {
-    const fileSystem = new FakeWorkspaceDiskFileSystem();
-    const clock = new FakeWorkspaceDiskClock();
-    const budget = createBudget(fileSystem, clock, { maximumAccountingEntries: 2 });
-    const attemptDirectory = attempt("a");
-    const reservation = await budget.admit(attemptDirectory);
-    const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
-      fileSystem,
-      attemptDirectory,
-    );
-    const otherAttempt = attempt("b");
-    const otherAttemptMarker = win32.join(otherAttempt, "marker.txt");
-    fileSystem.addDirectory(otherAttempt, clock.now);
-    fileSystem.addFile(otherAttemptMarker, 5n, clock.now);
-    const rootState = await fileSystem.lstat(workspaceRoot);
-    const attemptState = await fileSystem.lstat(attemptDirectory);
-    const checkoutState = await fileSystem.lstat(checkoutDirectory);
-
-    expect(reservation.removeCheckout).toHaveLength(0);
-    await Reflect.apply(reservation.removeCheckout, reservation, ["D:\\outside"]);
-
-    expect(fileSystem.checkoutRemovalRequests).toEqual([
-      {
-        workspaceRootDirectory: workspaceRoot,
-        workspaceRootDevice: rootState?.device,
-        workspaceRootInode: rootState?.inode,
+  it.each([
+    ["legacy", attempt("a")],
+    ["compact-v1", compactAttempt("a")],
+  ] as const)(
+    "removes only the fixed %s checkout identity and keeps its reservation active",
+    async (_, attemptDirectory) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const clock = new FakeWorkspaceDiskClock();
+      const budget = createBudget(fileSystem, clock, { maximumAccountingEntries: 2 });
+      const reservation = await budget.admit(attemptDirectory);
+      const { checkoutDirectory, preservedPaths } = addCheckoutWithPreservedMarkers(
+        fileSystem,
         attemptDirectory,
-        attemptDevice: attemptState?.device,
-        attemptInode: attemptState?.inode,
-        checkoutDirectory,
-        checkoutDevice: checkoutState?.device,
-        checkoutInode: checkoutState?.inode,
-        deadlineEpochMilliseconds: 40_000n,
-      },
-    ]);
-    expect(fileSystem.removed).toEqual([checkoutDirectory]);
-    expect(fileSystem.has(checkoutDirectory)).toBe(false);
-    for (const path of preservedPaths) expect(fileSystem.has(path)).toBe(true);
-    expect(fileSystem.has(otherAttemptMarker)).toBe(true);
-    await expect(budget.sweepOrphans()).resolves.toMatchObject({ active: 1, removed: 0 });
+      );
+      const otherAttempt = attempt("b");
+      const otherAttemptMarker = win32.join(otherAttempt, "marker.txt");
+      fileSystem.addDirectory(otherAttempt, clock.now);
+      fileSystem.addFile(otherAttemptMarker, 5n, clock.now);
+      const rootState = await fileSystem.lstat(workspaceRoot);
+      const attemptState = await fileSystem.lstat(attemptDirectory);
+      const checkoutState = await fileSystem.lstat(checkoutDirectory);
 
-    await reservation.removeCheckout();
-    expect(fileSystem.checkoutRemovalRequests).toHaveLength(1);
-    await reservation.removeAttempt();
-    expect(fileSystem.removed).toEqual([checkoutDirectory, attemptDirectory]);
-    expect(fileSystem.has("D:\\outside\\marker.txt")).toBe(true);
-    expect(fileSystem.has(otherAttemptMarker)).toBe(true);
-    await reservation.release();
-  });
+      expect(reservation.removeCheckout).toHaveLength(0);
+      await Reflect.apply(reservation.removeCheckout, reservation, ["D:\\outside"]);
+
+      expect(fileSystem.checkoutRemovalRequests).toEqual([
+        {
+          workspaceRootDirectory: workspaceRoot,
+          workspaceRootDevice: rootState?.device,
+          workspaceRootInode: rootState?.inode,
+          attemptDirectory,
+          attemptDevice: attemptState?.device,
+          attemptInode: attemptState?.inode,
+          checkoutDirectory,
+          checkoutDevice: checkoutState?.device,
+          checkoutInode: checkoutState?.inode,
+          deadlineEpochMilliseconds: 40_000n,
+        },
+      ]);
+      expect(fileSystem.removed).toEqual([checkoutDirectory]);
+      expect(fileSystem.has(checkoutDirectory)).toBe(false);
+      for (const path of preservedPaths) expect(fileSystem.has(path)).toBe(true);
+      expect(fileSystem.has(otherAttemptMarker)).toBe(true);
+      await expect(budget.sweepOrphans()).resolves.toMatchObject({ active: 1, removed: 0 });
+
+      await reservation.removeCheckout();
+      expect(fileSystem.checkoutRemovalRequests).toHaveLength(1);
+      await reservation.removeAttempt();
+      expect(fileSystem.removed).toEqual([checkoutDirectory, attemptDirectory]);
+      expect(fileSystem.has("D:\\outside\\marker.txt")).toBe(true);
+      expect(fileSystem.has(otherAttemptMarker)).toBe(true);
+      await reservation.release();
+    },
+  );
 
   it.each(["release", "abandon"] as const)(
     "refuses checkout removal after reservation %s",
@@ -835,6 +900,38 @@ describe("ProductionWorkspaceDiskBudget", () => {
       code: "EXISTING_WORKSPACE_UNHEALTHY",
     });
   });
+
+  it.each([
+    ["legacy", attempt("c")],
+    ["compact-v1", compactAttempt("c")],
+  ] as const)(
+    "counts both directory formats when admitting a %s attempt",
+    async (_, nextAttempt) => {
+      const fileSystem = new FakeWorkspaceDiskFileSystem();
+      const legacy = attempt("a");
+      const compact = compactAttempt("b");
+      const compactOutput = win32.join(compact, "output.bin");
+      fileSystem.addDirectory(legacy);
+      fileSystem.addFile(win32.join(legacy, "output.bin"), 51n * mebibyte);
+      fileSystem.addDirectory(compact);
+      fileSystem.addFile(compactOutput, 49n * mebibyte);
+      const budget = createBudget(fileSystem);
+
+      await expect(budget.hasCapacity()).resolves.toBe(true);
+      const reservation = await budget.admit(nextAttempt);
+      await expect(budget.hasCapacity()).resolves.toBe(false);
+      await reservation.release();
+
+      fileSystem.setFileSize(compactOutput, 49n * mebibyte + 1n);
+      await expect(budget.hasCapacity()).resolves.toBe(false);
+      await expect(budget.admit(nextAttempt)).rejects.toMatchObject({
+        code: "CAPACITY_UNAVAILABLE",
+      });
+      expect(fileSystem.removed).toEqual([]);
+      expect(fileSystem.has(legacy)).toBe(true);
+      expect(fileSystem.has(compact)).toBe(true);
+    },
+  );
 
   it("checks temporary capacity without reserving it and recovers after space returns", async () => {
     const fileSystem = new FakeWorkspaceDiskFileSystem();
@@ -1845,11 +1942,11 @@ describe("ProductionWorkspaceDiskBudget", () => {
     await reservation.release();
   });
 
-  it("recovers fresh startup orphans in bounded batches before restoring full capacity", async () => {
+  it("recovers mixed-format startup orphans in bounded batches before restoring full capacity", async () => {
     const fileSystem = new FakeWorkspaceDiskFileSystem();
     const clock = new FakeWorkspaceDiskClock();
     const firstOrphan = attempt("a");
-    const secondOrphan = attempt("b");
+    const secondOrphan = compactAttempt("b");
     fileSystem.addDirectory(firstOrphan, clock.now - 500n);
     fileSystem.addFile(win32.join(firstOrphan, "interrupted.bin"), 1n);
     fileSystem.addDirectory(secondOrphan, clock.now - 500n);
@@ -1866,7 +1963,10 @@ describe("ProductionWorkspaceDiskBudget", () => {
     });
     expect(fileSystem.has(firstOrphan)).toBe(false);
     expect(fileSystem.has(secondOrphan)).toBe(false);
-    const admitted = await Promise.all([budget.admit(attempt("c")), budget.admit(attempt("d"))]);
+    const admitted = await Promise.all([
+      budget.admit(attempt("c")),
+      budget.admit(compactAttempt("d")),
+    ]);
     expect(admitted).toHaveLength(2);
     await Promise.all(admitted.map((reservation) => reservation.release()));
   });
@@ -1908,30 +2008,72 @@ describe("ProductionWorkspaceDiskBudget", () => {
     }
   });
 
-  it("removes only retained-age orphan attempts and reports bigint reclaimed bytes", async () => {
+  it("applies the same orphan age and active reservation rules to both directory formats", async () => {
     const fileSystem = new FakeWorkspaceDiskFileSystem();
     const clock = new FakeWorkspaceDiskClock();
-    const stale = attempt("a");
-    const recent = attempt("b");
-    fileSystem.addDirectory(stale, 8_000n);
-    fileSystem.addFile(win32.join(stale, "result.bin"), 11n);
-    fileSystem.addDirectory(recent, 9_500n);
-    fileSystem.addFile(win32.join(recent, "result.bin"), 13n);
+    const budget = createBudget(fileSystem, clock);
+    const active = await budget.admit(compactAttempt("c"));
+    fileSystem.addDirectory(active.attemptDirectory, 0n);
+    fileSystem.addFile(win32.join(active.attemptDirectory, "active.bin"), 1n);
+    const staleLegacy = attempt("a");
+    const staleCompact = compactAttempt("a");
+    const recentLegacy = attempt("b");
+    const recentCompact = compactAttempt("b");
+    for (const [path, size] of [
+      [staleLegacy, 11n],
+      [staleCompact, 17n],
+    ] as const) {
+      fileSystem.addDirectory(path, 8_000n);
+      fileSystem.addFile(win32.join(path, "result.bin"), size);
+    }
+    for (const path of [recentLegacy, recentCompact]) {
+      fileSystem.addDirectory(path, 9_500n);
+      fileSystem.addFile(win32.join(path, "result.bin"), 13n);
+    }
 
-    const result = await createBudget(fileSystem, clock).sweepOrphans();
+    const result = await budget.sweepOrphans();
 
     expect(result).toEqual({
-      scanned: 2,
-      removed: 1,
-      retained: 1,
-      active: 0,
-      removedBytes: 11n,
+      scanned: 5,
+      removed: 2,
+      retained: 2,
+      active: 1,
+      removedBytes: 28n,
       limitReached: false,
     });
-    expect(fileSystem.removed).toEqual([stale]);
-    expect(fileSystem.has(stale)).toBe(false);
-    expect(fileSystem.has(recent)).toBe(true);
+    expect(new Set(fileSystem.removed)).toEqual(new Set([staleLegacy, staleCompact]));
+    expect(fileSystem.has(staleLegacy)).toBe(false);
+    expect(fileSystem.has(staleCompact)).toBe(false);
+    expect(fileSystem.has(recentLegacy)).toBe(true);
+    expect(fileSystem.has(recentCompact)).toBe(true);
+    expect(fileSystem.has(active.attemptDirectory)).toBe(true);
     expect(fileSystem.has(workspaceRoot)).toBe(true);
+    await active.release();
+  });
+
+  it("refuses a replaced compact orphan identity without deleting either directory format", async () => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+    const compact = compactAttempt("a");
+    const legacy = attempt("b");
+    for (const path of [compact, legacy]) {
+      fileSystem.addDirectory(path, 0n);
+      fileSystem.addFile(win32.join(path, "marker.txt"), 1n);
+    }
+    const removeAttempt = fileSystem.quarantineAndRemoveAttempt.bind(fileSystem);
+    fileSystem.quarantineAndRemoveAttempt = async (request) => {
+      expect(request.attemptDirectory).toBe(compact);
+      fileSystem.changeIdentity(compact);
+      return removeAttempt(request);
+    };
+
+    await expect(createBudget(fileSystem).sweepOrphans()).rejects.toMatchObject({
+      code: "HANDLE_BOUND_DELETE_FAILED",
+    });
+
+    expect(fileSystem.removed).toEqual([]);
+    for (const path of [compact, legacy]) {
+      expect(fileSystem.has(win32.join(path, "marker.txt"))).toBe(true);
+    }
   });
 
   it("bounds orphan startup scans and never removes an active reservation", async () => {
@@ -2010,6 +2152,11 @@ describe("ProductionWorkspaceDiskBudget", () => {
 
   it("accepts only canonical lowercase attempt hash directory names", () => {
     expect(isStrictAttemptDirectoryName(`attempt-${"a".repeat(64)}`)).toBe(true);
+    expect(isStrictAttemptDirectoryName(`a1-${"0".repeat(50)}`)).toBe(true);
+    expect(isStrictAttemptDirectoryName(`a1-${"0".repeat(49)}1`)).toBe(true);
+    expect(
+      isStrictAttemptDirectoryName("a1-6dp5qcb22im238nr3wvp0ic7q99w035jmy2iw7i6n43d37jtof"),
+    ).toBe(true);
     expect(isStrictAttemptDirectoryName(`attempt-${"A".repeat(64)}`)).toBe(false);
     expect(isStrictAttemptDirectoryName(`attempt-${"a".repeat(63)}`)).toBe(false);
     expect(isStrictAttemptDirectoryName(`attempt-${"a".repeat(64)}-extra`)).toBe(false);
@@ -2025,6 +2172,28 @@ describe("ProductionWorkspaceDiskBudget", () => {
           orphanScanLimit: 1,
         }),
     ).toThrowError(expect.objectContaining({ code: "INVALID_CONFIGURATION" }));
+  });
+
+  it.each([
+    `a1-${"0".repeat(49)}`,
+    `a1-${"0".repeat(51)}`,
+    `a1-${"0".repeat(49)}A`,
+    `A1-${"0".repeat(50)}`,
+    `a2-${"0".repeat(50)}`,
+    "a1-6dp5qcb22im238nr3wvp0ic7q99w035jmy2iw7i6n43d37jtog",
+    `a1-${"z".repeat(50)}`,
+    `a1-${"0".repeat(49)}_`,
+    `a1-${"0".repeat(49)}-`,
+    `a1-${"0".repeat(50)}-extra`,
+  ])("rejects noncanonical compact names before disk admission: %s", async (name) => {
+    const fileSystem = new FakeWorkspaceDiskFileSystem();
+
+    expect(isStrictAttemptDirectoryName(name)).toBe(false);
+    await expect(
+      createBudget(fileSystem).admit(win32.join(workspaceRoot, name)),
+    ).rejects.toMatchObject({ code: "INVALID_ATTEMPT_PATH" });
+    expect(fileSystem.ownershipChecks).toBe(0);
+    expect(fileSystem.removed).toEqual([]);
   });
 });
 
@@ -2045,7 +2214,7 @@ function addCheckoutWithPreservedMarkers(
   fileSystem.addFile(win32.join(checkoutDirectory, "second.bin"), 2n);
   fileSystem.addDirectory("D:\\outside");
   fileSystem.addFile("D:\\outside\\marker.txt", 3n);
-  for (const directory of ["temp", "control", "profile"]) {
+  for (const directory of ["temp", "control", "profile", "user-profile"]) {
     const siblingDirectory = win32.join(attemptDirectory, directory);
     const marker = win32.join(siblingDirectory, "marker.txt");
     fileSystem.addDirectory(siblingDirectory);

@@ -214,6 +214,7 @@ func (windowsLauncher) Launch(spec protocol.ProcessLaunchSpec, limits protocol.E
 		standardInput:               stdinParent,
 		standardOutput:              stdoutParent,
 		standardError:               stderrParent,
+		captureResourceUsage:        spec.CaptureResourceUsage,
 	}, nil
 }
 
@@ -348,6 +349,8 @@ type windowsProcess struct {
 	standardInput               *os.File
 	standardOutput              *os.File
 	standardError               *os.File
+	captureResourceUsage        bool
+	resourceUsage               resourceUsageObservation
 
 	jobMu                sync.Mutex
 	rootExited           bool
@@ -363,7 +366,23 @@ func (p *windowsProcess) StandardOutput() io.ReadCloser       { return p.standar
 func (p *windowsProcess) StandardError() io.ReadCloser        { return p.standardError }
 
 func (p *windowsProcess) Wait() (*int64, error) {
-	status, err := windows.WaitForSingleObject(p.process, windows.INFINITE)
+	waitTimeout := uint32(windows.INFINITE)
+	if p.captureResourceUsage {
+		waitTimeout = resourceUsageSampleIntervalMS
+	}
+	var status uint32
+	var err error
+	for {
+		if p.captureResourceUsage {
+			p.jobMu.Lock()
+			p.observeActiveProcessesLocked()
+			p.jobMu.Unlock()
+		}
+		status, err = windows.WaitForSingleObject(p.process, waitTimeout)
+		if err != nil || status != uint32(windows.WAIT_TIMEOUT) || !p.captureResourceUsage {
+			break
+		}
+	}
 	if err != nil {
 		cleanupErr := p.cleanupJob()
 		p.closeIOAfterCleanupFailure()
@@ -474,6 +493,7 @@ func (p *windowsProcess) closeJobLocked() error {
 	if p.job == 0 {
 		return nil
 	}
+	p.observeResourceUsageLocked()
 	if err := windows.CloseHandle(p.job); err != nil {
 		return fmt.Errorf("close Job Object: %w", err)
 	}

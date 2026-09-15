@@ -229,7 +229,7 @@ export function loadValidationRuntimeConfig(
   ) {
     invalid("WORKER_VALIDATION_CLEANUP_TIMEOUT_MS must be an integer from 1000 through 300000.");
   }
-  const summaryTimeoutText = environment.WORKER_VALIDATION_SUMMARY_TIMEOUT_MS ?? "60000";
+  const summaryTimeoutText = environment.WORKER_VALIDATION_SUMMARY_TIMEOUT_MS ?? "150000";
   const summaryTimeoutMs = Number(summaryTimeoutText);
   if (
     !/^[1-9][0-9]*$/u.test(summaryTimeoutText) ||

@@ -217,7 +217,7 @@ describe("validation runtime deployment configuration", () => {
       { WORKER_VALIDATION_SUMMARY_ENABLED: "true" },
       defaults(),
     );
-    expect(config.summary).toEqual({ maximumTimeoutMs: 60_000 });
+    expect(config.summary).toEqual({ maximumTimeoutMs: 150_000 });
     expect(Object.isFrozen(config.summary)).toBe(true);
     expect(
       loadValidationRuntimeConfig(

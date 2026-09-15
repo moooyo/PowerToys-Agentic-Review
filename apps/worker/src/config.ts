@@ -20,6 +20,7 @@ import {
   workerModelExecutionDisabledValue,
 } from "@agentic-review/contracts";
 import { processHostResourceBounds } from "./execution/process-host-protocol.js";
+import type { WorkspaceDirectoryNameFormat } from "./execution/workspace-directory-name.js";
 
 const kibibyte = 1024;
 const mebibyte = 1024 * kibibyte;
@@ -92,10 +93,12 @@ export interface WorkerExecutionCommonConfig {
   readonly gitSha256: string;
   readonly gitSharedRootDirectory: string;
   readonly workspaceRootDirectory: string;
+  readonly workspaceDirectoryNameFormat?: WorkspaceDirectoryNameFormat;
   readonly tempDirectory: string;
   readonly processHostRequestTimeoutMs: number;
   readonly processHostStartTimeoutMs: number;
   readonly processHostShutdownTimeoutMs: number;
+  readonly processHostResourceDiagnostics?: true;
   readonly gitHardTimeoutMs: number;
   readonly gitResourceLimits: WorkerExecutionResourceLimits;
   readonly totalResourceBudget: WorkerExecutionResourceLimits;
@@ -536,10 +539,14 @@ function loadExecutionConfig(
     gitSha256: readSha256(environment, "WORKER_GIT_SHA256"),
     gitSharedRootDirectory,
     workspaceRootDirectory,
+    workspaceDirectoryNameFormat: readWorkspaceDirectoryNameFormat(environment),
     tempDirectory,
     processHostRequestTimeoutMs,
     processHostStartTimeoutMs,
     processHostShutdownTimeoutMs,
+    ...(readBoolean(environment, "WORKER_PROCESS_HOST_RESOURCE_DIAGNOSTICS", false)
+      ? { processHostResourceDiagnostics: true as const }
+      : {}),
     gitHardTimeoutMs: readInteger(
       environment,
       "WORKER_GIT_HARD_TIMEOUT_MS",
@@ -606,6 +613,15 @@ function readCliEngine(environment: NodeJS.ProcessEnv): "codex" | "copilot" {
   if (engine !== "codex" && engine !== "copilot")
     throw new Error("WORKER_CLI_ENGINE must be codex or copilot.");
   return engine;
+}
+
+function readWorkspaceDirectoryNameFormat(
+  environment: NodeJS.ProcessEnv,
+): WorkspaceDirectoryNameFormat {
+  const format = environment.WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT ?? "legacy";
+  if (format !== "legacy" && format !== "compact-v1")
+    throw new Error("WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT must be legacy or compact-v1.");
+  return format;
 }
 
 function readResourceLimits(

@@ -70,6 +70,13 @@ ProcessHost enforces `WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS`, `WORKER_MODEL_MAX_P
 `WORKER_MODEL_MAX_MEMORY_BYTES` and `WORKER_MODEL_MAX_OUTPUT_BYTES` for model tasks. These are
 operational limits; they do not prove filesystem or network isolation within the VM.
 
+Record the optional `WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT` setting: `legacy` is the default,
+and `compact-v1` selects compact names for new attempt directories. Existing attempt directories
+are not renamed when this setting changes. Use a dedicated, short physical
+`WORKER_WORKSPACE_ROOT_DIRECTORY` beneath `WORKER_DATA_DIR`; do not use a `SUBST` drive or a
+junction as a trusted workspace root. The directory-name format does not relax path or ownership
+checks.
+
 ## Evidence setup and Worker registration
 
 Create a private evidence directory outside Worker data and repository worktrees. Record the
@@ -135,8 +142,22 @@ not prove that a model or repository command executed.
    field is a count; its job detail does not expose the attempt identifier.
 4. Before execution finishes, make an `active` collector capture with `-TaskId`, `-AttemptId`,
    `-RepositoryId`, and a new evidence path. Record the exact checkout and shared repository
-   paths. The layouts are `repository-<githubRepositoryId>.git` under the shared root and
-   `attempt-<lowercase SHA-256 of UTF-8 runAttemptId>\checkout` under the workspace root.
+   paths. The shared-root layout is `repository-<githubRepositoryId>.git`. For validation/default
+   workspaces, `legacy` uses `attempt-<64-character lowercase hexadecimal SHA-256 of UTF-8 runAttemptId>\checkout`
+   under the workspace root.
+   `compact-v1` uses `a1-<50-character lowercase base36 SHA-256 of UTF-8 runAttemptId>\checkout`:
+   the full digest is encoded losslessly and zero-padded to exactly 50 characters, without
+   truncation. Both formats retain the `checkout` subdirectory. Correlate the observed directory
+   with the actual attempt identity and creation-time configuration.
+
+Run the collector with the configuration used when the attempt was created, and retain its
+`observations.workspaceDirectoryNameFormat` value. It observes only the validation/default
+workspace path derived from that configuration and attempt identity; it does not enumerate
+other directories or fall back to another name format. An isolated model workspace hashes the
+UTF-8 `runAttemptId` followed by a NUL byte and the literal `model`, using the selected name
+format and the same `checkout` subdirectory. Correlate that separate workspace's exact path
+and attempt identity through Worker evidence; the collector's validation/default observation
+does not establish its presence or cleanup.
 
 Capture the worktree while it still exists. In the authorized Windows session, using the pinned
 Git executable and the exact paths from the active capture, retain these read-only outputs:
@@ -254,6 +275,10 @@ The supported actions follow [GitHub event normalization](../../apps/server/src/
 This exercise does not publish a GitHub review, merge a PR, or add Dashboard mutations.
 
 ## Descendant and workspace cleanup
+
+Workspace scans and cleanup strictly recognize canonical attempt directory names in both
+`legacy` and `compact-v1` formats, regardless of the configured format for new directories.
+Changing the format does not exempt existing attempts from accounting or cleanup.
 
 After each terminal response, allow the configured teardown interval for deferred worktree and
 process cleanup. A terminal Server status can precede cleanup completion. Fixed Git cleanup and

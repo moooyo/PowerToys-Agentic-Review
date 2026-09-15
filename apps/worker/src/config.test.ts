@@ -467,6 +467,7 @@ describe("loadWorkerConfig execution mode", () => {
       WORKER_GIT_EXECUTABLE_PATH: "C:\\unsafe\\..\\git.exe",
       WORKER_GIT_SHA256: "invalid",
       WORKER_WORKSPACE_ROOT_DIRECTORY: "relative/workspaces",
+      WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT: "invalid",
     });
 
     expect(config.executionEnabled).toBe(false);
@@ -495,6 +496,7 @@ describe("loadWorkerConfig execution mode", () => {
       gitSha256: "c".repeat(64),
       gitSharedRootDirectory: "D:\\AgenticReview\\Data\\Repositories",
       workspaceRootDirectory: "D:\\AgenticReview\\Data\\Workspaces",
+      workspaceDirectoryNameFormat: "legacy",
       tempDirectory: "D:\\AgenticReview\\Data\\Temp",
       cliHomeDirectory: "D:\\AgenticReview\\Data\\Profile",
       processHostRequestTimeoutMs: 15_000,
@@ -539,6 +541,30 @@ describe("loadWorkerConfig execution mode", () => {
     });
   });
 
+  it.each(["legacy", "compact-v1"] as const)(
+    "accepts the explicit %s workspace directory name format",
+    (format) => {
+      expect(
+        loadWorkerConfig({
+          ...enabledEnvironment(),
+          WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT: format,
+        }).execution?.workspaceDirectoryNameFormat,
+      ).toBe(format);
+    },
+  );
+
+  it.each(["", "compact", "compact-v2", "LEGACY", "COMPACT-V1", " legacy", "compact-v1 "])(
+    "rejects the invalid workspace directory name format %j",
+    (format) => {
+      expect(() =>
+        loadWorkerConfig({
+          ...enabledEnvironment(),
+          WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT: format,
+        }),
+      ).toThrow("WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT must be legacy or compact-v1.");
+    },
+  );
+
   it("accepts configured nonexistent binary paths without filesystem access", () => {
     const config = loadWorkerConfig({
       ...enabledEnvironment(),
@@ -549,6 +575,24 @@ describe("loadWorkerConfig execution mode", () => {
     });
 
     expect(config.execution?.processHostPath).toBe("Z:\\NotInstalled\\Bin\\ProcessHost.exe");
+  });
+
+  it("requires an explicit opt-in for the newer ProcessHost resource diagnostics protocol", () => {
+    expect(
+      loadWorkerConfig(enabledEnvironment()).execution?.processHostResourceDiagnostics,
+    ).toBeUndefined();
+    expect(
+      loadWorkerConfig({
+        ...enabledEnvironment(),
+        WORKER_PROCESS_HOST_RESOURCE_DIAGNOSTICS: "true",
+      }).execution?.processHostResourceDiagnostics,
+    ).toBe(true);
+    expect(() =>
+      loadWorkerConfig({
+        ...enabledEnvironment(),
+        WORKER_PROCESS_HOST_RESOURCE_DIAGNOSTICS: "yes",
+      }),
+    ).toThrow("WORKER_PROCESS_HOST_RESOURCE_DIAGNOSTICS");
   });
 
   it("rejects a drive root data directory while execution is disabled", () => {

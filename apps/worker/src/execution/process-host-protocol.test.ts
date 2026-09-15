@@ -369,6 +369,65 @@ const startRequest = (spec: ProcessLaunchSpec = launchSpec()): ProcessHostReques
 });
 
 describe("ProcessHost NDJSON contract", () => {
+  it("accepts optional resource observations without changing legacy exit events", () => {
+    const exited = {
+      protocolVersion: processHostProtocolVersion,
+      type: "exited",
+      requestId: "process:usage",
+      exitCode: 0,
+      signal: null,
+      outputTruncated: false,
+    };
+    expect(parseProcessHostEventFrame(frame(exited))).toEqual(exited);
+    for (const resourceUsage of [
+      { peakJobMemoryBytes: 0 },
+      { peakProcessMemoryBytes: Number.MAX_SAFE_INTEGER },
+      {
+        peakJobMemoryBytes: 500,
+        peakProcessMemoryBytes: 300,
+        activeProcesses: { sampledPeak: 2, sampleCount: 10, sampleIntervalMs: 250 },
+      },
+    ])
+      expect(parseProcessHostEventFrame(frame({ ...exited, resourceUsage }))).toEqual({
+        ...exited,
+        resourceUsage,
+      });
+    for (const resourceUsage of [
+      {},
+      null,
+      { peakJobMemoryBytes: -1 },
+      { peakProcessMemoryBytes: Number.MAX_SAFE_INTEGER + 1 },
+      { peakJobMemoryBytes: "100" },
+      { activeProcesses: { sampledPeak: 1, sampleCount: 0, sampleIntervalMs: 250 } },
+      { activeProcesses: { sampledPeak: -1, sampleCount: 1, sampleIntervalMs: 250 } },
+      { activeProcesses: { sampledPeak: 1, sampleCount: 1, sampleIntervalMs: 100 } },
+      { activeProcesses: { sampledPeak: 1, sampleCount: 1 } },
+      { peakJobMemoryBytes: 10, limitTriggered: true },
+    ])
+      expect(() => parseProcessHostEventFrame(frame({ ...exited, resourceUsage }))).toThrow(
+        ProcessHostProtocolError,
+      );
+  });
+
+  it("encodes resource capture only as an explicit opt-in", () => {
+    expect(
+      JSON.parse(encodeProcessHostRequest(startRequest()).toString("utf8")).spec,
+    ).not.toHaveProperty("captureResourceUsage");
+    expect(
+      JSON.parse(
+        encodeProcessHostRequest(
+          startRequest({ ...launchSpec(), captureResourceUsage: true }),
+        ).toString("utf8"),
+      ).spec.captureResourceUsage,
+    ).toBe(true);
+    for (const captureResourceUsage of [false, null, 0, "true", {}])
+      expect(() =>
+        encodeProcessHostRequest(
+          startRequest({ ...launchSpec(), captureResourceUsage } as unknown as ProcessLaunchSpec),
+        ),
+      ).toThrow(ProcessHostProtocolError);
+  });
+
   it("encodes one strict newline-delimited request", () => {
     const request = startRequest();
 

@@ -50,7 +50,10 @@ import { ProfileJobExecutor, type ProfileJobExecutorOptions } from "./profile-jo
 import { ReviewJobExecutor } from "./review-executor.js";
 import { captureTestProbeOutput } from "./test-probe-capture.js";
 import type { UiProfileResult } from "./ui-profile-runner.js";
-import type { HeadlessValidationCheckResult } from "./validation-check-runner.js";
+import {
+  type HeadlessValidationCheckResult,
+  HeadlessValidationCheckRunner,
+} from "./validation-check-runner.js";
 import {
   composeSummaryPrompt,
   createValidationSummaryContext,
@@ -2120,29 +2123,50 @@ describe("profile job executor", () => {
       code: "UI_EVIDENCE_SCOPE_INVALID",
     });
   });
-  it("requires isolated model triage for an issue without inventing command checks", async () => {
+  it("completes isolated model triage with the real snapshot-only runner and no source blocker", async () => {
     const test = harness(issueEnvelope());
-    test.headlessRunner.run.mockResolvedValue({
-      report: {
-        schemaVersion: "ValidationReportV1",
-        source: "worker",
-        sourceState: "original",
-        summary: "Triage has no configured execution commands.",
-        checks: [],
-        workItemKind: "issue",
-        reproductionConclusion: "inconclusive",
+    delete test.validation.captureWorktreeState;
+    const resolveExecutable = vi.fn(async () => {
+      throw new Error("Static triage must not resolve command executables.");
+    });
+    const headlessRunner = new HeadlessValidationCheckRunner({
+      baseEnvironment: {
+        COMSPEC: "C:\\Windows\\System32\\cmd.exe",
+        PATH: "C:\\Windows\\System32",
+        PATHEXT: ".COM;.EXE;.BAT;.CMD",
+        SYSTEMROOT: "C:\\Windows",
+        TEMP: test.validation.tempDirectory,
+        TMP: test.validation.tempDirectory,
+        USERPROFILE: test.validation.userProfileDirectory,
       },
+      resolveExecutable,
+      limits: {
+        hardTimeoutMs: 30_000,
+        maximumProcessCount: 8,
+        maximumMemoryBytes: 512 * 1_024 * 1_024,
+        maximumOutputBytes: 64 * 1_024,
+      },
+    });
+    const result = typed(
+      await new ProfileJobExecutor({ ...test.options, headlessRunner }).execute(
+        test.input,
+        test.context,
+      ),
+    );
+    expect(result.report.workItemKind).toBe("issue");
+    expect(result.report.sourceState).toBe("unknown");
+    expect(result.report.checks).toEqual([]);
+    expect(result.execution).toMatchObject({
       blockers: [],
       diagnostics: [],
       cleanupState: "not_needed",
     });
-    const result = typed(await test.run());
-    expect(result.report.workItemKind).toBe("issue");
-    expect(result.report.checks).toEqual([]);
     expect(result.modelReview).toMatchObject({
       state: "completed",
       result: { schemaVersion: "IssueTriageV2" },
     });
+    expect(resolveExecutable).not.toHaveBeenCalled();
+    expect(test.context.processHost.start).not.toHaveBeenCalled();
     expect(test.modelEnvelope()?.lease).toEqual(test.input.lease);
   });
   it("blocks issue UI validation without explicit source-commit authorization", async () => {

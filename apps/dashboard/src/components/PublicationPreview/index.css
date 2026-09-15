@@ -20,8 +20,8 @@
   margin: 0;
   border: 0;
   border-radius: 12px;
-  background: var(--app-surface-container, #f3edf7);
-  color: var(--app-on-surface, #1d1b20);
+  background: var(--app-surface-container, #edf3fa);
+  color: var(--app-text, #172b3a);
   font-family: var(--app-code-font, "Roboto Mono", monospace);
   font-size: 14px;
   font-weight: 400;

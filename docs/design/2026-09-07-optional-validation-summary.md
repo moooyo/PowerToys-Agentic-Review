@@ -89,12 +89,13 @@ uses the existing `modelReview.failed` branch and has no summary; a disabled sum
 summary nor a failure.
 
 `WORKER_VALIDATION_SUMMARY_ENABLED` defaults to `false`. Enabling it requires execution and at least
-one enabled validation runner. `WORKER_VALIDATION_SUMMARY_TIMEOUT_MS` defaults to `60000` and accepts
+one enabled validation runner. `WORKER_VALIDATION_SUMMARY_TIMEOUT_MS` defaults to `150000` and accepts
 positive integers from `10000` through `300000` milliseconds. Enabled but unavailable, malformed,
 budget-exhausted, or safely timed-out attempts are visible failures. Deterministic validation is
 not retried solely to recover optional prose.
 
 `ValidationSummaryExecutor` owns the only optional timer; Profile composition directly awaits it.
+The budget covers model workspace preparation, CLI execution, and post-execution source verification.
 With default teardown of 5 seconds, completion reserve of 30 seconds, and no-progress submission
 safety of 5 seconds, its budget is:
 

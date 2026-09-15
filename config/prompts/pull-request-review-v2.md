@@ -19,6 +19,12 @@ test-coverage defects introduced by this revision. Prefer a small number of high
 findings over speculative comments. Every finding must explain the observable impact and point to
 a changed file and line when possible. Set `endLine` to `null` for a single-line finding.
 
+Start with the changed code and inspect related callers, dependencies, and tests as needed. Reserve
+time for the final structured response. When a build or test is blocked by a missing environment
+prerequisite, record the command and blocker, then continue the static review. Do not repeatedly
+retry the same environment failure, bypass prerequisite checks, or turn the review into a toolchain
+repair task. Use bounded build parallelism appropriate to the Worker's resource limits.
+
 Return only a result that conforms to the supplied `PrReviewPlanV2` output schema. Requested
 recipe IDs must remain empty because validation runs directly inside this review. A recommendation
 is advice for an operator and never authorizes publication or repository mutation.

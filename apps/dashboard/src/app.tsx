@@ -210,10 +210,20 @@ function ApplicationShell() {
     <Box
       component="nav"
       aria-label="Main navigation"
-      sx={{ height: "100%", display: "flex", flexDirection: "column", px: 1.5, pb: 2 }}
+      sx={{
+        height: "100%",
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        px: 1.5,
+        pb: 1,
+      }}
     >
       {!desktop && (
-        <Stack direction="row" sx={{ alignItems: "center", minHeight: 72, px: 1, gap: 2 }}>
+        <Stack
+          direction="row"
+          sx={{ alignItems: "center", minHeight: 72, flexShrink: 0, px: 1, gap: 2 }}
+        >
           <AccountTreeRounded color="primary" />
           <Typography variant="h6" sx={{ flex: 1 }}>
             Agentic Review
@@ -223,7 +233,10 @@ function ApplicationShell() {
           </IconButton>
         </Stack>
       )}
-      <Box sx={{ flex: 1, overflowY: "auto", pt: desktop ? 1 : 0 }}>
+      <Box
+        className="material-scroll-region"
+        sx={{ flex: 1, minHeight: 0, overflowY: "auto", pt: desktop ? 0.5 : 0, pb: 1 }}
+      >
         {sections.map((section) => {
           const routes = routeDefinitions.filter(
             (route) =>
@@ -232,8 +245,8 @@ function ApplicationShell() {
               (!route.access || allowed[route.access as keyof typeof allowed]),
           );
           return routes.length ? (
-            <Box key={section.label} sx={{ mb: 1.5 }}>
-              <Typography variant="subtitle2" sx={{ color: "text.secondary", px: 2, py: 1.5 }}>
+            <Box key={section.label} sx={{ mb: 1, "&:last-child": { mb: 0 } }}>
+              <Typography variant="subtitle2" sx={{ color: "text.secondary", px: 2, py: 1 }}>
                 {section.label}
               </Typography>
               <List disablePadding>
@@ -249,10 +262,9 @@ function ApplicationShell() {
                       aria-current={selected ? "page" : undefined}
                       onClick={() => setMobileOpen(false)}
                       sx={{
-                        minHeight: 52,
+                        minHeight: 48,
                         borderRadius: 100,
                         px: 2,
-                        mb: 0.5,
                         color: "text.secondary",
                         "&.Mui-selected": {
                           bgcolor: "var(--app-secondary-container)",
@@ -278,16 +290,16 @@ function ApplicationShell() {
           ) : null;
         })}
       </Box>
-      <Divider sx={{ mx: 2, mb: 2 }} />
-      <Typography variant="body2" sx={{ px: 2, color: "text.secondary" }}>
+      <Divider sx={{ mx: 2, mb: 1, flexShrink: 0 }} />
+      <Typography variant="body2" sx={{ px: 2, color: "text.secondary", flexShrink: 0 }}>
         {preview ? "Local preview" : "Review workspace"}
       </Typography>
     </Box>
   );
 
   return (
-    <Box sx={{ minHeight: "100vh" }}>
-      <AppBar position="sticky">
+    <Box sx={{ height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <AppBar position="static" sx={{ flexShrink: 0 }}>
         <Toolbar sx={{ minHeight: 64, px: { xs: 1.5, md: 2 }, gap: { xs: 0.5, sm: 1 } }}>
           <Tooltip title={desktop && desktopOpen ? "Close navigation" : "Open navigation"}>
             <IconButton
@@ -371,7 +383,7 @@ function ApplicationShell() {
           </MenuItem>
         )}
       </Menu>
-      <Box sx={{ display: "flex" }}>
+      <Box sx={{ display: "flex", flex: 1, minHeight: 0 }}>
         <Drawer
           variant={desktop ? "persistent" : "temporary"}
           open={desktop ? desktopOpen : mobileOpen}
@@ -383,8 +395,9 @@ function ApplicationShell() {
                 width: sidebarWidth,
                 border: 0,
                 bgcolor: "background.default",
-                top: desktop ? 64 : 0,
-                height: desktop ? "calc(100dvh - 64px)" : "100%",
+                position: desktop ? "relative" : "fixed",
+                height: "100%",
+                overflow: "hidden",
                 borderRadius: desktop ? 0 : "0 16px 16px 0",
               },
             },
@@ -392,21 +405,40 @@ function ApplicationShell() {
         >
           {navigation}
         </Drawer>
-        <Box sx={{ flex: 1, minWidth: 0, pr: { xs: 0, lg: 2 }, pb: { xs: 0, lg: 2 } }}>
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            flex: 1,
+            minWidth: 0,
+            minHeight: 0,
+            pr: { xs: 0, lg: 2 },
+            pb: { xs: 0, lg: 2 },
+          }}
+        >
           {!desktop && (
-            <Stack direction="row" sx={{ alignItems: "center", px: 2, pt: 1, pb: 2, gap: 1 }}>
+            <Stack
+              direction="row"
+              sx={{ alignItems: "center", flexShrink: 0, px: 2, pt: 1, pb: 2, gap: 1 }}
+            >
               <RepositorySelector fullWidth />
               {githubShortcut}
               {status}
             </Stack>
           )}
           <Box
+            key={location.pathname}
             component="main"
-            className="material-main"
+            className="material-main material-scroll-region"
+            aria-label="Workspace"
+            tabIndex={0}
             sx={{
+              flex: 1,
+              width: "100%",
               maxWidth: 1600,
               mx: "auto",
-              minHeight: "calc(100dvh - 80px)",
+              minHeight: 0,
+              overflow: "auto",
               bgcolor: "background.paper",
               borderRadius: { xs: 0, lg: "24px" },
               p: { xs: 2, md: 3 },

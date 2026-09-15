@@ -338,6 +338,17 @@ func launchWindowsLauncherTestProcessWithIdentity(
 	captureIdentity bool,
 ) *windowsProcess {
 	t.Helper()
+	return launchWindowsLauncherTestProcessWithDiagnostics(t, helperArgument, resourceLimits, captureIdentity, false)
+}
+
+func launchWindowsLauncherTestProcessWithDiagnostics(
+	t *testing.T,
+	helperArgument string,
+	resourceLimits protocol.ProcessResourceLimits,
+	captureIdentity bool,
+	captureUsage bool,
+) *windowsProcess {
+	t.Helper()
 
 	executable, err := os.Executable()
 	if err != nil {
@@ -373,6 +384,7 @@ func launchWindowsLauncherTestProcessWithIdentity(
 		EnvironmentMode:        "replace",
 		Environment:            environment,
 		CaptureProcessIdentity: captureIdentity,
+		CaptureResourceUsage:   captureUsage,
 	}, limits)
 	if err != nil {
 		t.Fatal(err)

@@ -39,6 +39,11 @@ import {
   processHostResourceBounds,
 } from "./process-host-protocol.js";
 import {
+  encodeAttemptDirectoryName,
+  resolveWorkspaceDirectoryNameFormat,
+  type WorkspaceDirectoryNameFormat,
+} from "./workspace-directory-name.js";
+import {
   type WorkspaceDiskBudget,
   WorkspaceDiskBudgetError,
   type WorkspaceDiskMonitor,
@@ -102,6 +107,7 @@ export interface GitSharedCachePolicy {
 
 export interface ProductionDisposableJobWorkspaceProviderOptions {
   readonly workspaceRootDirectory: string;
+  readonly workspaceDirectoryNameFormat?: WorkspaceDirectoryNameFormat;
   readonly gitSharedRootDirectory: string;
   readonly gitExecutable: string;
   readonly gitWorkingDirectory: string;
@@ -308,6 +314,7 @@ type GitWorkspaceValidationMode = "strict" | "cleanup_safe" | "monitored_read";
 
 export class ProductionDisposableJobWorkspaceProvider implements JobWorkspaceProvider {
   readonly #workspaceRootDirectory: string;
+  readonly #workspaceDirectoryNameFormat: WorkspaceDirectoryNameFormat;
   readonly #gitSharedRootDirectory: string;
   readonly #gitExecutable: string;
   readonly #gitWorkingDirectory: string;
@@ -325,6 +332,9 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
 
   public constructor(options: ProductionDisposableJobWorkspaceProviderOptions) {
     try {
+      this.#workspaceDirectoryNameFormat = resolveWorkspaceDirectoryNameFormat(
+        options.workspaceDirectoryNameFormat,
+      );
       assertWindowsLocalAbsolutePath(
         options.workspaceRootDirectory,
         "workspaceRootDirectory",
@@ -429,6 +439,7 @@ export class ProductionDisposableJobWorkspaceProvider implements JobWorkspacePro
         this.#workspaceRootDirectory,
         envelope.lease.runAttemptId,
         purpose,
+        this.#workspaceDirectoryNameFormat,
       );
       repository =
         source !== null
@@ -2007,6 +2018,7 @@ function deriveWorkspaceLayout(
   rootDirectory: string,
   runAttemptId: string,
   purpose: "validation" | "model" = "validation",
+  format: WorkspaceDirectoryNameFormat = "legacy",
 ): WorkspaceLayout {
   if (
     typeof runAttemptId !== "string" ||
@@ -2017,7 +2029,10 @@ function deriveWorkspaceLayout(
   if (purpose !== "validation" && purpose !== "model")
     throw new TypeError("Workspace purpose is invalid.");
   const identity = purpose === "model" ? `${runAttemptId}\0model` : runAttemptId;
-  const attemptName = `attempt-${createHash("sha256").update(identity, "utf8").digest("hex")}`;
+  const attemptName = encodeAttemptDirectoryName(
+    createHash("sha256").update(identity, "utf8").digest("hex"),
+    format,
+  );
   const attemptDirectory = win32.join(rootDirectory, attemptName);
   const checkoutDirectory = win32.join(attemptDirectory, "checkout");
   const controlDirectory = win32.join(attemptDirectory, "control");

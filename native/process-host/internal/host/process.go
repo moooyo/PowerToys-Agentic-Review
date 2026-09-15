@@ -32,3 +32,9 @@ var (
 type processIdentityProvider interface {
 	ProcessCreationTimeFileTime() uint64
 }
+
+// processResourceUsageProvider returns a cached, best-effort snapshot after Wait.
+// Missing observations must not change process exit or cleanup behavior.
+type processResourceUsageProvider interface {
+	ResourceUsage() *protocol.ProcessResourceUsage
+}

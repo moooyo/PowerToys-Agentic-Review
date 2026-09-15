@@ -1,5 +1,5 @@
 .workspace-page {
-  color: var(--app-text, #1d1b20);
+  color: var(--app-text, #172b3a);
   min-width: 0;
   width: 100%;
 }
@@ -31,7 +31,7 @@
 }
 
 .workspace-list-item.MuiListItem-root {
-  border-top: 1px solid var(--app-line, #cac4d0);
+  border-top: 1px solid var(--app-line, #cfd9e4);
 }
 
 .workspace-list-item .workspace-list-item__button.MuiListItemButton-root {
@@ -48,8 +48,8 @@
 }
 
 .workspace-list-item__avatar.MuiAvatar-root {
-  background: var(--app-accent-soft, #eaddff);
-  color: var(--app-accent, #6750a4);
+  background: var(--app-accent-soft, #e3f2fd);
+  color: var(--app-accent, #1565c0);
   height: 40px;
   width: 40px;
 }
@@ -93,7 +93,7 @@
 }
 
 .workspace-updated {
-  color: var(--app-muted, #49454f);
+  color: var(--app-muted, #465c70);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 16px;
@@ -108,13 +108,13 @@
 }
 
 .workspace-secondary {
-  color: var(--app-muted, #49454f);
+  color: var(--app-muted, #465c70);
   font-size: 14px;
   line-height: 20px;
 }
 
 .workspace-footer {
-  border-top: 1px solid var(--app-line, #cac4d0);
+  border-top: 1px solid var(--app-line, #cfd9e4);
 }
 
 .workspace-footer .MuiTablePagination-toolbar {
@@ -125,7 +125,7 @@
 
 .workspace-guidance {
   align-items: center;
-  color: var(--app-muted, #49454f);
+  color: var(--app-muted, #465c70);
   display: flex;
   font-size: 14px;
   gap: 8px;
@@ -139,7 +139,7 @@
 
 .workspace-skeleton {
   align-items: center;
-  border-top: 1px solid var(--app-line, #cac4d0);
+  border-top: 1px solid var(--app-line, #cfd9e4);
   display: flex;
   gap: 16px;
   min-height: 88px;
@@ -148,8 +148,8 @@
 
 .workspace-detail__bar {
   align-items: center;
-  background: var(--app-surface, #fffbfe);
-  border-bottom: 1px solid var(--app-line, #cac4d0);
+  background: var(--app-surface, #ffffff);
+  border-bottom: 1px solid var(--app-line, #cfd9e4);
   display: flex;
   flex-shrink: 0;
   gap: 16px;
@@ -169,7 +169,7 @@
 }
 
 .workspace-detail__identity code {
-  color: var(--app-muted, #49454f);
+  color: var(--app-muted, #465c70);
 }
 
 .workspace-detail__header {
@@ -185,9 +185,9 @@
 }
 
 .workspace-request-context.MuiAccordion-root {
-  border-bottom: 1px solid var(--app-line, #cac4d0);
+  border-bottom: 1px solid var(--app-line, #cfd9e4);
   border-radius: 0;
-  border-top: 1px solid var(--app-line, #cac4d0);
+  border-top: 1px solid var(--app-line, #cfd9e4);
 }
 
 .workspace-request-context .MuiAccordionSummary-root {

@@ -40,6 +40,7 @@ type ProcessLaunchSpec struct {
 	StandardInput          *string               `json:"standardInput,omitempty"`
 	InteractiveStdin       bool                  `json:"interactiveStdin,omitempty"`
 	CaptureProcessIdentity bool                  `json:"captureProcessIdentity,omitempty"`
+	CaptureResourceUsage   bool                  `json:"captureResourceUsage,omitempty"`
 	Limits                 ProcessResourceLimits `json:"limits"`
 }
 
@@ -125,12 +126,26 @@ type TerminatedEvent struct {
 }
 
 type ExitedEvent struct {
-	ProtocolVersion string  `json:"protocolVersion"`
-	Type            string  `json:"type"`
-	RequestID       string  `json:"requestId"`
-	ExitCode        *int64  `json:"exitCode"`
-	Signal          *string `json:"signal"`
-	OutputTruncated bool    `json:"outputTruncated"`
+	ProtocolVersion string                `json:"protocolVersion"`
+	Type            string                `json:"type"`
+	RequestID       string                `json:"requestId"`
+	ExitCode        *int64                `json:"exitCode"`
+	Signal          *string               `json:"signal"`
+	OutputTruncated bool                  `json:"outputTruncated"`
+	ResourceUsage   *ProcessResourceUsage `json:"resourceUsage,omitempty"`
+}
+
+// ProcessResourceUsage contains observations, not evidence that a limit was reached.
+type ProcessResourceUsage struct {
+	PeakJobMemoryBytes     *uint64                   `json:"peakJobMemoryBytes,omitempty"`
+	PeakProcessMemoryBytes *uint64                   `json:"peakProcessMemoryBytes,omitempty"`
+	ActiveProcesses        *ActiveProcessObservation `json:"activeProcesses,omitempty"`
+}
+
+type ActiveProcessObservation struct {
+	SampledPeak      uint32 `json:"sampledPeak"`
+	SampleCount      uint64 `json:"sampleCount"`
+	SampleIntervalMS uint32 `json:"sampleIntervalMs"`
 }
 
 type ErrorEvent struct {

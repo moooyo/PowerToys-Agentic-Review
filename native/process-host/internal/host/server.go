@@ -212,11 +212,12 @@ func (s *Server) start(request protocol.StartRequest) error {
 	}
 
 	managed := &managedProcess{
-		server:    s,
-		requestID: request.ID,
-		process:   process,
-		limits:    limits,
-		done:      make(chan struct{}),
+		server:               s,
+		requestID:            request.ID,
+		process:              process,
+		limits:               limits,
+		done:                 make(chan struct{}),
+		captureResourceUsage: request.Spec.CaptureResourceUsage,
 	}
 	if request.Spec.InteractiveStdin {
 		managed.input = newInputController(managed, stdinStreamID, process.StandardInput())
@@ -414,13 +415,14 @@ func truncateUTF16(value string, maximumUnits int) string {
 }
 
 type managedProcess struct {
-	server        *Server
-	requestID     string
-	process       launchedProcess
-	limits        protocol.EffectiveLimits
-	done          chan struct{}
-	input         *inputController
-	publicationMu sync.Mutex
+	server               *Server
+	requestID            string
+	process              launchedProcess
+	limits               protocol.EffectiveLimits
+	done                 chan struct{}
+	input                *inputController
+	publicationMu        sync.Mutex
+	captureResourceUsage bool
 
 	lifecycleMu        sync.Mutex
 	terminating        bool
@@ -613,6 +615,12 @@ func (p *managedProcess) wait(collector *outputCollector, streams *sync.WaitGrou
 		return
 	}
 	outputTruncated, outputErr := collector.Finish()
+	var resourceUsage *protocol.ProcessResourceUsage
+	if p.captureResourceUsage {
+		if provider, available := p.process.(processResourceUsageProvider); available {
+			resourceUsage = provider.ResourceUsage()
+		}
+	}
 
 	p.publicationMu.Lock()
 	p.lifecycleMu.Lock()
@@ -632,6 +640,7 @@ func (p *managedProcess) wait(collector *outputCollector, streams *sync.WaitGrou
 		ExitCode:        exitCode,
 		Signal:          nil,
 		OutputTruncated: outputTruncated,
+		ResourceUsage:   resourceUsage,
 	})
 	p.publicationMu.Unlock()
 

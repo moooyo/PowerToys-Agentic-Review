@@ -7,8 +7,14 @@ import {
   statfs as nodeStatFileSystem,
 } from "node:fs/promises";
 import { win32 } from "node:path";
+import {
+  decodeAttemptDirectoryName,
+  encodeAttemptDirectoryName,
+  isStrictAttemptDirectoryName,
+} from "./workspace-directory-name.js";
 
-const strictAttemptNamePattern = /^attempt-[a-f0-9]{64}$/u;
+export { isStrictAttemptDirectoryName } from "./workspace-directory-name.js";
+
 const defaultMonitorIntervalMs = 5_000;
 const defaultMaximumAccountingEntries = 100_000;
 const defaultMaximumScanDurationMs = 30_000;
@@ -401,10 +407,15 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
     signal?: AbortSignal,
   ): Promise<WorkspaceDiskReservation> {
     const attempt = this.#parseAttemptDirectory(attemptDirectory);
+    // A format change must not admit the same digest while either representation is reserved or present.
+    const equivalentNames = [
+      encodeAttemptDirectoryName(attempt.digest, "legacy"),
+      encodeAttemptDirectoryName(attempt.digest, "compact-v1"),
+    ];
     return this.#runExclusive(async (deadline) => {
       throwIfAborted(signal);
       await this.#assertWorkspaceAccessReady(signal, deadline);
-      if (this.#reservations.has(attempt.name)) {
+      if (equivalentNames.some((name) => this.#reservations.has(name))) {
         throw new WorkspaceDiskBudgetError(
           "ATTEMPT_ALREADY_EXISTS",
           "The attempt already has an active disk reservation.",
@@ -413,7 +424,7 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
 
       const snapshot = await this.#readSnapshot("admission", signal, deadline);
       throwIfAborted(signal);
-      if (snapshot.attemptBytes.has(attempt.name)) {
+      if (equivalentNames.some((name) => snapshot.attemptBytes.has(name))) {
         throw new WorkspaceDiskBudgetError(
           "ATTEMPT_ALREADY_EXISTS",
           "The attempt directory already exists on disk.",
@@ -1423,15 +1434,17 @@ export class ProductionWorkspaceDiskBudget implements WorkspaceDiskBudget {
   #parseAttemptDirectory(attemptDirectory: string): {
     readonly name: string;
     readonly path: string;
+    readonly digest: string;
   } {
     try {
       const normalized = normalizeLocalWindowsPath(attemptDirectory, "attemptDirectory");
       const name = win32.basename(normalized);
-      if (!isStrictAttemptDirectoryName(name)) {
+      const digest = decodeAttemptDirectoryName(name);
+      if (digest === null) {
         throw new TypeError("attemptDirectory must use the strict attempt hash name.");
       }
       this.#assertAttemptPath(normalized, name);
-      return { name, path: normalized };
+      return { name, path: normalized, digest };
     } catch (error) {
       throw new WorkspaceDiskBudgetError(
         "INVALID_ATTEMPT_PATH",
@@ -1887,10 +1900,6 @@ async function waitForDiskOperation<T>(operation: Promise<T>, signal?: AbortSign
   } finally {
     signal.removeEventListener("abort", onAbort);
   }
-}
-
-export function isStrictAttemptDirectoryName(name: string): boolean {
-  return strictAttemptNamePattern.test(name);
 }
 
 function normalizeWorkspaceRoot(path: string): string {

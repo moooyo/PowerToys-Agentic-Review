@@ -117,7 +117,7 @@ func validateStartObjectShape(rawSpec json.RawMessage) error {
 	if err := requirePropertiesWithOptional(
 		spec,
 		[]string{"executable", "arguments", "workingDirectory", "environmentMode", "environment", "limits"},
-		[]string{"standardInput", "captureProcessIdentity", "interactiveStdin"},
+		[]string{"standardInput", "captureProcessIdentity", "captureResourceUsage", "interactiveStdin"},
 	); err != nil {
 		return fmt.Errorf("spec: %w", err)
 	}
@@ -127,6 +127,9 @@ func validateStartObjectShape(rawSpec json.RawMessage) error {
 	}
 	if captureIdentity, exists := spec["captureProcessIdentity"]; exists && !bytes.Equal(bytes.TrimSpace(captureIdentity), []byte("true")) {
 		return errors.New("optional property \"captureProcessIdentity\" must be true when present")
+	}
+	if captureUsage, exists := spec["captureResourceUsage"]; exists && !bytes.Equal(bytes.TrimSpace(captureUsage), []byte("true")) {
+		return errors.New("optional property \"captureResourceUsage\" must be true when present")
 	}
 	if interactiveStdin, exists := spec["interactiveStdin"]; exists {
 		if !bytes.Equal(bytes.TrimSpace(interactiveStdin), []byte("true")) {

@@ -62,11 +62,20 @@ Validation runner settings cannot enable execution when `WORKER_EXECUTION_ENABLE
 
 Optional UI and Issue validation advice is enabled with `WORKER_VALIDATION_SUMMARY_ENABLED=true`.
 It defaults to disabled. The published workflow prompt is frozen in either mode; a disabled summary
-is displayed as not requested. `WORKER_VALIDATION_SUMMARY_TIMEOUT_MS` defaults to `60000` and accepts
+is displayed as not requested. `WORKER_VALIDATION_SUMMARY_TIMEOUT_MS` defaults to `150000` and accepts
 `10000..300000` milliseconds. The remaining job and no-progress budgets may allow less time or skip
 the summary. Advice uses a separate read-only model workspace and the already observed structured
 checks/evidence; it cannot replace runner outcomes or imply that the model inspected screenshots.
 Ordinary summary failures remain visible without retrying successful deterministic checks.
+The summary budget includes workspace preparation and final source verification. CLI launch uses
+only the remaining budget; fewer than 10 seconds skips launch. Summary diagnostics identify the
+phase, elapsed time, and whether a CLI process was observed.
+
+`WORKER_PROCESS_HOST_RESOURCE_DIAGNOSTICS=true` explicitly enables resource observations with a
+ProcessHost binary that supports `captureResourceUsage`. Keep it disabled with older pinned
+binaries. The optional exit data includes kernel-reported peak Job and process committed memory,
+plus sampled active process counts. These observations do not prove which quota caused a failure.
+The Worker logs effective CLI limits and execution timing without dumping the process environment.
 
 Summary execution uses the selected CLI, and production model acceptance is pending. Keep the
 opt-in disabled for the baseline deployment. The historical M24 model probe denied controlled file
@@ -107,6 +116,39 @@ pins must match the installed file. Profile executable fields accept registered 
 `./build/app.exe` paths into the current checkout. Bare filenames, arbitrary absolute paths, other
 relative paths, links, and redirected checkout ancestors are rejected. The executable resolver
 never allows a repository's same-named binary to replace a registered tool.
+
+Headless validation commands use a replacement environment, not the Worker's full host environment.
+The baseline contains `COMSPEC`, `PATH`, `PATHEXT`, `SYSTEMROOT`, and attempt-scoped `TEMP`, `TMP`,
+`USERPROFILE`, and `PSMODULEANALYSISCACHEPATH`. Bind additional toolchain prerequisites explicitly
+in each published profile command's `command.environment`.
+
+Visual Studio initialization through `Enter-VsDevShell` needs `PROGRAMDATA` on the tested Worker.
+Set it on every command that initializes or uses that toolchain; a setup command's environment
+changes do not carry into later commands.
+The verified VS 18 DevShell configuration also needs `PROGRAMFILES` for vcpkg's Visual Studio
+discovery, `PROCESSOR_ARCHITECTURE` for compiler-host selection, and `SYSTEMDRIVE` for .NET
+Framework common-application-data resolution. Use the Worker's actual architecture and paths.
+For example, an AMD64 host with Windows installed on `C:` uses these system values:
+
+```json
+[
+  {"name":"PROGRAMDATA","value":"C:\\ProgramData"},
+  {"name":"PROGRAMFILES","value":"C:\\Program Files"},
+  {"name":"PROCESSOR_ARCHITECTURE","value":"AMD64"},
+  {"name":"SYSTEMDRIVE","value":"C:"}
+]
+```
+
+Visual Studio's read-only vcpkg bundle needs a non-empty `LOCALAPPDATA`, or `APPDATA` as a fallback,
+to resolve its cache home. Bind it through each relevant command's `command.environment` to a
+pre-created, run-owned writable directory instead of inheriting the user's AppData. An error that
+these variables cannot be read can mean they are missing or empty; it does not prove an ACL denial.
+Successful cache-path or help probes do not establish successful dependency restoration or builds.
+Verify actual compiler-host selection and a bounded compile with file tracking and analysis enabled.
+On the tested toolchain, missing architecture metadata selected HostX86 and compilation stalled;
+selecting HostX64 exposed an invalid common-data path until `SYSTEMDRIVE` was supplied. Providing
+the real environment values allowed the same tracked compile to pass without disabling analysis
+or file tracking. An installation inventory alone cannot establish this runtime compatibility.
 
 Secret mappings contain only operator-provisioned absolute file paths. Keep secret bytes out of
 configuration JSON, prompts, command arguments, and diagnostics. Protect the files and their parent
@@ -150,6 +192,23 @@ workspace budgets remain separate.
 Use an external Windows service manager or scheduled-task policy if automatic restart is required.
 It must preserve graceful process shutdown. The current repository does not prescribe a specific
 service manager and still does not provide an auto-distribution installer.
+
+`WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT` optionally selects `legacy` (the default) or `compact-v1`
+for newly created attempt directories. Both formats hash the UTF-8 workspace identity with
+SHA-256: validation/default workspaces use `runAttemptId`, while isolated model workspaces use
+`runAttemptId` followed by a NUL byte and the literal `model`. `legacy` uses `attempt-` followed
+by the digest's 64-character lowercase hexadecimal representation. `compact-v1` uses `a1-`
+followed by the same full digest encoded losslessly as a zero-padded, fixed-width 50-character
+lowercase base36 string; it does not truncate the digest. Both formats retain the `checkout`
+subdirectory.
+Workspace scans and cleanup strictly recognize canonical names in both formats, regardless of
+the selected format. Changing the setting only changes new directory names; it does not rename
+existing attempts or relax path, ownership, or cleanup checks. Admission rejects an identity that
+already has a directory or active reservation in either format.
+
+Use a dedicated, short physical `WORKER_WORKSPACE_ROOT_DIRECTORY` beneath `WORKER_DATA_DIR` to
+reduce Windows path lengths. Do not use a `SUBST` drive or a junction as a trusted workspace root.
+Compact naming reduces the attempt component but does not replace the physical-root requirement.
 
 Workspace admission, monitoring, and cleanup use bounded disk operations. Configure
 `WORKER_EXECUTION_DISK_SCAN_TIMEOUT_MS` (default `30000`, allowed `100..300000` milliseconds) and

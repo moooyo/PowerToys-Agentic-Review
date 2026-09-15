@@ -28,6 +28,10 @@ import {
 } from "./managed-process-runner.js";
 import type { ProcessHostClient, ProcessLaunchSpec } from "./process-host-protocol.js";
 import {
+  decodeAttemptDirectoryName,
+  type WorkspaceDirectoryNameFormat,
+} from "./workspace-directory-name.js";
+import {
   type WorkspaceDiskBudget,
   WorkspaceDiskBudgetError,
   type WorkspaceDiskMonitor,
@@ -696,6 +700,7 @@ function provider(
   fileSystem: FakeWorkspaceFileSystem,
   processRunner: FakeManagedProcessRunner,
   options: {
+    readonly workspaceDirectoryNameFormat?: WorkspaceDirectoryNameFormat;
     readonly gitEnvironment?: Readonly<Record<string, string>>;
     readonly gitWorkingDirectory?: string;
     readonly diskBudget?: WorkspaceDiskBudget;
@@ -711,6 +716,9 @@ function provider(
   processRunner.fileSystem = fileSystem;
   return new ProductionDisposableJobWorkspaceProvider({
     workspaceRootDirectory: workspaceRoot,
+    ...(options.workspaceDirectoryNameFormat === undefined
+      ? {}
+      : { workspaceDirectoryNameFormat: options.workspaceDirectoryNameFormat }),
     gitSharedRootDirectory,
     gitExecutable,
     gitWorkingDirectory: options.gitWorkingDirectory ?? gitWorkingDirectory,
@@ -890,27 +898,56 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     },
   );
 
-  it("isolates model and validation workspaces without changing the leased attempt", async () => {
-    const fileSystem = new FakeWorkspaceFileSystem();
-    const processRunner = new FakeManagedProcessRunner();
-    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
-    const workspaces = provider(fileSystem, processRunner, { diskBudget });
-    const input = envelope("issue");
-    const leaseBefore = structuredClone(input.lease);
-    const validation = await workspaces.prepare(input, preparationContext().context);
-    const model = await workspaces.prepare(input, preparationContext().context, "model");
+  it.each(["legacy", "compact-v1"] as const)(
+    "isolates %s model and validation workspaces without changing the leased attempt",
+    async (workspaceDirectoryNameFormat) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+      const workspaces = provider(fileSystem, processRunner, {
+        diskBudget,
+        workspaceDirectoryNameFormat,
+      });
+      const input = envelope("issue");
+      const leaseBefore = structuredClone(input.lease);
+      const validation = await workspaces.prepare(input, preparationContext().context);
+      const model = await workspaces.prepare(input, preparationContext().context, "model");
 
-    expect(input.lease).toEqual(leaseBefore);
-    expect(validation.attemptDirectory).not.toBe(model.attemptDirectory);
-    expect(win32.basename(validation.attemptDirectory)).toBe(
-      `attempt-${createHash("sha256").update(input.lease.runAttemptId).digest("hex")}`,
-    );
-    expect(diskBudget.admitted).toEqual([validation.attemptDirectory, model.attemptDirectory]);
-    await model.cleanup();
-    expect(fileSystem.has(validation.checkoutDirectory)).toBe(true);
-    await validation.cleanup();
-    expect(diskBudget.released).toEqual([model.attemptDirectory, validation.attemptDirectory]);
-  });
+      expect(input.lease).toEqual(leaseBefore);
+      expect(validation.attemptDirectory).not.toBe(model.attemptDirectory);
+      expect(decodeAttemptDirectoryName(win32.basename(validation.attemptDirectory))).toBe(
+        createHash("sha256").update(input.lease.runAttemptId).digest("hex"),
+      );
+      expect(decodeAttemptDirectoryName(win32.basename(model.attemptDirectory))).toBe(
+        createHash("sha256").update(`${input.lease.runAttemptId}\0model`).digest("hex"),
+      );
+      expect(win32.basename(validation.attemptDirectory)).toHaveLength(
+        workspaceDirectoryNameFormat === "legacy" ? 72 : 53,
+      );
+      expect(
+        [validation, model].flatMap((workspace) => [
+          win32.basename(workspace.checkoutDirectory),
+          win32.basename(workspace.controlDirectory),
+          win32.basename(workspace.tempDirectory),
+          win32.basename(workspace.userProfileDirectory),
+        ]),
+      ).toEqual([
+        "checkout",
+        "control",
+        "temp",
+        "user-profile",
+        "checkout",
+        "control",
+        "temp",
+        "user-profile",
+      ]);
+      expect(diskBudget.admitted).toEqual([validation.attemptDirectory, model.attemptDirectory]);
+      await model.cleanup();
+      expect(fileSystem.has(validation.checkoutDirectory)).toBe(true);
+      await validation.cleanup();
+      expect(diskBudget.released).toEqual([model.attemptDirectory, validation.attemptDirectory]);
+    },
+  );
 
   it("prepares the frozen evaluation PR commits after the upstream PR head has advanced", async () => {
     const fileSystem = new FakeWorkspaceFileSystem();
@@ -1934,56 +1971,67 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(progress.healthFaults).toEqual([]);
   });
 
-  it("recovers a nonzero Git removal through the reservation and confirms only this registration is absent", async () => {
-    const fileSystem = new FakeWorkspaceFileSystem();
-    const processRunner = new FakeManagedProcessRunner();
-    const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
-    const warn = vi.fn();
-    const progress = preparationContext();
-    const workspaceProvider = provider(fileSystem, processRunner, {
-      diskBudget,
-      logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
-    });
-    const first = await workspaceProvider.prepare(envelope("pull_request"), progress.context);
-    const second = await workspaceProvider.prepare(
-      envelope("pull_request", { runAttemptId: "other-active-attempt" }),
-      preparationContext().context,
-    );
-    const repository = `${gitSharedRootDirectory}\\repository-1844564.git`;
-    processRunner.worktreeListOutput =
-      `worktree ${repository}\0bare\0\0` +
-      `worktree ${second.checkoutDirectory}\0HEAD ${headSha}\0detached\0\0`;
-    processRunner.onRun = (spec) => {
-      if (spec.arguments.includes("remove") && spec.arguments.at(-1) === first.checkoutDirectory) {
-        throw new ManagedProcessRunError("NON_ZERO_EXIT", "Managed process exited with code 255.", {
-          exitCode: 255,
-          stderr: "error: failed to delete checkout: Result too large",
-        });
-      }
-    };
-    const callsBeforeCleanup = processRunner.calls.length;
+  it.each(["legacy", "compact-v1"] as const)(
+    "recovers a nonzero Git removal through the %s reservation and confirms only this registration is absent",
+    async (workspaceDirectoryNameFormat) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const diskBudget = new FakeWorkspaceDiskBudget(fileSystem);
+      const warn = vi.fn();
+      const progress = preparationContext();
+      const workspaceProvider = provider(fileSystem, processRunner, {
+        diskBudget,
+        logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+        workspaceDirectoryNameFormat,
+      });
+      const first = await workspaceProvider.prepare(envelope("pull_request"), progress.context);
+      const second = await workspaceProvider.prepare(
+        envelope("pull_request", { runAttemptId: "other-active-attempt" }),
+        preparationContext().context,
+      );
+      const repository = `${gitSharedRootDirectory}\\repository-1844564.git`;
+      processRunner.worktreeListOutput =
+        `worktree ${repository}\0bare\0\0` +
+        `worktree ${second.checkoutDirectory}\0HEAD ${headSha}\0detached\0\0`;
+      processRunner.onRun = (spec) => {
+        if (
+          spec.arguments.includes("remove") &&
+          spec.arguments.at(-1) === first.checkoutDirectory
+        ) {
+          throw new ManagedProcessRunError(
+            "NON_ZERO_EXIT",
+            "Managed process exited with code 255.",
+            {
+              exitCode: 255,
+              stderr: "error: failed to delete checkout: Result too large",
+            },
+          );
+        }
+      };
+      const callsBeforeCleanup = processRunner.calls.length;
 
-    await expect(first.cleanup()).resolves.toBeUndefined();
+      await expect(first.cleanup()).resolves.toBeUndefined();
 
-    expect(diskBudget.checkoutRemovals).toEqual([first.checkoutDirectory]);
-    expect(diskBudget.released).toEqual([first.attemptDirectory]);
-    expect(fileSystem.has(first.attemptDirectory)).toBe(false);
-    expect(fileSystem.has(second.checkoutDirectory)).toBe(true);
-    expect(
-      processRunner.calls
-        .slice(callsBeforeCleanup)
-        .map((call) =>
-          call.spec.arguments.filter((arg) => ["remove", "prune", "list"].includes(arg)),
-        ),
-    ).toEqual([["remove"], ["prune"], ["list"]]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(
-      "Git worktree removal recovered through reserved checkout cleanup.",
-      { exitCode: 255, stderrSummary: "error: failed to delete checkout: Result too large" },
-    );
-    expect(progress.healthFaults).toEqual([]);
-    await second.cleanup();
-  });
+      expect(diskBudget.checkoutRemovals).toEqual([first.checkoutDirectory]);
+      expect(diskBudget.released).toEqual([first.attemptDirectory]);
+      expect(fileSystem.has(first.attemptDirectory)).toBe(false);
+      expect(fileSystem.has(second.checkoutDirectory)).toBe(true);
+      expect(
+        processRunner.calls
+          .slice(callsBeforeCleanup)
+          .map((call) =>
+            call.spec.arguments.filter((arg) => ["remove", "prune", "list"].includes(arg)),
+          ),
+      ).toEqual([["remove"], ["prune"], ["list"]]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "Git worktree removal recovered through reserved checkout cleanup.",
+        { exitCode: 255, stderrSummary: "error: failed to delete checkout: Result too large" },
+      );
+      expect(progress.healthFaults).toEqual([]);
+      await second.cleanup();
+    },
+  );
 
   it.each([
     "checkout_removal",
@@ -2614,38 +2662,52 @@ describe("ProductionDisposableJobWorkspaceProvider", () => {
     expect(progress.processCounts.at(-1)).toBe(0);
   });
 
-  it("rejects attempt reuse, unsafe identities, and redirected roots", async () => {
+  it.each(["legacy", "compact-v1"] as const)(
+    "rejects %s attempt reuse, unsafe identities, and redirected roots",
+    async (workspaceDirectoryNameFormat) => {
+      const fileSystem = new FakeWorkspaceFileSystem();
+      const processRunner = new FakeManagedProcessRunner();
+      const workspaceProvider = provider(fileSystem, processRunner, {
+        workspaceDirectoryNameFormat,
+      });
+      const firstContext = preparationContext();
+      const first = await workspaceProvider.prepare(envelope("issue"), firstContext.context);
+      const collisionContext = preparationContext();
+      await expect(
+        workspaceProvider.prepare(envelope("issue"), collisionContext.context),
+      ).rejects.toMatchObject({ code: "ATTEMPT_ALREADY_EXISTS" });
+      expect(collisionContext.healthFaults).toHaveLength(1);
+      await first.cleanup();
+
+      const invalidContext = preparationContext();
+      await expect(
+        workspaceProvider.prepare(
+          envelope("issue", { runAttemptId: "../escape" }),
+          invalidContext.context,
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
+      expect(invalidContext.healthFaults).toEqual([]);
+
+      const redirected = new FakeWorkspaceFileSystem();
+      const redirectedContext = preparationContext();
+      redirected.setRealPath(workspaceRoot, "D:\\redirected");
+      await expect(
+        provider(redirected, new FakeManagedProcessRunner(), {
+          workspaceDirectoryNameFormat,
+        }).prepare(envelope("issue", { runAttemptId: "redirected" }), redirectedContext.context),
+      ).rejects.toMatchObject({ code: "WORKSPACE_ROOT_UNSAFE" });
+      expect(redirectedContext.healthFaults).toHaveLength(1);
+    },
+  );
+
+  it("rejects an unknown workspace name format before accessing the filesystem", () => {
     const fileSystem = new FakeWorkspaceFileSystem();
-    const processRunner = new FakeManagedProcessRunner();
-    const workspaceProvider = provider(fileSystem, processRunner);
-    const firstContext = preparationContext();
-    const first = await workspaceProvider.prepare(envelope("issue"), firstContext.context);
-    const collisionContext = preparationContext();
-    await expect(
-      workspaceProvider.prepare(envelope("issue"), collisionContext.context),
-    ).rejects.toMatchObject({ code: "ATTEMPT_ALREADY_EXISTS" });
-    expect(collisionContext.healthFaults).toHaveLength(1);
-    await first.cleanup();
-
-    const invalidContext = preparationContext();
-    await expect(
-      workspaceProvider.prepare(
-        envelope("issue", { runAttemptId: "../escape" }),
-        invalidContext.context,
-      ),
-    ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
-    expect(invalidContext.healthFaults).toEqual([]);
-
-    const redirected = new FakeWorkspaceFileSystem();
-    const redirectedContext = preparationContext();
-    redirected.setRealPath(workspaceRoot, "D:\\redirected");
-    await expect(
-      provider(redirected, new FakeManagedProcessRunner()).prepare(
-        envelope("issue", { runAttemptId: "redirected" }),
-        redirectedContext.context,
-      ),
-    ).rejects.toMatchObject({ code: "WORKSPACE_ROOT_UNSAFE" });
-    expect(redirectedContext.healthFaults).toHaveLength(1);
+    expect(() =>
+      provider(fileSystem, new FakeManagedProcessRunner(), {
+        workspaceDirectoryNameFormat: "compact" as WorkspaceDirectoryNameFormat,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_CONFIGURATION" }));
+    expect(fileSystem.created).toEqual([]);
   });
 
   it("tombstones unsafe cleanup and reports a node health fault for draining", async () => {

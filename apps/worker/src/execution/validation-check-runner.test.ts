@@ -1889,6 +1889,74 @@ describe("HeadlessValidationCheckRunner", () => {
     );
   });
 
+  it("completes snapshot-only issue triage without inspecting or claiming a source revision", async () => {
+    const fixture = harness();
+    fixture.captureWorktreeState.mockResolvedValue("unknown");
+    const selectedProfile: ValidationProfileVersion = {
+      ...profile({ test: [] }),
+      workflowKind: "issue_triage",
+      outputSchemaVersion: "IssueTriageV2",
+    };
+
+    const result = await fixture.run(selectedProfile, "issue");
+
+    expect(result.report).toMatchObject({
+      workItemKind: "issue",
+      sourceState: "unknown",
+      reproductionConclusion: "inconclusive",
+      checks: [],
+    });
+    expect(result.blockers).toEqual([]);
+    expect(result.diagnostics).toEqual([]);
+    expect(result.cleanupState).toBe("not_needed");
+    expect(fixture.captureWorktreeState).not.toHaveBeenCalled();
+    expect(fixture.processRunner.run).not.toHaveBeenCalled();
+    expect(fixture.resolveExecutable).not.toHaveBeenCalled();
+  });
+
+  it.each(["setup", "build", "test", "launch", "cleanup"] as const)(
+    "rejects issue triage with a %s command before applying the snapshot-only exception",
+    async (phase) => {
+      const fixture = harness();
+      const selectedProfile: ValidationProfileVersion = {
+        ...profile({ test: [], [phase]: [step("unexpected-command")] }),
+        workflowKind: "issue_triage",
+        outputSchemaVersion: "IssueTriageV2",
+      };
+
+      const result = await fixture.run(selectedProfile, "issue");
+
+      expect(result.blockers).toContainEqual(expect.objectContaining({ code: "PROFILE_INVALID" }));
+      expect(fixture.processRunner.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["pr_static_build", "issue_validation"] as const)(
+    "still blocks %s without source inspection even when its command stages are empty",
+    async (workflowKind) => {
+      const fixture = harness();
+      delete fixture.workspace.captureWorktreeState;
+      const selectedProfile: ValidationProfileVersion =
+        workflowKind === "pr_static_build"
+          ? profile({ test: [] })
+          : {
+              ...profile({ test: [] }),
+              workflowKind,
+              outputSchemaVersion: "ValidationReportV1",
+            };
+
+      const result = await fixture.run(
+        selectedProfile,
+        workflowKind === "pr_static_build" ? "pull_request" : "issue",
+      );
+
+      expect(result.report.sourceState).toBe("unknown");
+      expect(result.blockers).toContainEqual(
+        expect.objectContaining({ code: "SOURCE_STATE_UNKNOWN", phase: "source" }),
+      );
+    },
+  );
+
   it("finishes one final source observation within the budget when cleanup has no commands", async () => {
     vi.useFakeTimers();
     const fixture = harness({ cleanupTimeoutMs: 1000 });

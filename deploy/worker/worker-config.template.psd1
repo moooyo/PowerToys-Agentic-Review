@@ -34,7 +34,7 @@
     WORKER_VALIDATION_HEADLESS_ENABLED = 'true'
     WORKER_VALIDATION_CLEANUP_TIMEOUT_MS = 30000 # Allowed: 1000..300000 milliseconds, including final source observation.
     WORKER_VALIDATION_SUMMARY_ENABLED = 'false' # Optional UI/Issue model advice; runner checks remain authoritative.
-    WORKER_VALIDATION_SUMMARY_TIMEOUT_MS = 60000 # Allowed: 10000..300000; the remaining job budget also applies.
+    WORKER_VALIDATION_SUMMARY_TIMEOUT_MS = 150000 # Allowed: 10000..300000; preparation and final checks share this budget.
     WORKER_VALIDATION_WEB_ENABLED = 'false'
     WORKER_VALIDATION_WINDOWS_ENABLED = 'false'
     # Enable Web only after deploying web-driver.mjs and its packaged playwright-core runtime.
@@ -58,6 +58,7 @@
     WORKER_DATA_DIR = 'D:\AgenticReview\Data'
     WORKER_GIT_SHARED_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Repositories'
     WORKER_WORKSPACE_ROOT_DIRECTORY = 'D:\AgenticReview\Data\Workspaces'
+    WORKER_WORKSPACE_DIRECTORY_NAME_FORMAT = 'legacy' # Allowed: legacy, compact-v1. Compact names preserve the full SHA256 digest.
     WORKER_EXECUTION_TEMP_DIRECTORY = 'D:\AgenticReview\Data\Temp'
     # Trusted pinned infrastructure binaries (required when execution is enabled)
     WORKER_TRUSTED_EXECUTABLE_ROOT = 'D:\AgenticReview\Trusted'
@@ -84,6 +85,7 @@
     WORKER_PROCESS_HOST_REQUEST_TIMEOUT_MS = 15000
     WORKER_PROCESS_HOST_START_TIMEOUT_MS = 30000
     WORKER_PROCESS_HOST_SHUTDOWN_TIMEOUT_MS = 15000
+    WORKER_PROCESS_HOST_RESOURCE_DIAGNOSTICS = 'false' # Enable only with a pinned ProcessHost supporting captureResourceUsage.
 
     # Model/Git hard-stop controls; the CLI runs repository commands without recipe settings.
     WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS = 3600000
