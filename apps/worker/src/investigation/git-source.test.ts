@@ -461,7 +461,7 @@ describe("managed Git complete-output capture", () => {
         close: async () => undefined,
       },
     });
-    expect(Buffer.from(result.stdout)).toEqual(bytes);
+    expect(Buffer.from(result.stdout).equals(bytes)).toBe(true);
   });
 
   it("rejects complete-output budget exhaustion instead of accepting truncated patch data", async () => {
