@@ -22,6 +22,7 @@ export * from "./execution-evidence.js";
 export * from "./finding-dispositions.js";
 export * from "./github.js";
 export * from "./investigation.js";
+export * from "./investigation-artifact-metadata.js";
 export * from "./investigation-auth.js";
 export * from "./investigation-execution.js";
 export * from "./investigation-preview.js";

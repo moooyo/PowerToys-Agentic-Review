@@ -27,11 +27,14 @@ import {
   type InvestigationValidation,
   InvestigationValidationSchema,
   PositiveIntegerSchema,
+  validateInvestigationTask,
 } from "@agentic-review/contracts";
 import {
   evaluateInvestigationCompletion,
   investigationContentDigest,
   investigationTaskBindingDigest,
+  projectInvestigationNextActions,
+  projectInvestigationReportFindings,
 } from "@agentic-review/domain";
 import { Value } from "@sinclair/typebox/value";
 import { registerWorkerContractFormats } from "../contracts-formats.js";
@@ -150,12 +153,42 @@ export function buildInvestigationReportSubmission(
     "Evidence IDs must be unique across model and worker records.",
   );
   const plans = reportPlans(input, analysis.plans, sourceReportRef);
-  const nextActions = analysis.nextActions.map((action) => ({
-    ...action,
-    sourceReportRef: { ...sourceReportRef },
-    state: "saved" as const,
-  }));
-  const diagnostics = mergeDiagnostics(analysis.diagnostics, input.diagnostics ?? []);
+  const context: InvestigationResultV1["context"] = {
+    repository: structuredClone(task.repository),
+    workItem: structuredClone(task.workItem),
+    task: {
+      id: task.id,
+      kind: task.kind,
+      parentTaskId: task.parentTaskId,
+      subjectRef: task.subjectRef,
+    },
+    attempt: { id: attempt.id, number: attempt.number },
+    adoptedAttemptIds: [...checkpoint.adoptedAttemptIds],
+    subjects: runtime.subjects,
+    ...(task.sourceArtifacts === undefined
+      ? {}
+      : { sourceArtifacts: structuredClone(task.sourceArtifacts) }),
+    profileRef: structuredClone(task.profileRef),
+    promptRef: structuredClone(task.promptRef),
+    parentReportRef: structuredClone(task.parentReportRef),
+  };
+  const projectedFindings = projectInvestigationReportFindings(
+    analysis.findings,
+    sourceReportRef,
+    mergeDiagnostics(analysis.diagnostics, input.diagnostics ?? []),
+  );
+  const { nextActions, diagnostics } = projectInvestigationNextActions(
+    {
+      context,
+      report: sourceReportRef,
+      assessment: analysis.assessment,
+      findings: projectedFindings.findings,
+      feedbackDrafts: analysis.feedbackDrafts,
+    },
+    analysis.nextActions,
+    plans,
+    projectedFindings.diagnostics,
+  );
   const collections = {
     findings: analysis.findings.length,
     verificationEvidence: verificationEvidence.length,
@@ -169,22 +202,7 @@ export function buildInvestigationReportSubmission(
     schemaVersion: "InvestigationResultV1",
     id: reportId,
     version,
-    context: {
-      repository: structuredClone(task.repository),
-      workItem: structuredClone(task.workItem),
-      task: {
-        id: task.id,
-        kind: task.kind,
-        parentTaskId: task.parentTaskId,
-        subjectRef: task.subjectRef,
-      },
-      attempt: { id: attempt.id, number: attempt.number },
-      adoptedAttemptIds: [...checkpoint.adoptedAttemptIds],
-      subjects: runtime.subjects,
-      profileRef: structuredClone(task.profileRef),
-      promptRef: structuredClone(task.promptRef),
-      parentReportRef: structuredClone(task.parentReportRef),
-    },
+    context,
     outcome,
     report: {
       id: reportId,
@@ -213,7 +231,7 @@ export function buildInvestigationReportSubmission(
       limitations: analysis.limitations,
       collections,
     },
-    findings: analysis.findings,
+    findings: projectedFindings.findings,
     assessment: analysis.assessment,
     validation: runtime.validation,
     verificationEvidence,
@@ -301,6 +319,7 @@ export function buildInvestigationReportSubmission(
 function validateInput(input: BuildInvestigationReportSubmissionInput): void {
   if (
     !Value.Check(InvestigationTaskV1Schema, input.task) ||
+    (input.task.sourceArtifacts !== undefined && !validateInvestigationTask(input.task).valid) ||
     !Value.Check(InvestigationAttemptV1Schema, input.attempt) ||
     !Value.Check(InvestigationLoopCheckpointV1Schema, input.checkpoint) ||
     !Value.Check(EntityIdSchema, input.reportId) ||
@@ -390,6 +409,7 @@ function validatedRuntime(input: BuildInvestigationReportSubmissionInput): {
       (entry) =>
         !Value.Check(InvestigationArtifactV1Schema, entry) ||
         entry.taskId !== task.id ||
+        task.sourceArtifacts?.some((source) => source.id === entry.id) ||
         !adoptedAttemptIds.has(entry.attemptId) ||
         !subjectIds.has(entry.subjectRef),
     )

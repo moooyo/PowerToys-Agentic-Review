@@ -1,5 +1,97 @@
 # Implementation Status
 
+## Native Windows investigation delivery, 2026-09-16
+
+The production Server and Worker entry points passed the scoped synthetic Windows lifecycle
+exercise. Evidence quotas, bounded retention, current artifact availability, and inherited patch
+lineage are implemented. **The real CLI investigation, same-task recovery delivery, and explicitly
+approved two-comment publication run are accepted within their recorded scopes.** The
+[native Worker handoff](./handoff/2026-09-16-native-worker-acceptance.md) records the current scope
+and separates software verification, synthetic lifecycle acceptance, real-model recovery, and
+external publication.
+
+| Work | Current state | Evidence and remaining boundary |
+| --- | --- | --- |
+| Native lifecycle | Accepted for the synthetic fixture | Actual Server/Worker startup, password accounts and explicit grants, two consecutive tasks, cancellation, graceful stop/restart, and checkpoint resume passed on Windows. |
+| Complete report delivery | Accepted for the synthetic fixture | 137 findings and 137 final rechecks, approximately 3.9 MB exports, complete 50/50/37 pagination, retained partial findings, cleanup, and zero action intents. |
+| Evidence operations | Implemented with scoped regression coverage | `investigation-v2`, atomic resident quotas, bounded retention, current metadata APIs, protected recovery/source dependencies, and original producer lineage. Production capacity remains separate. |
+| Real model and recovery | Accepted as a combined sequence | Five actual model rounds followed by native attempt 2 on the same task sealed a complete 30,886-byte report with zero new model rounds/tokens. The original failed delivery remains unchanged; this is not an uninterrupted-run claim. |
+| Native publication | Approved scope accepted | Both native intents succeeded on owned-fork PR #3 and Issue #5. Each target had one confirmation and one new matching comment observed by GET; the one-run approval is consumed. |
+
+The evidence defaults are 30 days, 1 GiB of resident original artifact content, and 10,000 resident
+artifacts, with 100 metadata records scanned per cleanup pass every 60 seconds. Protection retains
+active work, accepted recovery checkpoints, and required inherited patch sources. Expiration
+preserves report history and metadata; decoded-content quotas do not bound or shrink physical
+SQLite/WAL files. Tasks and reports use `sourceArtifacts` to preserve ancestor patch producer IDs
+without claiming those inputs as new execution evidence. See the
+[Server operations instructions](../apps/server/README.md#evidence-retention-and-capacity).
+
+The delivery correction aligns completion with the approved design: an unresolved snapshot-analysis
+candidate may retain a same-subject saved `investigation`, `verification`, or `reproduction` plan
+with a valid current/exact-parent report source, nonempty steps and criteria, and an explicit
+limitation. An executable next-action button is not required to preserve that remaining work;
+saved-action validation and plan-kind execution guards remain strict.
+
+Report projection preserves invalid action proposals as complete non-executable diagnostics and
+derives zero-based finding display ordinals from the original ledger order. The model's retained
+`ordinal: 1` becomes report ordinal `0` with a trusted old/new ordinal diagnostic; its finding ID,
+version, body, and recheck bindings stay unchanged. Report projection does not mutate the accepted
+checkpoint. The Server independently recomputes findings, actions, and diagnostics and applies the
+complete public report semantic validator before sealing. The final remote checks and native recovery accepted
+these changes; they are deliberate contract and presentation changes.
+
+Native recovery reused task `2e067db8-6e14-4b52-83c2-4f9ba6d68090` and its existing database. Attempt 2
+advanced checkpoint v6 to v7 while retaining `stopReason: complete`, five model rounds, and identical
+analysis/runtime/consumed values. Report `aa4d1180-5473-4aaa-a8d9-b7bd19a244d7` retains one hypothesis
+finding, one reproduction plan, and the invalid-action and ordinal diagnostics, with no executable
+next-action suggestions. Server/Worker exit 0 and owned cleanup passed; ActionIntents remained zero
+and external writes disabled. The original run-5 failed receipt and absence of an export were not
+rewritten. This accepts real CLI analysis plus same-task delivery recovery, not real source
+execution, reproduction, UI behavior, or the correctness of the hypothesis.
+
+The final package regression scopes total **14,562 passes and 45 skips**: Contracts 1,690,
+Domain 346, Codex 222, Server 6,035, Worker 2,523, and Dashboard 3,746. The complete Linux Server run
+passed 174 files with one skip; the Worker retains 44 skips. Server active-investigation checks
+passed 295 tests in 15 files on both Windows and Linux and are not counted twice. Affected Windows
+type checks and shared/Server/Worker/Dashboard builds passed; the final 13-source-file Biome check
+had zero errors and 125 warnings, with one file formatted and no unsafe fixes. Codex and Dashboard
+retain their unchanged-scope receipts. The attempted full historical Server suite on Windows
+retains 151 Linux-specific database/evidence failures and is
+not an accepted Windows full-suite run. Earlier installation, model, and test type-checking
+failures remain recorded. These scopes do not claim a new whole-project CI result.
+
+The declared code base revision is `2d0c36ef3627143e4ac546197bb761c74674af9f`; executed source and
+runtime manifests identify the actual snapshots with subsequent changes. Full infrastructure
+receipts remain outside the repository. The [handoff](./handoff/2026-09-16-native-worker-acceptance.md)
+records the sealed export's size and hash without copying private deployment details.
+
+The user explicitly approved the immutable publication JSON with SHA-256
+`0671baa0f8a5c4b446dbadc3a8e4b7013cae1af04c490f6662bbdbf3f49ba936` for run
+`investigation-publication-20260916-v1`. Native preparation performed no external writes. Execution
+from `2026-09-16T07:24:12.437Z` to `07:24:53Z` passed: the
+[PR #3 comment](https://github.com/moooyo/PowerToys/pull/3#issuecomment-5693633461) and
+[Issue #5 comment](https://github.com/moooyo/PowerToys/issues/5#issuecomment-5693635709) both reached
+native intent state `succeeded`. Independent GET readback matched the full approved body, native
+marker, publisher ID `42196638`, and exact target; conversation counts changed 0 to 1 and 1 to 2.
+
+Each target had exactly one native confirmation. The production single-mutation path gives a
+derived upper bound of one POST attempt per target; no HTTP proxy measured network POST counts.
+No delivery became unknown and no native reconciliation was invoked. Ordinary GET readback does
+not establish unknown-delivery recovery. Server exit was 0. Repository requests stayed within
+`moooyo/PowerToys`, apart from the required `GET /user` identity check, and redirects were rejected.
+This publication run made no request to `microsoft/PowerToys`.
+
+Cleanup at `2026-09-16T07:26:19Z` confirmed removal of the temporary publisher credential and
+closure of the owned Server, with the original CLI authentication untouched. A sanitized native
+receipt is retained separately from private infrastructure data.
+
+The comments remain in place, and the single-run authorization is consumed. The
+[publication scope and execution record](../deploy/investigation-acceptance/publication-approval.md)
+retains the exact approved limits; no rerun, cleanup mutation, or broader publication authority is
+implied. This acceptance introduced no product-code change or new full-suite run. The
+project-designated remote Windows worker remains the default verification environment;
+Linux-specific checks may use `test-env`. No local verification was run.
+
 ## Built-in accounts, 2026-09-15
 
 Application-owned username/password authentication is implemented. The production entry uses
@@ -84,10 +176,11 @@ exit and schema-validated structured output. The CLI owns login, provider config
 traffic; the project does not read/copy CLI auth/provider files or maintain a global provider
 registry, model HTTP relay or provider call ledger. Capabilities expose nullable `cliEngine` and
 `cliVersion`, with null values when model execution is disabled. Configured model names do not
-establish independently verified remote-model identity. The unused `executionAccepted` field is
-absent from the current development contracts, results and UI. The product is unreleased: development directly
-maintains current SQLite schema **31**, without database resets, old-version upgrades, data
-conversion or compatibility migration work. The existing ordered SQL initialization remains in use.
+establish independently verified remote-model identity. The unused `executionAccepted` field was
+absent from that baseline's contracts, results and UI. That unreleased snapshot directly maintained
+SQLite schema **31**, without database resets, old-version upgrades, data conversion or compatibility
+migration work, using its ordered SQL initialization. This is historical architecture;
+the active investigation runtime now initializes `investigation-v2` directly.
 Historical schema numbers describe their original snapshots. Existing data and historical artifacts
 remain unchanged. Automated suites use isolated synthetic data; the explicitly
 authorized real CLI probes and controlled-fixture workflow acceptance below are separately scoped.
@@ -297,26 +390,29 @@ Legacy compatibility, dual writes, data backfills, and migration scripts are not
 Actual deployment and scenario acceptance remain scoped below; automated verification does not
 authorize writes to actual repository PRs or issues.
 
-- **Worker deployment:** accept full Worker `main.ts` startup and consecutive tasks on the intended
-  Windows VM, including account/session setup, credentials, restart, cancellation and cleanup.
-  M39 accepted component composition with an owned Git transport substitution, not that deployment.
-- **Additional model workflows:** intended real Issue workflows retain their own execution and
-  evidence scope beyond M39 PR/static review and the accepted M40 headless Issue case. The user
-  deferred dedicated PowerToys UI scenarios; computer-use verification can be considered when an
-  actual task requires it. No additional fixed PowerToys scenario suite is required for the
-  account-system delivery. Runner/evidence facts remain independent of model advice.
-- **Publication coverage:** built-in account storage, password verification, administrator setup,
-  session handling, and account permissions are complete within the scope recorded above. OIDC
-  and other third-party identity integrations are deferred and are not current acceptance
-  requirements. Application login remains separate from the configured GitHub API credential.
-  Repository-specific human/finding workflow acceptance still needs its own evidence. M41 accepts
-  its exact fork PR review and Issue comment through the production publisher; it does not
-  authorize new targets, content or reruns, or establish every deployed delivery channel.
-  M31 fixtures retain their original scope.
-- **Operational coverage:** intended workload capacity and evidence retention remain separate
-  deployment concerns. The user removed model-quality evaluation from the current task; no
-  model-ranking or quality-scoring work is required for this delivery. Ordinary software tests,
-  report validation, and evidence/source checks remain part of implementation correctness.
+The 2026-09-16 delivery accepted the new native lifecycle and a real CLI Issue investigation
+followed by same-task checkpoint recovery, sealed report delivery, and cleanup. The original
+failed attempt remains historical evidence. Real-model report delivery is no longer pending for
+that specific sequence; other source/execution scenarios retain their own scope.
+
+The separately approved native publication run also completed its exact two-comment scope on
+owned-fork PR #3 and Issue #5. That one-run authorization is consumed. Broader repository-specific
+human workflows and additional delivery scenarios need their own acceptance and explicit write
+approval; they are not covered by either this run or the historical M41 authorization.
+
+- **Deployment operations:** the new synthetic exercise has accepted full Server/Worker entry
+  points, consecutive tasks, cancellation, graceful restart/resume, and owned cleanup on Windows.
+  It does not accept hard-crash orphan recovery, SCM restart/signal policy, production hosting,
+  real source/executable/UI profiles, or sustained workload capacity. These boundaries must not be
+  confused with an unimplemented native task loop or the older M39 component-only exercise.
+- **Operational capacity:** resident evidence quotas, bounded retention, expiry reads, and source
+  protection are implemented. Remaining deployment work is to accept the intended sustained
+  workload and physical SQLite/WAL storage growth under that policy. A bounded logical content
+  quota does not establish total disk capacity or physical file compaction.
+
+Dedicated PowerToys UI scenarios and general model-quality evaluation remain outside the current
+delivery. Ordinary software tests, report validation, and source/evidence checks remain part of
+implementation correctness; no model-ranking or quality-scoring project is required.
 
 The removed split Worker, WindowsAttempt protected-journal/OS-attestation, provider registry and
 model HTTP relay are retired. Old-version upgrades, resets, conversions and compatibility migrations
@@ -1007,8 +1103,12 @@ execution remains unverified by these mapping tests. See the
 
 ## Retained architecture baseline
 
-These are the current retained responsibilities. Historical milestone descriptions above do not
-override schema 31, CLI-owned model execution or the current product boundaries.
+This section preserves the historical Job-based architecture at schema 31. Its Job protocols,
+`loopback`/`oidc` authentication, `WORKER_*` configuration, and ordered SQL initialization are not
+the active investigation runtime. The responsibilities below describe that earlier snapshot only.
+The current Task/Report runtime uses built-in password accounts, `investigation-v2`, and
+`INVESTIGATION_WORKER_*`; see [Architecture](../ARCHITECTURE.md) and the delivery sections above
+for current implementation and acceptance boundaries.
 
 ### Server
 
@@ -1023,8 +1123,8 @@ override schema 31, CLI-owned model execution or the current product boundaries.
 - Authenticated Job detail reads with structured PR-review and issue-triage result projections.
 - Explicit `loopback` or `oidc` operator authentication.
 - Loopback-only database recovery-maintenance mode.
-- Current schema 31 uses the existing ordered SQL initialization definitions. No old-version
-  upgrade, reset, data conversion or compatibility migration work is required.
+- That baseline used schema 31 and its ordered SQL initialization definitions, without an
+  old-version upgrade, reset, data conversion, or compatibility migration project.
 
 ### Windows Worker
 
@@ -1069,8 +1169,8 @@ override schema 31, CLI-owned model execution or the current product boundaries.
 - Inline schema-validated result submission.
 - V2 inline results separate model verification claims from captured command exits and final
   worktree state; bounded redacted failure diagnostics are persisted and shown in job details.
-- Current envelope/result versions keep their declared semantics independently of database
-  schema version; they do not introduce an old-database upgrade path.
+- That baseline's envelope/result versions kept their declared semantics independently of database
+  schema version; they did not introduce an old-database upgrade path.
 - Progress deadline refreshes only on observed CLI stdout/stderr activity; silent execution no
   longer receives synthetic keepalive progress.
 
@@ -1107,7 +1207,10 @@ by ADR 0031; it must not be described as the restoration of those prototypes.
 
 ## Retained foundation contracts
 
-These foundation boundaries remain in force alongside the current schema and CLI architecture.
+These are historical foundation contracts for the Job-based baseline above. They are retained to
+interpret its code and receipts, not as active configuration or compatibility requirements for the
+Task/Report runtime. In particular, its authentication modes, credential-file convention,
+`WORKER_CLI_HOME`, and completion protocol must not be used to configure the current application.
 The historical exclusions in the next section are not a current implementation backlog.
 
 - Worker authentication: one node-scoped Bearer Token stored at
@@ -1149,11 +1252,13 @@ recorded above.
 
 ## Verification requirements
 
-Repository verification defaults to `test-env`; local validation requires explicit authorization
-for the current task. The authorization for the 2026-09-05 exercise does not authorize local
-verification of subsequent changes. The required branch gate is:
+Repository verification defaults to the project-designated remote Windows worker. Linux-specific
+checks may use `test-env`; local validation requires explicit authorization for the current task.
+If the designated environment is unavailable, report verification as blocked instead of falling
+back to local execution. Historical verification authorization does not authorize local checks of
+subsequent changes. The standard package gates are:
 
-```bash
+```powershell
 pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
@@ -1163,7 +1268,7 @@ pnpm lint
 
 ProcessHost Go tests and Windows cross-compilation are separate checks. Windows-native validation
 is required in addition to Linux CI, which cannot establish Windows process, path, ACL, Git, or
-CLI runtime behavior. The historical runtime exercise below predates the current remediation;
+CLI runtime behavior. The historical runtime exercise below predates the active Task/Report delivery;
 its passing counts do not establish that the current branch's CI is green.
 
 The 2026-09-06 remediation passed all Linux gates, 1,354 Linux Node tests, 591 native Windows Worker

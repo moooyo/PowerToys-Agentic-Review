@@ -296,6 +296,16 @@ export function createSessionScopedSampleApi(
       return result(user, exported, exported.context.repository.id);
     },
 
+    async artifact(id, signal) {
+      signal?.throwIfAborted();
+      const user = await currentUser();
+      const metadata = await api.artifact(id, signal);
+      const detail = await api.task(metadata.artifact.taskId);
+      const scoped = await result(user, metadata, detail.task.repository.id);
+      signal?.throwIfAborted();
+      return scoped;
+    },
+
     async actionContext(workItemId, reportId) {
       const user = await currentUser();
       const item = await workItem(user, workItemId);

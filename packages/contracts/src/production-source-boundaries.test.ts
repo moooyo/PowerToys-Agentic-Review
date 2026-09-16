@@ -78,6 +78,12 @@ const retiredDatabaseBootstrapTokens = [
 // These entry points and helpers are test-only programs, outside production compilation.
 // Keep exact files here: adjacent deploy scripts must retain the production loader checks.
 const testOnlyAcceptanceSourceFiles = new Set([
+  "deploy/investigation-acceptance/prepare-public-issue.mjs",
+  "deploy/investigation-acceptance/run-real-cli.mjs",
+  "deploy/investigation-acceptance/run-publication.mjs",
+  "deploy/investigation-acceptance/resume-real-cli.mjs",
+  "deploy/investigation-acceptance/run.mjs",
+  "deploy/investigation-acceptance/source-manifest.mjs",
   "deploy/worker/cli-workflow-acceptance/cleanup-verification.ts",
   "deploy/worker/cli-workflow-acceptance/git-fixture.ts",
   "deploy/worker/cli-workflow-acceptance/prepare-server.mjs",
@@ -155,6 +161,10 @@ describe("production source boundaries", () => {
       "deploy/worker/issue-summary-acceptance/probe/production.mjs",
       "deploy/worker/publication-acceptance-old/run.mjs",
       "apps/worker/src/deploy/worker/cli-workflow-acceptance/run.mjs",
+      "deploy/investigation-acceptance/unreviewed.mjs",
+      "deploy/investigation-acceptance/nested/run.mjs",
+      "deploy/investigation-acceptance-old/run.mjs",
+      "apps/worker/src/deploy/investigation-acceptance/run.mjs",
       "config/artifact-policy.ts",
     ];
     const excludedPaths = [
@@ -235,6 +245,327 @@ describe("production source boundaries", () => {
         "production import of a test-only acceptance module",
       );
     }
+  });
+
+  it("retains the exact offline and loopback boundaries of opt-in investigation acceptance", () => {
+    const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    const expectedImports = new Map<string, readonly string[]>([
+      [
+        "prepare-public-issue.mjs",
+        ['import(pathToFileURL(join(repoRoot,"packages","domain","dist","index.js")).href)'],
+      ],
+      [
+        "run-real-cli.mjs",
+        [
+          'import(pathToFileURL(join(repo,"packages","contracts","dist","index.js")).href)',
+          'import(pathToFileURL(join(repo,"packages","domain","dist","index.js")).href)',
+          'import(pathToFileURL(join(repo,"apps","server","dist","investigation","store.js")).href)',
+        ],
+      ],
+      [
+        "run.mjs",
+        [
+          'import(pathToFileURL(join(repo,"packages","contracts","dist","index.js")).href)',
+          'import(pathToFileURL(join(repo,"packages","domain","dist","index.js")).href)',
+          'import(pathToFileURL(join(repo,"packages","contracts","dist","investigation-preview.js")).href)',
+          'import(pathToFileURL(join(repo,"apps","server","dist","investigation","store.js")).href)',
+        ],
+      ],
+      ["source-manifest.mjs", []],
+      [
+        "resume-real-cli.mjs",
+        [
+          'import(pathToFileURL(join(repo,"packages","contracts","dist","index.js")).href)',
+          'import(pathToFileURL(join(repo,"packages","domain","dist","index.js")).href)',
+        ],
+      ],
+    ]);
+    const sources = [...expectedImports.keys()].map((name) => {
+      const repositoryPath = `deploy/investigation-acceptance/${name}`;
+      expect(testOnlyAcceptanceSourceFiles.has(repositoryPath)).toBe(true);
+      const fileName = join(repositoryRoot, repositoryPath);
+      return { fileName, source: readFileSync(fileName, "utf8") };
+    });
+    withVirtualSourceFiles(sources, (parsed) => {
+      for (const source of sources) {
+        const sourceFile = parsed.get(source.fileName);
+        if (sourceFile === undefined) throw new Error("The reviewed acceptance source must parse.");
+        const name = basename(source.fileName);
+        const runner =
+          name === "run.mjs" || name === "run-real-cli.mjs" || name === "resume-real-cli.mjs";
+        const dynamicImports: string[] = [];
+        const childImports: string[] = [];
+        const moduleImports: string[] = [];
+        const requireFactories: string[] = [];
+        const requiredModules: string[] = [];
+        const forks: string[] = [];
+        const origins: string[] = [];
+        const properties = new Map<string, string[]>();
+        const text = (node: ts.Node): string =>
+          compactNodeText(node, sourceFile).replace(/,(?=[)\]}])/gu, "");
+        const visit = (node: ts.Node): void => {
+          if (ts.isImportDeclaration(node) && ts.isStringLiteralLikeNode(node.moduleSpecifier)) {
+            if (node.moduleSpecifier.text === "node:child_process")
+              childImports.push(importedBindingSignature(node));
+            if (node.moduleSpecifier.text === "node:module")
+              moduleImports.push(importedBindingSignature(node));
+            if (!runner)
+              expect(["node:http", "node:https", "node:net"]).not.toContain(
+                node.moduleSpecifier.text,
+              );
+          }
+          if (ts.isCallExpression(node)) {
+            if (node.expression.kind === ts.SyntaxKind.ImportKeyword)
+              dynamicImports.push(text(node));
+            if (calledExpressionName(node.expression) === "fork") forks.push(text(node));
+            if (calledExpressionName(node.expression) === "createrequire")
+              requireFactories.push(text(node));
+            if (calledExpressionName(node.expression) === "requireserver")
+              requiredModules.push(text(node));
+            if (!runner) expect(calledExpressionName(node.expression)).not.toBe("fetch");
+          }
+          if (
+            ts.isBinaryExpression(node) &&
+            node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            ts.isIdentifier(node.left) &&
+            node.left.text === "origin"
+          )
+            origins.push(text(node.right));
+          if (ts.isPropertyAssignment(node)) {
+            const key =
+              ts.isIdentifier(node.name) || ts.isStringLiteralLikeNode(node.name)
+                ? node.name.text
+                : "";
+            properties.set(key, [...(properties.get(key) ?? []), text(node.initializer)]);
+          }
+          node.forEachChild((child) => {
+            visit(child);
+            return undefined;
+          });
+        };
+        visit(sourceFile);
+        expect(dynamicImports.toSorted(), name).toEqual(
+          [...(expectedImports.get(name) ?? [])].sort(),
+        );
+        expect(childImports, name).toEqual(
+          runner
+            ? ["execFile:execFile:value,fork:fork:value"]
+            : name === "source-manifest.mjs"
+              ? ["execFile:execFile:value"]
+              : [],
+        );
+        expect(moduleImports, name).toEqual(runner ? ["createRequire:createRequire:value"] : []);
+        expect(requireFactories, name).toEqual(
+          runner ? ['createRequire(join(repo,"apps","server","package.json"))'] : [],
+        );
+        expect(requiredModules.toSorted(), name).toEqual(
+          runner
+            ? ['requireServer("@sinclair/typebox")', 'requireServer("@sinclair/typebox/value")']
+            : [],
+        );
+        if (runner) {
+          expect(forks, name).toEqual([
+            'fork(entry,[],{cwd:repo,env:environment,windowsHide:true,stdio:["ignore","pipe","pipe","ipc"],execArgv:["--enable-source-maps","--import",pathToFileURL(join(here,"ipc-signals.mjs")).href]})',
+          ]);
+          expect(origins, name).toEqual(["`http://127.0.0.1:${port}`"]);
+          expect(properties.get("INVESTIGATION_ENABLE_EXTERNAL_WRITES"), name).toEqual(['"false"']);
+          expect(properties.get("INVESTIGATION_WORKER_ALLOWED_REPOSITORIES_JSON"), name).toEqual([
+            '"[]"',
+          ]);
+          const executionModes = properties.get("executionMode") ?? [];
+          expect(executionModes.length, name).toBeGreaterThan(0);
+          expect(
+            executionModes.every((mode) => mode === '"snapshot_only"'),
+            name,
+          ).toBe(true);
+          for (const [variable, expected] of [
+            ["serverEntry", 'join(repo,"apps","server","dist","main.js")'],
+            ["workerEntry", 'join(repo,"apps","worker","dist","worker.mjs")'],
+          ]) {
+            const initializer = findUniqueVariableInitializer(sourceFile, variable!);
+            expect(
+              initializer === undefined ? undefined : text(initializer),
+              `${name}: ${variable}`,
+            ).toBe(expected);
+          }
+          const compact = text(sourceFile);
+          if (name === "run-real-cli.mjs") {
+            const workerPathInitializer = findUniqueVariableInitializer(sourceFile, "workerPath");
+            expect(
+              workerPathInitializer === undefined ? undefined : text(workerPathInitializer),
+            ).toBe('args.get("--worker-path")');
+            expect(properties.get("INVESTIGATION_WORKER_PATH")).toEqual(["workerPath"]);
+            expect(compact).toContain(
+              "workerPath===undefined?{}:{INVESTIGATION_WORKER_PATH:workerPath}",
+            );
+            expect(compact).toContain(String.raw`!/[\0\r\n]/u.test(workerPath)`);
+          }
+          expect(compact, name).toContain(
+            name === "resume-real-cli.mjs"
+              ? String.raw`!/\/action-intents|\/confirm|\/import-work-item|\/cancel/u.test(path)`
+              : String.raw`!/\/action-intents|\/confirm|\/import-work-item/u.test(path)`,
+          );
+          if (name === "resume-real-cli.mjs") {
+            expect(compact).toContain('args.get("--previous-processes-stopped"),"true"');
+            expect(compact).toContain("newDatabaseSync(database,{readOnly:true})");
+            expect(compact).toContain("newDatabaseSync(authDatabase,{readOnly:true})");
+            expect(properties.get("INVESTIGATION_DATABASE_PATH")).toEqual(["database"]);
+            expect(properties.get("INVESTIGATION_AUTH_DATABASE_PATH")).toEqual(["authDatabase"]);
+            expect(compact).toContain('assert(!(method==="POST"&&path==="/api/tasks")');
+            expect(compact).toContain("assert.equal(path,`/api/tasks/${taskId}/resume`)");
+            expect(compact).toContain(
+              "assert.deepEqual(queued.checkpoint.analysis,before.checkpoint.analysis)",
+            );
+            expect(compact).toContain(
+              "assert.deepEqual(queued.checkpoint.runtime,before.checkpoint.runtime)",
+            );
+            expect(compact).toContain("assertReportHistory(original.task,original.reports)");
+            expect(compact).toContain("assertReportHistory(after.task,after.reports)");
+            expect(compact).toContain(
+              'awaitreadOptionalOrdinaryFile(join(previousRun,"report.json"))',
+            );
+            expect(compact).not.toContain('awaitreadFile(join(previousRun,"report.json"))');
+            expect(compact).toContain(
+              'constdeliveryOnly=original.checkpoint.stopReason==="complete"',
+            );
+            expect(compact).toContain(
+              "assert.equal(final.checkpoint.round,before.checkpoint.round)",
+            );
+            expect(compact).toContain(
+              "assert.deepEqual(final.checkpoint.analysis,before.checkpoint.analysis)",
+            );
+            expect(compact).toContain(
+              "assert.deepEqual(final.checkpoint.runtime,before.checkpoint.runtime)",
+            );
+            expect(compact).toContain(
+              "assert.equal(final.checkpoint.consumed.tokens,before.checkpoint.consumed.tokens)",
+            );
+            expect(compact).toContain("assert.equal(receipt.realModel,false)");
+            expect(source.source).not.toContain("INVESTIGATION_BOOTSTRAP_ADMIN_");
+          }
+          expect(compact, name).not.toContain("...process.env");
+          expect(source.source, name).not.toMatch(/INVESTIGATION_GITHUB_(?:TOKEN|USER_ID)/u);
+        } else {
+          expect(forks, name).toEqual([]);
+        }
+      }
+    });
+  });
+
+  it("keeps native publication opt-in with GET-only direct upstream access and a single confirmation reservation", () => {
+    const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    const fileName = join(repositoryRoot, "deploy/investigation-acceptance/run-publication.mjs");
+    const source = readFileSync(fileName, "utf8");
+    withVirtualSourceFiles([{ fileName, source }], (parsed) => {
+      const sourceFile = parsed.get(fileName);
+      if (sourceFile === undefined) throw new Error("The publication companion must parse.");
+      const text = (node: ts.Node): string =>
+        compactNodeText(node, sourceFile).replace(/,(?=[)\]}])/gu, "");
+      const imports: string[] = [];
+      const childImports: string[] = [];
+      const forks: string[] = [];
+      const origins: string[] = [];
+      const gateValues: string[] = [];
+      const fetchTargets: string[] = [];
+      let consumptionReservations = 0;
+      const visit = (node: ts.Node): void => {
+        if (ts.isImportDeclaration(node) && ts.isStringLiteralLikeNode(node.moduleSpecifier)) {
+          if (node.moduleSpecifier.text === "node:child_process")
+            childImports.push(importedBindingSignature(node));
+          expect(node.moduleSpecifier.text).not.toBe("node:module");
+        }
+        if (ts.isCallExpression(node)) {
+          if (node.expression.kind === ts.SyntaxKind.ImportKeyword) imports.push(text(node));
+          if (calledExpressionName(node.expression) === "fork") forks.push(text(node));
+          if (calledExpressionName(node.expression) === "fetch") {
+            const target = node.arguments[0];
+            if (target === undefined)
+              throw new Error("A publication fetch needs an explicit destination.");
+            fetchTargets.push(text(target));
+            if (text(target) === "`https://api.github.com${path}`") {
+              expect(findAncestor(node, ts.isFunctionDeclaration)?.name?.text).toBe("githubGet");
+              const options = node.arguments[1];
+              if (options === undefined || !ts.isObjectLiteralExpression(options))
+                throw new Error("The direct GitHub request must use reviewed literal options.");
+              const method = options.properties.find(
+                (property) => ts.isPropertyAssignment(property) && text(property.name) === "method",
+              );
+              expect(
+                method !== undefined && ts.isPropertyAssignment(method)
+                  ? text(method.initializer)
+                  : undefined,
+              ).toBe('"GET"');
+            }
+          }
+          if (
+            calledExpressionName(node.expression) === "writefile" &&
+            node.arguments[0] !== undefined &&
+            text(node.arguments[0]) === "consumptionPath"
+          ) {
+            consumptionReservations += 1;
+            const options = node.arguments[2];
+            expect(options === undefined ? undefined : text(options)).toBe(
+              '{flag:"wx",mode:0o600}',
+            );
+          }
+        }
+        if (
+          ts.isBinaryExpression(node) &&
+          node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isIdentifier(node.left) &&
+          node.left.text === "origin"
+        )
+          origins.push(text(node.right));
+        if (
+          ts.isPropertyAssignment(node) &&
+          text(node.name) === "INVESTIGATION_ENABLE_EXTERNAL_WRITES"
+        )
+          gateValues.push(text(node.initializer));
+        node.forEachChild((child) => {
+          visit(child);
+          return undefined;
+        });
+      };
+      visit(sourceFile);
+      expect(imports.toSorted()).toEqual([
+        'import(pathToFileURL(join(repo,"apps","server","dist","investigation","store.js")).href)',
+        'import(pathToFileURL(join(repo,"packages","domain","dist","index.js")).href)',
+      ]);
+      expect(childImports).toEqual(["fork:fork:value"]);
+      expect(forks).toEqual([
+        'fork(entry,[],{cwd:repo,env:environment,windowsHide:true,stdio:["ignore","pipe","pipe","ipc"],execArgv:["--enable-source-maps","--import",pathToFileURL(join(here,"ipc-signals.mjs")).href]})',
+      ]);
+      expect(origins).toEqual(["`http://127.0.0.1:${port}`"]);
+      expect(gateValues).toEqual(['approvalValidated?"true":"false"']);
+      expect(fetchTargets.toSorted()).toEqual([
+        "`${origin}${path}`",
+        "`${origin}/api/auth/session`",
+        "`https://api.github.com${path}`",
+      ]);
+      expect(consumptionReservations).toBe(1);
+      for (const [variable, expected] of [
+        ["executeRequested", 'args.get("--execute")==="true"'],
+        ["expectedGitHubUserId", "42196638"],
+        ["serverEntry", 'join(repo,"apps","server","dist","main.js")'],
+      ]) {
+        const initializer = findUniqueVariableInitializer(sourceFile, variable!);
+        expect(initializer === undefined ? undefined : text(initializer), variable).toBe(expected);
+      }
+      const compact = text(sourceFile);
+      for (const guard of [
+        "assert.equal(value.approvedDraftSha256,draftSha256)",
+        "assert.equal(value.maximumPostAttemptsPerTarget,1)",
+        "assert.equal(value.executionScope.maximumGitHubPostAttempts,2)",
+        "assert.equal(operation.actionIntentPayload.body,fixedBody(number))",
+        "assert(!allowExecute||(executeRequested&&approvalValidated&&executionConsumed))",
+        "assert(executeRequested&&approvalValidated&&executionConsumed)",
+        "assert(prepared&&!confirmDispatches.has(prepared.intent.id)&&!prepared.confirmAttempts)",
+        "confirmDispatches.add(prepared.intent.id);prepared.confirmAttempts=1;awaitsaveState();",
+      ])
+        expect(compact, guard).toContain(guard);
+      expect(compact).not.toContain("...process.env");
+      expect(compact).not.toContain("INVESTIGATION_GITHUB_TOKEN:");
+    });
   });
 
   it("removes the retired Server binding island while preserving reviewed production surfaces", () => {

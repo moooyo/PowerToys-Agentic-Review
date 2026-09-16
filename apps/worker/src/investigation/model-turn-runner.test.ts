@@ -391,12 +391,55 @@ describe("investigation model turn runner", () => {
       expect(spec.environment).not.toHaveProperty("WORKER_TOKEN");
       expect(spec.standardInput).toContain("Synthetic frozen issue text");
       expect(spec.standardInput).toContain("Do not run commands, tests, builds");
+      for (const instruction of [
+        "evidenceRefs identifies evidence, not subjects",
+        "evidenceRefs: []",
+        "Only status and evidenceRefs may change",
+        "Accepted evidence and recheck records are immutable",
+        "including changes to a finding's confirmation or recheckRef",
+        `provisional digest "${"0".repeat(64)}"`,
+        "the Worker computes the real digest from the complete proposed plan",
+        "Copy existing saved plan references exactly",
+        "findingVersion must match the updated finding version",
+        "preserve its subjectRef and discoveredRound exactly",
+        "In a recheck round, return all three together",
+        "incrementing version and setting confirmation.recheckRef to a new recheck ID",
+        "Appending only a recheck does not link it to the finding and leaves the finding pending",
+        "This snapshot_only task investigates only the provided material",
+        "not new required coverage that must wait for future inputs",
+        "bugAssessment may remain needs_information or needs_verification",
+        "Do not leave a candidate pending solely to wait for unavailable external information",
+        "independently recheck its final version against the supplied evidence",
+        "keep its hypothesis status if uncertainty remains",
+      ])
+        expect(spec.standardInput).toContain(instruction);
       expect(spec.arguments).not.toContain("--dangerously-bypass-approvals-and-sandbox");
       expect(spec.arguments).not.toContain("--allow-all");
       if (engine === "codex") {
-        expect(spec.arguments).toContain("features.shell_tool=false");
-        expect(spec.arguments).toContain("read-only");
-      } else expect(spec.arguments).toContain("--available-tools=view,glob,grep");
+        expect(spec.arguments[spec.arguments.indexOf("--cd") + 1]).toBe(
+          f.input.workspace.modelInputDirectory,
+        );
+        expect(
+          spec.arguments.filter((argument) => argument === "--skip-git-repo-check"),
+        ).toHaveLength(1);
+        expect(spec.arguments[spec.arguments.indexOf("--sandbox") + 1]).toBe("read-only");
+        expect(spec.arguments).toEqual(
+          expect.arrayContaining([
+            'approval_policy="never"',
+            "features.shell_tool=false",
+            "features.unified_exec=false",
+            "features.apps=false",
+            "features.hooks=false",
+            "features.multi_agent=false",
+            'web_search="disabled"',
+            'mcp_servers."external-services".enabled=false',
+          ]),
+        );
+        expect(spec.arguments.at(-1)).toBe("-");
+      } else {
+        expect(spec.arguments).toContain("--available-tools=view,glob,grep");
+        expect(spec.arguments).not.toContain("--skip-git-repo-check");
+      }
       expect(f.io.writeExclusiveUtf8).toHaveBeenCalledWith(
         win32.join(f.roundDirectory, "round-schema.json"),
         JSON.stringify(createInvestigationModelOutputSchema(InvestigationModelTurnDeltaV1Schema)),
@@ -630,7 +673,10 @@ describe("investigation model turn runner", () => {
     });
     expect(result.sourceUnitIds).toEqual(descriptors.map((chunk) => chunk.id));
     expect(workspace.resolveSourcePath).not.toHaveBeenCalled();
-    expect(f.start.mock.calls[0]![0].standardInput).toContain("export const removed = true;");
+    const prompt = f.start.mock.calls[0]![0].standardInput;
+    expect(prompt).toContain("export const removed = true;");
+    expect(prompt).toContain("Only status and evidenceRefs may change");
+    expect(prompt).not.toContain("This snapshot_only task investigates only the provided material");
     expect(
       result.round.analysis.coverage.includedUnits.find((unit) => unit.id === "full-diff")?.status,
     ).toBe("pending");

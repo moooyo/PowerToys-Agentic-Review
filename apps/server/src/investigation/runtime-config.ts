@@ -8,6 +8,10 @@ import {
   normalizeInvestigationUsername,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
+import {
+  defaultInvestigationEvidencePolicy,
+  type InvestigationEvidencePolicy,
+} from "./evidence-store.js";
 import type { InvestigationWorkerPrincipal } from "./types.js";
 
 export interface InvestigationWorkerCredential extends InvestigationWorkerPrincipal {
@@ -40,6 +44,7 @@ export interface InvestigationRuntimeConfig {
   readonly executionBindingsPath: string | undefined;
   readonly sourceImportMaximumBytes: number;
   readonly sourceImportMaximumPages: number;
+  readonly evidencePolicy: InvestigationEvidencePolicy;
 }
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -316,6 +321,38 @@ export function loadInvestigationRuntimeConfig(
       1000,
       10000,
     ),
+    evidencePolicy: {
+      maximumBytes: integer(
+        environment,
+        "INVESTIGATION_EVIDENCE_MAXIMUM_BYTES",
+        defaultInvestigationEvidencePolicy.maximumBytes,
+        Number.MAX_SAFE_INTEGER,
+      ),
+      maximumCount: integer(
+        environment,
+        "INVESTIGATION_EVIDENCE_MAXIMUM_COUNT",
+        defaultInvestigationEvidencePolicy.maximumCount,
+        10_000_000,
+      ),
+      retentionSeconds: integer(
+        environment,
+        "INVESTIGATION_EVIDENCE_RETENTION_SECONDS",
+        defaultInvestigationEvidencePolicy.retentionSeconds,
+        10 * 366 * 24 * 60 * 60,
+      ),
+      cleanupIntervalSeconds: integer(
+        environment,
+        "INVESTIGATION_EVIDENCE_CLEANUP_INTERVAL_SECONDS",
+        defaultInvestigationEvidencePolicy.cleanupIntervalSeconds,
+        86_400,
+      ),
+      cleanupBatchSize: integer(
+        environment,
+        "INVESTIGATION_EVIDENCE_CLEANUP_BATCH_SIZE",
+        defaultInvestigationEvidencePolicy.cleanupBatchSize,
+        1_000,
+      ),
+    },
     github:
       githubToken === undefined
         ? undefined

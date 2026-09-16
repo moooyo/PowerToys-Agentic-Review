@@ -4,6 +4,26 @@ import { createSampleInvestigationApi } from "./sample-adapter";
 import { createHttpTransport } from "./transport";
 
 describe("typed investigation HTTP operations", () => {
+  it("reads and validates current artifact retention independently of report snapshots", async () => {
+    const sample = createSampleInvestigationApi();
+    const report = await sample.exportReport("sample-pr-partial-report");
+    const artifact = report.artifacts[0];
+    if (!artifact) throw new Error("The partial report omitted its evidence artifact.");
+    const metadata = await sample.artifact(artifact.id);
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(metadata));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    const signal = new AbortController().signal;
+    expect(await api.artifact(artifact.id, signal)).toEqual(metadata);
+    expect(fetcher).toHaveBeenCalledWith(
+      `/api/artifacts/${encodeURIComponent(artifact.id)}`,
+      expect.objectContaining({ method: "GET", credentials: "include", cache: "no-store" }),
+    );
+    expect(artifact.availability).toBe("available");
+    expect(metadata.artifact.availability).toBe("expired");
+    fetcher.mockResolvedValue(Response.json({ ...metadata, expiredAt: "invalid date" }));
+    await expect(api.artifact(artifact.id)).rejects.toThrow("invalid structured response");
+  });
+
   it("imports a source snapshot using a scoped repository route without sending feedback", async () => {
     const sample = createSampleInvestigationApi();
     const workItem = await sample.workItem("sample-bug-work-item");

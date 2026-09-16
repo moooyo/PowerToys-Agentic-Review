@@ -6,9 +6,11 @@ import {
   type InvestigationAnalysisEvidence,
   type InvestigationAnalysisV1,
   InvestigationAnalysisV1Schema,
+  type InvestigationArtifactV1,
   InvestigationAttemptV1Schema,
   type InvestigationResultV1,
   InvestigationResultV1Schema,
+  type InvestigationSubjectV1,
   InvestigationTaskV1Schema,
   investigationCanonicalJson,
   investigationPlanDigestPayload,
@@ -86,6 +88,65 @@ function removeSavedPlans(result: InvestigationResultV1): void {
   if (result.assessment.kind === "bug") result.assessment.reproduction.planRef = null;
   if (result.assessment.kind === "feature")
     result.assessment.featureAssessment.implementationPlanRef = null;
+}
+
+function inheritedPatchFixture(selectedPatch = false, producingTaskId = "parent-task") {
+  const fixture = createInvestigationFixture("pr", { findingCount: 0 });
+  const { task, result } = fixture;
+  const original = first(task.subjects);
+  if (original.kind !== "original_pr") throw new Error("Expected an original PR subject.");
+  const patch: Extract<InvestigationSubjectV1, { kind: "local_patch" }> = {
+    id: "inherited-patch",
+    kind: "local_patch",
+    repositoryId: original.repositoryId,
+    workItemId: original.workItemId,
+    revisionKey: "6".repeat(64),
+    baseSubjectRef: original.id,
+    baseSha: original.headSha,
+    patchDigest: "7".repeat(64),
+    artifactRef: "inherited-patch-artifact",
+  };
+  const artifact: InvestigationArtifactV1 = {
+    id: patch.artifactRef,
+    taskId: producingTaskId,
+    attemptId: `${producingTaskId}-attempt`,
+    subjectRef: patch.id,
+    kind: "patch",
+    name: "inherited.patch",
+    mediaType: "text/x-diff",
+    digest: patch.patchDigest,
+    byteLength: 128,
+    availability: "available",
+  };
+  const parentReportRef = { id: "parent-report", version: 2, digest: "9".repeat(64) };
+  task.kind = "pr-verify";
+  task.parentTaskId = "parent-task";
+  task.parentReportRef = parentReportRef;
+  task.subjects.push(structuredClone(patch));
+  task.sourceArtifacts = [structuredClone(artifact)];
+  const plan = first(result.plans);
+  task.planRef = { id: plan.id, version: plan.version, digest: plan.digest };
+  plan.sourceReportRef = { id: parentReportRef.id, version: parentReportRef.version };
+  result.context.task.kind = task.kind;
+  result.context.task.parentTaskId = task.parentTaskId;
+  result.context.parentReportRef = structuredClone(parentReportRef);
+  result.context.subjects.push(patch);
+  result.context.sourceArtifacts = [structuredClone(artifact)];
+  if (selectedPatch) {
+    task.subjectRef = patch.id;
+    task.executionPolicy.allowedSubjectRefs.push(patch.id);
+    result.context.task.subjectRef = patch.id;
+    result.assessment.subjectRef = patch.id;
+    result.assessment.evidenceRefs = [];
+    plan.subjectRef = patch.id;
+    for (const check of result.validation.checks) check.subjectRef = patch.id;
+    for (const action of result.nextActions)
+      if (action.planRef !== null) {
+        action.subjectRef = patch.id;
+        action.action = "start-task";
+      }
+  }
+  return { ...fixture, patch, artifact };
 }
 
 describe("investigation structural contracts", () => {
@@ -264,6 +325,54 @@ describe("investigation semantic completion", () => {
     expectSemanticFailure(result);
   });
 
+  it("allows a saved continuation plan to support a complete hypothesis without an executable action", () => {
+    const { result } = createInvestigationFixture("bug");
+    expect(first(result.report.loop.candidates).status).toBe("unresolved");
+    result.nextActions = [];
+    result.report.collections.nextActions = 0;
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+    for (const kind of ["verification", "reproduction"] as const) {
+      first(result.plans).kind = kind;
+      expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+    }
+    if (result.assessment.kind !== "bug") throw new Error("Expected a bug fixture.");
+    result.assessment.bugAssessment.status = "needs_information";
+    result.assessment.bugAssessment.missingInformation = [
+      "Provide the exact source and reproduction input.",
+    ];
+    result.assessment.reproduction.planRef = null;
+    first(result.plans).kind = "investigation";
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+  });
+
+  it.each([
+    "missing",
+    "subject",
+    "source",
+    "steps",
+    "criteria",
+    "limitation",
+    "implementation",
+    "fix",
+  ])("does not accept an inapplicable saved continuation plan: %s", (invalid) => {
+    const { result } = createInvestigationFixture("bug");
+    result.nextActions = [];
+    result.report.collections.nextActions = 0;
+    const plan = first(result.plans);
+    if (invalid === "missing") removeSavedPlans(result);
+    if (invalid === "subject") {
+      const other = { ...first(result.context.subjects), id: "unrelated-subject" };
+      result.context.subjects.push(other);
+      plan.subjectRef = other.id;
+    }
+    if (invalid === "source") plan.sourceReportRef.id = "unrelated-report";
+    if (invalid === "steps") plan.steps = [];
+    if (invalid === "criteria") plan.acceptanceCriteria = [];
+    if (invalid === "limitation") result.report.limitations = [];
+    if (invalid === "implementation" || invalid === "fix") plan.kind = invalid;
+    expect(validateInvestigationResult(result).valid).toBe(false);
+  });
+
   it("rejects an unresolved candidate without a saved continuation plan and limitation", () => {
     const { result } = createInvestigationFixture("bug");
     removeSavedPlans(result);
@@ -303,6 +412,92 @@ describe("investigation semantic completion", () => {
 });
 
 describe("investigation subject evidence binding", () => {
+  it.each([false, true])(
+    "retains inherited patch ownership when the child selects the patch: %s",
+    (selectedPatch) => {
+      const { task, result, patch, artifact } = inheritedPatchFixture(selectedPatch);
+      expect(Value.Check(InvestigationTaskV1Schema, task)).toBe(true);
+      expect(Value.Check(InvestigationResultV1Schema, result)).toBe(true);
+      expect(validateInvestigationTask(task)).toEqual({ valid: true, errors: [] });
+      expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+      expect(result.context.sourceArtifacts).toEqual([artifact]);
+      expect(result.context.adoptedAttemptIds).not.toContain(artifact.attemptId);
+      expect(result.artifacts.every((item) => item.taskId === task.id)).toBe(true);
+      expect(result.artifacts.some((item) => item.id === patch.artifactRef)).toBe(false);
+      expect(result.context.task.subjectRef === patch.id).toBe(selectedPatch);
+    },
+  );
+
+  it("preserves a grandparent patch owner through the exact parent report context", () => {
+    const { task, result, artifact } = inheritedPatchFixture(true, "grandparent-task");
+    expect(artifact.taskId).not.toBe(task.parentTaskId);
+    expect(artifact.attemptId).toBe("grandparent-task-attempt");
+    expect(validateInvestigationTask(task)).toEqual({ valid: true, errors: [] });
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+    expect(result.context.sourceArtifacts).toEqual([artifact]);
+  });
+
+  it.each([
+    "digest",
+    "subject",
+    "artifact-id",
+    "non-patch",
+    "current-owner",
+    "missing-parent-task",
+    "missing-parent-report",
+    "duplicate",
+  ] as const)("rejects inherited patch metadata with an invalid %s binding", (binding) => {
+    const { task, result } = inheritedPatchFixture();
+    for (const artifact of [first(task.sourceArtifacts!), first(result.context.sourceArtifacts!)]) {
+      if (binding === "digest") artifact.digest = "8".repeat(64);
+      else if (binding === "subject") artifact.subjectRef = task.subjectRef;
+      else if (binding === "artifact-id") artifact.id = "unbound-patch-artifact";
+      else if (binding === "non-patch") artifact.kind = "log";
+      else if (binding === "current-owner") artifact.taskId = task.id;
+    }
+    if (binding === "missing-parent-task") {
+      task.parentTaskId = null;
+      result.context.task.parentTaskId = null;
+    } else if (binding === "missing-parent-report") {
+      task.parentReportRef = null;
+      result.context.parentReportRef = null;
+    } else if (binding === "duplicate") {
+      task.sourceArtifacts!.push(structuredClone(first(task.sourceArtifacts!)));
+      result.context.sourceArtifacts!.push(structuredClone(first(result.context.sourceArtifacts!)));
+    }
+    expect(Value.Check(InvestigationTaskV1Schema, task)).toBe(true);
+    expect(validateInvestigationTask(task).errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "INVALID_SOURCE_ARTIFACT" })]),
+    );
+    expectSemanticFailure(result);
+  });
+
+  it("rejects republishing inherited patch metadata as a current task artifact", () => {
+    const { result, artifact } = inheritedPatchFixture();
+    result.artifacts.push({
+      ...artifact,
+      taskId: result.context.task.id,
+      attemptId: result.context.attempt.id,
+    });
+    result.report.collections.artifacts = result.artifacts.length;
+    expectSemanticFailure(result);
+    expect(validateInvestigationResult(result).errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "SOURCE_ARTIFACT_ID_CONFLICT" })]),
+    );
+  });
+
+  it("rejects ancestor artifacts in current evidence even if their attempt is adopted", () => {
+    const { result, artifact } = inheritedPatchFixture();
+    result.context.sourceArtifacts = [];
+    result.context.adoptedAttemptIds.push(artifact.attemptId);
+    result.artifacts.push(artifact);
+    result.report.collections.artifacts = result.artifacts.length;
+    expectSemanticFailure(result);
+    expect(validateInvestigationResult(result).errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "ARTIFACT_SCOPE_MISMATCH" })]),
+    );
+  });
+
   it("does not use local patch evidence to confirm a finding on the original PR", () => {
     const { result } = createInvestigationFixture("pr");
     const original = first(result.context.subjects);

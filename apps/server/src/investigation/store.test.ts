@@ -202,7 +202,7 @@ describe("InvestigationStore", () => {
     const writer = new DatabaseSync(path);
     writer
       .prepare('UPDATE investigation_metadata SET "value" = ? WHERE "key" = ?')
-      .run("investigation-v2", "schema_version");
+      .run("investigation-v1", "schema_version");
     writer.close();
     expect(() => open(path)).toThrow(expect.objectContaining({ code: "incompatible_schema" }));
 

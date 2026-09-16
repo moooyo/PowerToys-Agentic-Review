@@ -482,6 +482,33 @@ Material UI 可继续作为组件库，但旧路由、页面结构、适配器�
 本次没有执行 migration、旧接口适配或真实 PR/Issue 写入。
 下一步部署验收应为真实 Windows 环境、真实 CLI 模型以及具体 PowerToys 场景分别记录源码、运行条件和实际证据，不能由示例报告推断通过。
 
+### Saved continuation plans and rejected proposals (2026-09-16)
+
+Saving a continuation plan and publishing an executable action are separate facts. A complete
+investigation may retain an unresolved hypothesis when an applicable saved investigation,
+verification, or reproduction plan and an explicit limitation record its remaining work. This
+plan-only path requires the same subject, current or exact parent report provenance, and nonempty
+steps and acceptance criteria. An implementation or fix plan does not qualify for this path.
+The current plan contract has no finding-specific reference field; this binding is to the subject.
+
+Report assembly deterministically validates every accepted action proposal against saved records.
+Valid proposals retain their content and saved report binding. Each rejected proposal remains in
+a non-executable limitation diagnostic with its complete canonical JSON proposal and reason codes;
+it is never silently rewritten into a different task kind. The Worker leaves the checkpoint and
+findings unchanged, and the Server independently recomputes and compares both projected actions
+and diagnostics before accepting the report. The diagnostic itself does not establish follow-up
+coverage, execution authority, or successful validation. Saved action validation remains strict;
+the unresolved-candidate completion rule now explicitly permits the bounded plan-only path above.
+Other reference and report checks still apply. Oversized diagnostic items fail delivery explicitly
+and preserve the checkpoint rather than truncating the original proposal.
+
+The report DTO also derives zero-based finding ordinals from the complete checkpoint array order.
+This is display-position metadata: the projection neither sorts the ledger nor changes finding
+IDs, versions, reviewed text, or recheck references. Every changed ordinal produces a separate
+diagnostic retaining the finding ID/version and both original and report ordinals. The original
+checkpoint remains immutable. The Server independently reconstructs this complete finding
+projection and validates the final report with the public semantic validator before sealing it.
+
 ## 后续范围说明（2026-09-15）
 
 最新范围决定：用户暂不安排 PowerToys 专用 UI 场景，模型质量评估也不做。

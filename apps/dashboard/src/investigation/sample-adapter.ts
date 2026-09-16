@@ -4,6 +4,7 @@ import {
   type InvestigationActionGuard,
   type InvestigationActionIntentV1,
   type InvestigationActionKind,
+  type InvestigationArtifactMetadataV1,
   type InvestigationFindingsPageV1,
   type InvestigationLoopCheckpointV1,
   type InvestigationReportHeaderV1,
@@ -112,10 +113,6 @@ function sampleFixtures(): Fixture[] {
     fixture.result.context.workItem.number = scenario.number;
     fixture.result.context.workItem.title = scenario.title;
     fixture.result.context.repository.githubRepositoryId = repository.githubRepositoryId;
-    fixture.result.artifacts = fixture.result.artifacts.map((artifact) => ({
-      ...artifact,
-      availability: "missing",
-    }));
     if (scenario.name === "pr-p1") {
       const plainFinding = fixture.result.findings[1];
       if (plainFinding) {
@@ -287,6 +284,7 @@ export function createSampleInvestigationApi(): InvestigationApi {
   const workItems = new Map<string, WorkItem>();
   const tasks = new Map<string, TaskDetail>();
   const reports = new Map<string, InvestigationResultV1>();
+  const artifacts = new Map<string, InvestigationArtifactMetadataV1>();
   const intents = new Map<string, InvestigationActionIntentV1>();
   const taskRequests = new Map<string, { input: string; taskId: string }>();
   const actionRequests = new Map<string, { input: string; intentId: string }>();
@@ -305,6 +303,15 @@ export function createSampleInvestigationApi(): InvestigationApi {
       updatedAt: sampleTime,
     });
     reports.set(fixture.result.id, fixture.result);
+    for (const artifact of fixture.result.artifacts) {
+      const expired = fixture.task.id === "sample-pr-partial-task";
+      artifacts.set(artifact.id, {
+        artifact: { ...artifact, availability: expired ? "expired" : "missing" },
+        storedAt: sampleTime,
+        expiredAt: expired ? "2026-09-16T03:00:00.000Z" : null,
+        retentionProtected: false,
+      });
+    }
     tasks.set(fixture.task.id, {
       task: fixture.task,
       attempts: [fixture.attempt],
@@ -723,6 +730,10 @@ export function createSampleInvestigationApi(): InvestigationApi {
       return structuredClone(page);
     },
     exportReport: async (id) => structuredClone(required(reports, id, "report")),
+    artifact: async (id, signal) => {
+      signal?.throwIfAborted();
+      return structuredClone(required(artifacts, id, "artifact"));
+    },
     actionContext: async (workItemId, reportId) =>
       structuredClone(actionContext(workItemId, reportId)),
     prepareAction: async (input: PrepareActionInput) => {

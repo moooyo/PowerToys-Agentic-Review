@@ -20,6 +20,7 @@ import { useEffect, useReducer, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { ActionPanel } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
+import { ArtifactPanel } from "./artifact-panel";
 import {
   createFeedbackSelection,
   feedbackSelectionReducer,
@@ -423,39 +424,10 @@ export function ReportWorkspace({ reportId }: { reportId: string }) {
               ))}
             </Stack>
           </Section>
-          <Section title="Artifacts">
-            <Stack spacing={2}>
-              {result.artifacts.map((artifact) => (
-                <Box key={artifact.id}>
-                  <Typography variant="subtitle2">
-                    {artifact.name} · {artifact.kind}
-                  </Typography>
-                  <Typography variant="caption" component="div">
-                    {artifact.availability} · {artifact.mediaType} · {artifact.byteLength} bytes
-                  </Typography>
-                  <Typography variant="caption" component="div" sx={{ overflowWrap: "anywhere" }}>
-                    Digest: {artifact.digest}
-                  </Typography>
-                  <Typography variant="caption" component="div">
-                    Subject: {artifact.subjectRef} · Attempt: {artifact.attemptId}
-                  </Typography>
-                  {artifact.availability === "available" &&
-                    process.env.NODE_ENV !== "development" && (
-                      <Button
-                        component="a"
-                        href={`/api/artifacts/${encodeURIComponent(artifact.id)}/content`}
-                        download
-                      >
-                        Download artifact
-                      </Button>
-                    )}
-                </Box>
-              ))}
-              {result.artifacts.length === 0 && (
-                <Typography color="text.secondary">No artifacts registered.</Typography>
-              )}
-            </Stack>
-          </Section>
+          <ArtifactPanel artifacts={result.artifacts} />
+          {result.context.sourceArtifacts && result.context.sourceArtifacts.length > 0 && (
+            <ArtifactPanel artifacts={result.context.sourceArtifacts} origin="inherited" />
+          )}
         </>
       )}
       {tab === 3 && result && (

@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 import {
   EntityIdSchema,
   InvestigationArtifactContentRequestSchema,
+  InvestigationArtifactMetadataV1Schema,
   InvestigationArtifactV1Schema,
   InvestigationCheckpointRequestSchema,
   InvestigationClaimRequestSchema,
@@ -44,7 +45,11 @@ import type {
 export interface InvestigationAppOptions
   extends Pick<
     InvestigationServiceOptions,
-    "prepareTaskInput" | "resolveTaskSource" | "resolvePlanPrerequisites" | "maxReportBytes"
+    | "prepareTaskInput"
+    | "resolveTaskSource"
+    | "resolvePlanPrerequisites"
+    | "maxReportBytes"
+    | "evidencePolicy"
   > {
   readonly databasePath?: string;
   readonly store?: InvestigationStore;
@@ -126,9 +131,22 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false, useDefaults: false } },
   });
 
-  if (options.store === undefined) {
-    app.addHook("onClose", async () => store.close());
-  }
+  let evidenceCleanupTimer: NodeJS.Timeout | undefined;
+  app.addHook("onReady", async () => {
+    service.evidence.cleanup();
+    evidenceCleanupTimer = setInterval(() => {
+      try {
+        service.evidence.cleanup();
+      } catch {
+        app.log.error({ code: "evidence_cleanup_failed" }, "Evidence retention cleanup failed.");
+      }
+    }, service.evidence.policy.cleanupIntervalSeconds * 1_000);
+    evidenceCleanupTimer.unref();
+  });
+  app.addHook("onClose", async () => {
+    if (evidenceCleanupTimer !== undefined) clearInterval(evidenceCleanupTimer);
+    if (options.store === undefined) store.close();
+  });
 
   const operators = new WeakMap<object, InvestigationOperatorPrincipal>();
   const workers = new WeakMap<object, InvestigationWorkerPrincipal>();
@@ -323,6 +341,14 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
         .header("content-disposition", `attachment; filename="${request.params.id}.json"`)
         .send(stream);
     },
+  );
+  app.get<{ Params: IdParams }>(
+    "/api/artifacts/:id",
+    {
+      preHandler: authenticateOperator,
+      schema: { params: idParamsSchema, response: { 200: InvestigationArtifactMetadataV1Schema } },
+    },
+    async (request) => service.artifactMetadata(actor(request), request.params.id),
   );
   app.get<{ Params: IdParams }>(
     "/api/artifacts/:id/content",

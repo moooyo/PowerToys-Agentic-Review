@@ -16,6 +16,10 @@ import { investigationContentDigest } from "@agentic-review/domain";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildInvestigationApp } from "../../dist/investigation/app.js";
+import {
+  type InvestigationEvidencePolicy,
+  InvestigationEvidenceStore,
+} from "../../dist/investigation/evidence-store.js";
 import type { InvestigationPreparedTaskInput } from "../../dist/investigation/service.js";
 import { InvestigationStore } from "../../dist/investigation/store.js";
 import type {
@@ -70,6 +74,7 @@ async function harness(
   options: {
     actionTransport?: InvestigationActionTransport;
     allowRepositoryExecution?: boolean;
+    evidencePolicy?: Partial<InvestigationEvidencePolicy>;
   } = {},
 ) {
   const item = workItem();
@@ -121,6 +126,7 @@ async function harness(
     now: () => new Date(time),
     idFactory: () => `synthetic-generated-${++sequence}`,
     leaseDurationMs: 1_000,
+    ...(options.evidencePolicy === undefined ? {} : { evidencePolicy: options.evidencePolicy }),
     ...(options.actionTransport === undefined ? {} : { actionTransport: options.actionTransport }),
     authenticateOperator: (request) =>
       request.headers.authorization === "operator"
@@ -1026,5 +1032,79 @@ describe("investigation service API", () => {
     );
     expect(crossTaskRead.statusCode).toBe(403);
     expect(crossTaskRead.json()).toMatchObject({ code: "artifact_scope_mismatch" });
+  });
+
+  it("exposes current expiration separately and authorizes before revealing expired content", async () => {
+    const { app, item, store, advance } = await harness({
+      evidencePolicy: { retentionSeconds: 1 },
+    });
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const bytes = Buffer.from("Synthetic retained content");
+    const artifact = artifactFor(claimed, bytes);
+    expect(
+      (
+        await post(
+          app,
+          `/api/worker/tasks/${task.id}/artifacts`,
+          {
+            lease: claimed.lease,
+            artifact,
+            contentBase64: bytes.toString("base64"),
+          },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(200);
+    const metadataPath = `/api/artifacts/${artifact.id}`;
+    expect((await get(app, metadataPath)).json()).toMatchObject({
+      artifact,
+      expiredAt: null,
+      retentionProtected: true,
+    });
+    expect((await get(app, metadataPath, "other-operator")).statusCode).toBe(403);
+    store.put("tasks", task.id, { ...task, state: "completed" });
+    advance(2_000);
+    new InvestigationEvidenceStore(
+      store,
+      { retentionSeconds: 1 },
+      () => new Date(startedAt + 2_000),
+    ).cleanup();
+    expect((await get(app, metadataPath)).json()).toMatchObject({
+      artifact: { ...artifact, availability: "expired" },
+      expiredAt: new Date(startedAt + 2_000).toISOString(),
+      retentionProtected: false,
+    });
+    const expired = await get(app, `${metadataPath}/content`);
+    expect(expired.statusCode).toBe(410);
+    expect(expired.json()).toMatchObject({ code: "artifact_expired", retryable: false });
+    expect((await get(app, `${metadataPath}/content`, "other-operator")).statusCode).toBe(403);
+    expect(
+      store.get<{ artifact: InvestigationArtifactV1 }>("evidenceMetadata", artifact.id)?.artifact,
+    ).toEqual(artifact);
+  });
+
+  it("rejects excess uploads without disclosing foreign storage usage", async () => {
+    const { app, item, store } = await harness({
+      evidencePolicy: { maximumBytes: 1, maximumCount: 1 },
+    });
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const bytes = Buffer.from("a");
+    const artifact = artifactFor(claimed, bytes);
+    const path = `/api/worker/tasks/${task.id}/artifacts`;
+    const payload = { artifact, lease: claimed.lease, contentBase64: bytes.toString("base64") };
+    expect((await post(app, path, payload, "worker")).statusCode).toBe(200);
+    expect((await post(app, path, payload, "worker")).statusCode).toBe(200);
+    const rejected = await post(
+      app,
+      path,
+      { ...payload, artifact: { ...artifact, id: "second-artifact" } },
+      "worker",
+    );
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json()).toMatchObject({ code: "evidence_quota_exceeded", retryable: false });
+    expect(rejected.json()).not.toHaveProperty("usage");
+    expect(store.list("evidenceAssets")).toHaveLength(1);
   });
 });

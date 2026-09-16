@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { win32 } from "node:path";
+import { Readable } from "node:stream";
 import {
   createInvestigationPreview as createInvestigationFixture,
   type InvestigationModelEditsV1,
@@ -6,9 +8,18 @@ import {
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
-import type { ProcessHostClient } from "../execution/process-host-protocol.js";
+import {
+  type ManagedProcess,
+  type ProcessHostClient,
+  type ProcessLaunchSpec,
+  processHostProtocolVersion,
+} from "../execution/process-host-protocol.js";
 import { createModelEditAdapter, type ModelEditRunnerOptions } from "./model-edit-runner.js";
-import type { StaticModelJsonInput } from "./model-turn-runner.js";
+import type {
+  ModelTurnFileIO,
+  ModelTurnFileStat,
+  StaticModelJsonInput,
+} from "./model-turn-runner.js";
 import type { InvestigationModelEditAdapter } from "./plan-executor.js";
 import type { PreparedInvestigationWorkspace } from "./workspace.js";
 
@@ -140,6 +151,123 @@ function fixture(
 }
 
 describe("saved model edit adapter", () => {
+  it("uses the default Codex runner in the non-Git model input directory with static tool policy", async () => {
+    const f = fixture();
+    const { workspace } = f.input;
+    const roundDirectory = win32.join(workspace.controlDirectory, "round-fixture");
+    const resultPath = win32.join(roundDirectory, "round-result.json");
+    const files = new Map<string, Buffer>();
+    const directories = new Set([
+      workspace.controlDirectory,
+      workspace.modelInputDirectory,
+      workspace.sourceDirectory!,
+      win32.join(workspace.sourceDirectory!, ".git"),
+    ]);
+    const stat = (path: string): ModelTurnFileStat => {
+      if (!directories.has(path) && !files.has(path))
+        throw Object.assign(new Error("Fixture path is absent."), { code: "ENOENT" });
+      return {
+        dev: 1n,
+        ino: BigInt([...directories, ...files.keys()].indexOf(path) + 1),
+        size: BigInt(files.get(path)?.length ?? 0),
+        mtimeMs: 1n,
+        ctimeMs: 1n,
+        nlink: 1n,
+        isFile: () => files.has(path),
+        isDirectory: () => directories.has(path),
+        isSymbolicLink: () => false,
+      };
+    };
+    const fileIO: ModelTurnFileIO = {
+      createPrivateDirectory: vi.fn(async (prefix) => {
+        expect(prefix).toBe(win32.join(workspace.controlDirectory, "round-"));
+        directories.add(roundDirectory);
+        return roundDirectory;
+      }),
+      writeExclusiveUtf8: vi.fn(async (path, content) => {
+        if (files.has(path)) throw new Error("The fixture prevents replacing an existing file.");
+        files.set(path, Buffer.from(content));
+      }),
+      lstat: vi.fn(async (path) => stat(path)),
+      realpath: vi.fn(async (path) => path),
+      openRead: vi.fn(async (path) => ({
+        stat: async () => stat(path),
+        read: async (buffer: Buffer, offset: number, length: number, position: number) => ({
+          bytesRead: files.get(path)!.copy(buffer, offset, position, position + length),
+        }),
+        close: async () => undefined,
+      })),
+      removeDirectory: vi.fn(async (path) => {
+        expect(path).toBe(roundDirectory);
+        for (const name of files.keys()) if (name.startsWith(`${path}\\`)) files.delete(name);
+        directories.delete(path);
+      }),
+    };
+    const start = vi.fn(async (_spec: ProcessLaunchSpec): Promise<ManagedProcess> => {
+      files.set(resultPath, Buffer.from(JSON.stringify(f.proposal)));
+      return {
+        requestId: "model-edit-request",
+        processId: 17,
+        stdout: Readable.from([
+          `${JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 31, output_tokens: 19 },
+          })}\n`,
+        ]),
+        stderr: Readable.from([]),
+        completed: Promise.resolve({
+          protocolVersion: processHostProtocolVersion,
+          type: "exited",
+          requestId: "model-edit-request",
+          exitCode: 0,
+          signal: null,
+          outputTruncated: false,
+        }),
+        terminate: vi.fn(async () => undefined),
+      };
+    });
+    const { structuredRunner: _structuredRunner, ...runnerOptions } = f.runnerOptions;
+    const adapter = createModelEditAdapter({
+      ...runnerOptions,
+      fileIO,
+      staticConfiguration: { verified: true, disabledMcpServers: ["external-services"] },
+    });
+    const context = { ...f.context, processHost: { ...f.context.processHost, start } };
+
+    expect(await adapter.execute(f.input, context)).toEqual({
+      proposal: f.proposal,
+      usage: { tokens: 50, source: "cli" },
+    });
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledOnce();
+    const spec = start.mock.calls[0]![0];
+    const modelDirectory = spec.arguments[spec.arguments.indexOf("--cd") + 1]!;
+    expect(modelDirectory).toBe(workspace.modelInputDirectory);
+    expect(modelDirectory).not.toBe(workspace.sourceDirectory);
+    expect(directories.has(win32.join(modelDirectory, ".git"))).toBe(false);
+    expect(spec.arguments.filter((argument) => argument === "--skip-git-repo-check")).toHaveLength(
+      1,
+    );
+    expect(spec.arguments[spec.arguments.indexOf("--sandbox") + 1]).toBe("read-only");
+    expect(spec.arguments).toEqual(
+      expect.arrayContaining([
+        'approval_policy="never"',
+        "features.shell_tool=false",
+        "features.unified_exec=false",
+        "features.apps=false",
+        "features.hooks=false",
+        "features.multi_agent=false",
+        'web_search="disabled"',
+        'mcp_servers."external-services".enabled=false',
+      ]),
+    );
+    expect(spec.arguments.at(-1)).toBe("-");
+    expect(spec.arguments).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(spec.standardInput).toContain("<saved_model_edit_context>");
+    expect(fileIO.removeDirectory).toHaveBeenCalledExactlyOnceWith(roundDirectory);
+    expect(workspace.applyEdits).not.toHaveBeenCalled();
+  });
+
   it("uses the strict edit schema and returns passive edits with observed usage", async () => {
     const f = fixture();
     const result = await f.adapter.execute(f.input, f.context);

@@ -81,6 +81,7 @@ export async function createInvestigationRuntime(
       resolveTaskSource: sourceImporter.resolveTaskSource,
       resolvePlanPrerequisites: sourceImporter.resolvePlanPrerequisites,
       enableExternalWrites: config.enableExternalWrites,
+      evidencePolicy: config.evidencePolicy,
       ...(config.https === undefined ? {} : { https: config.https }),
       logger: dependencies.logger ?? {
         level: "info",

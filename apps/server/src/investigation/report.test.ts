@@ -9,12 +9,15 @@ import {
   type InvestigationReportCollection,
   type InvestigationReportPartV1,
   type InvestigationResultV1,
+  validateInvestigationResult,
 } from "@agentic-review/contracts";
 import {
   applyInvestigationSourceCoverage,
   createInvestigationCheckpoint,
   investigationContentDigest,
   investigationTaskBindingDigest,
+  projectInvestigationNextActions,
+  projectInvestigationReportFindings,
 } from "@agentic-review/domain";
 import { describe, expect, it } from "vitest";
 
@@ -541,6 +544,235 @@ describe("assembleInvestigationReport", () => {
     refreshPartChain(actionCase);
     expectCode(() => assembleInvestigationReport(actionCase), "invalid_saved_action");
   });
+
+  it("preserves every checkpoint finding while projecting rejected action proposals into diagnostics", () => {
+    const { input, result } = fixture(4);
+    const rejected = input.checkpoint.analysis.nextActions[0]!;
+    rejected.action = "start-task";
+    rejected.taskKind = "reproduction-setup";
+    sealCheckpoint(input.checkpoint);
+    const checkpoint = structuredClone(input.checkpoint);
+    const projected = projectInvestigationNextActions(
+      result,
+      checkpoint.analysis.nextActions,
+      result.plans,
+      checkpoint.analysis.diagnostics,
+    );
+    result.nextActions = projected.nextActions;
+    result.diagnostics = projected.diagnostics;
+    result.report.collections.nextActions = result.nextActions.length;
+    sealResult(result);
+    const accepted = assembleInvestigationReport(
+      submission(result, checkpoint, input.task, input.attempt),
+    );
+    expect(accepted.outcome).toBe("completed");
+    expect(accepted.findings).toEqual(checkpoint.analysis.findings);
+    expect(accepted.nextActions.some((action) => action.id === rejected.id)).toBe(false);
+    expect(JSON.parse(accepted.diagnostics.at(-1)!.message)).toMatchObject({
+      proposal: rejected,
+      reasonCodes: ["plan_task_kind_mismatch", "bug_verification_not_supported_by_assessment"],
+    });
+    expect(input.checkpoint).toEqual(checkpoint);
+  });
+
+  it("seals a report after projecting a suggestion proposal without replacement content", () => {
+    const { input, result } = fixture();
+    const draft = result.feedbackDrafts[0]!;
+    expect(draft.suggestion).toBeNull();
+    const rejected = {
+      ...input.checkpoint.analysis.nextActions[0]!,
+      id: "synthetic-suggestion-without-replacement",
+      action: "suggestion-comment" as const,
+      taskKind: null,
+      planRef: null,
+      draftRef: draft.id,
+      prerequisiteRefs: [],
+    };
+    input.checkpoint.analysis.nextActions.push(rejected);
+    sealCheckpoint(input.checkpoint);
+    const checkpoint = structuredClone(input.checkpoint);
+    result.nextActions.push({
+      ...rejected,
+      state: "saved",
+      sourceReportRef: { id: result.report.id, version: result.report.version },
+    });
+    result.report.collections.nextActions = result.nextActions.length;
+    expect(validateInvestigationResult(result).errors).toEqual([
+      expect.objectContaining({ code: "SUGGESTION_REQUIRED" }),
+    ]);
+    sealResult(result);
+    expectCode(
+      () => assembleInvestigationReport(submission(result, checkpoint, input.task, input.attempt)),
+      "report_action_draft_mismatch",
+    );
+
+    const projected = projectInvestigationNextActions(
+      result,
+      checkpoint.analysis.nextActions,
+      result.plans,
+      checkpoint.analysis.diagnostics,
+    );
+    result.nextActions = projected.nextActions;
+    result.diagnostics = projected.diagnostics;
+    result.report.collections.nextActions = result.nextActions.length;
+    sealResult(result);
+    const accepted = assembleInvestigationReport(
+      submission(result, checkpoint, input.task, input.attempt),
+    );
+    expect(accepted.outcome).toBe("completed");
+    expect(accepted.findings).toEqual(checkpoint.analysis.findings);
+    expect(accepted.nextActions.some((action) => action.id === rejected.id)).toBe(false);
+    expect(JSON.parse(accepted.diagnostics.at(-1)!.message)).toMatchObject({
+      proposal: rejected,
+      reasonCodes: ["missing_saved_suggestion"],
+    });
+    expect(input.checkpoint).toEqual(checkpoint);
+  });
+
+  it("seals deterministic finding display positions while preserving every original reviewed field", () => {
+    const { input, result } = fixture(3);
+    input.checkpoint.analysis.findings.forEach((finding, index) => {
+      finding.ordinal = [8, 8, 1][index]!;
+    });
+    sealCheckpoint(input.checkpoint);
+    const original = structuredClone(input.checkpoint);
+    const findings = projectInvestigationReportFindings(
+      original.analysis.findings,
+      { id: result.report.id, version: result.report.version },
+      original.analysis.diagnostics,
+    );
+    result.findings = findings.findings;
+    result.diagnostics = findings.diagnostics;
+    sealResult(result);
+    const accepted = assembleInvestigationReport(
+      submission(result, original, input.task, input.attempt),
+    );
+    expect(accepted.findings).toEqual(
+      original.analysis.findings.map((finding, ordinal) => ({ ...finding, ordinal })),
+    );
+    expect(accepted.report.recheck.records).toEqual(original.analysis.rechecks);
+    expect(
+      accepted.diagnostics.filter((diagnostic) => diagnostic.code === "FINDING_ORDINAL_NORMALIZED"),
+    ).toHaveLength(3);
+    expect(input.checkpoint).toEqual(original);
+  });
+
+  it.each(["ordinal", "body", "order", "drop-diagnostic", "rewrite-diagnostic"])(
+    "rejects a forged finding projection with recomputed report digests: %s",
+    (mutation) => {
+      const { input, result } = fixture(2);
+      input.checkpoint.analysis.findings.forEach((finding) => {
+        finding.ordinal = 7;
+      });
+      sealCheckpoint(input.checkpoint);
+      const projected = projectInvestigationReportFindings(
+        input.checkpoint.analysis.findings,
+        { id: result.report.id, version: result.report.version },
+        input.checkpoint.analysis.diagnostics,
+      );
+      result.findings = projected.findings;
+      result.diagnostics = projected.diagnostics;
+      let code = "report_checkpoint_collection_mismatch";
+      if (mutation === "ordinal") result.findings[0]!.ordinal = 7;
+      if (mutation === "body")
+        result.findings[0]!.impact.description = "Substituted reviewed content";
+      if (mutation === "order")
+        result.findings = result.findings
+          .reverse()
+          .map((finding, ordinal) => ({ ...finding, ordinal }));
+      if (mutation === "drop-diagnostic") {
+        result.diagnostics.pop();
+        code = "report_diagnostic_projection_mismatch";
+      }
+      if (mutation === "rewrite-diagnostic") {
+        const diagnostic = result.diagnostics.at(-1)!;
+        const envelope = JSON.parse(diagnostic.message);
+        envelope.originalOrdinal = 1;
+        diagnostic.message = JSON.stringify(envelope);
+        code = "report_diagnostic_projection_mismatch";
+      }
+      sealResult(result);
+      expectCode(
+        () =>
+          assembleInvestigationReport(
+            submission(result, input.checkpoint, input.task, input.attempt),
+          ),
+        code,
+      );
+    },
+  );
+
+  it("refuses a schema-valid report whose conclusion contradicts its confirmed blocking findings", () => {
+    const { input, result } = fixture();
+    if (result.assessment.kind !== "pr" || input.checkpoint.analysis.assessment.kind !== "pr")
+      throw new Error("Expected PR fixture.");
+    result.assessment.reviewConclusion.status = "no-blocking-findings";
+    input.checkpoint.analysis.assessment.reviewConclusion.status = "no-blocking-findings";
+    sealCheckpoint(input.checkpoint);
+    sealResult(result);
+    expectCode(
+      () =>
+        assembleInvestigationReport(
+          submission(result, input.checkpoint, input.task, input.attempt),
+        ),
+      "invalid_logical_report_semantics",
+    );
+  });
+
+  it.each([
+    "drop-valid",
+    "restore-invalid",
+    "drop-diagnostic",
+    "substitute-proposal",
+    "substitute-reasons",
+    "forge-source",
+    "forge-diagnostic",
+  ])(
+    "rejects a forged proposal projection even with recomputed transport and report digests: %s",
+    (mutation) => {
+      const { input, result } = fixture();
+      const rejected = input.checkpoint.analysis.nextActions[0]!;
+      rejected.action = "start-task";
+      rejected.taskKind = "reproduction-setup";
+      sealCheckpoint(input.checkpoint);
+      const projected = projectInvestigationNextActions(
+        result,
+        input.checkpoint.analysis.nextActions,
+        result.plans,
+        input.checkpoint.analysis.diagnostics,
+      );
+      result.nextActions = projected.nextActions;
+      result.diagnostics = projected.diagnostics;
+      let code = "report_diagnostic_projection_mismatch";
+      if (mutation === "drop-valid") {
+        result.nextActions.pop();
+        code = "report_action_draft_mismatch";
+      }
+      if (mutation === "restore-invalid") {
+        result.nextActions.unshift({
+          ...rejected,
+          state: "saved",
+          sourceReportRef: { id: result.report.id, version: result.report.version },
+        });
+        code = "report_action_draft_mismatch";
+      }
+      if (mutation === "drop-diagnostic") result.diagnostics.pop();
+      if (mutation === "forge-diagnostic")
+        result.diagnostics.push({ ...result.diagnostics[0]!, id: "forged-extra-diagnostic" });
+      if (["substitute-proposal", "substitute-reasons", "forge-source"].includes(mutation)) {
+        const diagnostic = result.diagnostics.at(-1)!;
+        const envelope = JSON.parse(diagnostic.message);
+        if (mutation === "substitute-proposal") envelope.proposal.taskKind = "pr-verify";
+        if (mutation === "substitute-reasons") envelope.reasonCodes = ["fabricated_reason"];
+        if (mutation === "forge-source") envelope.sourceReportRef.id = "unrelated-report";
+        diagnostic.message = JSON.stringify(envelope);
+      }
+      result.report.collections.nextActions = result.nextActions.length;
+      sealResult(result);
+      const forged = submission(result, input.checkpoint, input.task, input.attempt);
+      expectCode(() => assembleInvestigationReport(forged), code);
+    },
+  );
 
   it("cannot upgrade model analysis into worker or server evidence", () => {
     for (const authority of ["worker", "server"] as const) {

@@ -165,6 +165,32 @@ export const InvestigationCoverageSchema = object({
 });
 export type InvestigationCoverage = Static<typeof InvestigationCoverageSchema>;
 
+export const InvestigationArtifactV1Schema = object({
+  id: EntityIdSchema,
+  taskId: EntityIdSchema,
+  attemptId: EntityIdSchema,
+  subjectRef: EntityIdSchema,
+  kind: Type.Union([
+    Type.Literal("log"),
+    Type.Literal("image"),
+    Type.Literal("trace"),
+    Type.Literal("patch"),
+    Type.Literal("report"),
+    Type.Literal("source"),
+    Type.Literal("other"),
+  ]),
+  name: text,
+  mediaType: text,
+  digest: Sha256Schema,
+  byteLength: NonNegativeIntegerSchema,
+  availability: Type.Union([
+    Type.Literal("available"),
+    Type.Literal("expired"),
+    Type.Literal("missing"),
+  ]),
+});
+export type InvestigationArtifactV1 = Static<typeof InvestigationArtifactV1Schema>;
+
 export const InvestigationTaskV1Schema = object({
   schemaVersion: Type.Literal("InvestigationTaskV1"),
   id: EntityIdSchema,
@@ -176,6 +202,8 @@ export const InvestigationTaskV1Schema = object({
   planRef: Type.Union([InvestigationVersionRefSchema, Type.Null()]),
   subjectRef: EntityIdSchema,
   subjects: Type.Array(InvestigationSubjectV1Schema, { minItems: 1 }),
+  // Frozen parent patch metadata preserves the producing task and attempt identities.
+  sourceArtifacts: Type.Optional(Type.Array(InvestigationArtifactV1Schema)),
   scope: InvestigationCoverageSchema,
   executionPolicy: InvestigationExecutionPolicySchema,
   budget: InvestigationBudgetSchema,
@@ -238,31 +266,6 @@ export const InvestigationAnalysisEvidenceSchema = object({
 });
 export type InvestigationAnalysisEvidence = Static<typeof InvestigationAnalysisEvidenceSchema>;
 
-export const InvestigationArtifactV1Schema = object({
-  id: EntityIdSchema,
-  taskId: EntityIdSchema,
-  attemptId: EntityIdSchema,
-  subjectRef: EntityIdSchema,
-  kind: Type.Union([
-    Type.Literal("log"),
-    Type.Literal("image"),
-    Type.Literal("trace"),
-    Type.Literal("patch"),
-    Type.Literal("report"),
-    Type.Literal("source"),
-    Type.Literal("other"),
-  ]),
-  name: text,
-  mediaType: text,
-  digest: Sha256Schema,
-  byteLength: NonNegativeIntegerSchema,
-  availability: Type.Union([
-    Type.Literal("available"),
-    Type.Literal("expired"),
-    Type.Literal("missing"),
-  ]),
-});
-export type InvestigationArtifactV1 = Static<typeof InvestigationArtifactV1Schema>;
 export const InvestigationDiagnosticSchema = object({
   id: EntityIdSchema,
   code: text,
@@ -653,6 +656,7 @@ export const InvestigationResultContextSchema = object({
   attempt: object({ id: EntityIdSchema, number: PositiveIntegerSchema }),
   adoptedAttemptIds: ids,
   subjects: Type.Array(InvestigationSubjectV1Schema, { minItems: 1 }),
+  sourceArtifacts: Type.Optional(Type.Array(InvestigationArtifactV1Schema)),
   profileRef: InvestigationVersionRefSchema,
   promptRef: InvestigationVersionRefSchema,
   parentReportRef: Type.Union([InvestigationReportRefSchema, Type.Null()]),
@@ -1265,6 +1269,24 @@ export function validateInvestigationResult(
   const findings = unique(result.findings, "/findings");
   const evidence = unique(result.verificationEvidence, "/verificationEvidence");
   const artifacts = unique(result.artifacts, "/artifacts");
+  const sourceArtifacts = unique(result.context.sourceArtifacts ?? [], "/context/sourceArtifacts");
+  errors.push(
+    ...validateSourceArtifactBindings({
+      taskId: result.context.task.id,
+      parentTaskId: result.context.task.parentTaskId,
+      parentReportRef: result.context.parentReportRef,
+      subjects: result.context.subjects,
+      sourceArtifacts: result.context.sourceArtifacts ?? [],
+      path: "/context/sourceArtifacts",
+    }),
+  );
+  for (const id of sourceArtifacts.keys())
+    if (artifacts.has(id))
+      add(
+        "/artifacts",
+        "SOURCE_ARTIFACT_ID_CONFLICT",
+        "An inherited source artifact cannot be republished as current task evidence.",
+      );
   const plans = unique(result.plans, "/plans");
   const actions = unique(result.nextActions, "/nextActions");
   const candidates = unique(result.report.loop.candidates, "/report/loop/candidates");
@@ -1407,7 +1429,7 @@ export function validateInvestigationResult(
           "PATCH_BASE_SHA_MISMATCH",
           "The patch base SHA must match the referenced source subject.",
         );
-      const artifact = artifacts.get(item.artifactRef);
+      const artifact = artifacts.get(item.artifactRef) ?? sourceArtifacts.get(item.artifactRef);
       if (
         !artifact ||
         artifact.kind !== "patch" ||
@@ -2223,11 +2245,28 @@ export function validateInvestigationResult(
           action.planRef !== null &&
           plans.has(action.planRef.id),
       );
-      if (!hasNextStep || result.report.limitations.length === 0)
+      // Saving continuation work is independent of publishing an executable action proposal.
+      const hasSavedContinuationPlan = [...plans.values()].some((plan) => {
+        const source = plan.sourceReportRef;
+        const parent = result.context.parentReportRef;
+        return (
+          plan.subjectRef === candidate.subjectRef &&
+          plan.state === "saved" &&
+          ["investigation", "verification", "reproduction"].includes(plan.kind) &&
+          plan.steps.length > 0 &&
+          plan.acceptanceCriteria.length > 0 &&
+          ((source.id === result.report.id && source.version === result.report.version) ||
+            (parent !== null &&
+              result.context.task.parentTaskId !== null &&
+              source.id === parent.id &&
+              source.version === parent.version))
+        );
+      });
+      if ((!hasNextStep && !hasSavedContinuationPlan) || result.report.limitations.length === 0)
         add(
           `/report/loop/candidates/${candidate.id}`,
           "UNRESOLVED_CANDIDATE_FOLLOWUP_REQUIRED",
-          "Retained hypotheses need an explicit limitation and a saved follow-up plan/action.",
+          "Retained hypotheses need an explicit limitation and an applicable saved continuation plan or action.",
         );
     }
   }
@@ -2244,6 +2283,40 @@ export function assertInvestigationResult(result: InvestigationResultV1): void {
     );
 }
 
+function validateSourceArtifactBindings(input: {
+  taskId: string;
+  parentTaskId: string | null;
+  parentReportRef: InvestigationTaskV1["parentReportRef"];
+  subjects: readonly InvestigationSubjectV1[];
+  sourceArtifacts: readonly InvestigationArtifactV1[];
+  path: string;
+}): InvestigationSemanticIssue[] {
+  const errors: InvestigationSemanticIssue[] = [];
+  const subjects = new Map(input.subjects.map((subject) => [subject.id, subject]));
+  const ids = new Set<string>();
+  for (const [index, artifact] of input.sourceArtifacts.entries()) {
+    const subject = subjects.get(artifact.subjectRef);
+    if (
+      input.parentTaskId === null ||
+      input.parentReportRef === null ||
+      artifact.taskId === input.taskId ||
+      artifact.kind !== "patch" ||
+      subject?.kind !== "local_patch" ||
+      subject.artifactRef !== artifact.id ||
+      subject.patchDigest !== artifact.digest ||
+      ids.has(artifact.id)
+    )
+      errors.push({
+        path: `${input.path}/${index}`,
+        code: "INVALID_SOURCE_ARTIFACT",
+        message:
+          "Inherited patch metadata requires an exact parent report binding, its frozen patch subject, and the original producing task identity.",
+      });
+    ids.add(artifact.id);
+  }
+  return errors;
+}
+
 export function validateInvestigationTask(
   task: InvestigationTaskV1,
 ): InvestigationSemanticValidation {
@@ -2251,6 +2324,16 @@ export function validateInvestigationTask(
   const add = (path: string, code: string, message: string) => {
     errors.push({ path, code, message });
   };
+  errors.push(
+    ...validateSourceArtifactBindings({
+      taskId: task.id,
+      parentTaskId: task.parentTaskId,
+      parentReportRef: task.parentReportRef,
+      subjects: task.subjects,
+      sourceArtifacts: task.sourceArtifacts ?? [],
+      path: "/sourceArtifacts",
+    }),
+  );
   const subjects = new Map(task.subjects.map((subject) => [subject.id, subject]));
   if (subjects.size !== task.subjects.length)
     add("/subjects", "DUPLICATE_ID", "Task subject IDs must be unique.");

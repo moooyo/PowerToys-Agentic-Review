@@ -9,7 +9,7 @@ import {
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type CreateTaskInput, type InvestigationApi, type PrepareActionInput } from "./api";
+import type { CreateTaskInput, InvestigationApi, PrepareActionInput } from "./api";
 import { createSampleInvestigationApi } from "./sample-adapter";
 import { createSampleAuthApi } from "./sample-auth";
 import { createSessionScopedSampleApi } from "./sample-workspace-access";
@@ -173,6 +173,7 @@ describe("sample workspace session and repository access", () => {
       () => api.report(reportId),
       () => api.findings(reportId),
       () => api.exportReport(reportId),
+      () => api.artifact("sample-artifact"),
       () => api.actionContext(workItemId, reportId),
       () => api.prepareAction(input),
       () => api.actionIntent("sample-intent"),
@@ -218,6 +219,22 @@ describe("sample workspace session and repository access", () => {
     expect(await api.repositories()).toEqual({ items: [] });
     expect(await api.workItems()).toEqual({ items: [] });
     expect(await api.tasks()).toEqual({ items: [] });
+  });
+
+  it("scopes artifact metadata to the owning task and rechecks access before returning it", async () => {
+    const raw = createSampleInvestigationApi();
+    const artifact = required((await raw.exportReport(reportId)).artifacts[0]);
+    let current = signedIn({ repositoryIds: [foreignRepositoryId] });
+    const api = createSessionScopedSampleApi(raw, async () => current);
+    await expectDenied(api.artifact(artifact.id));
+    current = signedIn();
+    expect((await api.artifact(artifact.id)).artifact.id).toBe(artifact.id);
+    const task = await raw.task(taskId);
+    vi.spyOn(raw, "task").mockImplementation(async () => {
+      current = signedIn({ repositoryIds: [] });
+      return task;
+    });
+    await expectDenied(api.artifact(artifact.id));
   });
 
   it("rejects direct identifiers outside repository grants without returning findings or exports", async () => {

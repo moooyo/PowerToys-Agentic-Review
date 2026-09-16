@@ -73,6 +73,25 @@ function seal(checkpoint: InvestigationLoopCheckpointV1): InvestigationLoopCheck
   return { ...checkpoint, digest: investigationContentDigest(content) };
 }
 
+function snapshotProjection(): ModelTurnProjection {
+  const { task, attempt } = createInvestigationFixture("bug", { findingCount: 0 });
+  task.scope.includedUnits = task.scope.includedUnits.map((unit) => ({
+    ...unit,
+    status: "pending" as const,
+    evidenceRefs: [],
+  }));
+  task.scope.completedUnitRefs = [];
+  task.scope.unresolvedUnitRefs = task.scope.includedUnits.map((unit) => unit.id);
+  const checkpoint = createInvestigationCheckpoint({
+    task,
+    attemptId: attempt.id,
+    checkpointId: "snapshot-projection-checkpoint",
+    leaseVersion: attempt.leaseVersion,
+    recordedAt: task.updatedAt,
+  });
+  return prepareModelTurnProjection({ task, attempt, checkpoint, maximumContextBytes: 32 * 1024 });
+}
+
 function emptyDelta(projection: ModelTurnProjection): InvestigationModelTurnDeltaV1 {
   return {
     schemaVersion: "InvestigationModelTurnDeltaV1",
@@ -183,6 +202,71 @@ describe("bounded investigation model context", () => {
       initial.findings.map((finding) => finding.rootCause),
     );
     expect(f.checkpoint.analysis).toEqual(initial);
+  });
+
+  it("keeps an appended recheck pending until the updated finding and its owners link to that version", () => {
+    const f = fixture(1);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    expect(projection.phase).toBe("recheck");
+    const finding = projection.context.analysis.findings[0]!;
+    const unlinkedDelta = emptyDelta(projection);
+    unlinkedDelta.analysis.rechecks.push({
+      id: "synthetic-unlinked-recheck",
+      findingId: finding.id,
+      findingVersion: finding.version,
+      subjectRef: finding.subjectRef,
+      round: projection.context.round,
+      evidenceRefs: [...finding.evidenceRefs],
+      conclusion: "The synthetic finding was rechecked without updating its confirmation link.",
+      unresolvedQuestions: [],
+    });
+    expect(unlinkedDelta.analysis.findings).toEqual([]);
+    const unlinkedRound = mergeModelTurnDelta(projection, unlinkedDelta);
+    expect(unlinkedRound.continue).toBe(true);
+    let checkpoint = applyInvestigationLoopRound(f.checkpoint, unlinkedRound, {
+      recordedAt: f.checkpoint.recordedAt,
+      usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+    });
+    expect(checkpoint.analysis.rechecks).toContainEqual(unlinkedDelta.analysis.rechecks[0]);
+    expect(checkpoint.analysis.findings[0]).toEqual(finding);
+    expect(checkpoint.analysis.findings[0]!.confirmation.recheckRef).toBeNull();
+    const retryProjection = prepareModelTurnProjection({
+      ...f,
+      checkpoint,
+      maximumContextBytes: 100 * 1024,
+    });
+    expect(retryProjection.phase).toBe("recheck");
+    expect(retryProjection.context.counts.pendingFindings).toBe(1);
+    expect(retryProjection.selectedFindingIds).toEqual([finding.id]);
+
+    const linkedDelta = recheckDelta(retryProjection);
+    const updatedFinding = linkedDelta.analysis.findings[0]!;
+    const linkedRecheck = linkedDelta.analysis.rechecks[0]!;
+    expect(updatedFinding.version).toBe(finding.version + 1);
+    expect(updatedFinding.confirmation.recheckRef).toBe(linkedRecheck.id);
+    expect(linkedRecheck.id).not.toBe(unlinkedDelta.analysis.rechecks[0]!.id);
+    expect(linkedRecheck.findingVersion).toBe(updatedFinding.version);
+    expect(linkedDelta.analysis.candidates.length).toBeGreaterThan(0);
+    for (const candidate of linkedDelta.analysis.candidates) {
+      expect(candidate.findingId).toBe(updatedFinding.id);
+      expect(candidate.findingVersion).toBe(updatedFinding.version);
+    }
+    checkpoint = applyInvestigationLoopRound(
+      checkpoint,
+      mergeModelTurnDelta(retryProjection, linkedDelta),
+      {
+        recordedAt: checkpoint.recordedAt,
+        usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+      },
+    );
+    const finalProjection = prepareModelTurnProjection({
+      ...f,
+      checkpoint,
+      maximumContextBytes: 100 * 1024,
+    });
+    expect(finalProjection.phase).toBe("finalize");
+    expect(finalProjection.context.counts.pendingFindings).toBe(0);
+    expect(mergeModelTurnDelta(finalProjection, emptyDelta(finalProjection)).continue).toBe(false);
   });
 
   it("continues through more than one hundred frozen scope units without dropping pending work", () => {
@@ -302,6 +386,58 @@ describe("bounded investigation model context", () => {
     delta.round += 1;
     expect(() => mergeModelTurnDelta(projection, delta)).toThrow(/does not match/u);
   });
+
+  it.each(["reporter_statement", "static_analysis"] as const)(
+    "rejects a supplied snapshot subject ID used as a %s evidence reference",
+    (source) => {
+      const projection = snapshotProjection();
+      const subject = projection.context.task.primarySubject;
+      expect(subject.kind).toBe("issue_snapshot");
+      expect(projection.context.subjects).toContainEqual(subject);
+      expect(projection.context.analysis.evidence).toEqual([]);
+      expect(projection.context.observations).toEqual([]);
+      const delta = emptyDelta(projection);
+      delta.analysis.evidence = [
+        {
+          id: "synthetic-snapshot-leaf",
+          subjectRef: subject.id,
+          source,
+          summary: "A synthetic observation drawn directly from the supplied snapshot.",
+          evidenceRefs: [subject.id],
+        },
+      ];
+      expect(() => mergeModelTurnDelta(projection, delta)).toThrow(
+        /references evidence outside its supplied batch or new records/u,
+      );
+    },
+  );
+
+  it.each(["reporter_statement", "static_analysis"] as const)(
+    "accepts leaf %s evidence from a supplied snapshot and evidence derived in the same turn",
+    (source) => {
+      const projection = snapshotProjection();
+      const delta = emptyDelta(projection);
+      delta.analysis.evidence = [
+        {
+          id: "synthetic-snapshot-leaf",
+          subjectRef: projection.context.task.subjectRef,
+          source,
+          summary: "A synthetic observation drawn directly from the supplied snapshot.",
+          evidenceRefs: [],
+        },
+        {
+          id: "synthetic-derived-analysis",
+          subjectRef: projection.context.task.subjectRef,
+          source: "static_analysis",
+          summary: "The snapshot observation supports a hypothesis, not a reproduced defect.",
+          evidenceRefs: ["synthetic-snapshot-leaf"],
+        },
+      ];
+      expect(mergeModelTurnDelta(projection, delta).analysis.evidence).toEqual(
+        delta.analysis.evidence,
+      );
+    },
+  );
 
   it("rejects an oversized individual finding instead of truncating its content", () => {
     const f = fixture(1);

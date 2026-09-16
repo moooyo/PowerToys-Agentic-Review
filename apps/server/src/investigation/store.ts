@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 
-export const investigationSchemaVersion = "investigation-v1";
+export const investigationSchemaVersion = "investigation-v2";
 
 export const investigationCollections = [
   "repositories",
@@ -15,6 +15,9 @@ export const investigationCollections = [
   "actionIntents",
   "idempotency",
   "evidenceAssets",
+  "evidenceMetadata",
+  "evidencePins",
+  "evidenceUsage",
   "findingEvents",
   "sourceSnapshots",
 ] as const;
@@ -165,12 +168,41 @@ export class InvestigationStore {
     return row === undefined ? undefined : (JSON.parse(row.value as string) as T);
   }
 
+  has(collection: InvestigationCollection, id: string): boolean {
+    return (
+      this.database
+        .prepare(`SELECT 1 FROM ${collectionName(collection)} WHERE "id" = ?`)
+        .get(id) !== undefined
+    );
+  }
+
   list<T>(collection: InvestigationCollection, predicate?: (value: T) => boolean): T[] {
     const values = this.database
       .prepare(`SELECT "value" FROM ${collectionName(collection)} ORDER BY "id"`)
       .all()
       .map((row) => JSON.parse(row.value as string) as T);
     return predicate === undefined ? values : values.filter(predicate);
+  }
+
+  /** Keyset paging uses the primary key and never reads a collection's unrelated values. */
+  page<T>(collection: InvestigationCollection, afterId: string, limit: number): T[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
+      throw new InvestigationStoreError("invalid_value", "Page size must be between 1 and 1,000.");
+    return this.database
+      .prepare(
+        `SELECT "value" FROM ${collectionName(collection)} WHERE "id" > ? ORDER BY "id" LIMIT ?`,
+      )
+      .all(afterId, limit)
+      .map((row) => JSON.parse(row.value as string) as T);
+  }
+
+  /** Pin IDs use an ASCII-encoded prefix, so this lookup is an indexed bounded range. */
+  hasPrefix(collection: InvestigationCollection, prefix: string): boolean {
+    return (
+      this.database
+        .prepare(`SELECT 1 FROM ${collectionName(collection)} WHERE "id" >= ? AND "id" < ? LIMIT 1`)
+        .get(prefix, `${prefix}\uffff`) !== undefined
+    );
   }
 
   insert<T>(collection: InvestigationCollection, id: string, value: T): void {
@@ -240,7 +272,7 @@ export class InvestigationStore {
     if (!compatible) {
       throw new InvestigationStoreError(
         "incompatible_schema",
-        "This database does not use the investigation-v1 schema. Configure a new database; legacy databases are not migrated.",
+        `This database does not use the ${investigationSchemaVersion} schema. Configure a new database; existing databases are not migrated.`,
       );
     }
     const version = this.database

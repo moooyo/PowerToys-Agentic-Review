@@ -2,8 +2,10 @@ import type {
   ActionContextV1,
   InvestigationActionGuard,
   InvestigationActionKind,
+  InvestigationDiagnostic,
   InvestigationFindingV1,
   InvestigationLoopCheckpointV1,
+  InvestigationNextActionDraft,
   InvestigationNextActionV1,
   InvestigationPlanV1,
   InvestigationResultV1,
@@ -15,6 +17,7 @@ import {
   assertInvestigationCheckpointIntegrity,
   investigationTaskBindingDigest,
 } from "./investigation-loop.js";
+import { appendInvestigationProjectionDiagnostic } from "./investigation-report-projection.js";
 
 /** Server-validated feedback facts. These must never come from model authority flags. */
 export interface InvestigationFeedbackFact {
@@ -224,7 +227,10 @@ function validFindingRecheck(
   );
 }
 
-function planSourceIsBound(result: InvestigationResultV1, plan: InvestigationPlanV1): boolean {
+function planSourceIsBound(
+  result: InvestigationNextActionResolutionContext,
+  plan: InvestigationPlanV1,
+): boolean {
   const source = plan.sourceReportRef;
   return (
     (source.id === result.report.id && source.version === result.report.version) ||
@@ -235,7 +241,7 @@ function planSourceIsBound(result: InvestigationResultV1, plan: InvestigationPla
 }
 
 function actionPlanSubjectIsBound(
-  result: InvestigationResultV1,
+  result: InvestigationNextActionResolutionContext,
   action: InvestigationNextActionV1,
   plan: InvestigationPlanV1,
 ): boolean {
@@ -271,14 +277,23 @@ export interface InvestigationNextActionValidation {
   readonly reasonCodes: readonly string[];
 }
 
+/** Only saved reference facts participate in proposal validation; completion and counts do not. */
+export type InvestigationNextActionResolutionContext = Pick<
+  InvestigationResultV1,
+  "context" | "assessment" | "findings" | "feedbackDrafts"
+> & {
+  readonly report: Pick<InvestigationResultV1["report"], "id" | "version">;
+  readonly nextActions: InvestigationNextActionV1[];
+};
+
 /** Resolve proposals against saved records. A classification alone never creates an action. */
 export function validateInvestigationNextActions(
-  result: InvestigationResultV1,
+  result: InvestigationNextActionResolutionContext,
   persistedPlans: readonly InvestigationPlanV1[],
 ): InvestigationNextActionValidation[] {
-  const drafts = new Set(
+  const drafts = new Map(
     [...result.feedbackDrafts, ...result.findings.map((finding) => finding.feedbackDraft)].map(
-      (draft) => draft.id,
+      (draft) => [draft.id, draft] as const,
     ),
   );
   const subjects = new Map(result.context.subjects.map((subject) => [subject.id, subject]));
@@ -312,6 +327,13 @@ export function validateInvestigationNextActions(
       action.draftRef === null
     )
       reasons.push("missing_saved_draft");
+    if (
+      action.action === "suggestion-comment" &&
+      action.draftRef !== null &&
+      drafts.has(action.draftRef) &&
+      drafts.get(action.draftRef)!.suggestion === null
+    )
+      reasons.push("missing_saved_suggestion");
     if (action.action === "start-task" || action.action === "reviews.verify") {
       if (plan === undefined) reasons.push("missing_saved_plan");
       if (action.taskKind === null) reasons.push("missing_task_kind");
@@ -331,6 +353,7 @@ export function validateInvestigationNextActions(
         action.action === "reviews.verify" &&
         (assessment.kind !== "pr" ||
           action.taskKind !== "pr-verify" ||
+          subjects.get(action.subjectRef)?.kind !== "original_pr" ||
           !sameRef(action.planRef, assessment.e2eAssessment.planRef))
       )
         reasons.push("invalid_pr_verification_binding");
@@ -378,6 +401,59 @@ export function validateInvestigationNextActions(
       reasons.push("unknown_prerequisite");
     return { action, valid: reasons.length === 0, reasonCodes: reasons };
   });
+}
+
+export interface InvestigationNextActionProjection {
+  readonly nextActions: InvestigationNextActionV1[];
+  readonly diagnostics: InvestigationDiagnostic[];
+}
+
+/**
+ * Project accepted proposals without editing the checkpoint or granting invalid actions.
+ * Rejected proposals remain complete canonical JSON in a non-executable diagnostic message.
+ * The Server recomputes this projection from trusted records before accepting report delivery.
+ */
+export function projectInvestigationNextActions(
+  context: Omit<InvestigationNextActionResolutionContext, "nextActions">,
+  proposals: readonly InvestigationNextActionDraft[],
+  persistedPlans: readonly InvestigationPlanV1[],
+  checkpointDiagnostics: readonly InvestigationDiagnostic[],
+): InvestigationNextActionProjection {
+  const sourceReportRef = { id: context.report.id, version: context.report.version };
+  const candidates = proposals.map(
+    (proposal): InvestigationNextActionV1 => ({
+      ...structuredClone(proposal),
+      sourceReportRef: { ...sourceReportRef },
+      state: "saved",
+    }),
+  );
+  const validations = validateInvestigationNextActions(
+    { ...context, nextActions: candidates },
+    persistedPlans,
+  );
+  const nextActions: InvestigationNextActionV1[] = [];
+  const diagnostics = structuredClone([...checkpointDiagnostics]);
+  const diagnosticIds = new Set(diagnostics.map((diagnostic) => diagnostic.id));
+  for (const [proposalIndex, validation] of validations.entries()) {
+    if (validation.valid) {
+      nextActions.push(validation.action);
+      continue;
+    }
+    const envelope = {
+      projectionVersion: "InvestigationNextActionProjectionV1",
+      sourceReportRef,
+      proposalIndex,
+      proposal: structuredClone(proposals[proposalIndex]!),
+      reasonCodes: [...validation.reasonCodes],
+    };
+    appendInvestigationProjectionDiagnostic(
+      diagnostics,
+      "INVALID_NEXT_ACTION_PROPOSAL",
+      envelope,
+      diagnosticIds,
+    );
+  }
+  return { nextActions, diagnostics };
 }
 
 /** Required coverage comes from the saved plan, including scenarios that were never run. */

@@ -60,6 +60,7 @@ export function investigationTaskBindingDigest(task: InvestigationTaskV1): strin
     planRef: task.planRef,
     subjectRef: task.subjectRef,
     subjects: task.subjects,
+    ...(task.sourceArtifacts === undefined ? {} : { sourceArtifacts: task.sourceArtifacts }),
     scope: task.scope,
     executionPolicy: task.executionPolicy,
     budget: task.budget,

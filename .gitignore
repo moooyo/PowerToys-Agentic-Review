@@ -28,3 +28,4 @@ backups/
 *.sqlite-shm
 *.sqlite-wal
 apps/dashboard/src/services/generated/
+/apps/worker/.tmp-ui-driver-*/

@@ -17,12 +17,16 @@ import {
   type InvestigationSubjectV1,
   type InvestigationTaskV1,
   InvestigationTaskV1Schema,
+  validateInvestigationResult,
   validateInvestigationSourceCoverage,
+  validateInvestigationTask,
 } from "@agentic-review/contracts";
 import {
   evaluateInvestigationCompletion,
   investigationContentDigest,
   investigationTaskBindingDigest,
+  projectInvestigationNextActions,
+  projectInvestigationReportFindings,
   validateInvestigationNextActions,
 } from "@agentic-review/domain";
 import { FormatRegistry } from "@sinclair/typebox";
@@ -304,6 +308,7 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
   const { task, attempt, checkpoint, header, manifest, parts } = input;
   requireCondition(
     Value.Check(InvestigationTaskV1Schema, task) &&
+      (task.sourceArtifacts === undefined || validateInvestigationTask(task).valid) &&
       Value.Check(InvestigationAttemptV1Schema, attempt) &&
       Value.Check(InvestigationLoopCheckpointV1Schema, checkpoint) &&
       Value.Check(InvestigationReportHeaderV1Schema, header) &&
@@ -388,6 +393,7 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
       attempt: { id: attempt.id, number: attempt.number },
       adoptedAttemptIds: checkpoint.adoptedAttemptIds,
       subjects: reportSubjects(task, checkpoint),
+      ...(task.sourceArtifacts === undefined ? {} : { sourceArtifacts: task.sourceArtifacts }),
       profileRef: task.profileRef,
       promptRef: task.promptRef,
       parentReportRef: task.parentReportRef,
@@ -592,7 +598,9 @@ function validateReportReferences(
   for (const artifact of result.artifacts) {
     requireSubject(artifact.subjectRef);
     requireCondition(
-      artifact.taskId === task.id && adoptedAttempts.has(artifact.attemptId),
+      artifact.taskId === task.id &&
+        !task.sourceArtifacts?.some((source) => source.id === artifact.id) &&
+        adoptedAttempts.has(artifact.attemptId),
       422,
       "report_artifact_scope_mismatch",
       "Artifacts must originate from the current task and an explicitly adopted attempt.",
@@ -830,14 +838,18 @@ export function assembleInvestigationReport(
   const { header, manifest, checkpoint, task } = input;
   const collections = collectParts(input);
   const { analysis } = checkpoint;
+  const projectedFindings = projectInvestigationReportFindings(
+    analysis.findings,
+    { id: header.id, version: header.version },
+    analysis.diagnostics,
+  );
   for (const [actual, expected, name] of [
-    [collections.findings, analysis.findings, "findings"],
+    [collections.findings, projectedFindings.findings, "findings"],
     [collections.coverageUnits, analysis.coverage.includedUnits, "coverage units"],
     [collections.coverageExclusions, analysis.coverage.exclusions, "coverage exclusions"],
     [collections.candidates, analysis.candidates, "candidates"],
     [collections.rechecks, analysis.rechecks, "rechecks"],
     [collections.feedbackDrafts, analysis.feedbackDrafts, "feedback drafts"],
-    [collections.diagnostics, analysis.diagnostics, "diagnostics"],
     [collections.limitations, analysis.limitations, "limitations"],
     [collections.artifacts, checkpoint.runtime.artifacts, "artifacts"],
     [collections.validationChecks, checkpoint.runtime.checks, "validation checks"],
@@ -900,12 +912,6 @@ export function assembleInvestigationReport(
       "Saved plans must bind their original draft digest and the current report version.",
     );
   }
-  requireEqual(
-    collections.nextActions.map(({ sourceReportRef: _source, state: _state, ...draft }) => draft),
-    analysis.nextActions,
-    "report_action_draft_mismatch",
-    "Saved next actions must preserve every accepted action draft exactly.",
-  );
   for (const action of collections.nextActions) {
     requireCondition(
       action.state === "saved" &&
@@ -916,6 +922,30 @@ export function assembleInvestigationReport(
       "Saved next actions must bind the current report version.",
     );
   }
+  const projectedActions = projectInvestigationNextActions(
+    {
+      context: header.context,
+      report: { id: header.id, version: header.version },
+      assessment: analysis.assessment,
+      findings: projectedFindings.findings,
+      feedbackDrafts: analysis.feedbackDrafts,
+    },
+    analysis.nextActions,
+    collections.plans,
+    projectedFindings.diagnostics,
+  );
+  requireEqual(
+    collections.nextActions,
+    projectedActions.nextActions,
+    "report_action_draft_mismatch",
+    "Saved next actions must exactly match the validated checkpoint proposal projection.",
+  );
+  requireEqual(
+    collections.diagnostics,
+    projectedActions.diagnostics,
+    "report_diagnostic_projection_mismatch",
+    "Diagnostics must preserve every checkpoint record and every rejected proposal exactly.",
+  );
   const modelEvidence = analysis.evidence.map((entry) => ({
     ...entry,
     authority: "model" as const,
@@ -1044,6 +1074,13 @@ export function assembleInvestigationReport(
     422,
     "invalid_logical_report",
     "The complete reconstructed result must satisfy the versioned result schema.",
+  );
+  const semanticValidation = validateInvestigationResult(result);
+  requireCondition(
+    semanticValidation.valid,
+    422,
+    "invalid_logical_report_semantics",
+    `The complete reconstructed result must satisfy report semantics: ${semanticValidation.errors.map((error) => `${error.code} (${error.path})`).join("; ")}`,
   );
   return structuredClone(result);
 }

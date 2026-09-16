@@ -3,9 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createHttpTransport,
   decodeResponse,
+  fetchInvestigationArtifactContent,
   InvestigationHttpError,
   queryString,
   resumeInvestigationRequests,
+  subscribeInvestigationSessionExpired,
   suspendInvestigationRequests,
 } from "./transport";
 
@@ -17,6 +19,58 @@ const ResultSchema = Type.Object(
 afterEach(() => resumeInvestigationRequests());
 
 describe("investigation transport", () => {
+  it("does not download an expired artifact error response as evidence content", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        Response.json(
+          { code: "artifact_expired", message: "Artifact content expired." },
+          { status: 410 },
+        ),
+      );
+    await expect(
+      fetchInvestigationArtifactContent("evidence:report", undefined, fetcher),
+    ).rejects.toMatchObject({
+      status: 410,
+      message: expect.stringContaining("artifact_expired"),
+    });
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/artifacts/evidence%3Areport/content",
+      expect.objectContaining({ credentials: "include", cache: "no-store", redirect: "error" }),
+    );
+  });
+
+  it("expires the workspace session when an artifact download is unauthorized", async () => {
+    const expired = vi.fn();
+    const unsubscribe = subscribeInvestigationSessionExpired(expired);
+    try {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { status: 401 }));
+      await expect(
+        fetchInvestigationArtifactContent("evidence", undefined, fetcher),
+      ).rejects.toMatchObject({ status: 401 });
+      expect(expired).toHaveBeenCalledOnce();
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("discards artifact bytes that finish after the workspace session is suspended", async () => {
+    let complete!: (content: Blob) => void;
+    const response = new Response("artifact");
+    const blob = vi.spyOn(response, "blob").mockImplementation(
+      () =>
+        new Promise<Blob>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const pending = fetchInvestigationArtifactContent("evidence", undefined, fetcher);
+    await vi.waitFor(() => expect(blob).toHaveBeenCalledOnce());
+    suspendInvestigationRequests();
+    complete(new Blob(["artifact"]));
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("does not turn invalid or legacy results into a successful structured report", () => {
     expect(() => decodeResponse(ResultSchema, { success: true })).toThrow(
       "invalid structured response",

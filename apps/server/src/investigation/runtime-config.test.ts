@@ -107,6 +107,42 @@ describe("password runtime configuration", () => {
     ).toThrow("out of range");
   });
 
+  it("configures bounded evidence storage and retention without an unlimited mode", () => {
+    expect(loadInvestigationRuntimeConfig({}).evidencePolicy).toEqual({
+      maximumBytes: 1_024 * 1_024 * 1_024,
+      maximumCount: 10_000,
+      retentionSeconds: 2_592_000,
+      cleanupIntervalSeconds: 60,
+      cleanupBatchSize: 100,
+    });
+    expect(
+      loadInvestigationRuntimeConfig({
+        INVESTIGATION_EVIDENCE_MAXIMUM_BYTES: "1024",
+        INVESTIGATION_EVIDENCE_MAXIMUM_COUNT: "2",
+        INVESTIGATION_EVIDENCE_RETENTION_SECONDS: "3600",
+        INVESTIGATION_EVIDENCE_CLEANUP_INTERVAL_SECONDS: "5",
+        INVESTIGATION_EVIDENCE_CLEANUP_BATCH_SIZE: "10",
+      }).evidencePolicy,
+    ).toEqual({
+      maximumBytes: 1024,
+      maximumCount: 2,
+      retentionSeconds: 3600,
+      cleanupIntervalSeconds: 5,
+      cleanupBatchSize: 10,
+    });
+    for (const [name, value] of [
+      ["MAXIMUM_BYTES", "0"],
+      ["MAXIMUM_COUNT", "-1"],
+      ["RETENTION_SECONDS", "316224001"],
+      ["CLEANUP_INTERVAL_SECONDS", "86401"],
+      ["CLEANUP_BATCH_SIZE", "1001"],
+    ]) {
+      expect(() =>
+        loadInvestigationRuntimeConfig({ [`INVESTIGATION_EVIDENCE_${name}`]: value }),
+      ).toThrow();
+    }
+  });
+
   it("retains explicitly scoped bearer workers and opt-in GitHub transport", () => {
     const worker = { id: "worker-1", token: "T".repeat(43), repositoryIds: ["repo-1"] };
     const config = loadInvestigationRuntimeConfig({

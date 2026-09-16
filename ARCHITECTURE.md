@@ -1,541 +1,305 @@
 # Agentic Review Architecture
 
-## Scope
+## Scope and production entry points
 
-This document describes the unreleased architecture after M38 CLI simplification and M39/M40
-scoped workflow acceptance. M39 exercised six real CLI review tasks; M40 accepted six headless Issue
-summaries through Windows Worker components and a WSL Server, including checks, results, frozen
-inputs and cleanup. These did not exercise full Worker `main.ts` or the intended PowerToys/VM profile. See
-[Implementation Status](./docs/IMPLEMENTATION_STATUS.md) for current CI status and the remaining
-workflow/deployment boundaries.
+Agentic Review investigates GitHub pull requests and issues, retains complete structured reports,
+and prepares explicit follow-up actions. The application is unreleased. The active domain is
+`Task`, `Attempt`, `LoopCheckpoint`, `Report`, and `ActionIntent`.
 
-ADR 0029 replaces the unpublished Control/Executor split, local RPC protocols, result-artifact
-pipeline, and signed Worker package flow. No compatibility path is retained for those prototypes.
-[ADR 0031](./docs/adr/0031-profile-validation-runs-and-bounded-evidence.md) narrowly replaces its
-inline-only evidence restriction and adds profile validation runs. Existing V1 envelopes and
-historical inline review results remain supported.
+`apps/server/src/main.ts` starts the investigation Server and serves the Dashboard. The bundled
+Worker entry point, `apps/worker/src/main.ts`, starts the native investigation runtime. Tasks are
+not converted into the older Job protocol. Historical source modules, design decisions, and
+acceptance receipts do not define alternate production endpoints. There is no legacy API
+compatibility, dual-write path, data conversion, or migration project.
 
-The system has three application processes and one native execution helper:
+The [structured investigation design](./docs/design/2026-09-15-structured-investigation-results-and-loop.md)
+and [built-in account design](./docs/design/2026-09-15-built-in-accounts.md) record the current
+product decisions. [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) distinguishes active
+implementation and verification from historical milestones and outstanding deployment acceptance.
 
-- a Linux Server;
-- a browser Dashboard served by the Server;
-- one outbound-only Windows Worker process per node; and
-- `AgenticReview.ProcessHost.exe`, launched by the Worker for bounded child process execution.
-
-## System flow
+## Components and ownership
 
 ```text
-GitHub webhook/poller
-        |
-        v
-Linux Server ---- SQLite + private bounded evidence storage
-    |  ^
-    |  | HTTPS + Worker Bearer Token
-    v  |
-Windows Worker
+Browser Dashboard
     |
-    +-- shared bare Git repository per GitHub repository
-    +-- detached worktree per run attempt
-    +-- separate original-source validation and model workspaces
-    +-- ProcessHost -> Git / Codex CLI or Copilot CLI / validation process trees
-    +-- managed Windows UI Automation / Chromium driver children
+    | same-origin authenticated API
+    v
+Investigation Server ---- private investigation SQLite database
+    |       |           ---- separate account SQLite database
+    |       +---- GitHub import and explicit action transport
+    |
+    | outbound Worker HTTPS requests with scoped bearer credentials
+    v
+Windows Worker
+    +---- attempt-owned source, control files, and artifacts
+    +---- durable checkpoint and report delivery
+    +---- ProcessHost
+              +---- Git
+              +---- Codex CLI or Copilot CLI
+              +---- registered commands and UI driver processes
 ```
 
-The Server is the only component that owns SQLite and GitHub ingestion credentials. The Worker
-receives job envelopes and reports progress and terminal results. It does not receive a GitHub
-publication credential and does not open the Server database.
-
-## Trust model
-
-Repositories, revisions, prompts, and executable validation selected by admission policy are
-trusted execution inputs. The Worker is allowed to execute builds and tests from the admitted
-worktree.
-
-This trust decision removes the need for a separate credential-free Executor service. It does not
-remove operational controls:
-
-- Server leases and generations fence stale Workers and replayed terminal reports.
-- ProcessHost creates Windows Job Objects with kill-on-close, timeout, process-count, memory, and
-  combined-output limits.
-- Git and model CLI processes receive replacement environments.
-- Worker Bearer Tokens and Server-side GitHub credentials are never propagated to child processes.
-- Worktrees and task control, temporary, and user-profile directories are deleted after terminal
-  reporting; CLI-owned login storage remains outside disposable attempt directories.
-
-ProcessHost is a reliability and resource-control boundary, not an adversarial same-user sandbox.
-
-## Server
-
-The Fastify Server owns:
-
-- GitHub webhook verification and optional polling;
-- authorization of configured repositories and actors;
-- immutable work-item and revision projections;
-- job creation, retry policy, claims, leases, heartbeats, and terminal fencing;
-- bounded current scheduling diagnostics for scoped Jobs and validation requests;
-- immutable review-run plans, profile dispatch, and separate typed validation-result persistence;
-- inline completion validation and bounded evidence upload/finalization/scoped reads;
-- Worker credential creation, rotation, revocation, and authentication;
-- operator authentication, repository access control, membership audit, and Dashboard APIs; and
-- health and recovery-maintenance behavior.
-
-SQLite has one process owner. Current schema version is **31**, defined by the ordered SQL
-initialization files in `migrations`. The unreleased product maintains those definitions directly;
-existing SQL initialization remains in use, without an old-version upgrade, reset, conversion or
-compatibility migration project. Historical schema-upgrade acceptance reports describe their
-original source only and do not create a current requirement to modify existing data.
-Authoritative result JSON remains in bounded inline database fields. The same database owner
-manages evidence manifests and a private filesystem directory; there is no separate artifact
-service or restoration of the unpublished artifact Worker Thread design.
-
-Whole-file hashes and UI scenario evidence checks run in a dedicated read-only verification
-Worker. It receives scoped immutable snapshots, never SQLite access or lease tokens. Finalization
-and completion await verification outside transactions and repeat current authority checks before
-committing. Overlapping identical finalizations share one fenced operation; terminal completion
-replays remain independent of evidence retention. Run details use prepared proofs and fresh file
-identity probes; cold reads return explicit pending coverage while bounded verification runs in
-the background. Heartbeats, cancellation, and scheduling are not queued behind that file work.
-Shutdown stops admission, aborts and drains pending preflights, confirms verifier exit, then closes
-SQLite. See the [verification design](docs/design/2026-09-07-evidence-verification-control-plane.md).
-
-Source events retain immutable provenance separately from local observation times and current
-snapshots. Replayed deliveries must preserve their payload identity. Stable execution inputs,
-prompt/schema versions, and policy determine task reuse; delivery IDs and polling timestamps do
-not. A return to a superseded revision creates a new activation when the old job is no longer
-reusable, without reviving a terminal attempt.
-
-PR authorization defaults to an explicit request for the exact base/head revision. Historical
-polling actors cannot authorize a newly observed SHA. Automatic inheritance requires both the
-current policy and the original epoch policy to select `inherit_authorized_epoch`; the original
-requesting actor must still be authorized. Issue triage retains its snapshot workflow. See ADR 0030.
-
-Dashboard list filters and pagination execute in SQL with matching indexes. GitHub health comes
-from configured ingestion modes and per-repository polling success/failure, not business-event
-frequency. Worker long polls stop when their response connection closes.
-
-### Repositories, plans, and profile jobs
-
-Managed repositories use stable internal and GitHub numeric identities. Published Prompt/profile
-versions and per-repository bindings are database-owned; environment configuration is bootstrap
-input rather than a source that overwrites subsequent edits. M19 repository grants constrain
-server reads, pagination, totals, actions, and configuration at the database boundary. Selecting a
-repository in the Dashboard does not itself grant access.
-
-M14 freezes a `ReviewRunExecutionPlanV1`, rendered prompts, profile requests, source identity, and
-authorization. Static/build, Windows UI, Web UI, issue triage, and issue validation are separate
-workflow/profile requests. M15 stores their typed results independently of legacy review results.
-M17 provides bounded pending dispatch, repository rotation, audited cancellation, and idempotent
-profile reruns. Runner readiness is recomputed from implemented runtime capabilities and does not
-change the plan digest or queued snapshots.
-
-Database `job_kind` retains `pull_request_review` and `issue_triage`. Envelope V2 carries the
-selected profile's `ValidationJobContextV1`: workflow/target, run and plan identity, Prompt/profile
-versions, required coverage, run activation, and profile job activation. It uses the existing lease
-and attempt machinery. An operator rerun within a frozen plan creates a new profile job activation;
-an infrastructure retry creates another attempt of the existing job. New configuration requires a
-new run. These operations preserve earlier results.
-
-M18 records source transitions, including A-to-B-to-A, and pins legacy-versus-ReviewRun routing per
-work item, authorization epoch, and source sequence. Transport replay and later binding changes
-cannot launch a second pipeline for the same source activation. Separate active assignment and
-review-request epochs may own separate runs; matching profile jobs retain concurrency exclusion.
-The bridge and dispatch components have integration coverage. Acceptance of the intended
-deployment's actual GitHub authorization-to-Worker flow remains separate from M39's owned fixture.
-
-Issue reproduction requires an explicitly selected commit and an independently authenticated
-operator source authorization bound to the run activation, repository, issue, current issue content
-revision, and exact commit. Issuer, subject, and authorization time come from the authenticated
-Server boundary. Issue-triage authority cannot silently authorize arbitrary code execution. PRs
-continue to require the exact GitHub-authorized base/head revision.
-
-### Current scheduling diagnostics
-
-M27 P0 provides three read-only GET projections: a repository Job with exact work-item ownership,
-a repository Run/request with its latest Job or a no-Job observation, and platform-administrator
-Job inspection including unassociated legacy Jobs. Current authorization and projection execute
-within one synchronous database-owner read snapshot. These reads do not claim, dispatch, retry,
-cancel, or change stored scheduling state.
-
-Diagnostics share the existing claim path's pure template, capability, and envelope helpers while
-preserving claim gates and ordering. Current source and authorization changes are reported as
-`current_prerequisite` observations without adding claim enforcement. Legacy Jobs consider their
-associated authorization epochs. Slot observations count active attempts, including expired but
-unreaped leases and attempts whose Jobs have cancellation pending.
-
-Worker inspection uses indexed status/affinity selection of at most 129 identities, with the final
-identity serving as an overflow sentinel; at most 128 Worker payloads are read. Requirement-name
-traversal has a 4,096-step budget, and repeated envelope inspection has a 64 MiB work budget.
-Responses are limited to 64 KiB, 32 reasons, and 64 requirement names. Incomplete inspection and
-truncated names remain explicit rather than establishing that no suitable Worker exists. Public
-projections omit Worker identities, other Jobs holding capacity, and global inventory counts.
-
-The Dashboard displays live scheduling observations separately from frozen plan readiness. It
-polls every five seconds while visible and eligible for refresh, cancels hidden or superseded
-requests, and clears old observations when session, scope, or access changes. Terminal observations
-stop polling. M29 V3 diagnostics add configured queue/active limits, scoped usage and policy
-observations. Repository/global quotas, queue-credit recovery, fairness and bounded claim
-continuation are implemented; deployment-specific capacity acceptance remains separate.
-
-The [M27 acceptance report](./artifacts/m27-scheduling-diagnostics-20260907/REPORT.md) records the
-completed P0 checks and aggregate browser/HTTP evidence across original and recovery sessions.
-An external restart destroyed the original temporary environment, so original Server graceful
-shutdown is unproven. Recovery covered all eight HTTP states with unchanged core rows and a
-confirmed graceful Server/database shutdown; the retained orchestration failures remain part of
-the evidence boundary. This acceptance performs no real repository PR or Issue writes.
-
-### Durable Job admission foundation
-
-M28 separates acceptance from admission. Valid Legacy and V2 work, including reruns, persists a
-real immutable Job with a pending admission episode even when no Worker is available. Missing
-structural prerequisites such as a Prompt still leave a validation request without a Job. Both
-retry paths create a new pending episode in the terminal-attempt transaction. Claim requires an
-admitted row whose `attempt_base` matches the waiting Job's attempt count; SQL guards reject
-missing/stale admission and invalid lease/active-attempt transitions.
-
-The historical M28 migration 24 backfilled existing Jobs with the production execution-template
-parser without rewriting historical payloads. Waiting Jobs started admitted with an explicit
-migration timestamp basis; active Jobs retained their pre-grant attempt base and lifecycle.
-Numeric GitHub repository buckets and explicit unresolved/conflicting ownership do not grant read access.
-The durable episode and inspection sequences use safe integers. Bounded inspection remains
-explicitly incomplete when its budget cannot establish ownership; a trusted claim witness can
-refine unknown ownership from the actual stored template.
-
-A coalesced production pump processes a bounded pending pass with a captured episode high-water
-mark, retains progress across calls, wakes on relevant changes, falls back every five seconds,
-and drains during shutdown. This implemented the admission foundation. The subsequent M29 layer
-adds repository/class fairness, configured limits and bounded continuation of the complete claim
-scan. Strict V2 scheduling diagnostics retain V1 compatibility. Public Job, Run, Work Item,
-and System projections distinguish
-pending admission, admitted waiting Jobs, and no-Job prerequisites; the HTTP Job-list whitelist
-accepts the admission filter. Observational GETs do not mutate scheduling state.
-
-The [M28 report](./artifacts/m28-admission-foundation-20260907/REPORT.md) records final automated
-and connected acceptance, including UI cancellation/rerun, unchanged exact replay, production-pump
-admission after Worker registration, access revocation/restoration, and explicit service closure.
-No lease or real PR/Issue write occurred in that M28 acceptance. M29 subsequently completed the
-configured limits, CAS/audit, queue-credit recovery, fairness, bounded continuation and declared
-100,000-Job acceptance dataset. Those historical results do not establish every production
-workload's latency or capacity; see the current implementation ledger.
-
-### Worker API
-
-The current Worker surface is intentionally small:
-
-```text
-POST /api/v1/worker/instances
-POST /api/v1/worker/leases/claim
-PUT  /api/v1/worker/instances/{workerInstanceId}/heartbeat
-PUT  /api/v1/worker/leases/{runAttemptId}/heartbeat
-POST /api/v1/worker/runs/{runAttemptId}/complete
-POST /api/v1/worker/runs/{runAttemptId}/fail
-POST /api/v1/worker/evidence/uploads
-POST /api/v1/worker/evidence/{assetId}/chunks
-POST /api/v1/worker/evidence/{assetId}/finalize
-```
-
-Every request uses a node-scoped Bearer Token. Lease-token, Worker-instance, generation, and active
-attempt checks are still required for progress, uploads, finalization, and terminal operations.
-Operator evidence reads are additionally scoped through repository, run, job, and attempt routes.
-
-## Operator authentication
-
-Operator authentication has two explicit modes:
-
-- `loopback`: for a Server whose listener and public origin are both loopback; and
-- `oidc`: for an externally reachable deployment using Authorization Code plus PKCE.
-
-OIDC is therefore a deployment choice, not a Worker execution dependency. GitHub webhook secrets
-and GitHub read tokens are independent credentials and are unrelated to operator OIDC.
-
-M19 authorization uses the authenticated session's exact `(issuer, subject)` pair. Repository
-roles inherit read, run-control, configuration, and membership-management permissions through
-viewer, reviewer, maintainer, and admin. Platform administrators are configured at startup; OIDC
-requires `AGENTIC_REVIEW_OIDC_ADMIN_SUBJECTS_JSON`, a nonempty subset of allowed login subjects.
-Loopback mode uses its explicit development identity. Login alone does not grant repository access.
-Global Prompt catalogs, Workers, credentials, System resources, and repository creation require a
-platform administrator.
-
-Operator HTTP handlers use a session-bound database request allowlist, separate from trusted
-internal Server and Worker operations. Repository ownership and current grants are checked in the
-database owner, including after asynchronous evidence preparation and before each download chunk.
-Invisible resources return an opaque 404. Membership changes create immutable audited receipts
-with version checks, idempotency, and last-admin safeguards. The Dashboard resets cached data when
-the authenticated principal changes; controls are secondary to Server authorization. See the
-[access design](./docs/design/2026-09-07-operator-repository-access.md).
-
-M23 exposes recorded repository configuration, prompt binding, and profile events within each
-repository's read scope. Global Prompt history requires platform authority. Lists are bounded
-metadata projections; details use retained snapshots rather than current rows or draft text.
-The two audit tables preserve their history in migration 23's immutable `WITHOUT ROWID` storage.
-See the [configuration audit design](./docs/design/2026-09-07-configuration-audit-reads.md).
-
-M20a records human decisions in an immutable per-Run stream, separately from model advice, runner
-checks, policy eligibility, and publication. New decisions bind the exact source sequence and all
-planned requests' latest Job/attempt/result identities. A queued rerun invalidates an earlier
-decision immediately. Comments preserve the current decision; withdrawals retain a tombstone.
-Ordinary approval rechecks verified evidence and current policy inside the final short transaction.
-An exception approval requires a maintainer and remains qualified without changing policy. State
-and history reads select bounded public receipts, not the potentially large private policy bodies.
-No GitHub write is performed by these APIs. See the
-[decision design](./docs/design/2026-09-07-run-human-decisions.md).
-
-M21 adds immutable finding occurrences, reviewer disposition, and explicit result comparisons.
-Occurrence identity uses the original result ID/digest, namespace, and ordinal. Policy v2 retains
-the raw P0/P1 count but only open or accepted P0/P1 findings remain blocking. Failed checks, missing
-evidence, and source/lifecycle gates still apply. A V2 human-decision snapshot binds the current
-disposition versions, so reopening or changing a finding cannot silently reuse an old approval.
-Migration 0021 preserves all historical v1 decision bytes and receipts. The connected Dashboard
-shows complete finding content and history; comparison never treats an absent finding as resolved.
-See the [finding design](./docs/design/2026-09-07-finding-lifecycle.md).
-
-## Windows Worker
-
-The Worker is one Node.js process built as `apps/worker/dist/worker.mjs`. A service manager may run
-that process, but the repository does not currently ship a native Worker service wrapper or
-installer. Manual trusted deployment is the supported pre-release path.
-
-Startup composes the following responsibilities:
-
-- loads its fixed Bearer Token profile;
-- checks configured runtime directory identities using read-only `lstat`/`realpath`
-   validation, rejecting links, aliases, overlap, and observed identity changes;
-- validates runtime executable paths and ProcessHost/Git integrity settings;
-- starts ProcessHost over its NDJSON standard-I/O protocol and acquires the data-root singleton;
-- detects the configured model CLI version through an available ProcessHost with bounded `--version`;
-- recovers abandoned attempt directories under the acquired singleton;
-- derives prepared runtime capabilities and registers one Worker instance; and
-- enters the claim, heartbeat, execute and terminal-report loop.
-
-Any initialization failure after ProcessHost creation closes that client before rethrowing the
-original error. Cleanup diagnostics are bounded and cannot mask the startup failure.
-
-Only one Worker process may use a node's data, shared-repository, and workspace directories at a
-time. ProcessHost holds a Windows global named mutex derived from the resolved Worker data root for
-its complete lifetime. A service manager may restart the Worker, but it is not the exclusivity
-boundary.
-
-Pending-start cancellation retains the request's original acknowledgement deadline and terminates
-only that request after acknowledgement. Unrelated process trees remain active.
-
-Workspace monitors share one node-wide periodic accounting scan while retaining per-attempt
-identity and quota checks. Queue wait and scan execution have separate bounded deadlines. Startup
-recovery removes confirmed unowned attempts regardless of age. Capacity shortages pause claims
-and report zero slots; the Worker rechecks capacity and resumes automatically. Unsafe paths and
-unrecoverable infrastructure faults still drain the node.
-
-The profile runtime adds registered executable aliases, protected secret references, headless
-command execution, and managed UI drivers. Capabilities are derived after runtime preparation;
-deployment labels cannot claim unavailable V2, browser, or interactive-desktop execution. M39
-accepted production-component workflow composition; the full deployed `main.ts` startup remains
-a separate Windows VM acceptance boundary.
-
-Windows UI uses UI Automation in an active unlocked session and an exclusive desktop lease. It
-operates only on the selected window in the launched process tree; uncertain stop/reset retains a
-quarantine marker. Web UI uses a separately managed Chromium driver and browser context against
-the owned allocated loopback application origin. Both run deterministic scenarios, capture evidence,
-and drain owned processes before releasing resources. Neither target's driver is an OS or network
-sandbox. Dedicated test data, session provisioning, and reset behavior remain deployment inputs.
-
-## Git repository and worktree lifecycle
-
-Each configured public GitHub repository maps to one persistent bare repository:
-
-```text
-<git-shared-root>/repository-<githubRepositoryId>.git
-```
-
-For each pull request attempt, the Worker serializes repository metadata mutation for that
-repository and performs the following operations:
-
-1. initialize or reuse the bare repository;
-2. set the canonical GitHub `origin` URL;
-3. prune stale worktree registrations;
-4. fetch the envelope's immutable `baseSha` and pull request head ref without shallow history,
-   using `--no-auto-maintenance`;
-5. verify the fetched pull request head equals the envelope's immutable `headSha`;
-6. verify the envelope `baseSha` and `headSha` are commits and have a merge base;
-7. create a detached worktree at the exact `headSha`; and
-8. verify the worktree `HEAD` again before the model CLI starts.
-
-The fetch is independent of the base branch name or its current tip. It supports PRs targeting
-`dev` or any other base ref without assuming or falling back to `main`. Queued jobs retain their
-immutable base SHA when the branch advances.
-
-The current Worker uses an anonymous GitHub HTTPS URL and disables credential helpers. Private
-repository checkout is not supported by this MVP.
-
-Worktrees live below the attempt workspace root. The bare repository persists across jobs, so
-subsequent fetches transfer only missing objects. A cancellable shared-cache mutation lock serializes
-global accounting and bare-repository setup or cleanup across repositories; per-repository locks
-preserve ordering for each repository. Once prepared, worktrees for different jobs can execute
-concurrently.
-
-The shared repository root has a separate total-byte limit and minimum-free-disk guard. Accounting
-is bounded by entry count and wall-clock time and fails closed on reparse points or unstable paths.
-The Worker checks the budget before and after fetch and after worktree cleanup. When the budget is
-violated, it first prunes stale worktree metadata, verifies that no registered or in-memory worktree
-is active, expires reflogs only to the configured conservative age, and runs repository-local GC
-with the same prune age. A cache that remains over budget is reported as a node infrastructure
-fault so the Worker drains instead of accepting more work.
-
-Issue-triage jobs currently use an isolated non-repository workspace because their envelope contains
-an issue snapshot rather than a repository revision.
-
-Issue-validation jobs have a distinct exact-source path using the separately authorized commit;
-they do not infer a checkout from a branch tip or from the issue content digest. Profile validation
-and model review receive separate workspace identities under the same real attempt lease. UI
-profiles currently build their own source; no cross-profile build-artifact reuse is implemented.
-
-## CLI-owned model execution
-
-The Server renders a trusted versioned prompt and sends its digest and authoritative output schema
-in the job envelope. The Worker independently selects the matching compiled schema, verifies the
-envelope, and writes per-attempt schema and result control files. The Worker selects `codex` or
-`copilot` through `WORKER_CLI_ENGINE` and launches the absolute
-`WORKER_CLI_EXECUTABLE_PATH`. `WORKER_CLI_HOME` and `WORKER_CLI_MODEL` are optional configuration.
-Startup detects the installed CLI version through ProcessHost with a 20-second/64-KiB `--version`
-probe and records the first stdout line. There is no manually declared CLI version;
-`WORKER_CLI_SHA256` is an optional binary pin. CLI paths can be outside the infrastructure trusted
-root, and Windows WinGet links resolve to their installed targets. Capabilities expose nullable
-`cliEngine` and `cliVersion` and do not invent an identity for a model-free Worker.
-
-The selected CLI owns login, provider configuration, model access and HTTP traffic. Operators log
-in through that CLI under the actual Worker account and intended home. The Worker does not parse,
-copy or rewrite CLI auth/provider files. There is no global provider registry, project-owned HTTP
-relay, provider metadata classification policy or provider request/response ledger.
-
-The project records the selected CLI configuration, bounded process exit and schema-validated
-structured output associated with the current task and lease. Configured model names and CLI
-versions are observations, not independent verification of a remote provider's model. Model-required
-work remains incomplete if the CLI is unavailable or its output is missing or invalid.
-
-The CLI uses the prepared worktree and managed ProcessHost lifetime/resource limits. Model limits
-use `WORKER_MODEL_MAXIMUM_HARD_TIMEOUT_MS`, `WORKER_MODEL_MAX_PROCESSES`,
-`WORKER_MODEL_MAX_MEMORY_BYTES` and `WORKER_MODEL_MAX_OUTPUT_BYTES`. Worker and Server credentials
-remain excluded from child environments. The VM deployment owns account, filesystem and network
-isolation. See the [current execution design](./docs/design/2026-09-10-cli-owned-model-execution.md).
-
-The legacy pull request prompt permits inspection, edits, builds, and tests inside its disposable
-worktree and forbids publishing, pushing, merging, or mutating external systems. Profile jobs run
-deterministic validation against the original source and perform required model review in a
-separate workspace. A model repair or its subsequent successful tests cannot certify the submitted
-source. Model output is separately validated and cannot supply runner checks or finalized evidence.
-
-## Result contract
-
-The authoritative completion retains one form:
-
-```json
-{"resultDigest":"<sha256>","result":{}}
-```
-
-The Worker validates the model output against the job schema, canonicalizes it, computes its digest,
-and submits the inline result. The Server revalidates the result before the fenced database
-transaction completes the attempt.
-
-Legacy review jobs use `PrReviewPlanV2` or `IssueTriageV2`. Model verification statements are displayed
-separately from Worker-captured CLI command status/exit codes and final `git status` observations.
-Read-only inspection commands do not prove that tests passed, and incomplete capture stays
-explicitly incomplete. The model cannot supply the Worker evidence field. Commands and diagnostic
-summaries are bounded and redacted before submission. Failed attempts retain a structured category,
-exit code, summary, and correlation ID; diagnostic content participates in terminal replay identity.
-The original V1 schema registry remains available for queued jobs and historical results.
-
-Versioned result readers preserve the meaning of the result contracts they support. This is
-separate from database-version compatibility: current schema 31 is maintained through the
-existing SQL initialization machinery, without a required old-data upgrade, reset or conversion.
-
-Profile jobs use the current `ValidationJobResultV1`/`ValidationJobResultV2` branches, separating
-the Worker report, command/lifecycle diagnostics, cleanup and model content. Recorded V2 model
-output carries CLI execution and input/output consistency facts. Required checks come from the frozen plan.
-Each typed UI scenario has one qualified check ID; its actions and assertions are evidence details.
-Execution success does not imply check success or a recommendation to approve. A failed compile or
-assertion can be a valid, completed report.
-
-Approval eligibility is computed for the current revision and plan. All required runner checks
-must pass against original source with complete evidence; missing profiles/scenarios, required
-lifecycle failures, stale or modified-source results, and unresolved blocking findings prevent an
-unqualified approval conclusion. Human decisions and actual GitHub publication remain separate.
-
-M16 adds evidence manifests and bounded resumable upload for PNG screenshots, JSON steps, ZIP/JSON
-traces, and text logs. The current limits are 512 KiB per chunk, 64 MiB per asset, 16 MiB per
-screenshot, and 256 assets/128 MiB per attempt, with additional configured global quotas, retention,
-and incomplete-upload expiry. The Server derives storage paths, validates file identity/size/digest,
-and exposes authenticated scoped manifests and content. Required evidence must be finalized before
-it can establish complete coverage. Completion JSON references assets; it is not replaced by an
-artifact-backed result mode.
-
-Production result reads validate UI step files against frozen scenarios, including target, order,
-action, expected/actual assertions, and screenshot ownership. A finalized file with a valid SHA but
-fabricated step semantics cannot establish eligibility. Expired or unavailable evidence makes the
-current projection incomplete while preserving the immutable result history. M26 and M34 accepted
-their actual Web/Notepad++ evidence-delivery cases. Other applications, profiles and deployment
-identities require their own acceptance; a missing asset is not repaired by model output.
-
-## Deployment
-
-The Server is expected to run on Linux with private SQLite and evidence storage. The Worker is
-manually deployed to Windows with Node.js, Git, the selected Codex or Copilot CLI, `worker.mjs`, and ProcessHost
-binaries. UI execution also needs the registered driver assets and browser or interactive-session
-prerequisites. A normal noninteractive service cannot satisfy desktop UI readiness. Automatic
-package distribution, Ed25519 release signing, upgrades, repair, and rollback are outside the MVP.
-
-Production network deployments use HTTPS. Loopback development may explicitly allow HTTP. The
-Worker initiates all Server connections; no inbound Worker listener is required.
-
-## Recovery maintenance
-
-`AGENTIC_REVIEW_RECOVERY_MAINTENANCE=true` starts a loopback-only recovery boundary. It keeps
-liveness open, readiness closed, Worker routes closed, GitHub ingestion stopped, and lease reaping
-stopped while operators reconcile the restored database and Worker credentials. See
-`docs/operations/worker-token-recovery.md`.
-
-The 2026-09-05 Windows runtime E2E exercise passed, including healthy success, active cancellation,
-cache reuse, and recovered cleanup. Its tested scope, evidence, and environment closeout are in the
-[live validation handoff](./docs/handoff/2026-09-05-windows-e2e-live-validation.md).
-
-## Current product and deployment boundaries
-
-M39 accepted one ordinary review and two Evaluation arms for each CLI on an owned fixture, using
-separate complete Codex/Copilot source/run sequences. All required checks and model steps passed;
-assessments and cleanup were retained.
-The fixture's findings remain provisional/unjudged, with no general precision/recall benchmark.
-See the [M39 handoff](./docs/handoff/2026-09-10-cli-workflow-handoff.md).
-
-M40 adds targeted finding/publication checks and a pure post-run revalidation of a nine-task Codex
-quality exercise. The original failed cardinality receipt was preserved; corrected cleanup/count
-postconditions passed without replaying models. Four human adjudications support the observed
-metrics on three small cases, while the healthy candidate's incomplete full-review statement and
-static-review limits remain. These results do not establish general model quality or a PowerToys
-benchmark. M40 also accepted six headless Issue summaries for a frozen measurement case, with
-independent semantic review, four frozen inputs, 216 managed process completions and 12 deferred
-cleanups. Both closed Server copies matched their original files. The schema-portability correction
-and resulting acceptance retain the earlier failed runs as history; no provider reconfiguration
-or model replay was used to rewrite those failures.
-
-- Full Worker `main.ts` startup and consecutive-task operation on the intended Windows VM still
-  need deployment acceptance, including account/session setup and restart/cleanup behavior.
-  Service installation and restart policy remain deployment-owned.
-- Real PowerToys build/test/UI profiles and their toolchain/state-restoration requirements remain
-  distinct from accepted M26 Web and M34 Notepad++ cases. Private repository checkout, reusable
-  build artifacts and video evidence are not implemented. M40 restore passed, but native build
-  failed with `MSB8040`; two requested Spectre component installations remain unapproved/unperformed.
-- Issue triage, Windows/Web model-assisted workflows and other application-specific reproduction
-  cases need their own acceptance beyond the M40 headless measurement case. Optional summaries
-  remain disabled by default; VM network isolation is deployment-owned.
-- Operator OIDC, intended multi-user roles and repository-specific human/finding workflows still
-  need acceptance in their deployment. Existing connected fixture tests retain their original scope.
-- M30 publication preview/outbox, M31 notifications and M32/M39 Evaluation are implemented within
-  their recorded scopes. Live GitHub publication still requires deployed credentials and separately
-  approved exact targets/payloads and repository-automation effects. M40's synthetic-outbox
-  preparation passed; the revised live plan remains unapproved and unexecuted. Its operational
-  details are tracked in Implementation Status, not implied by mock-transport acceptance.
-- General model-quality comparisons require appropriately labeled/adjudicated cases. Correctly
-  identifying the owned discount defect is not acceptance of broad review quality or complete
-  Copilot command capture.
-
-Current CI/P1/P2 remediation is tracked in [Implementation Status](./docs/IMPLEMENTATION_STATUS.md).
-Historical green gates are not a statement about the latest branch. Retired split-worker,
-WindowsAttempt journal/OS-attestation, provider-registry and model-relay designs are not current
-backlog items. Historical migration reports likewise do not create an unreleased-product upgrade
-or data-conversion project.
+The Server owns persistent application state, browser authentication, Worker admission, source
+imports, task creation, accepted checkpoints, report sealing, action policy, and delivery. It is
+the only runtime component that opens the investigation and account databases or uses the configured
+GitHub API credential. The Worker initiates connections to the Server and has no inbound listener.
+
+The Worker owns source preparation, managed process execution, loop coordination, artifact capture,
+and cleanup. It receives a scoped task lease and frozen inputs. It does not receive the GitHub
+publication credential, open Server databases, or implicitly commit, push, merge, or publish.
+
+The Dashboard provides repository, PR, Issue, Task, Report, and account workspaces. Production
+requests use the authenticated investigation API. Synthetic development data is explicitly labeled
+and is never a fallback for a failed production request.
+
+`packages/contracts` defines runtime schemas and semantic validation. `packages/domain` defines
+loop transitions, completion requirements, recommendations, and operation guards.
+`packages/codex` supplies shared CLI launch and structured-output handling. The native
+`AgenticReview.ProcessHost.exe` manages Windows process trees and resource limits.
+
+## Durable domain
+
+| Entity | Responsibility |
+| --- | --- |
+| `Task` | Freezes the repository, work item, subjects, coverage, execution policy, budgets, prompt/profile versions, and optional parent report and saved plan. |
+| `Attempt` | Records one Worker execution, its identity, lease fence, lifecycle, and termination reason. |
+| `LoopCheckpoint` | Retains accepted analysis, coverage, candidates, rechecks, consumption, source facts, and execution start/completion receipts. |
+| `Report` | Seals one complete collection of findings, assessment, validation, evidence, artifacts, plans, next actions, and explicit limitations. |
+| `ActionIntent` | Binds an actor, exact target/revision, reviewed payload digest, and current guards to a prepared follow-up operation. |
+
+Task kinds are `pr-review`, `issue-investigate`, `pr-verify`, `issue-verify`,
+`reproduction-setup`, `issue-fix`, and `feature-implement`. Task and attempt outcomes distinguish
+`completed`, `blocked`, `failed`, `cancelled`, and `interrupted`. Report completeness is a separate
+`complete` or `partial` property; neither a successful process exit nor a sealed partial report
+establishes a complete investigation.
+
+Subjects keep different claims separate: `original_pr` identifies exact base/head SHAs;
+`issue_snapshot` identifies immutable Issue content; `source_commit` selects an exact commit;
+`local_patch` identifies an artifact and its base; and `remote_branch` requires verified remote
+source evidence. Passing checks against a local patch does not certify the original PR or establish
+that an upstream fix exists.
+
+Inherited patches retain their original producing task and attempt metadata in `Task.sourceArtifacts`
+and the sealed report's `context.sourceArtifacts`. These records are frozen source lineage, not new
+execution evidence or artifacts produced by the child task. The exact parent report, patch subject,
+artifact identity, and digest remain bound across follow-up tasks.
+
+## Source import and task admission
+
+Operators register exact internal and GitHub numeric repository identities. The production import
+endpoint reads the current PR or Issue and every conversation page, including PR review comments
+and review summaries. It verifies the upstream repository, work item, and final revision before
+atomically saving the complete snapshot. Imports use GitHub GET requests only.
+
+Response-byte and pagination budgets bound the import. Exceeding a budget, observing changed source,
+or failing to retrieve all pages rejects the import without saving a shortened snapshot. A current
+snapshot pointer supplies newly created tasks; already-created tasks keep their frozen inputs.
+
+Execution modes are `snapshot_only`, `source_read`, and `execute`. Snapshot-only analysis does not
+check out or execute repository source. Source-aware Issue work requires an explicitly selected
+full commit SHA, verified by the Server against GitHub. Issue content cannot silently choose an
+arbitrary branch or grant execution authority. Source execution additionally requires the actor's
+explicit repository-execution grant and a task policy bound to authorized subjects.
+
+PR source materialization uses the exact frozen base and head commits and verifies the merge base
+and checked-out identity. The Worker admits public repositories through an explicit allowlist;
+Git acquisition disables inherited credentials, hooks, and submodule execution. Source coverage
+records what was actually materialized and supplied to analysis. Omitted source cannot be marked
+reviewed merely because the model completed a turn.
+
+## Accounts and credential boundaries
+
+Console authentication uses application-owned username/password accounts. There is no
+passwordless production login, self-service registration, OIDC callback, or third-party identity
+provider in the active runtime. An empty account database requires configured first-administrator
+credentials and has no predefined password. Bootstrap only creates the first account; later starts
+do not overwrite existing accounts or grants.
+
+Administrator status grants account management. Repository scopes, business permissions, action
+capabilities, and repository-execution authority are separate explicit grants. Being an
+administrator does not grant access to every repository or authorize GitHub operations.
+
+Passwords use salted asynchronous scrypt with bounded concurrency and rate limiting. Browser
+sessions use opaque random tokens whose hashes are stored in the account database. Each request
+checks the account's enabled state and version. Account updates, password changes, and resets revoke
+that account's sessions. Version checks prevent stale administrative changes; the last enabled
+administrator is protected from accidental removal.
+
+Browser cookies are HttpOnly and SameSite=Strict, with Secure `__Host-` cookies for HTTPS.
+State-changing browser requests require the exact configured Origin. Public HTTP listeners are
+rejected; explicit local HTTP is restricted to actual loopback requests. Forwarded headers do not
+establish identity. Account recovery is an offline operator command, documented in the
+[Server instructions](./apps/server/README.md).
+
+Worker credentials are independent scoped bearer tokens configured by the Server. Browser cookies
+cannot claim tasks, and Worker tokens cannot administer accounts. The Server resolves Worker
+identity and exact repository scopes from trusted configuration, rather than request bodies.
+CLI login is owned by Codex or Copilot under the actual Worker account. The Worker does not copy
+CLI authentication files. Replacement child environments exclude the Worker bearer credential
+and Server-side credentials.
+
+## Worker lifecycle and managed execution
+
+The production runtime validates canonical local Windows paths, separate trusted and mutable
+roots, and executable SHA-256 pins before admission. ProcessHost holds a singleton identity for the
+resolved Worker data root and applies Windows Job Object lifetime, timeout, process-count, memory,
+and output limits. These are process-management controls, not an adversarial same-user sandbox.
+The deployment owns account, filesystem, network, and interactive-session isolation.
+
+The Worker polls for eligible queued task kinds within its configured concurrency bound. Claims
+are restricted to its repository scopes. Every attempt has a new fence and lease token;
+heartbeats renew that lease and receive cancellation state. Checkpoint, artifact, report-part,
+and finalization requests are checked against the current task, attempt, Worker, and lease.
+Expired or superseded Workers cannot commit new progress.
+
+The default Worker concurrency is one. Attempt workspaces isolate source and model control files.
+Execution records are retained before cleanup. SIGINT/SIGTERM stops new claims, cancels owned work,
+drains managed processes, and closes ProcessHost. Unconfirmed cleanup causes a node fault and
+retains the affected workspace; a later attempt must not reuse uncertain local state.
+
+## Model turns and executable plans
+
+The selected Codex or Copilot CLI owns login, provider configuration, and model transport. The
+project has no provider registry or model HTTP relay. Deployment verifies the static CLI policy
+and disables unmanaged tools before starting the Worker. CLI engine, executable pin, model choice,
+and explicit account environment are deployment settings.
+
+Investigation turns analyze supplied snapshots and complete source files and return structured
+analysis. They do not execute repository commands, build, test, browse, or mutate files. CLI launch
+restrictions, output-schema validation, and event checks enforce the static-turn contract. A model
+cannot supply authoritative Worker execution observations, operation permissions, or a successful
+validation result.
+
+Executable follow-ups use saved plans from immutable reports. A deployment-owned execution binding
+maps an exact plan or profile reference to ordered `command`, `ui`, or `model-edit` operations.
+Prerequisites must have explicit matching acknowledgements. Missing or ambiguous bindings block
+creation; natural-language plan text is never substituted into executable arguments.
+
+Command IDs resolve to trusted pinned executables. UI operations require registered adapters,
+application bindings, frozen scenarios, and available evidence capture. Windows UI work additionally
+requires an active, unlocked dedicated session and exclusive desktop access. Missing readiness is
+a blocker, not a successful check inferred from model text.
+
+Model-edit operations return proposed complete contents only for explicit allowed paths. The Worker
+checks the path allowlist and expected original-content digests before applying them and producing
+a separately identified patch. Validation runs against its recorded subject. An implementation-only
+plan may produce a patch without claiming tests passed. Creating a PR requires an existing verified
+remote branch and never implicitly commits or pushes that patch.
+
+## Complete investigation loop and recovery
+
+The loop advances through discovery, investigation, recheck, and finalization. Each accepted round
+references the previous checkpoint and retains candidate and finding identities. A finding records
+priority, trigger, impact, root cause or explicit uncertainty, evidence, repair advice, feedback,
+and a final-version recheck. Priorities affect ordering, not whether a finding is retained.
+
+Completion requires handled coverage and candidate records, valid rechecks for final finding
+versions, and a sealed report. Unresolved coverage, missing prerequisites, cancellation, protocol
+failure, and exhausted round, duration, token, or report-size budgets remain explicit. Known findings
+and remaining work survive a partial outcome; the loop does not silently discard lower-priority
+findings to fit a top-k result.
+
+The Server applies validated transitions to durable checkpoints using content digests and version
+checks. Worker execution steps persist a start receipt before running and a completion receipt with
+actual checks, artifacts, source identity, and resource consumption afterward. Accepted receipts
+remain separate from model conclusions.
+
+Lease expiry retains the accepted checkpoint and marks the task interrupted or cancelled. Explicit
+resume creates a new attempt from the frozen task and checkpoint, rather than reviving an old CLI
+session. Completed analysis can be restored for report delivery without repeating model work.
+Confirmed completed execution can be retained across attempts; an uncertain in-flight mutation is
+not automatically replayed. Patch restoration requires the exact saved artifact and source digest.
+
+## Reports, evidence, and storage
+
+Report transport uses bounded typed parts plus a final header and manifest. Parts carry task,
+attempt, report, sequence, count, and digest identities. Duplicate delivery is idempotent only when
+the content is identical. The Server assembles and semantically validates the full report against
+the current accepted checkpoint, frozen task, saved parent plan, and linked report identities.
+Finalization seals the report transactionally; exact terminal retries return the existing identity.
+
+Findings, validation, diagnostics, evidence, artifacts, plans, next actions, and feedback remain
+separate collections. Evidence records its subject, producer, authority, and provenance so model
+analysis is distinguishable from captured execution or Server observations. Artifact content is
+checked against its declared size and digest and is accessed through scoped authenticated APIs.
+Availability distinguishes available, expired, and missing evidence.
+
+Mutable evidence metadata, retention pins, and aggregate usage are separate from immutable artifact
+identities and sealed reports. The default policy allows 1 GiB of resident original content bytes
+and 10,000 resident artifacts, with a 30-day retention interval. A bounded cleanup pass runs at
+startup and then every minute, scanning at most 100 metadata records per pass without loading
+artifact content. The Server's five `INVESTIGATION_EVIDENCE_*` settings configure these limits.
+
+Cleanup preserves queued/running tasks, accepted checkpoint evidence needed for recovery, and
+parent or inherited-source evidence pinned by unfinished follow-ups. Quota exhaustion rejects new
+uploads instead of evicting protected content. Eligible expired content is removed while metadata,
+report history, and digests remain. `GET /api/artifacts/:id` reports current availability and
+retention protection; `GET /api/artifacts/:id/content` returns HTTP `410` for expired or missing
+content. Retention does not rewrite a report's original evidence declarations.
+
+The byte quota measures original resident artifact content, not Base64, SQLite, metadata, or WAL
+overhead. Cleanup releases logical quota but does not promise that database or WAL files shrink.
+Deployment storage sizing and workload acceptance must account for those physical files separately.
+
+Report headers and paginated findings support browsing without changing the authoritative full
+report. Server recommendations and hard blockers use the complete saved collection, including
+findings beyond the visible page. Export retains the complete result and its logical content digest.
+
+The Server process owns SQLite through `InvestigationStore`, with schema identity
+`investigation-v2`, and a separate account store. Schemas are initialized directly for this
+unreleased product; incompatible existing databases are rejected without conversion, deletion, or
+fallback. Both databases must remain private and outside the Dashboard static directory. Detailed
+retention controls and operating guidance are in the [Server instructions](./apps/server/README.md).
+Historical evidence services and schema numbers do not describe this active store.
+
+## Recommendations and action delivery
+
+Recommendations describe what the complete report supports. Current operation guards separately
+check the actor, installed handler, target state, revision, source, and pending delivery. An
+unresolved, confirmed, rechecked P0 on the current original PR blocks Approve, including qualifying
+findings retained in an accepted checkpoint. P1 findings, incomplete analysis, and missing required
+E2E affect recommendations without adding that same hard content prohibition.
+
+Preparing an action stores the exact actor, target/revision, report reference, payload, and payload
+digest. Confirmation checks the reviewed digest and current intent version, then recomputes current
+permissions and prerequisites before acquiring execution. Only the caller that persists the
+execution transition owns delivery. Repeated confirmation does not resend the operation.
+
+Follow-up tasks preserve the saved parent report and selected plan. Unknown external delivery uses
+read-only reconciliation and is not automatically resent. A pending unknown submission blocks
+conflicting new writes. Actual GitHub writes also require configured transport credentials and
+`INVESTIGATION_ENABLE_EXTERNAL_WRITES=true`, which is disabled by default.
+
+Automated tests must use isolated synthetic state and mocked transports or read-only live checks.
+Writing to actual repository PRs or issues requires explicit authorization for the targets,
+operations, content, and execution scope, as recorded in [AGENTS.md](./AGENTS.md). Historical live
+acceptance authorizes neither new targets nor an unapproved rerun.
+
+## Deployment and acceptance boundaries
+
+Use the [Server instructions](./apps/server/README.md) and
+[Worker instructions](./apps/worker/README.md) for active configuration. The Server uses
+`INVESTIGATION_*`; the Worker uses `INVESTIGATION_WORKER_*`. The runtime requires the supported
+Node.js and pnpm versions, a built Dashboard, the Worker bundle, ProcessHost, Git, and a configured
+model CLI. Public deployments use HTTPS. Service installation, restart policy, backups, resource
+sizing, and interactive-session readiness belong to the deployment.
+
+Project verification runs on the project-designated remote Windows worker. Linux-specific checks
+may use `test-env`; local verification requires explicit authorization for the current task.
+The [investigation acceptance instructions](./deploy/investigation-acceptance/README.md) describe
+the opt-in synthetic lifecycle harness and real CLI companion. The scripts' availability is not
+an acceptance result. Automated checks establish their recorded scope; they do not by themselves
+accept a real model, Windows desktop, upstream repository workflow, or production workload.
+
+M39/M40 retain their controlled CLI and headless Issue workflow evidence. M41 accepted its exact
+approved publication targets and payloads. M42 completed the recorded Spectre prerequisite
+installation, scoped PowerToys build, and seven selected tests; its earlier uninstalled state is
+historical. These receipts preserve their original revisions and environments and do not establish
+acceptance of the new Task protocol or a newly deployed Windows Worker.
+
+Current deployment, real-model workflow, human-action, capacity, and evidence-retention acceptance
+must be recorded independently in [Implementation Status](./docs/IMPLEMENTATION_STATUS.md).
+Dedicated PowerToys UI scenarios, general model-quality evaluation, and third-party login are
+outside the current delivery. Private checkout, automatic distribution, video evidence, and reusable
+build artifacts remain separate unimplemented scope. Retired split-Worker, protected-journal,
+provider-registry, and model-relay designs are not current backlog items.

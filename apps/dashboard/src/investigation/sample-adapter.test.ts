@@ -1,6 +1,7 @@
 import {
   ActionContextV1Schema,
   InvestigationActionIntentV1Schema,
+  InvestigationArtifactMetadataV1Schema,
   InvestigationFindingsPageV1Schema,
   type InvestigationFindingV1,
   InvestigationReportHeaderV1Schema,
@@ -91,6 +92,26 @@ afterEach(() => {
 });
 
 describe("sample investigation read contracts", () => {
+  it("keeps historical report content stable when current artifact bytes are unavailable", async () => {
+    const api = createSampleInvestigationApi();
+    for (const [seed, availability] of [
+      ["sample-pr-partial", "expired"],
+      ["sample-pr-p1", "missing"],
+    ] as const) {
+      const report = await api.exportReport(`${seed}-report`);
+      const artifact = required(report.artifacts[0]);
+      const metadata = await api.artifact(artifact.id);
+      expectSchema(InvestigationArtifactMetadataV1Schema, metadata);
+      expect(artifact.availability).toBe("available");
+      expect(metadata.artifact.availability).toBe(availability);
+      expect(metadata.expiredAt !== null).toBe(availability === "expired");
+      metadata.artifact.availability = "available";
+      expect((await api.artifact(artifact.id)).artifact.availability).toBe(availability);
+      expect(await api.exportReport(report.id)).toEqual(report);
+    }
+    await expect(api.artifact("missing-artifact")).rejects.toMatchObject({ status: 404 });
+  });
+
   it("returns all five isolated scenarios through the structured list and detail contracts", async () => {
     const api = createSampleInvestigationApi();
     const repositories = await api.repositories();

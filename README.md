@@ -7,8 +7,9 @@ The refactor does not provide legacy API compatibility, dual writes, data conver
 migration scripts.
 
 The [current design](./docs/design/2026-09-15-structured-investigation-results-and-loop.md)
-describes the result contract, complete investigation loop, and action rules. Design documents
-are written in Chinese; code, configuration examples, and operational instructions use English.
+describes the result contract, complete investigation loop, and action rules. The
+[architecture](./ARCHITECTURE.md) and application instructions document the active runtime and
+deployment boundaries.
 
 ## Runtime components
 
@@ -66,8 +67,9 @@ external writes. Automated tests must not write to real PRs or issues; see [AGEN
 
 Use Node.js 24.20.x and pnpm 11.24.x. The Server uses `INVESTIGATION_*` configuration; the Worker
 uses `INVESTIGATION_WORKER_*`. Read the [Server instructions](./apps/server/README.md) and
-[Worker instructions](./apps/worker/README.md) before starting a deployment. New databases are
-initialized directly with the investigation schema; an incompatible existing database is rejected.
+[Worker instructions](./apps/worker/README.md) before starting a deployment. New investigation databases are
+initialized directly with the `investigation-v2` schema; an incompatible existing database is
+rejected without conversion or deletion.
 
 The Dashboard development server uses clearly labeled synthetic data, including PowerToys PR,
 Bug, Feature, incomplete-report, and page-two P0 examples:
@@ -95,12 +97,21 @@ The [account design](./docs/design/2026-09-15-built-in-accounts.md) records the 
 and acceptance scope. Dedicated PowerToys UI scenarios and model-quality evaluation are not part
 of this delivery, following the user's current scope decision.
 
-Run verification on `ssh test-env` unless the user explicitly authorizes local verification for
-the current task. Standard package build, typecheck, test, and lint scripts remain available;
-opt-in live-model and publication acceptance harnesses are separate from ordinary tests.
-Tests should use mocked transports and isolated databases, with no real repository mutations.
+Run verification on the project-designated remote Windows worker. Linux-specific checks may use
+`test-env`; local verification requires explicit authorization for the current task. Standard
+package build, typecheck, test, and lint scripts remain available. The
+[investigation acceptance instructions](./deploy/investigation-acceptance/README.md) describe the
+opt-in synthetic lifecycle harness and real CLI companion, including prerequisites and exclusions;
+their availability does not imply a completed acceptance run. Tests should use mocked transports
+and isolated databases, with no real repository mutations.
 
 ## Evidence and project status
+
+Evidence retention defaults to 30 days, 1 GiB of resident original content, and 10,000 resident
+artifacts. Bounded cleanup preserves recovery and follow-up source dependencies. Current artifact
+availability is separate from immutable reports, and inherited patches retain their original
+producer identities in `sourceArtifacts`. See the [Server evidence instructions](./apps/server/README.md#evidence-retention-and-capacity)
+for configuration, HTTP availability responses, and physical SQLite storage limits.
 
 [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) distinguishes this refactor from historical
 milestones. M39/M40 model workflows, M41 publication acceptance, M42 selected PowerToys tests, and

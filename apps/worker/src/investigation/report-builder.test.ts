@@ -1,5 +1,6 @@
 import {
   type InvestigationAnalysisV1,
+  type InvestigationArtifactV1,
   type InvestigationAttemptV1,
   InvestigationAttemptV1Schema,
   type InvestigationEvidenceV1,
@@ -409,6 +410,73 @@ function parentPlanFixture() {
   return { input, parentPlan, draft };
 }
 
+function inheritedPatchReportFixture(selectedPatch = false, producingTaskId = "task:parent") {
+  const { input, parentPlan } = parentPlanFixture();
+  const patch: Extract<InvestigationSubjectV1, { kind: "local_patch" }> = {
+    id: "subject:inherited-patch",
+    kind: "local_patch",
+    repositoryId: input.task.repository.id,
+    workItemId: input.task.workItem.id,
+    revisionKey: "4".repeat(64),
+    baseSubjectRef: input.task.subjectRef,
+    baseSha: "c".repeat(40),
+    patchDigest: "5".repeat(64),
+    artifactRef: "artifact:inherited-patch",
+  };
+  const artifact: InvestigationArtifactV1 = {
+    id: patch.artifactRef,
+    taskId: producingTaskId,
+    attemptId: `${producingTaskId}:attempt`,
+    subjectRef: patch.id,
+    kind: "patch",
+    name: "inherited.patch",
+    mediaType: "text/x-diff",
+    digest: patch.patchDigest,
+    byteLength: 128,
+    availability: "available",
+  };
+  input.task.subjects.push(patch);
+  input.task.sourceArtifacts = [structuredClone(artifact)];
+  if (selectedPatch) {
+    input.task.subjectRef = patch.id;
+    input.task.executionPolicy.allowedSubjectRefs.push(patch.id);
+    input.checkpoint.subjectRevisionKey = patch.revisionKey;
+    input.checkpoint.analysis.assessment.subjectRef = patch.id;
+    input.checkpoint.analysis.assessment.evidenceRefs = [];
+    input.checkpoint.analysis.findings[0]!.fixRecommendation.planRef = null;
+    parentPlan.subjectRef = patch.id;
+    const {
+      digest: _digest,
+      state: _state,
+      sourceReportRef: _sourceReportRef,
+      ...draft
+    } = parentPlan;
+    parentPlan.digest = investigationContentDigest(draft);
+    input.task.planRef = {
+      id: parentPlan.id,
+      version: parentPlan.version,
+      digest: parentPlan.digest,
+    };
+  }
+  input.checkpoint.runtime.artifacts = [
+    {
+      id: "artifact:current-log",
+      taskId: input.task.id,
+      attemptId: input.attempt.id,
+      subjectRef: input.task.subjectRef,
+      kind: "log",
+      name: "current-attempt.log",
+      mediaType: "text/plain",
+      digest: "6".repeat(64),
+      byteLength: 64,
+      availability: "available",
+    },
+  ];
+  input.checkpoint.taskBindingDigest = investigationTaskBindingDigest(input.task);
+  input.checkpoint = seal(input.checkpoint);
+  return { input, parentPlan, patch, artifact };
+}
+
 function selectedIssueSourceFixture(
   kind: "issue-verify" | "reproduction-setup" | "issue-fix" | "feature-implement",
 ) {
@@ -784,6 +852,8 @@ describe("investigation report builder", () => {
     input.checkpoint.analysis.plans = [draft];
     input.checkpoint.analysis.nextActions = [action];
     input.checkpoint.analysis.findings[0]!.fixRecommendation.planRef = planRef;
+    if (input.checkpoint.analysis.assessment.kind !== "pr") throw new Error("Expected PR fixture.");
+    input.checkpoint.analysis.assessment.e2eAssessment.planRef = planRef;
     input.checkpoint = seal(input.checkpoint);
     const submission = buildInvestigationReportSubmission({
       ...input,
@@ -813,6 +883,122 @@ describe("investigation report builder", () => {
       collectionItems(submission.parts, "plans"),
     );
     expect(reordered.manifest.logicalContentDigest).toBe(submission.manifest.logicalContentDigest);
+  });
+
+  it("delivers complete findings while retaining invalid action proposals outside the executable action list", () => {
+    const input = fixture();
+    const proposal = {
+      id: "action:invalid-verification",
+      action: "start-task" as const,
+      taskKind: "issue-verify" as const,
+      label: "Verify the retained findings",
+      reason: "The source findings need a separate saved verification plan.",
+      recommended: true,
+      subjectRef: input.task.subjectRef,
+      planRef: null,
+      draftRef: null,
+      validationReportRef: null,
+      prerequisiteRefs: [],
+    };
+    input.checkpoint.analysis.nextActions = [proposal];
+    input.checkpoint = seal(input.checkpoint);
+    const original = structuredClone(input.checkpoint);
+    const submission = buildInvestigationReportSubmission(input);
+    expect(submission.header.outcome).toBe("completed");
+    expect(submission.header.report.collections.nextActions).toBe(0);
+    expect(collectionItems(submission.parts, "findings")).toEqual(original.analysis.findings);
+    expect(collectionItems(submission.parts, "nextActions")).toEqual([]);
+    const diagnostics = submission.parts.flatMap((part) =>
+      part.collection === "diagnostics" ? part.items : [],
+    );
+    expect(diagnostics).toHaveLength(1);
+    expect(JSON.parse(diagnostics[0]!.message)).toMatchObject({
+      proposal,
+      reasonCodes: ["missing_saved_plan", "bug_verification_not_supported_by_assessment"],
+    });
+    expect(input.checkpoint).toEqual(original);
+    expect(input.checkpoint.digest).toBe(original.digest);
+  });
+
+  it("keeps duplicate terminal diagnostics identical to checkpoint diagnostics and rejects uncheckpointed additions", () => {
+    const input = fixture();
+    const diagnostic = {
+      id: "diagnostic:accepted",
+      code: "ACCEPTED_LIMITATION",
+      category: "limitation" as const,
+      message: "A terminal limitation already accepted in this checkpoint.",
+      retryable: false,
+      evidenceRefs: [],
+      prerequisiteRefs: [],
+    };
+    input.checkpoint.analysis.diagnostics = [diagnostic];
+    input.checkpoint = seal(input.checkpoint);
+    const ordinary = buildInvestigationReportSubmission(input);
+    expect(
+      buildInvestigationReportSubmission({ ...input, diagnostics: [structuredClone(diagnostic)] }),
+    ).toEqual(ordinary);
+    expectBuildError(
+      () =>
+        buildInvestigationReportSubmission({
+          ...input,
+          diagnostics: [{ ...diagnostic, id: "diagnostic:uncheckpointed" }],
+        }),
+      "INVALID_INPUT",
+    );
+    expectBuildError(
+      () =>
+        buildInvestigationReportSubmission({
+          ...input,
+          diagnostics: [{ ...diagnostic, message: "Changed accepted content" }],
+        }),
+      "INVALID_INPUT",
+    );
+  });
+
+  it("normalizes only report display ordinals and preserves original finding versions and the accepted checkpoint", () => {
+    const input = fixture();
+    input.checkpoint.analysis.findings.forEach((finding, index) => {
+      finding.ordinal = [10, 10, 1][index]!;
+    });
+    input.checkpoint = seal(input.checkpoint);
+    const original = structuredClone(input.checkpoint);
+    const submission = buildInvestigationReportSubmission(input);
+    expect(collectionItems(submission.parts, "findings")).toEqual(
+      original.analysis.findings.map((finding, ordinal) => ({ ...finding, ordinal })),
+    );
+    expect(collectionItems(submission.parts, "rechecks")).toEqual(original.analysis.rechecks);
+    const diagnostics = submission.parts.flatMap((part) =>
+      part.collection === "diagnostics" ? part.items : [],
+    );
+    expect(diagnostics).toHaveLength(3);
+    expect(
+      diagnostics.every((diagnostic) => diagnostic.code === "FINDING_ORDINAL_NORMALIZED"),
+    ).toBe(true);
+    expect(input.checkpoint).toEqual(original);
+    expect(submission.header.outcome).toBe("completed");
+  });
+
+  it("does not truncate a rejected proposal that cannot fit inside a transport part", () => {
+    const input = fixture();
+    input.checkpoint.analysis.nextActions = [
+      {
+        id: "action:oversized-rejected",
+        action: "start-task",
+        taskKind: "pr-verify",
+        label: "Keep the complete proposal",
+        reason: 'Quoted \\"data\\" '.repeat(20_000),
+        recommended: true,
+        subjectRef: input.task.subjectRef,
+        planRef: null,
+        draftRef: null,
+        validationReportRef: null,
+        prerequisiteRefs: [],
+      },
+    ];
+    input.checkpoint = seal(input.checkpoint);
+    const original = structuredClone(input.checkpoint);
+    expectBuildError(() => buildInvestigationReportSubmission(input), "REPORT_ITEM_TOO_LARGE");
+    expect(input.checkpoint).toEqual(original);
   });
 
   it("keeps trusted checkpoint receipts separate from model evidence", () => {
@@ -1050,6 +1236,58 @@ describe("investigation report builder", () => {
     expect(parentPlan.sourceReportRef.id).not.toBe(submission.header.id);
     expect(collectionItems(submission.parts, "findings")).toEqual(
       input.checkpoint.analysis.findings,
+    );
+  });
+
+  it.each([
+    { selection: "original source", selectedPatch: false, producingTaskId: "task:parent" },
+    { selection: "local patch", selectedPatch: true, producingTaskId: "task:parent" },
+    { selection: "nested local patch", selectedPatch: true, producingTaskId: "task:grandparent" },
+  ])(
+    "preserves frozen patch lineage when reporting on $selection",
+    ({ selectedPatch, producingTaskId }) => {
+      const { input, parentPlan, patch, artifact } = inheritedPatchReportFixture(
+        selectedPatch,
+        producingTaskId,
+      );
+      const submission = buildInvestigationReportSubmission({ ...input, parentPlan });
+
+      expect(submission.header.context.subjects).toEqual(input.task.subjects);
+      expect(submission.header.context.sourceArtifacts).toEqual([artifact]);
+      expect(submission.header.context.parentReportRef).toEqual(input.task.parentReportRef);
+      expect(submission.header.context.task.subjectRef === patch.id).toBe(selectedPatch);
+      expect(submission.header.context.adoptedAttemptIds).not.toContain(artifact.attemptId);
+      expect(collectionItems(submission.parts, "artifacts")).toEqual(
+        input.checkpoint.runtime.artifacts,
+      );
+      expect(submission.header.report.collections.artifacts).toBe(1);
+      expect(collectionItems(submission.parts, "artifacts")).not.toContainEqual(artifact);
+      expect(collectionItems(submission.parts, "plans")).toEqual([parentPlan]);
+      expect(input.task.sourceArtifacts).toEqual([artifact]);
+    },
+  );
+
+  it("rejects changing frozen inherited artifact metadata after the checkpoint was sealed", () => {
+    const { input, parentPlan } = inheritedPatchReportFixture();
+    const boundDigest = input.checkpoint.taskBindingDigest;
+    input.task.sourceArtifacts![0]!.name = "replacement.patch";
+
+    expect(investigationTaskBindingDigest(input.task)).not.toBe(boundDigest);
+    expectBuildError(
+      () => buildInvestigationReportSubmission({ ...input, parentPlan }),
+      "INVALID_INPUT",
+    );
+  });
+
+  it("rejects an inherited patch in runtime artifacts even when its ancestor attempt is adopted", () => {
+    const { input, parentPlan, artifact } = inheritedPatchReportFixture(true);
+    input.checkpoint.adoptedAttemptIds.push(artifact.attemptId);
+    input.checkpoint.runtime.artifacts.push(artifact);
+    input.checkpoint = seal(input.checkpoint);
+
+    expectBuildError(
+      () => buildInvestigationReportSubmission({ ...input, parentPlan }),
+      "INVALID_RUNTIME_ARTIFACT",
     );
   });
 

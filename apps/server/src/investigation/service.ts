@@ -38,6 +38,7 @@ import {
 } from "@agentic-review/domain";
 import { InvestigationActions } from "./actions.js";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
+import { type InvestigationEvidencePolicy, InvestigationEvidenceStore } from "./evidence-store.js";
 import { constantTimeEqual, encodeCursor, parseCursor } from "./integrity.js";
 import type {
   InvestigationDirectoryQuery,
@@ -72,11 +73,6 @@ interface IdempotencyRecord {
   digest: string;
   entityId: string;
 }
-interface ArtifactRecord {
-  artifact: InvestigationArtifactV1;
-  contentBase64: string;
-}
-
 export interface InvestigationServiceOptions {
   store: InvestigationStore;
   actionTransport?: InvestigationActionTransport;
@@ -85,6 +81,7 @@ export interface InvestigationServiceOptions {
   idFactory?: () => string;
   leaseDurationMs?: number;
   maxReportBytes?: number;
+  evidencePolicy?: Partial<InvestigationEvidencePolicy>;
   resolvePlanPrerequisites?: InvestigationPrerequisiteResolver;
   resolveTaskSource?: (
     repository: InvestigationRepositoryRecord,
@@ -102,6 +99,7 @@ export interface InvestigationServiceOptions {
 
 export class InvestigationService {
   readonly actions: InvestigationActions;
+  readonly evidence: InvestigationEvidenceStore;
   private readonly store: InvestigationStore;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
@@ -111,6 +109,7 @@ export class InvestigationService {
   constructor(private readonly options: InvestigationServiceOptions) {
     this.store = options.store;
     this.now = options.now ?? (() => new Date());
+    this.evidence = new InvestigationEvidenceStore(this.store, options.evidencePolicy, this.now);
     this.idFactory = options.idFactory ?? randomUUID;
     this.leaseDurationMs = options.leaseDurationMs ?? 120_000;
     this.maxReportBytes = options.maxReportBytes ?? 64 * 1024 * 1024;
@@ -457,6 +456,25 @@ export class InvestigationService {
       "An explicit source cannot replace an existing frozen subject identity.",
     );
     if (existingSubject === undefined) subjects.push(subject);
+    const parentArtifacts = new Map(
+      [...(parent?.artifacts ?? []), ...(parent?.context.sourceArtifacts ?? [])].map(
+        (artifact) => [artifact.id, artifact] as const,
+      ),
+    );
+    const sourceArtifacts = subjects.flatMap((entry) => {
+      if (entry.kind !== "local_patch") return [];
+      const artifact = parentArtifacts.get(entry.artifactRef);
+      requireCondition(
+        artifact !== undefined &&
+          artifact.kind === "patch" &&
+          artifact.subjectRef === entry.id &&
+          artifact.digest === entry.patchDigest,
+        409,
+        "parent_patch_binding_missing",
+        "Every inherited patch must retain its exact artifact metadata from the saved parent report.",
+      );
+      return [artifact];
+    });
     const id = this.idFactory();
     const units =
       plan === null
@@ -534,6 +552,7 @@ export class InvestigationService {
       planRef: request.planRef ?? null,
       subjectRef: subject.id,
       subjects,
+      ...(sourceArtifacts.length === 0 ? {} : { sourceArtifacts }),
       scope,
       executionPolicy: {
         mode,
@@ -628,6 +647,7 @@ export class InvestigationService {
         "Executable bindings must preserve the saved plan, explicit authorization, and frozen source.",
       );
     }
+    this.evidence.requireTaskSources(task, parent ?? null);
     if (!persist) return task;
     return this.store.transaction(() => {
       const concurrent = this.store.get<IdempotencyRecord>("idempotency", key);
@@ -640,7 +660,9 @@ export class InvestigationService {
         );
         return this.task(actor, concurrent.entityId);
       }
+      this.evidence.requireTaskSources(task, parent ?? null);
       this.store.insert("tasks", task.id, task);
+      this.evidence.pinParent(task);
       this.store.insert("idempotency", `input:${task.id}`, input);
       this.store.insert("idempotency", key, { digest, entityId: task.id });
       return task;
@@ -1253,6 +1275,7 @@ export class InvestigationService {
         "Another checkpoint was accepted before this write.",
       );
       this.store.put("checkpoints", taskId, next);
+      this.evidence.retainCheckpoint(next.runtime.artifacts);
       this.store.insert("idempotency", key, { digest, checkpoint: next });
     });
     return { checkpoint: next };
@@ -1437,6 +1460,7 @@ export class InvestigationService {
         latestReportRef: ref,
         updatedAt: this.time(),
       });
+      if (result.outcome === "completed") this.evidence.releaseParent(task);
       this.store.put("attempts", record.attempt.id, {
         ...record,
         attempt: {
@@ -1452,14 +1476,7 @@ export class InvestigationService {
 
   private requireArtifact(artifact: InvestigationArtifactV1): void {
     if (artifact.availability !== "available") return;
-    const stored = this.store.get<ArtifactRecord>("evidenceAssets", artifact.id);
-    requireCondition(
-      stored !== undefined &&
-        investigationContentDigest(stored.artifact) === investigationContentDigest(artifact),
-      400,
-      "artifact_not_registered",
-      "Available evidence must have verified stored bytes before it can be referenced.",
-    );
+    this.evidence.requireAvailable(artifact);
   }
   workerArtifact(
     worker: InvestigationWorkerPrincipal,
@@ -1489,27 +1506,18 @@ export class InvestigationService {
       "artifact_integrity_mismatch",
       "Artifact bytes do not match the claimed content digest or length.",
     );
-    const previous = this.store.get<ArtifactRecord>("evidenceAssets", artifact.id);
-    if (previous !== undefined)
-      requireCondition(
-        investigationContentDigest(previous.artifact) === investigationContentDigest(artifact),
-        409,
-        "artifact_identity_conflict",
-        "An artifact identity cannot be reused with different content.",
-      );
-    else
-      this.store.transaction(() => {
-        this.lease(worker, taskId, request.lease);
-        this.store.insert("evidenceAssets", artifact.id, {
-          artifact,
-          contentBase64: request.contentBase64,
-        });
-      });
+    this.evidence.upload(artifact, request.contentBase64, () => {
+      this.lease(worker, taskId, request.lease);
+    });
     return { accepted: true as const };
   }
+  artifactMetadata(actor: InvestigationOperatorPrincipal, id: string) {
+    this.task(actor, this.evidence.artifact(id).taskId);
+    return this.evidence.current(id);
+  }
   artifactContent(actor: InvestigationOperatorPrincipal, id: string) {
-    const record = this.required<ArtifactRecord>("evidenceAssets", id);
-    this.task(actor, record.artifact.taskId);
+    this.task(actor, this.evidence.artifact(id).taskId);
+    const record = this.evidence.content(id);
     return { artifact: record.artifact, content: Buffer.from(record.contentBase64, "base64") };
   }
   workerArtifactContent(
@@ -1518,27 +1526,41 @@ export class InvestigationService {
     request: { lease: InvestigationWorkerLease; artifactId: string },
   ) {
     const { task } = this.lease(worker, taskId, request.lease);
-    const record = this.required<ArtifactRecord>("evidenceAssets", request.artifactId);
+    const artifact = this.evidence.artifact(request.artifactId);
     const parent =
       task.parentReportRef === null
         ? undefined
         : this.store.get<InvestigationResultV1>("reports", task.parentReportRef.id);
+    const isExactArtifact = (entry: InvestigationArtifactV1) =>
+      investigationContentDigest(entry) === investigationContentDigest(artifact);
+    const inheritedSourceAllowed =
+      artifact.kind === "patch" &&
+      task.sourceArtifacts?.some(isExactArtifact) === true &&
+      task.subjects.some(
+        (subject) =>
+          subject.kind === "local_patch" &&
+          (subject.id === task.subjectRef ||
+            task.executionPolicy.allowedSubjectRefs.includes(subject.id)) &&
+          subject.artifactRef === artifact.id &&
+          subject.id === artifact.subjectRef &&
+          subject.patchDigest === artifact.digest,
+      );
     requireCondition(
-      record.artifact.taskId === task.id ||
+      artifact.taskId === task.id ||
         (parent !== undefined &&
+          parent.context.task.id === task.parentTaskId &&
           parent.context.repository.id === task.repository.id &&
           parent.context.workItem.id === task.workItem.id &&
           parent.report.version === task.parentReportRef?.version &&
           parent.report.logicalContentDigest === task.parentReportRef.digest &&
-          parent.artifacts.some(
-            (artifact) =>
-              artifact.id === record.artifact.id && artifact.digest === record.artifact.digest,
-          )),
+          (parent.artifacts.some(isExactArtifact) ||
+            (inheritedSourceAllowed &&
+              parent.context.sourceArtifacts?.some(isExactArtifact) === true))),
       403,
       "artifact_scope_mismatch",
-      "The artifact does not belong to this task or its exact parent report.",
+      "The artifact must belong to this task, its exact parent report, or an explicitly authorized inherited patch source.",
     );
-    return record;
+    return this.evidence.content(request.artifactId);
   }
 
   actionContext(...args: Parameters<InvestigationActions["actionContext"]>) {

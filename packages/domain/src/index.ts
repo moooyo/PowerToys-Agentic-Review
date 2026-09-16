@@ -3,6 +3,7 @@ export * from "./evaluation-reproduction.js";
 export * from "./evaluation-scoring.js";
 export * from "./investigation-loop.js";
 export * from "./investigation-policy.js";
+export { projectInvestigationReportFindings } from "./investigation-report-projection.js";
 export * from "./issue-reproduction.js";
 export * from "./job-state.js";
 export * from "./lease.js";

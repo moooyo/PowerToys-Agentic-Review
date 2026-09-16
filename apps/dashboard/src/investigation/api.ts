@@ -3,6 +3,7 @@ import {
   DateTimeSchema,
   EntityIdSchema,
   InvestigationActionIntentV1Schema,
+  InvestigationArtifactMetadataV1Schema,
   InvestigationAttemptV1Schema,
   type InvestigationBudget,
   type InvestigationCreateActionIntentRequest,
@@ -107,6 +108,10 @@ export function createInvestigationApi(transport: InvestigationTransport) {
       ),
     exportReport: (id: string) =>
       transport(`/api/reports/${encodeURIComponent(id)}/export`, InvestigationResultV1Schema),
+    artifact: (id: string, signal?: AbortSignal) =>
+      transport(`/api/artifacts/${encodeURIComponent(id)}`, InvestigationArtifactMetadataV1Schema, {
+        signal,
+      }),
     actionContext: (workItemId: string, reportId?: string) =>
       transport(
         `/api/work-items/${encodeURIComponent(workItemId)}/action-context${queryString({ reportId })}`,

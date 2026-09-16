@@ -18,6 +18,11 @@ load a dotenv file. `.env.example` lists the supported settings. Keep both datab
 restricted to the service account and administrators, outside the dashboard static directory.
 Relative database paths resolve against the process working directory.
 
+Investigation data uses schema identity `investigation-v2`. Use a new investigation database path
+when an existing file has an earlier or unrelated schema. Startup rejects incompatible databases;
+it does not convert, delete, or reset them. The separate password-account database retains its own
+schema identity and initialization rules.
+
 ## Initialize the first administrator
 
 A new installation uses a separate `investigation-accounts.sqlite` account database. Configure a
@@ -214,3 +219,69 @@ operation. Allowed edit paths are explicit repository-relative files, without gl
 validation tasks cannot contain model-edit steps. Registry changes take effect after server restart,
 and already-created tasks preserve their frozen execution binding.
 
+An inherited `local_patch` subject keeps its original artifact metadata in `Task.sourceArtifacts`.
+The sealed child report copies that lineage to `context.sourceArtifacts`, preserving the producing
+task and attempt IDs. It is not an artifact or execution observation newly produced by the child.
+Admission and Worker reads verify the exact saved parent report, patch subject, digest, and current
+content availability. A required patch that has expired or gone missing cannot be replaced with a
+different branch or artifact under the same task identity.
+
+## Evidence retention and capacity
+
+The investigation database stores artifact content, mutable metadata, retention pins, and aggregate
+usage separately. Immutable reports and artifact identities retain their original content digests
+and provenance when stored content later expires. Configure these process environment settings
+before starting the Server; the [configuration template](./.env.example) contains the defaults.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `INVESTIGATION_EVIDENCE_MAXIMUM_BYTES` | `1073741824` (1 GiB) | Maximum resident original artifact-content bytes. |
+| `INVESTIGATION_EVIDENCE_MAXIMUM_COUNT` | `10000` | Maximum number of resident artifact contents. |
+| `INVESTIGATION_EVIDENCE_RETENTION_SECONDS` | `2592000` (30 days) | Minimum age before unprotected content becomes eligible for cleanup. |
+| `INVESTIGATION_EVIDENCE_CLEANUP_INTERVAL_SECONDS` | `60` | Interval between bounded cleanup passes. |
+| `INVESTIGATION_EVIDENCE_CLEANUP_BATCH_SIZE` | `100` | Maximum metadata records scanned in one pass. |
+
+All values must be positive integers. Cleanup runs one bounded pass during startup and then on the
+configured interval. It scans metadata without loading artifact content and continues from a saved
+cursor; the defaults do not promise that every eligible artifact expires within one minute. The
+retention age begins at the later of upload time and the producing task's latest update.
+
+Queued/running task content is protected. Accepted checkpoint artifacts remain protected when an
+unfinished task may need recovery, including completed analysis awaiting final report delivery.
+Parent tasks and required inherited patch producers are pinned until the dependent task reaches
+`completed`. A cancelled or interrupted follow-up may therefore continue retaining its source.
+Protected content is not evicted to make room for another upload.
+
+Upload validation and quota accounting share the lease-checked write transaction. Exceeding either
+resident quota returns HTTP `409` with `evidence_quota_exceeded`; no new content is accepted. Allow
+eligible retention cleanup to release capacity or increase the appropriate configured quota and
+restart the Server. A capacity increase cannot recover content that has already expired. Earlier
+reports and retained metadata remain available even after content cleanup.
+
+Use the authenticated, repository-scoped artifact APIs to distinguish frozen report declarations
+from current storage availability:
+
+- `GET /api/artifacts/:id` returns `{artifact, storedAt, expiredAt, retentionProtected}`. The returned
+  artifact's `availability` is the current `available`, `expired`, or `missing` state.
+- `GET /api/artifacts/:id/content` returns the original content when available. Expired content
+  returns HTTP `410` with `artifact_expired`; missing content returns HTTP `410` with
+  `artifact_missing`. These responses do not alter the immutable report or logical content digest.
+
+The byte quota counts decoded original content. It excludes Base64 expansion, retained metadata,
+reports, SQLite indexes and pages, and WAL overhead. Cleanup releases logical artifact quota but
+does not guarantee that SQLite or WAL files shrink on disk. Size the deployment for physical
+database growth separately; resident evidence limits are not a bound on total database size or a
+workload-capacity acceptance result.
+
+## Verification and deployment acceptance
+
+Run project verification on the project-designated remote Windows worker. Linux-specific checks
+may use `test-env`; local verification requires explicit authorization for the current task.
+Tests use isolated databases and mocked or read-only upstream transports. No ordinary test run
+authorizes actual PR or Issue writes.
+
+The [investigation acceptance instructions](../../deploy/investigation-acceptance/README.md) provide
+an opt-in synthetic lifecycle harness and a separate real CLI companion. They run prebuilt
+production entry points with isolated state and document source manifests, prerequisites, and
+scope exclusions. Their availability is not a claim that an acceptance run has completed; record
+actual results and remaining deployment boundaries in [Implementation Status](../../docs/IMPLEMENTATION_STATUS.md).

@@ -55,6 +55,12 @@ complete coverage and candidate/recheck records; a final report is not a top-k s
 outcomes retain known findings and the remaining work. Resume uses the accepted checkpoint and
 frozen source/configuration, not an assumed surviving CLI session.
 
+For a saved patch, `Task.sourceArtifacts` retains the original producing task and attempt metadata;
+the child report preserves it in `context.sourceArtifacts`. The Worker fetches the exact inherited
+artifact through its current scoped lease and verifies its patch digest and subject before source
+materialization. Inherited source is not relabeled as new child-task execution evidence, and a
+missing or expired required patch blocks execution rather than selecting different source.
+
 Executable plans require the Server's trusted execution binding as well as Worker executable or
 UI registrations. A natural-language plan alone cannot run commands. Command, UI, and model-edit
 steps write start records before execution and retain actual outcomes, source identity, and
@@ -73,16 +79,29 @@ process count, memory, and output through `PROCESS_TIMEOUT_MS`, `MAX_PROCESS_COU
 `GIT_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS`, `CLAIM_POLL_MS`, and `SHUTDOWN_TIMEOUT_MS` use the same prefix.
 Task budgets are independently frozen by the Server and enforced across loop and plan receipts.
 
+Artifact retention and aggregate upload quotas are configured on the Server through
+`INVESTIGATION_EVIDENCE_*`; they are independent of Worker process and task limits. Quota exhaustion
+rejects additional uploads without evicting content protected for active tasks, recovery, or
+unfinished follow-ups. See the [Server evidence instructions](../server/README.md#evidence-retention-and-capacity)
+for defaults and current artifact-availability reads.
+
 SIGINT/SIGTERM shutdown stops new claims, cancels owned work, drains managed processes, and closes
 ProcessHost. Unconfirmed cleanup produces a node fault and retains the affected workspace rather
 than claiming a successful release. A new Worker must not reuse an uncertain attempt directory.
 
 ## Verification
 
-Run project verification on `ssh test-env` unless the user explicitly authorizes local validation
-for the current task. Tests use isolated state and injected model, filesystem, process, and GitHub
-transports. Linux verification does not establish real Windows desktop or real-model acceptance.
+Run project verification on the project-designated remote Windows worker. Linux-specific checks
+may use `test-env`; local verification requires explicit authorization for the current task.
+Tests use isolated state and injected model, filesystem, process, and GitHub transports. Linux
+verification does not establish real Windows desktop or real-model acceptance.
 
 Build with `pnpm --filter @agentic-review/worker build` in the authorized environment, then start
 the configured Worker with `pnpm --filter @agentic-review/worker start`. Actual PR/Issue writes are
 handled by the Server's separate confirmed action-intent path and require their own explicit scope.
+
+The [investigation acceptance instructions](../../deploy/investigation-acceptance/README.md) describe
+the opt-in harness for production entry points, consecutive synthetic tasks, cancellation,
+graceful restart/resume, report export, and cleanup. A separate companion uses an already frozen
+public Issue and the real configured CLI. Follow each script's prerequisites and evidence scope;
+the presence of a harness is not proof that the deployment or a real model workflow passed.

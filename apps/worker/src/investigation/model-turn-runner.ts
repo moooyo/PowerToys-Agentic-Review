@@ -535,6 +535,8 @@ function staticArguments(
     ...original.filter(
       (argument) => argument !== "--dangerously-bypass-approvals-and-sandbox" && argument !== "-",
     ),
+    // The worker verifies this snapshot-only directory; repository source is stored separately.
+    "--skip-git-repo-check",
     "--sandbox",
     "read-only",
     ...policy.flatMap((setting) => ["--config", setting]),
@@ -645,8 +647,23 @@ async function makePrompt(
           "This is a saved-plan execution summary. Do not restart a broad PR review or issue investigation. Explain only supplied plan observations, recorded edits/checks, and the individual rechecks of candidates arising from those observations.",
         ]),
     "Respect the task executionPolicy, allowedSubjectRefs, immutable subject revisions, and coverage manifest. Do not claim to have read omitted files or mark omitted source units complete.",
+    "For an existing selected coverage unit, copy id, subjectRef, kind, paths, and requiredWork exactly from turn.analysis.coverageUnits. Only status and evidenceRefs may change; do not paraphrase or expand its frozen requiredWork.",
+    "subjectRef identifies a supplied turn.subjects record. evidenceRefs identifies evidence, not subjects: use only IDs from turn.analysis.evidence, turn.observations, or analysis.evidence records added in this delta, and cite only evidence on the same subject. Never use a subject ID, snapshot.subjectRef, task ID, coverage unit ID, or file path as an evidence reference.",
+    "For a leaf evidence record derived directly from the supplied snapshot, create a distinct analysis.evidence ID with the appropriate reporter_statement or static_analysis source and evidenceRefs: []. Describe the supplied fact in summary; do not invent an upstream evidence ID. Other records may cite that new evidence ID in the same delta. Evidence must not cite itself.",
+    ...(input.task.executionPolicy.mode === "snapshot_only"
+      ? [
+          "This snapshot_only task investigates only the provided material. Add required coverage units only for analysis that can be performed on that material. Record missing external source, executable revisions, runtime conditions, or observations as limitations and explicit follow-up plan prerequisites, not new required coverage that must wait for future inputs.",
+          "Complete a snapshot coverage unit only after analyzing every supplied fact and supported hypothesis within its unchanged requiredWork. Completing that analysis does not establish a defect or its root cause: bugAssessment may remain needs_information or needs_verification, and reproduction may remain not_run. Never invent execution evidence, tests, or confirmation to finish the task.",
+          "Do not leave a candidate pending solely to wait for unavailable external information. Preserve a supported but unproven retained candidate as unresolved, linked by findingId and findingVersion to a finding with confirmation.status hypothesis, explicit limitations, and a concrete proposed follow-up plan and next action. Unsupported possibilities can remain clearly labeled in assessment hypotheses; do not manufacture a finding or withdraw a supported concern merely to reach completion.",
+          "When the Worker selects a retained hypothesis finding for recheck, independently recheck its final version against the supplied evidence, keep its hypothesis status if uncertainty remains, and record non-empty unresolvedQuestions plus limitations. After all supplied work and required rechecks are complete, a finalize batch can finish the snapshot analysis while external verification remains a follow-up.",
+        ]
+      : []),
     "PR diff units are complete frozen chunks, including deleted-file base content and exact diff context. Only chunks in sourceChunks were delivered this round. Base64 chunks are raw binary data, never a visual observation; explicitly record any required visual verification.",
     "Return only updates for supplied entities plus newly discovered records. Unchanged summary and assessment are null; unchanged collections are empty arrays. The Worker retains the full ledger and merges this delta without dropping any omitted records.",
+    "Accepted evidence and recheck records are immutable: omit them from updates and cite their IDs instead of rewriting them. Any content change to an existing finding or plan requires a higher version, including changes to a finding's confirmation or recheckRef.",
+    `For a planRef to a plan added or updated in this delta, use its exact id and version with provisional digest "${"0".repeat(64)}"; the Worker computes the real digest from the complete proposed plan. Copy existing saved plan references exactly; do not replace their digests with placeholders or invent a digest.`,
+    "A recheck's findingVersion and a candidate's findingVersion must match the updated finding version they reference. When updating a candidate, preserve its subjectRef and discoveredRound exactly.",
+    "In a recheck round, return all three together for each retained selected finding: its full updated record in analysis.findings, incrementing version and setting confirmation.recheckRef to a new recheck ID; that new analysis.rechecks record with findingId and findingVersion matching the updated finding's id and version; and updates for its supplied owning candidates with the same findingVersion. Appending only a recheck does not link it to the finding and leaves the finding pending.",
     "The phase and selected work are assigned by the Worker. Do not update unselected prior findings, candidates, or coverage units. Do not remove a finding without an explicit selected withdrawal or merge and removedFindingIds.",
     "Do not impose a top-N finding limit. Resolve all candidates, preserve unresolved work, and recheck every final finding version before proposing finalization. Record explicit limitations when input is insufficient.",
     "The model proposes analysis only: never claim worker/server evidence authority, runtime observations, saved plans, permissions, or a final task outcome.",
@@ -721,7 +738,7 @@ async function makePrompt(
     for (const path of paths) {
       if (sourceBudgetExceeded) break;
       input.signal.throwIfAborted();
-      if (/[?*\[\]{}]/u.test(path))
+      if (/[?*[\]{}]/u.test(path))
         throw failure(
           "MODEL_SOURCE_UNAVAILABLE",
           "Source coverage must contain concrete file paths; wildcard paths are not executed or silently expanded.",
