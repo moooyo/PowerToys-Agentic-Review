@@ -33,9 +33,7 @@
         "id": "synthetic-pr-attempt-1",
         "number": 1
       },
-      "adoptedAttemptIds": [
-        "synthetic-pr-attempt-1"
-      ],
+      "adoptedAttemptIds": ["synthetic-pr-attempt-1"],
       "subjects": [
         {
           "id": "synthetic-pr-subject",
@@ -81,9 +79,7 @@
             "paths": [],
             "requiredWork": "Freeze the supplied work item and source identity before analysis.",
             "status": "completed",
-            "evidenceRefs": [
-              "synthetic-pr-snapshot-evidence"
-            ]
+            "evidenceRefs": ["synthetic-pr-snapshot-evidence"]
           },
           {
             "id": "synthetic-pr-analysis-unit",
@@ -100,10 +96,7 @@
           }
         ],
         "exclusions": [],
-        "completedUnitRefs": [
-          "synthetic-pr-snapshot-unit",
-          "synthetic-pr-analysis-unit"
-        ],
+        "completedUnitRefs": ["synthetic-pr-snapshot-unit", "synthetic-pr-analysis-unit"],
         "unresolvedUnitRefs": []
       },
       "recheck": {
@@ -117,9 +110,7 @@
             "findingVersion": 1,
             "subjectRef": "synthetic-pr-subject",
             "round": 3,
-            "evidenceRefs": [
-              "synthetic-pr-finding-evidence-1"
-            ],
+            "evidenceRefs": ["synthetic-pr-finding-evidence-1"],
             "conclusion": "The final finding remains supported by the frozen snapshot and is distinct from the other findings.",
             "unresolvedQuestions": []
           },
@@ -129,9 +120,7 @@
             "findingVersion": 1,
             "subjectRef": "synthetic-pr-subject",
             "round": 3,
-            "evidenceRefs": [
-              "synthetic-pr-finding-evidence-2"
-            ],
+            "evidenceRefs": ["synthetic-pr-finding-evidence-2"],
             "conclusion": "The final finding remains supported by the frozen snapshot and is distinct from the other findings.",
             "unresolvedQuestions": []
           }
@@ -152,9 +141,7 @@
             "findingVersion": 1,
             "mergedIntoCandidateId": null,
             "rationale": "Confirmed and individually rechecked before final delivery.",
-            "evidenceRefs": [
-              "synthetic-pr-finding-evidence-1"
-            ]
+            "evidenceRefs": ["synthetic-pr-finding-evidence-1"]
           },
           {
             "id": "synthetic-pr-candidate-2",
@@ -166,9 +153,7 @@
             "findingVersion": 1,
             "mergedIntoCandidateId": null,
             "rationale": "Confirmed and individually rechecked before final delivery.",
-            "evidenceRefs": [
-              "synthetic-pr-finding-evidence-2"
-            ]
+            "evidenceRefs": ["synthetic-pr-finding-evidence-2"]
           }
         ],
         "stopReason": "complete",
@@ -190,9 +175,7 @@
           "id": "synthetic-pr-synthetic-limitation",
           "description": "This is isolated synthetic fixture data, not evidence of a live investigation.",
           "impact": "No runtime behavior or upstream repository state has been verified.",
-          "evidenceRefs": [
-            "synthetic-pr-snapshot-evidence"
-          ]
+          "evidenceRefs": ["synthetic-pr-snapshot-evidence"]
         }
       ],
       "collections": {
@@ -213,29 +196,18 @@
         "priority": "P1",
         "title": "Cancellation can persist stale settings in scenario 1",
         "trigger": {
-          "conditions": [
-            "A settings operation is cancelled before persistence."
-          ],
-          "inputs": [
-            "Synthetic scenario 1"
-          ],
-          "steps": [
-            "Start a settings update.",
-            "Cancel before persistence completes."
-          ]
+          "conditions": ["A settings operation is cancelled before persistence."],
+          "inputs": ["Synthetic scenario 1"],
+          "steps": ["Start a settings update.", "Cancel before persistence completes."]
         },
         "impact": {
           "description": "Cancelled work can overwrite persisted settings and mislead the caller about the saved state.",
-          "affectedParties": [
-            "Users updating PowerToys settings"
-          ]
+          "affectedParties": ["Users updating PowerToys settings"]
         },
         "rootCause": {
           "status": "established",
           "explanation": "The persistence boundary does not inspect the cancellation token before committing state.",
-          "evidenceRefs": [
-            "synthetic-pr-finding-evidence-1"
-          ]
+          "evidenceRefs": ["synthetic-pr-finding-evidence-1"]
         },
         "subjectRef": "synthetic-pr-subject",
         "locations": [
@@ -247,22 +219,16 @@
             "endLine": 42
           }
         ],
-        "evidenceRefs": [
-          "synthetic-pr-finding-evidence-1"
-        ],
+        "evidenceRefs": ["synthetic-pr-finding-evidence-1"],
         "confirmation": {
           "status": "confirmed",
           "rationale": "The final finding version was rechecked against the frozen source snapshot.",
-          "evidenceRefs": [
-            "synthetic-pr-finding-evidence-1"
-          ],
+          "evidenceRefs": ["synthetic-pr-finding-evidence-1"],
           "recheckRef": "synthetic-pr-recheck-1"
         },
         "fixRecommendation": {
           "summary": "Check cancellation immediately before persistence and preserve the existing settings on cancellation.",
-          "constraints": [
-            "Do not claim runtime verification from static or reporter evidence."
-          ],
+          "constraints": ["Do not claim runtime verification from static or reporter evidence."],
           "planRef": {
             "id": "synthetic-pr-plan",
             "version": 1,
@@ -290,29 +256,18 @@
         "priority": "P1",
         "title": "Cancellation can persist stale settings in scenario 2",
         "trigger": {
-          "conditions": [
-            "A settings operation is cancelled before persistence."
-          ],
-          "inputs": [
-            "Synthetic scenario 2"
-          ],
-          "steps": [
-            "Start a settings update.",
-            "Cancel before persistence completes."
-          ]
+          "conditions": ["A settings operation is cancelled before persistence."],
+          "inputs": ["Synthetic scenario 2"],
+          "steps": ["Start a settings update.", "Cancel before persistence completes."]
         },
         "impact": {
           "description": "Cancelled work can overwrite persisted settings and mislead the caller about the saved state.",
-          "affectedParties": [
-            "Users updating PowerToys settings"
-          ]
+          "affectedParties": ["Users updating PowerToys settings"]
         },
         "rootCause": {
           "status": "established",
           "explanation": "The persistence boundary does not inspect the cancellation token before committing state.",
-          "evidenceRefs": [
-            "synthetic-pr-finding-evidence-2"
-          ]
+          "evidenceRefs": ["synthetic-pr-finding-evidence-2"]
         },
         "subjectRef": "synthetic-pr-subject",
         "locations": [
@@ -324,22 +279,16 @@
             "endLine": 42
           }
         ],
-        "evidenceRefs": [
-          "synthetic-pr-finding-evidence-2"
-        ],
+        "evidenceRefs": ["synthetic-pr-finding-evidence-2"],
         "confirmation": {
           "status": "confirmed",
           "rationale": "The final finding version was rechecked against the frozen source snapshot.",
-          "evidenceRefs": [
-            "synthetic-pr-finding-evidence-2"
-          ],
+          "evidenceRefs": ["synthetic-pr-finding-evidence-2"],
           "recheckRef": "synthetic-pr-recheck-2"
         },
         "fixRecommendation": {
           "summary": "Check cancellation immediately before persistence and preserve the existing settings on cancellation.",
-          "constraints": [
-            "Do not claim runtime verification from static or reporter evidence."
-          ],
+          "constraints": ["Do not claim runtime verification from static or reporter evidence."],
           "planRef": {
             "id": "synthetic-pr-plan",
             "version": 1,
@@ -382,12 +331,8 @@
           "version": 1,
           "digest": "2222222222222222222222222222222222222222222222222222222222222222"
         },
-        "scenarioIds": [
-          "synthetic-pr-scenario"
-        ],
-        "prerequisiteRefs": [
-          "synthetic-pr-environment"
-        ],
+        "scenarioIds": ["synthetic-pr-scenario"],
+        "prerequisiteRefs": ["synthetic-pr-environment"],
         "linkedValidationReportRefs": []
       }
     },
@@ -419,9 +364,7 @@
         "source": "source_snapshot",
         "authority": "worker",
         "summary": "Synthetic frozen input snapshot; this fixture has not contacted GitHub or executed repository code.",
-        "artifactRefs": [
-          "synthetic-pr-source-artifact"
-        ],
+        "artifactRefs": ["synthetic-pr-source-artifact"],
         "evidenceRefs": [],
         "provenance": {
           "taskId": "synthetic-pr-task",
@@ -437,9 +380,7 @@
         "authority": "model",
         "summary": "Synthetic static analysis 1 identifies a missing cancellation guard in the frozen source snapshot.",
         "artifactRefs": [],
-        "evidenceRefs": [
-          "synthetic-pr-snapshot-evidence"
-        ],
+        "evidenceRefs": ["synthetic-pr-snapshot-evidence"],
         "provenance": {
           "taskId": "synthetic-pr-task",
           "attemptId": "synthetic-pr-attempt-1",
@@ -454,9 +395,7 @@
         "authority": "model",
         "summary": "Synthetic static analysis 2 identifies a missing cancellation guard in the frozen source snapshot.",
         "artifactRefs": [],
-        "evidenceRefs": [
-          "synthetic-pr-snapshot-evidence"
-        ],
+        "evidenceRefs": ["synthetic-pr-snapshot-evidence"],
         "provenance": {
           "taskId": "synthetic-pr-task",
           "attemptId": "synthetic-pr-attempt-1",
@@ -506,9 +445,7 @@
             "id": "synthetic-pr-plan-step",
             "description": "Open Settings, cancel an in-progress operation, and record the resulting state.",
             "expectedObservation": "Cancelled work does not commit state or report success.",
-            "checkIds": [
-              "synthetic-pr-check"
-            ]
+            "checkIds": ["synthetic-pr-check"]
           }
         ],
         "acceptanceCriteria": [
@@ -533,9 +470,7 @@
         },
         "draftRef": null,
         "validationReportRef": null,
-        "prerequisiteRefs": [
-          "synthetic-pr-environment"
-        ],
+        "prerequisiteRefs": ["synthetic-pr-environment"],
         "state": "saved",
         "sourceReportRef": {
           "id": "synthetic-pr-report",
@@ -857,9 +792,7 @@
         },
         "draftRef": null,
         "validationReportRef": null,
-        "prerequisiteRefs": [
-          "synthetic-pr-environment"
-        ],
+        "prerequisiteRefs": ["synthetic-pr-environment"],
         "state": "saved",
         "sourceReportRef": {
           "id": "synthetic-pr-report",

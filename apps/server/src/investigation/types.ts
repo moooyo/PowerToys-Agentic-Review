@@ -10,6 +10,8 @@ import type { FastifyRequest } from "fastify";
 
 export interface InvestigationOperatorPrincipal {
   readonly id: string;
+  readonly username?: string;
+  readonly isAdmin?: boolean;
   readonly displayName: string;
   readonly repositoryIds: readonly string[];
   readonly permissions: readonly (

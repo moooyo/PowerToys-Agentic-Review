@@ -1,101 +1,146 @@
 # Investigation server
 
-`src/main.ts` starts the Task / Attempt / LoopCheckpoint / Report application. It does not load the
-previous API, database gateway, scheduling bootstrap, or SQL migration directory. Configure new,
-separate SQLite files for investigation data and authentication data. Existing unrelated databases
-are rejected without conversion or deletion.
+`src/main.ts` starts the Task / Attempt / LoopCheckpoint / Report application. The active server
+uses built-in username and password accounts only. There is no passwordless local login, OIDC
+callback, third-party identity provider, or self-service registration. Previous standalone prototype
+modules are not part of this runtime.
 
 ## Start the application
 
 Build the workspace and dashboard in the authorized verification or deployment environment, then
 run `pnpm --filter @agentic-review/server start`. The server serves the dashboard bundle and `/api`
 from the same origin. The default dashboard directory is resolved relative to the installed
-application, independent of the process working directory. Database files must be outside the
-dashboard directory so static delivery cannot expose private data. An absent `index.html` stops startup
-with a configuration error. `SIGINT` and `SIGTERM` close HTTP admission, active connections,
-authentication cleanup, and both database handles.
+application, independent of the process working directory. Missing `index.html` stops startup.
+`SIGINT` and `SIGTERM` close HTTP admission, active connections, cleanup, and both database handles.
 
-The server reads `INVESTIGATION_*` settings from its process environment. `.env.example` is a
-reference; startup does not automatically load a dotenv file. Database paths are resolved relative
-to the process working directory unless absolute paths are supplied.
+The server reads `INVESTIGATION_*` settings from its process environment; it does not automatically
+load a dotenv file. `.env.example` lists the supported settings. Keep both databases in directories
+restricted to the service account and administrators, outside the dashboard static directory.
+Relative database paths resolve against the process working directory.
 
-## Local operator authentication
+## Initialize the first administrator
 
-The default listener and public origin use literal `127.0.0.1`, port `8000`, and loopback operator
-authentication. Login issues an expiring, HttpOnly, SameSite cookie. It requires a matching Host,
-an actual loopback connection, no forwarding headers, and the exact configured Origin. Every
-operator mutation requires that Origin as well. Worker routes never accept operator cookies.
+A new installation uses a separate `investigation-accounts.sqlite` account database. Configure a
+new path instead of an old authentication database: schema identities are checked and older or
+unrelated schemas are rejected without migration, conversion, or deletion.
 
-The default local identity has no repository scopes, no execution permission, and no action
-capabilities. Set `INVESTIGATION_OPERATORS_JSON` to exactly one local operator binding to grant
-the intended authority. For example:
+Before the first start, configure `INVESTIGATION_BOOTSTRAP_ADMIN_USERNAME` and either
+`INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD` or `INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD_PATH`.
+`INVESTIGATION_BOOTSTRAP_ADMIN_DISPLAY_NAME` is optional and defaults to the normalized username.
+A protected UTF-8 password file is read verbatim. Its leading spaces, trailing spaces, byte order
+mark, and final newline are part of the password; create the file with exactly the intended text.
+There is no predefined password. Empty account storage without bootstrap credentials refuses to
+start, so a new instance never exposes an unauthenticated account-creation route.
 
-```json
-[
-  {
-    "id": "local-operator",
-    "subject": "local-operator",
-    "displayName": "Local Operator",
-    "repositoryIds": ["repo-powertoys-fork"],
-    "permissions": ["repository:manage", "task:create", "task:cancel", "action:prepare", "action:execute"],
-    "actionCapabilities": ["comment", "approve", "suggestion-comment", "request-changes", "close", "merge", "trigger-ci", "close-as-duplicate", "start-task", "reviews.verify", "view-validation", "view-changes", "create-pr", "view-evidence", "resume"],
-    "allowRepositoryExecution": true
-  }
-]
+Bootstrap runs only while no accounts exist. Subsequent starts do not replace passwords, account
+status, administrator flags, or permissions from bootstrap settings. Remove all bootstrap settings
+from the service environment after initialization. The first account is an enabled administrator
+with no implicit repository scopes, business permissions, action capabilities, or source-execution
+authority. Sign in and use account management to grant the exact required access.
+
+Usernames are trimmed and normalized to lowercase ASCII, with 3 to 64 letters, digits, dots,
+underscores, or hyphens, beginning with a letter or digit. Login names are immutable. Passwords
+contain 15 to 128 Unicode code points and at least one non-whitespace character; passwords are
+otherwise stored and compared exactly as entered. Do not trim or normalize them in a client.
+
+## Accounts, permissions, and sessions
+
+Only enabled administrators manage accounts. `isAdmin` grants account administration; it does not
+expand repository or execution authority. Account management supports creating accounts, editing
+names and access, disabling accounts, and resetting passwords. Disabling preserves account IDs
+referenced by investigation history. Every update carries the current `version`; concurrent changes
+return a conflict instead of overwriting another administrator's edits. Transactions protect the
+last enabled administrator from being disabled or losing administrator status.
+
+Repository scopes contain exact internal repository IDs, including during repository registration.
+The five business permissions are `repository:manage`, `task:create`, `task:cancel`, `action:prepare`,
+and `action:execute`. Action capabilities and `allowRepositoryExecution` remain separate explicit
+grants. They do not replace current GitHub permissions, target state, revision checks, or confirmed
+action intents.
+
+Passwords use asynchronous Node.js scrypt with `N=32768`, `r=8`, `p=3`, a fresh 16-byte random salt,
+and a 32-byte derived key. This work factor uses approximately 32 MiB per derivation, with a 64 MiB
+allocation ceiling for overhead. Two concurrent derivations and eight queued requests are the
+default; bounded settings prevent unbounded KDF work. Verification of missing, disabled, or invalid
+accounts performs the same-cost dummy derivation and uses constant-time key comparison. Login,
+account creation, administrator password resets, and personal password changes also share bounded
+IP and normalized-account rate limits. Behind a loopback reverse proxy the IP limit applies to the
+proxy's connection address; forwarded headers are not trusted as authentication or rate-limit keys.
+
+Login issues a random opaque session token; only its SHA-256 hash is persisted. Sessions default to
+eight hours. Each request reads the account's current enabled state and version. Account updates,
+password changes, and password resets revoke every session for the changed account. Personal
+password changes require the current password and sign the user out everywhere. Asynchronous KDF
+operations recheck account and administrator versions inside their final transactions. A persisted
+clock high-water mark prevents expired sessions from reviving after a restart and clock rollback.
+
+## HTTP, HTTPS, and cookies
+
+The default listener and public origin are literal `127.0.0.1`, port `8000`. Unencrypted HTTP is
+permitted only for actual loopback requests with matching Host and no forwarding headers. Passwords
+remain mandatory. All state-changing browser requests must have the exact configured Origin.
+Cookies are HttpOnly and SameSite=Strict; HTTPS uses Secure cookies with the `__Host-` prefix.
+Authentication and account routes suppress request logs, and password fields are redacted from
+runtime request logging. Responses never include password hashes, salts, or bearer session tokens.
+
+For remote users, configure an HTTPS public origin and either a TLS listener using
+`INVESTIGATION_TLS_KEY_PATH`/`INVESTIGATION_TLS_CERT_PATH`, or a private loopback listener behind an
+HTTPS reverse proxy that preserves the public Host header. Public HTTP listeners are rejected.
+Keep the reverse proxy's HTTP upstream inaccessible to untrusted clients. Forwarded identity
+headers never establish an account session.
+
+## Account API
+
+- `GET /api/auth/session` returns a password-mode session. Authenticated responses include
+  `expiresAt` and a user with `id`, `username`, `displayName`, `isAdmin`, explicit access fields,
+  and `email: null`; signed-out responses contain `user: null`.
+- `POST /api/auth/login` accepts `{username, password}` and returns the session with an HttpOnly
+  cookie. Invalid credentials use a uniform response. Rate limits return HTTP `429`.
+- `POST /api/auth/logout` revokes the current session, clears its cookie, and returns HTTP `204`.
+- `POST /api/auth/password` accepts `{currentPassword, newPassword}`, revokes all of the caller's
+  sessions, clears the cookie, and returns HTTP `204`.
+- `GET /api/accounts` returns `{items: Account[]}` to administrators.
+- `POST /api/accounts` creates an account using its username, password, display name, administrator
+  flag, and explicit access fields.
+- `POST /api/accounts/:id/update` accepts `version`, `displayName`, `enabled`, `isAdmin`, and all
+  explicit access fields. Usernames cannot change.
+- `POST /api/accounts/:id/password` accepts `{version, newPassword}`, increments the target version,
+  and revokes the target's sessions.
+
+Account DTOs include `id`, `username`, `displayName`, `isAdmin`, `enabled`, `version`, `createdAt`,
+`updatedAt`, `repositoryIds`, `permissions`, `actionCapabilities`, and `allowRepositoryExecution`.
+All request and response structures are defined in the shared investigation authentication contract.
+
+## Recover a lost administrator password
+
+Stop the service and run the recovery command as an operating-system administrator or the trusted
+service account. Prepare a protected UTF-8 file containing the new password, then run:
+
+```powershell
+pnpm --filter @agentic-review/server run accounts:reset-admin --database "D:\ServiceData\investigation-accounts.sqlite" --username "your-admin-name" --password-path "D:\Secrets\replacement-password.txt"
 ```
 
-Repository scopes use exact internal repository IDs, including during repository registration.
-Wildcards are rejected. Permission grants and action capabilities are separate: task creation,
-repository administration, preparing a draft, and confirming an action require their corresponding
-permissions. Action capabilities do not replace current GitHub permissions, target state, revision
-checks, or explicit action confirmation. Source execution also requires `allowRepositoryExecution`.
-
-## OIDC and HTTPS
-
-For remote users, set `INVESTIGATION_AUTH_MODE=oidc`, an HTTPS public origin, the exact issuer,
-client ID, client secret, and explicit operator bindings. Each binding's `subject` is the OIDC `sub`
-claim for that issuer. The configured issuer is assigned by trusted startup configuration, never
-by a request body. Login uses PKCE, state, nonce, a browser binding, one-use transactions, and
-session expiration. The callback is `/api/auth/callback` at the public origin.
-
-Use either a TLS listener with `INVESTIGATION_TLS_KEY_PATH` and `INVESTIGATION_TLS_CERT_PATH`, or
-keep the server on `127.0.0.1` behind an HTTPS reverse proxy that preserves the public Host header.
-A non-loopback listener without TLS is rejected. Do not expose an HTTP reverse-proxy upstream to
-untrusted clients. OIDC cookies use the `__Host-` prefix and Secure attribute. Login authorization
-and repository permissions come from the configured bindings; identity-provider claims do not
-automatically grant additional authority.
+The command first checks the existing database identity with a read-only connection. It refuses an
+empty file, a different schema, a missing account, a disabled account, or a non-administrator. It
+changes only the existing administrator's password and version and revokes that account's sessions;
+it does not create accounts, promote users, or change repository permissions. Password values are
+not accepted on the command line or printed. Restart the service, sign in with the new password,
+and remove the temporary secret file using the environment's normal secret-handling procedure.
 
 ## Worker and GitHub credentials
 
-`INVESTIGATION_WORKERS_JSON` contains `{ "id", "token", "repositoryIds" }` entries. Generate each
-unique token from at least 32 cryptographically random bytes encoded as base64url. Workers send
-`Authorization: Bearer <token>`; the server resolves ID and exact repository scopes from the
-credential, ignoring identity claims in HTTP payloads. No configured workers means no worker can
-claim a task. Keep these values in the service's trusted environment or use
-`INVESTIGATION_WORKERS_JSON_PATH` to reference a protected JSON file. Operator bindings similarly
-support `INVESTIGATION_OPERATORS_JSON_PATH`.
+Worker authentication remains separate from browser accounts. `INVESTIGATION_WORKERS_JSON` or
+`INVESTIGATION_WORKERS_JSON_PATH` supplies `{id, token, repositoryIds}` entries. Generate each unique
+token from at least 32 cryptographically random bytes encoded as base64url. Workers send
+`Authorization: Bearer <token>`; the server resolves ID and exact repository scopes from trusted
+configuration, ignoring identity claims in request bodies. Worker tokens cannot administer accounts,
+and browser cookies cannot claim worker tasks. No configured workers means no worker admission.
 
-GitHub transport is optional. Configure `INVESTIGATION_GITHUB_TOKEN` together with
-`INVESTIGATION_GITHUB_USER_ID` to enable the transport's current-account and target checks. Token
-and client-secret settings also support a `_PATH` variant; do not set both forms. Without transport
-credentials, remote operations are explicitly unavailable. External writes additionally require
-`INVESTIGATION_ENABLE_EXTERNAL_WRITES=true` and the normal confirmed action-intent workflow.
-Enabling transport or running tests does not authorize writes to any actual repository PR or issue.
-
-## Browser session API
-
-- `GET /api/auth/session` returns `authenticated`, `authMode`, `loginPath`, `user`, and an optional
-  `expiresAt`. An authenticated user contains `id`, `displayName`, `email`, `repositoryIds`,
-  `permissions`, `actionCapabilities`, and `allowRepositoryExecution`.
-- `POST /api/auth/login` returns the authenticated session in loopback mode, or an
-  `authorizationUrl` for OIDC. The browser then navigates to that authorization URL.
-- `GET /api/auth/callback` completes OIDC and redirects to `/pull-requests`.
-- `POST /api/auth/logout` revokes the session and browser login flow, clears cookies, and returns
-  HTTP `204`.
-
-The previous `/api/v1` endpoints and management pages are not served by this entry point. New
-repository/work-item registration and structured investigation endpoints are the active API.
-
+GitHub transport remains optional. Configure `INVESTIGATION_GITHUB_TOKEN` or its `_PATH` variant
+alongside `INVESTIGATION_GITHUB_USER_ID`. Without credentials, remote operations are unavailable.
+External writes also require `INVESTIGATION_ENABLE_EXTERNAL_WRITES=true` and the normal confirmed
+action-intent workflow. Account administration or test execution does not authorize writes to any
+actual repository PR or issue.
 ## Import complete upstream inputs
 
 After registering an exact repository ID, an operator with `repository:manage` can call
@@ -168,3 +213,4 @@ plans require at least one `{ "kind": "model-edit", "allowedPaths": ["src/exampl
 operation. Allowed edit paths are explicit repository-relative files, without globs or traversal;
 validation tasks cannot contain model-edit steps. Registry changes take effect after server restart,
 and already-created tasks preserve their frozen execution binding.
+

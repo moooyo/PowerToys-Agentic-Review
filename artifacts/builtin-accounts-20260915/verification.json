@@ -1,0 +1,163 @@
+{
+  "task": "Built-in username and password accounts",
+  "snapshot": "snapshot-002",
+  "generatedAtUtc": "2026-09-15T15:32:12.821919+00:00",
+  "status": "passed",
+  "source": {
+    "baseCommit": "21c4a021a2357d96b65ee2f78812a3e865b40626",
+    "archiveSha256": "1ae264268c0f163fc0cad4395f85158514ea7aba86814799ae790841d304fdf6",
+    "files": 1237,
+    "addedSources": 21,
+    "manifest": "source-manifest.sha256",
+    "manifestSha256": "3c974915ad0bea95770ffbe1984fcb9fa30faf17d6b63c14003ac96a7fe7347f",
+    "metadata": "source-snapshot.json",
+    "releaseCommitVerification": "The verified working-tree snapshot is preserved in the manifest; an eventual release commit must be compared with this inventory."
+  },
+  "environment": {
+    "host": "test-env",
+    "os": "Linux",
+    "node": "24.20.0",
+    "pnpm": "11.24.0",
+    "vitest": "4.1.11",
+    "biome": "2.5.11",
+    "chromium": "153.0.8010.12",
+    "isolation": "Separate loopback-only network namespaces; offline dependency cache; credential and live-service environment variables removed"
+  },
+  "checks": {
+    "rootTypecheck": {
+      "status": "passed",
+      "exitCode": 0,
+      "command": "pnpm typecheck",
+      "log": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/root-typecheck.log"
+    },
+    "rootBuild": {
+      "status": "passed",
+      "exitCode": 0,
+      "command": "pnpm build",
+      "log": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/root-build.log"
+    },
+    "sharedBuild": {
+      "status": "passed",
+      "exitCode": 0,
+      "command": "pnpm run build:shared",
+      "log": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/shared-build.log"
+    },
+    "serverBuild": {
+      "status": "passed",
+      "exitCode": 0,
+      "command": "pnpm --filter @agentic-review/server build:only",
+      "log": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/server-build.log"
+    },
+    "fullPackageTests": {
+      "packages": {
+        "contracts": {
+          "exitCode": 0,
+          "status": "passed",
+          "passed": 1666,
+          "failed": 0,
+          "skipped": 0,
+          "filesPassed": 42,
+          "filesFailed": 0,
+          "filesSkipped": 0,
+          "duration": "12.65s"
+        },
+        "dashboard": {
+          "exitCode": 0,
+          "status": "passed",
+          "passed": 3735,
+          "failed": 0,
+          "skipped": 0,
+          "filesPassed": 127,
+          "filesFailed": 0,
+          "filesSkipped": 0,
+          "duration": "47.07s"
+        },
+        "server": {
+          "exitCode": 0,
+          "status": "passed",
+          "passed": 6002,
+          "failed": 0,
+          "skipped": 1,
+          "filesPassed": 172,
+          "filesFailed": 0,
+          "filesSkipped": 0,
+          "duration": "570.65s"
+        }
+      },
+      "totals": {
+        "passed": 11403,
+        "failed": 0,
+        "skipped": 1
+      },
+      "commandTemplate": "pnpm --filter @agentic-review/<package> test:only --maxWorkers=1 --no-file-parallelism",
+      "scope": ["contracts", "dashboard", "server"],
+      "logDirectory": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002",
+      "skipReasons": [
+        {
+          "package": "server",
+          "file": "src/config.test.ts",
+          "test": "rejects Windows UNC roots and case aliases inside SQLite",
+          "condition": "it.runIf(process.platform === \"win32\")",
+          "reason": "Windows-only test skipped on Linux"
+        }
+      ]
+    },
+    "biome": {
+      "status": "passed",
+      "command": "pnpm exec biome check . --diagnostic-level=error --max-diagnostics=100",
+      "scope": "The entire snapshot repository including existing and newly generated artifact JSON files",
+      "exitCode": 0,
+      "log": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/root-biome-pre-final.log",
+      "finalReceiptLog": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/root-biome-final.log",
+      "filesChecked": 1030
+    },
+    "productionBundle": {
+      "status": "passed",
+      "evidence": "production-bundle-check.json",
+      "developmentPasswordAndSeedMarkersPresent": false
+    },
+    "browser": {
+      "status": "passed",
+      "productionFlowsPassed": 12,
+      "developmentChecksPassed": 18,
+      "productionExpectedHttpConsoleErrors": 10,
+      "unexpectedConsoleErrors": 0,
+      "pageErrors": 0,
+      "externalRequests": 0,
+      "evidence": "browser/account-browser-summary.json"
+    }
+  },
+  "targetedRegressionHistory": {
+    "snapshot001ContractsAuthPassed": 6,
+    "snapshot001ServerAuthPassed": 92,
+    "snapshot002DashboardAuthPassed": 77,
+    "resolvedFailure": "The first snapshot had one Dashboard Accounts loading/error test failure. Snapshot 002 fixes retry-on-mount and preserves the actionable error until a successful refresh. All 77 targeted Dashboard tests and the full package now pass."
+  },
+  "sharedDistTransfer": {
+    "status": "copied-to-local",
+    "packages": ["contracts", "domain", "codex"],
+    "builtOn": "test-env",
+    "sourceSnapshot": "snapshot-001",
+    "archiveSha256": "f9e3ccf49c2aac281c55ccdf0a16b4bd1a4c4ce23922d9b532c772ae300712c5",
+    "note": "The only code changes between snapshots 001 and 002 are the Accounts page and its test; shared package sources are identical. Local builds and probes were not executed."
+  },
+  "cleanup": {
+    "browserClosed": true,
+    "productionServerClosed": true,
+    "developmentViteStopped": true,
+    "syntheticDatabasesRemoved": true,
+    "evidenceRetained": true
+  },
+  "scopeLimits": [
+    "No local tests, builds, runtime probes, or acceptance runs.",
+    "No real GitHub, pull-request, issue, or model operations; no outbound network routes.",
+    "No PowerToys-specific scenarios, native Windows UI, deployment TLS, or real-model quality acceptance was performed.",
+    "Worker, domain, and codex runtime suites were not repeated for this account-only change; the exact root typecheck and root build cover their compilation.",
+    "The Vite bundle-size advisory remains informational; the production build succeeded."
+  ],
+  "evidence": {
+    "remoteSnapshotDirectory": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/snapshots/snapshot-002",
+    "remoteLogDirectory": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002",
+    "localTransferDirectory": "C:\\Users\\moooyo\\AppData\\Local\\Temp\\powertoys-builtin-account-auth-0a8470c5ab3842dc8a5407c579e2a1e6"
+  }
+}

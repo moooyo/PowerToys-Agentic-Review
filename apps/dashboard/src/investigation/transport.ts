@@ -10,6 +10,18 @@ FormatRegistry.Set(
 FormatRegistry.Set("uri", (value) => URL.canParse(value));
 
 let sessionRequests = new AbortController();
+const sessionExpiredListeners = new Set<() => void>();
+
+export function subscribeInvestigationSessionExpired(listener: () => void): () => void {
+  sessionExpiredListeners.add(listener);
+  return () => {
+    sessionExpiredListeners.delete(listener);
+  };
+}
+
+export function notifyInvestigationSessionExpired(): void {
+  for (const listener of sessionExpiredListeners) listener();
+}
 
 export function suspendInvestigationRequests(): void {
   sessionRequests.abort();
@@ -64,6 +76,9 @@ export function createHttpTransport(fetcher: typeof fetch = fetch): Investigatio
     });
     signal.throwIfAborted();
     if (!response.ok) {
+      if (response.status === 401) {
+        notifyInvestigationSessionExpired();
+      }
       let message =
         response.status === 401
           ? "Your session expired. Sign in again."

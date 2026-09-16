@@ -12,7 +12,7 @@ are written in Chinese; code, configuration examples, and operational instructio
 
 ## Runtime components
 
-- `apps/server`: the new SQLite-backed Task/Report API, scoped operator sessions, OIDC,
+- `apps/server`: the new SQLite-backed Task/Report API, built-in password accounts and scoped sessions,
   Worker credentials, immutable checkpoints and reports, action preparation, and delivery.
 - `apps/worker`: an outbound Windows Worker using the new task protocol. ProcessHost owns
   process trees; disposable workspaces hold exact source, model inputs, and captured artifacts.
@@ -77,6 +77,23 @@ pnpm --filter @agentic-review/dashboard dev
 ```
 
 Production Dashboard requests use the authenticated new API and never fall back to sample data.
+
+## Built-in accounts
+
+The console uses application-owned username/password accounts. The first administrator is
+initialized from deployment configuration, with no default production password. Administrators
+manage accounts and explicit repository/action grants; account administration does not implicitly
+grant access to every repository. Password changes, resets, disabled accounts, and permission
+changes revoke existing sessions.
+
+Read the [Server account setup and recovery instructions](./apps/server/README.md) before starting
+a new deployment. The account database is initialized separately from investigation data;
+third-party login and conversion of the previous authentication database are outside this scope.
+GitHub API credentials and Worker credentials remain independent of console login.
+
+The [account design](./docs/design/2026-09-15-built-in-accounts.md) records the API, session behavior,
+and acceptance scope. Dedicated PowerToys UI scenarios and model-quality evaluation are not part
+of this delivery, following the user's current scope decision.
 
 Run verification on `ssh test-env` unless the user explicitly authorizes local verification for
 the current task. Standard package build, typecheck, test, and lint scripts remain available;

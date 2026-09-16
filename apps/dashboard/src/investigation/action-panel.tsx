@@ -26,6 +26,7 @@ import { Link } from "react-router-dom";
 import { investigationApi, type WorkItem } from "./api";
 import type { FeedbackSelectionEvent, FeedbackSelectionState } from "./feedback-selection";
 import { Section, TextList } from "./report-sections";
+import { useInvestigationSession } from "./session";
 
 export const actionLabels: Record<InvestigationActionKind, string> = {
   comment: "Comment",
@@ -138,6 +139,7 @@ export function ActionPanel({
   editedBodies: Record<string, string>;
 }) {
   const queryClient = useQueryClient();
+  const { session } = useInvestigationSession();
   const [nextActionId, setNextActionId] = useState<string>();
   const [body, setBody] = useState("");
   const [mergeMethod, setMergeMethod] = useState<"merge" | "squash" | "rebase">("squash");
@@ -152,6 +154,11 @@ export function ActionPanel({
   const [baseBranch, setBaseBranch] = useState("");
   const [sourceCommit, setSourceCommit] = useState("");
   const [intent, setIntent] = useState<InvestigationActionIntentV1>();
+  const canExecuteIntent = Boolean(
+    intent &&
+      session.user?.permissions.includes("action:execute") &&
+      session.user.actionCapabilities.includes(intent.action),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const activeNextAction = nextActionId
@@ -681,6 +688,11 @@ export function ActionPanel({
               >
                 {JSON.stringify(intent.payload, null, 2)}
               </Box>
+              {intent.state === "prepared" && !canExecuteIntent && (
+                <Alert severity="info">
+                  Your account can prepare this preview but does not have permission to execute it.
+                </Alert>
+              )}
               {intent.guards
                 .filter((guard) => !guard.satisfied)
                 .map((guard) => (
@@ -736,7 +748,9 @@ export function ActionPanel({
           {intent?.state === "prepared" && (
             <Button
               variant="contained"
-              disabled={busy || intent.guards.some((guard) => !guard.satisfied)}
+              disabled={
+                busy || !canExecuteIntent || intent.guards.some((guard) => !guard.satisfied)
+              }
               onClick={() => void updateIntent("confirm")}
             >
               Confirm {actionLabels[intent.action]}

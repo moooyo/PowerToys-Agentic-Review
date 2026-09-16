@@ -3,21 +3,27 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   EntityIdSchema,
-  type InvestigationActionKind,
-  InvestigationActionKindSchema,
+  InvestigationNewPasswordSchema,
+  InvestigationUsernameInputSchema,
+  normalizeInvestigationUsername,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
-import type { OperatorAuthConfig } from "../security/operator-auth.js";
-import type { OperatorOidcClientConfig } from "../security/operator-auth-oidc.js";
-import type { InvestigationOperatorPrincipal, InvestigationWorkerPrincipal } from "./types.js";
-
-export interface InvestigationOperatorBinding extends InvestigationOperatorPrincipal {
-  readonly issuer: string;
-  readonly subject: string;
-}
+import type { InvestigationWorkerPrincipal } from "./types.js";
 
 export interface InvestigationWorkerCredential extends InvestigationWorkerPrincipal {
   readonly token: string;
+}
+
+export interface InvestigationPasswordRuntimeConfig {
+  readonly mode: "password";
+  readonly publicOrigin: string;
+  readonly sessionTtlSeconds: number;
+  readonly maxKdfConcurrency: number;
+  readonly maxKdfQueue: number;
+  readonly loginIpLimit: number;
+  readonly loginAccountLimit: number;
+  readonly loginWindowSeconds: number;
+  readonly bootstrapAdmin: { username: string; password: string; displayName: string } | undefined;
 }
 
 export interface InvestigationRuntimeConfig {
@@ -26,9 +32,7 @@ export interface InvestigationRuntimeConfig {
   readonly databasePath: string;
   readonly authDatabasePath: string;
   readonly dashboardDirectory: string;
-  readonly auth: OperatorAuthConfig;
-  readonly oidc: OperatorOidcClientConfig | undefined;
-  readonly operators: readonly InvestigationOperatorBinding[];
+  readonly auth: InvestigationPasswordRuntimeConfig;
   readonly workers: readonly InvestigationWorkerCredential[];
   readonly https: { key: string; cert: string; passphrase?: string } | undefined;
   readonly github: { token: string; expectedGitHubUserId: number } | undefined;
@@ -38,13 +42,6 @@ export interface InvestigationRuntimeConfig {
   readonly sourceImportMaximumPages: number;
 }
 
-const permissions = [
-  "repository:manage",
-  "task:create",
-  "task:cancel",
-  "action:prepare",
-  "action:execute",
-] as const;
 type Environment = Readonly<Record<string, string | undefined>>;
 
 function exact(value: unknown, name: string): string {
@@ -118,6 +115,21 @@ function secret(environment: Environment, name: string): string | undefined {
   return inline === undefined ? undefined : exact(inline, name);
 }
 
+function passwordSecret(environment: Environment, name: string): string | undefined {
+  const inline = environment[name];
+  const path = environment[`${name}_PATH`];
+  if (inline !== undefined && path !== undefined)
+    throw new Error(`Configure only ${name} or ${name}_PATH.`);
+  // Password bytes remain verbatim, including whitespace supplied through a protected file.
+  const password = path === undefined ? inline : readFileSync(exact(path, `${name}_PATH`), "utf8");
+  if (password !== undefined && !Value.Check(InvestigationNewPasswordSchema, password)) {
+    throw new Error(
+      `${name} must contain 15 to 128 characters, including a non-whitespace character.`,
+    );
+  }
+  return password;
+}
+
 function parseJson(environment: Environment, name: string, fallback: unknown): unknown {
   const inline = environment[name];
   const path = environment[`${name}_PATH`];
@@ -134,44 +146,14 @@ function parseJson(environment: Environment, name: string, fallback: unknown): u
   }
 }
 
-function operatorBinding(
-  value: Record<string, unknown>,
-  issuer: string,
-): InvestigationOperatorBinding {
-  const grantedPermissions = stringList(value.permissions, "operator.permissions");
-  if (
-    grantedPermissions.some((permission) => !permissions.some((allowed) => permission === allowed))
-  ) {
-    throw new Error("operator.permissions contains an unknown permission.");
-  }
-  const actionCapabilities = stringList(value.actionCapabilities, "operator.actionCapabilities");
-  if (actionCapabilities.some((action) => !Value.Check(InvestigationActionKindSchema, action))) {
-    throw new Error("operator.actionCapabilities contains an unknown action.");
-  }
-  if (typeof value.allowRepositoryExecution !== "boolean")
-    throw new Error("operator.allowRepositoryExecution must be boolean.");
-  return {
-    issuer,
-    id: entityId(value.id, "operator.id"),
-    subject: exact(value.subject, "operator.subject"),
-    displayName: exact(value.displayName, "operator.displayName"),
-    repositoryIds: stringList(value.repositoryIds, "operator.repositoryIds").map((id) =>
-      entityId(id, "operator.repositoryIds"),
-    ),
-    permissions: grantedPermissions as InvestigationOperatorBinding["permissions"],
-    actionCapabilities: actionCapabilities as InvestigationActionKind[],
-    allowRepositoryExecution: value.allowRepositoryExecution,
-  };
-}
-
 export function loadInvestigationRuntimeConfig(
   environment: Environment = process.env,
 ): InvestigationRuntimeConfig {
   const host = exact(environment.INVESTIGATION_HOST ?? "127.0.0.1", "INVESTIGATION_HOST");
   const port = integer(environment, "INVESTIGATION_PORT", 8000, 65535);
-  const mode = environment.INVESTIGATION_AUTH_MODE ?? "loopback";
-  if (mode !== "oidc" && mode !== "loopback")
-    throw new Error("INVESTIGATION_AUTH_MODE must be oidc or loopback.");
+  if ((environment.INVESTIGATION_AUTH_MODE ?? "password") !== "password") {
+    throw new Error("INVESTIGATION_AUTH_MODE only supports password authentication.");
+  }
   const publicOrigin = new URL(
     environment.INVESTIGATION_PUBLIC_ORIGIN ?? `http://127.0.0.1:${port}`,
   );
@@ -182,11 +164,6 @@ export function loadInvestigationRuntimeConfig(
   ) {
     throw new Error(
       "INVESTIGATION_PUBLIC_ORIGIN must be an HTTP(S) origin without a path or credentials.",
-    );
-  }
-  if (mode === "loopback" && (host !== "127.0.0.1" || publicOrigin.hostname !== "127.0.0.1")) {
-    throw new Error(
-      "Loopback authentication requires the literal 127.0.0.1 listener and public origin.",
     );
   }
   const keyPath = environment.INVESTIGATION_TLS_KEY_PATH;
@@ -204,11 +181,19 @@ export function loadInvestigationRuntimeConfig(
         };
   if (tlsPassphrase !== undefined && https === undefined)
     throw new Error("A TLS key passphrase requires a configured TLS listener.");
-  if (
-    publicOrigin.protocol !== "https:" &&
-    !(mode === "loopback" && publicOrigin.protocol === "http:" && https === undefined)
-  ) {
-    throw new Error("Remote operator authentication requires an HTTPS public origin.");
+  if (publicOrigin.protocol === "http:") {
+    if (
+      host !== "127.0.0.1" ||
+      publicOrigin.hostname !== "127.0.0.1" ||
+      https !== undefined ||
+      Number(publicOrigin.port || "80") !== port
+    ) {
+      throw new Error(
+        "HTTP password authentication requires the literal 127.0.0.1 listener and matching local public origin.",
+      );
+    }
+  } else if (publicOrigin.protocol !== "https:") {
+    throw new Error("Password authentication requires an HTTP(S) public origin.");
   }
   if (host !== "127.0.0.1" && https === undefined)
     throw new Error(
@@ -216,74 +201,49 @@ export function loadInvestigationRuntimeConfig(
     );
   if (https !== undefined && publicOrigin.protocol !== "https:")
     throw new Error("TLS requires an HTTPS public origin.");
-  const issuer =
-    mode === "loopback"
-      ? "urn:agentic-review:loopback"
-      : exact(environment.INVESTIGATION_OIDC_ISSUER_URL, "INVESTIGATION_OIDC_ISSUER_URL");
-  const operators = entries(
-    parseJson(
-      environment,
-      "INVESTIGATION_OPERATORS_JSON",
-      mode === "loopback"
-        ? [
-            {
-              id: "local-operator",
-              subject: "local-operator",
-              displayName: "Local Operator",
-              repositoryIds: [],
-              permissions: ["repository:manage"],
-              actionCapabilities: [],
-              allowRepositoryExecution: false,
-            },
-          ]
-        : [],
-    ),
-    "INVESTIGATION_OPERATORS_JSON",
-  ).map((value) => operatorBinding(value, issuer));
+
+  const bootstrapUsername = environment.INVESTIGATION_BOOTSTRAP_ADMIN_USERNAME;
+  const bootstrapPassword = passwordSecret(environment, "INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD");
+  const bootstrapDisplayName = environment.INVESTIGATION_BOOTSTRAP_ADMIN_DISPLAY_NAME;
   if (
-    operators.length === 0 ||
-    new Set(operators.map((operator) => operator.id)).size !== operators.length ||
-    new Set(operators.map((operator) => operator.subject)).size !== operators.length
+    (bootstrapUsername === undefined) !== (bootstrapPassword === undefined) ||
+    (bootstrapDisplayName !== undefined && bootstrapUsername === undefined)
   ) {
-    throw new Error("Configure at least one operator with a unique ID and subject.");
+    throw new Error("Administrator bootstrap requires a username and password together.");
   }
-  if (mode === "loopback" && operators.length !== 1)
-    throw new Error("Loopback mode supports exactly one local operator.");
-  const commonAuth = {
-    environment: mode === "loopback" && https === undefined ? "development" : "production",
+  if (
+    bootstrapUsername !== undefined &&
+    !Value.Check(InvestigationUsernameInputSchema, bootstrapUsername)
+  ) {
+    throw new Error(
+      "The bootstrap username must normalize to 3 to 64 ASCII letters, digits, dots, underscores, or hyphens.",
+    );
+  }
+  const username =
+    bootstrapUsername === undefined ? undefined : normalizeInvestigationUsername(bootstrapUsername);
+  const displayName = bootstrapDisplayName ?? username;
+  if (
+    displayName !== undefined &&
+    (displayName.length === 0 || displayName.length > 120 || !/\S/u.test(displayName))
+  ) {
+    throw new Error(
+      "The bootstrap display name must contain 1 to 120 characters and a non-whitespace character.",
+    );
+  }
+  const auth: InvestigationPasswordRuntimeConfig = {
+    mode: "password",
     publicOrigin: publicOrigin.origin,
-    loginTransactionTtlSeconds: integer(environment, "INVESTIGATION_LOGIN_TTL_SECONDS", 600, 3600),
     sessionTtlSeconds: integer(environment, "INVESTIGATION_SESSION_TTL_SECONDS", 28800, 86400),
-    postLoginRedirectPath: "/pull-requests",
+    maxKdfConcurrency: integer(environment, "INVESTIGATION_PASSWORD_KDF_CONCURRENCY", 2, 4),
+    maxKdfQueue: integer(environment, "INVESTIGATION_PASSWORD_KDF_QUEUE_LIMIT", 8, 64),
+    loginIpLimit: integer(environment, "INVESTIGATION_LOGIN_IP_LIMIT", 30, 1000),
+    loginAccountLimit: integer(environment, "INVESTIGATION_LOGIN_ACCOUNT_LIMIT", 10, 1000),
+    loginWindowSeconds: integer(environment, "INVESTIGATION_LOGIN_WINDOW_SECONDS", 900, 86400),
+    bootstrapAdmin:
+      username === undefined || bootstrapPassword === undefined || displayName === undefined
+        ? undefined
+        : { username, password: bootstrapPassword, displayName },
   };
-  const firstOperator = operators[0];
-  if (firstOperator === undefined) throw new Error("The operator binding is missing.");
-  const auth: OperatorAuthConfig =
-    mode === "loopback"
-      ? {
-          ...commonAuth,
-          mode,
-          developmentIdentity: {
-            issuer,
-            subject: firstOperator.subject,
-            displayName: firstOperator.displayName,
-            email: null,
-          },
-        }
-      : { ...commonAuth, mode, authorizedSubjects: operators.map((operator) => operator.subject) };
-  const oidcSecret = secret(environment, "INVESTIGATION_OIDC_CLIENT_SECRET");
-  const oidc: OperatorOidcClientConfig | undefined =
-    mode === "loopback"
-      ? undefined
-      : {
-          issuerUrl: issuer,
-          clientId: exact(environment.INVESTIGATION_OIDC_CLIENT_ID, "INVESTIGATION_OIDC_CLIENT_ID"),
-          clientSecret: exact(oidcSecret, "INVESTIGATION_OIDC_CLIENT_SECRET"),
-          clientAuthenticationMethod: "client_secret_basic",
-          redirectUri: `${publicOrigin.origin}/api/auth/callback`,
-          scopes: ["openid", "profile", "email"],
-          requestTimeoutSeconds: 30,
-        };
   const workers = entries(
     parseJson(environment, "INVESTIGATION_WORKERS_JSON", []),
     "INVESTIGATION_WORKERS_JSON",
@@ -318,7 +278,7 @@ export function loadInvestigationRuntimeConfig(
     environment.INVESTIGATION_DATABASE_PATH ?? ".data/investigation.sqlite",
   );
   const authDatabasePath = resolve(
-    environment.INVESTIGATION_AUTH_DATABASE_PATH ?? ".data/investigation-auth.sqlite",
+    environment.INVESTIGATION_AUTH_DATABASE_PATH ?? ".data/investigation-accounts.sqlite",
   );
   if (databasePath === authDatabasePath)
     throw new Error("Investigation and authentication must use separate database files.");
@@ -332,8 +292,6 @@ export function loadInvestigationRuntimeConfig(
         fileURLToPath(new URL("../../../dashboard/dist/", import.meta.url)),
     ),
     auth,
-    oidc,
-    operators,
     workers,
     https,
     enableExternalWrites,

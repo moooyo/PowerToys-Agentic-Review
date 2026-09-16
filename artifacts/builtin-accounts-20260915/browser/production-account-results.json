@@ -1,0 +1,692 @@
+{
+  "name": "Production account browser QA",
+  "workspace": "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002",
+  "startedAt": "2026-09-15T15:27:00.224Z",
+  "isolation": "Remote test-env, loopback-only network namespace, explicit synthetic configuration, separate ephemeral databases, no external credentials or writes",
+  "fixturePolicy": "Passwords are generated in memory and omitted from evidence. Cookies, tokens, request bodies, and response headers are never saved.",
+  "steps": [
+    {
+      "name": "Initial signed-out state and mobile login layout",
+      "passed": true,
+      "authenticated": false,
+      "authMode": "password",
+      "developmentDemoAbsent": true,
+      "layout": {
+        "viewportWidth": 390,
+        "documentClientWidth": 390,
+        "documentScrollWidth": 390,
+        "targetClientWidth": 390,
+        "targetScrollWidth": 390,
+        "targetLeft": 0,
+        "targetRight": 390,
+        "overflowingControls": []
+      }
+    },
+    {
+      "name": "Incorrect credentials produce a usable error and correct login succeeds",
+      "passed": true,
+      "incorrectStatus": 401,
+      "correctStatus": 200,
+      "adminAccessWithoutBusinessGrants": true,
+      "sessionExpiresInFuture": true
+    },
+    {
+      "name": "Administrator creates an ordinary account through a mobile form",
+      "passed": true,
+      "status": 201,
+      "normalizedUsername": "qa.member",
+      "isAdmin": false,
+      "permissions": ["repository:manage", "task:create"],
+      "layout": {
+        "viewportWidth": 390,
+        "documentClientWidth": 390,
+        "documentScrollWidth": 390,
+        "targetClientWidth": 326,
+        "targetScrollWidth": 326,
+        "targetLeft": 32,
+        "targetRight": 358,
+        "overflowingControls": []
+      }
+    },
+    {
+      "name": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "passed": true,
+      "accountsNavigationAbsent": true,
+      "directRouteBlocked": true,
+      "accountListStatus": 403,
+      "accountUpdateStatus": 403
+    },
+    {
+      "name": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "passed": true,
+      "changeStatus": 204,
+      "peerProtectedStatus": 401,
+      "peerAuthenticated": false,
+      "oldPasswordStatus": 401,
+      "trimmedNewPasswordStatus": 401,
+      "verbatimNewPasswordStatus": 200,
+      "unicodeAndOuterWhitespacePreserved": true
+    },
+    {
+      "name": "Logout removes the authenticated UI and server session",
+      "passed": true,
+      "logoutStatus": 204,
+      "authenticated": false,
+      "protectedStatus": 401,
+      "protectedSubtreeAbsent": true
+    },
+    {
+      "name": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "passed": true,
+      "staleStatus": 409,
+      "errorCode": "conflict",
+      "editsPreserved": true,
+      "reviewRequired": true,
+      "reviewedRetryStatus": 200,
+      "persistedDisplayName": "QA Member Proposed"
+    },
+    {
+      "name": "Independent delegate administrator fixture is created and signed in",
+      "passed": true,
+      "status": 201,
+      "noBusinessGrants": true,
+      "accountDirectoryVisible": true
+    },
+    {
+      "name": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "passed": true,
+      "resetStatus": 200,
+      "protectedStatus": 401,
+      "staleDirectoryRemoved": true,
+      "authenticatedAfterReset": false,
+      "oldPasswordStatus": 401,
+      "resetPasswordStatus": 200
+    },
+    {
+      "name": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+      "passed": true,
+      "disableStatus": 200,
+      "protectedStatus": 401,
+      "staleDirectoryRemoved": true,
+      "disabledSignInStatus": 401,
+      "persistedEnabled": false
+    },
+    {
+      "name": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "passed": true,
+      "disableStatus": 409,
+      "demoteStatus": 409,
+      "errorCodes": ["last_admin", "last_admin"],
+      "reviewAvailable": true,
+      "falseSuccessAbsent": true,
+      "lastAdminStillEnabled": true,
+      "lastAdminStillAdministrator": true
+    },
+    {
+      "name": "Administrator logout and browser console finish cleanly",
+      "passed": true,
+      "logoutStatus": 204,
+      "authenticated": false,
+      "unhandledPageErrors": 0,
+      "unexpectedConsoleErrors": 0,
+      "externalNetworkRequests": 0
+    }
+  ],
+  "http": [
+    {
+      "page": "administrator",
+      "step": "Initial signed-out state and mobile login layout",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "administrator-api",
+      "step": "Initial signed-out state and mobile login layout",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Incorrect credentials produce a usable error and correct login succeeds",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 401
+    },
+    {
+      "page": "administrator",
+      "step": "Incorrect credentials produce a usable error and correct login succeeds",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Incorrect credentials produce a usable error and correct login succeeds",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Incorrect credentials produce a usable error and correct login succeeds",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator-api",
+      "step": "Incorrect credentials produce a usable error and correct login succeeds",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Administrator creates an ordinary account through a mobile form",
+      "method": "POST",
+      "path": "/api/accounts",
+      "status": 201
+    },
+    {
+      "page": "administrator",
+      "step": "Administrator creates an ordinary account through a mobile form",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator-api",
+      "step": "Administrator creates an ordinary account through a mobile form",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "page": "member-api",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 403
+    },
+    {
+      "page": "member-api",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "POST",
+      "path": "/api/accounts/3a108b1d-74ff-4e39-8122-2676cdb2160a/update",
+      "status": 403
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Ordinary account has no Accounts navigation and account API access is forbidden",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "page": "member-peer-api",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "method": "POST",
+      "path": "/api/auth/password",
+      "status": 204
+    },
+    {
+      "page": "member-peer-api",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 401
+    },
+    {
+      "page": "member-peer-api",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 401
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 401
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Logout removes the authenticated UI and server session",
+      "method": "POST",
+      "path": "/api/auth/logout",
+      "status": 204
+    },
+    {
+      "page": "member-api",
+      "step": "Logout removes the authenticated UI and server session",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "member-api",
+      "step": "Logout removes the authenticated UI and server session",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 401
+    },
+    {
+      "page": "administrator",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator-api",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "concurrent-administrator-api",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "method": "POST",
+      "path": "/api/accounts/3a108b1d-74ff-4e39-8122-2676cdb2160a/update",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "method": "POST",
+      "path": "/api/accounts/3a108b1d-74ff-4e39-8122-2676cdb2160a/update",
+      "status": 409
+    },
+    {
+      "page": "administrator",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "method": "POST",
+      "path": "/api/accounts/3a108b1d-74ff-4e39-8122-2676cdb2160a/update",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator-api",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator-api",
+      "step": "Independent delegate administrator fixture is created and signed in",
+      "method": "POST",
+      "path": "/api/accounts",
+      "status": 201
+    },
+    {
+      "page": "administrator",
+      "step": "Independent delegate administrator fixture is created and signed in",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Independent delegate administrator fixture is created and signed in",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Independent delegate administrator fixture is created and signed in",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Independent delegate administrator fixture is created and signed in",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Independent delegate administrator fixture is created and signed in",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "method": "POST",
+      "path": "/api/accounts/abce1aba-c8ce-42c9-ab6b-74eb4ef3cf16/password",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 401
+    },
+    {
+      "page": "delegate-api",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 401
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "method": "GET",
+      "path": "/api/repositories",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+      "method": "POST",
+      "path": "/api/accounts/abce1aba-c8ce-42c9-ab6b-74eb4ef3cf16/update",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 401
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "status": 401
+    },
+    {
+      "page": "administrator-api",
+      "step": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator-api",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "method": "POST",
+      "path": "/api/accounts/274f512f-2e0a-4853-97fe-0113040cff67/update",
+      "status": 409
+    },
+    {
+      "page": "administrator",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "method": "POST",
+      "path": "/api/accounts/274f512f-2e0a-4853-97fe-0113040cff67/update",
+      "status": 409
+    },
+    {
+      "page": "administrator",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator-api",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "method": "GET",
+      "path": "/api/accounts",
+      "status": 200
+    },
+    {
+      "page": "administrator",
+      "step": "Administrator logout and browser console finish cleanly",
+      "method": "POST",
+      "path": "/api/auth/logout",
+      "status": 204
+    },
+    {
+      "page": "administrator-api",
+      "step": "Administrator logout and browser console finish cleanly",
+      "method": "GET",
+      "path": "/api/auth/session",
+      "status": 200
+    }
+  ],
+  "console": [
+    {
+      "page": "administrator",
+      "step": "Incorrect credentials produce a usable error and correct login succeeds",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "ordinary-member",
+      "step": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "administrator",
+      "step": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 409 (Conflict)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "delegate-administrator",
+      "step": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "administrator",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 409 (Conflict)",
+      "expectedHttpError": true
+    },
+    {
+      "page": "administrator",
+      "step": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 409 (Conflict)",
+      "expectedHttpError": true
+    }
+  ],
+  "pageErrors": [],
+  "unexpectedNetwork": [],
+  "screenshots": [
+    "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/account-browser/production-login-mobile.png",
+    "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/account-browser/production-create-account-mobile.png",
+    "/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/logs/snapshot-002/account-browser/production-last-admin-conflict.png"
+  ],
+  "passed": true,
+  "cleanup": {
+    "browserClosed": true,
+    "productionServerClosed": true,
+    "isolatedDatabasesRemoved": true
+  },
+  "finishedAt": "2026-09-15T15:27:07.372Z"
+}

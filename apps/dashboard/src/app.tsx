@@ -7,7 +7,9 @@ import {
   GitHub,
   LightModeOutlined,
   LogoutRounded,
+  ManageAccountsOutlined,
   MenuRounded,
+  PersonOutlineRounded,
   PlayCircleOutlineRounded,
 } from "@mui/icons-material";
 import {
@@ -34,6 +36,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ComponentType, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import routeDefinitions from "../config/routes";
+import AccountsPage from "./investigation/accounts-page";
+import MyAccountPage from "./investigation/my-account";
 import ReportPage from "./investigation/report-workspace";
 import RepositoriesPage from "./investigation/repositories-page";
 import {
@@ -53,12 +57,16 @@ const pages: Record<string, ComponentType> = {
   "./InvestigationTasks": TasksPage,
   "./InvestigationReport": ReportPage,
   "./InvestigationRepositories": RepositoriesPage,
+  "./MyAccount": MyAccountPage,
+  "./Accounts": AccountsPage,
 };
 const icons: Record<string, ComponentType> = {
   "/pull-requests": AccountTreeRounded,
   "/issues": FactCheckOutlined,
   "/tasks": PlayCircleOutlineRounded,
   "/repositories": FolderOutlined,
+  "/account": PersonOutlineRounded,
+  "/accounts": ManageAccountsOutlined,
 };
 
 function ApplicationShell() {
@@ -98,9 +106,12 @@ function ApplicationShell() {
       <Typography variant="subtitle2" color="text.secondary" sx={{ px: 2, py: 1 }}>
         Workspace
       </Typography>
-      <List disablePadding sx={{ flex: 1 }}>
+      <List disablePadding sx={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
         {routeDefinitions
-          .filter((route) => !route.hideInMenu && route.name)
+          .filter(
+            (route) =>
+              !route.hideInMenu && route.name && (!route.adminOnly || session.user?.isAdmin),
+          )
           .map((route) => {
             const Icon = icons[route.path] ?? FolderOutlined;
             return (
@@ -135,7 +146,7 @@ function ApplicationShell() {
       </List>
       <Divider sx={{ mb: 1 }} />
       <Typography variant="body2" color="text.secondary" sx={{ px: 2 }}>
-        {sample ? "Sample workspace" : session.user?.displayName}
+        {sample ? `${session.user?.username} · Sample workspace` : session.user?.displayName}
       </Typography>
     </Box>
   );
@@ -189,7 +200,7 @@ function ApplicationShell() {
           >
             {mode === "light" ? <DarkModeOutlined /> : <LightModeOutlined />}
           </IconButton>
-          {!sample && (
+          {
             <Tooltip title={`Sign out ${session.user?.displayName}`}>
               <IconButton
                 aria-label="Sign out"
@@ -202,7 +213,7 @@ function ApplicationShell() {
                 <LogoutRounded />
               </IconButton>
             </Tooltip>
-          )}
+          }
         </Toolbar>
       </AppBar>
       <Box sx={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -288,6 +299,10 @@ function ApplicationShell() {
                       element={
                         route.component === "./WorkspaceRedirect" ? (
                           <Navigate to={`/pull-requests${scopeQuery}`} replace />
+                        ) : route.adminOnly && !session.user?.isAdmin ? (
+                          <Alert severity="info">
+                            Account administration requires an administrator account.
+                          </Alert>
                         ) : Page ? (
                           <Page />
                         ) : (

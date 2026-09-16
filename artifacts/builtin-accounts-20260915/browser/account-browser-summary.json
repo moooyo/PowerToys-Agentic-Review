@@ -1,0 +1,185 @@
+{
+  "status": "passed",
+  "snapshot": "snapshot-002",
+  "environment": "Remote test-env; separate loopback-only network namespaces; synthetic accounts only",
+  "production": {
+    "passed": true,
+    "flowsPassed": 12,
+    "flows": [
+      {
+        "name": "Initial signed-out state and mobile login layout",
+        "passed": true,
+        "authenticated": false,
+        "authMode": "password",
+        "developmentDemoAbsent": true,
+        "layout": {
+          "viewportWidth": 390,
+          "documentClientWidth": 390,
+          "documentScrollWidth": 390,
+          "targetClientWidth": 390,
+          "targetScrollWidth": 390,
+          "targetLeft": 0,
+          "targetRight": 390,
+          "overflowingControls": []
+        }
+      },
+      {
+        "name": "Incorrect credentials produce a usable error and correct login succeeds",
+        "passed": true,
+        "incorrectStatus": 401,
+        "correctStatus": 200,
+        "adminAccessWithoutBusinessGrants": true,
+        "sessionExpiresInFuture": true
+      },
+      {
+        "name": "Administrator creates an ordinary account through a mobile form",
+        "passed": true,
+        "status": 201,
+        "normalizedUsername": "qa.member",
+        "isAdmin": false,
+        "permissions": ["repository:manage", "task:create"],
+        "layout": {
+          "viewportWidth": 390,
+          "documentClientWidth": 390,
+          "documentScrollWidth": 390,
+          "targetClientWidth": 326,
+          "targetScrollWidth": 326,
+          "targetLeft": 32,
+          "targetRight": 358,
+          "overflowingControls": []
+        }
+      },
+      {
+        "name": "Ordinary account has no Accounts navigation and account API access is forbidden",
+        "passed": true,
+        "accountsNavigationAbsent": true,
+        "directRouteBlocked": true,
+        "accountListStatus": 403,
+        "accountUpdateStatus": 403
+      },
+      {
+        "name": "Own password change revokes every session, preserves whitespace, and accepts only the new password",
+        "passed": true,
+        "changeStatus": 204,
+        "peerProtectedStatus": 401,
+        "peerAuthenticated": false,
+        "oldPasswordStatus": 401,
+        "trimmedNewPasswordStatus": 401,
+        "verbatimNewPasswordStatus": 200,
+        "unicodeAndOuterWhitespacePreserved": true
+      },
+      {
+        "name": "Logout removes the authenticated UI and server session",
+        "passed": true,
+        "logoutStatus": 204,
+        "authenticated": false,
+        "protectedStatus": 401,
+        "protectedSubtreeAbsent": true
+      },
+      {
+        "name": "Concurrent account update returns 409, preserves edits, and requires review before retry",
+        "passed": true,
+        "staleStatus": 409,
+        "errorCode": "conflict",
+        "editsPreserved": true,
+        "reviewRequired": true,
+        "reviewedRetryStatus": 200,
+        "persistedDisplayName": "QA Member Proposed"
+      },
+      {
+        "name": "Independent delegate administrator fixture is created and signed in",
+        "passed": true,
+        "status": 201,
+        "noBusinessGrants": true,
+        "accountDirectoryVisible": true
+      },
+      {
+        "name": "Administrator password reset revokes the old session and protected 401 removes cached account UI",
+        "passed": true,
+        "resetStatus": 200,
+        "protectedStatus": 401,
+        "staleDirectoryRemoved": true,
+        "authenticatedAfterReset": false,
+        "oldPasswordStatus": 401,
+        "resetPasswordStatus": 200
+      },
+      {
+        "name": "Administrator disabling an account revokes its session and denies subsequent sign-in",
+        "passed": true,
+        "disableStatus": 200,
+        "protectedStatus": 401,
+        "staleDirectoryRemoved": true,
+        "disabledSignInStatus": 401,
+        "persistedEnabled": false
+      },
+      {
+        "name": "The last enabled administrator cannot be disabled or demoted and sees an actionable conflict",
+        "passed": true,
+        "disableStatus": 409,
+        "demoteStatus": 409,
+        "errorCodes": ["last_admin", "last_admin"],
+        "reviewAvailable": true,
+        "falseSuccessAbsent": true,
+        "lastAdminStillEnabled": true,
+        "lastAdminStillAdministrator": true
+      },
+      {
+        "name": "Administrator logout and browser console finish cleanly",
+        "passed": true,
+        "logoutStatus": 204,
+        "authenticated": false,
+        "unhandledPageErrors": 0,
+        "unexpectedConsoleErrors": 0,
+        "externalNetworkRequests": 0
+      }
+    ],
+    "httpRequestCount": 67,
+    "httpStatusCounts": {
+      "200": 48,
+      "201": 2,
+      "204": 3,
+      "401": 9,
+      "403": 2,
+      "409": 3
+    },
+    "unhandledPageErrors": 0,
+    "expectedHttpConsoleErrors": 10,
+    "unexpectedConsoleErrors": 0,
+    "externalRequests": 0,
+    "realScryptAndHttp": true,
+    "isolatedEphemeralDatabases": true,
+    "cleanup": {
+      "browserClosed": true,
+      "productionServerClosed": true,
+      "isolatedDatabasesRemoved": true
+    },
+    "details": "production-account-results.json"
+  },
+  "developmentSample": {
+    "checksPassed": 18,
+    "checksTotal": 18,
+    "apiRequestCount": 0,
+    "totalRequests": 108,
+    "pageErrorCount": 0,
+    "consoleErrorCount": 0,
+    "singleSpaDocumentLoad": true,
+    "externalRequests": 0,
+    "cleanup": {
+      "browserClosed": true,
+      "viteStopped": true
+    },
+    "details": "dev-sample/result.json"
+  },
+  "visualReview": {
+    "passed": true,
+    "notes": "Four screenshots inspected: mobile login and create-account dialog are readable with no horizontal overflow; desktop last-admin conflict and sample password form display usable controls.",
+    "screenshots": [
+      "production-login-mobile.png",
+      "production-create-account-mobile.png",
+      "production-last-admin-conflict.png",
+      "dev-sample/account-after-password-change.png"
+    ]
+  },
+  "scope": "Accounts, login, password changes, access control, session revocation, logout, concurrency and last-administrator protection only. No repository imports, GitHub/PR/issue writes, Worker, or model operations.",
+  "sensitiveDataPolicy": "No raw cookies, tokens, request bodies, or passwords saved in evidence."
+}

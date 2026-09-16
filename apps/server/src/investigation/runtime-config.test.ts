@@ -1,127 +1,126 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { loadInvestigationRuntimeConfig } from "../../dist/investigation/runtime-config.js";
 
-const operator = {
-  id: "operator-1",
-  subject: "subject-1",
-  displayName: "Test Operator",
-  repositoryIds: ["repo-1"],
-  permissions: ["task:create", "action:prepare"],
-  actionCapabilities: ["comment"],
-  allowRepositoryExecution: true,
-};
+const directories: string[] = [];
+afterEach(async () => {
+  for (const directory of directories.splice(0))
+    await rm(directory, { recursive: true, force: true });
+});
 
-describe("investigation runtime configuration", () => {
-  it("documents the native databases, scoped authority, and disabled-by-default external writes", async () => {
-    const example = await readFile(resolve(import.meta.dirname, "../..", ".env.example"), "utf8");
-    expect(example).toContain(
-      "INVESTIGATION_DATABASE_PATH=/var/lib/agentic-review/investigation.sqlite",
-    );
-    expect(example).toContain(
-      "INVESTIGATION_AUTH_DATABASE_PATH=/var/lib/agentic-review/investigation-auth.sqlite",
-    );
-    expect(example).toContain("INVESTIGATION_AUTH_MODE=loopback");
-    expect(example).toContain("INVESTIGATION_OPERATORS_JSON");
-    expect(example).toContain("INVESTIGATION_WORKERS_JSON");
-    expect(example).toContain("INVESTIGATION_ENABLE_EXTERNAL_WRITES=false");
-    expect(example).not.toContain("AGENTIC_REVIEW_");
-  });
-
-  it("defaults to a loopback listener with no repository or execution authority", () => {
+describe("password runtime configuration", () => {
+  it("defaults to password authentication without any predefined credentials", () => {
     const config = loadInvestigationRuntimeConfig({});
     expect(config.host).toBe("127.0.0.1");
-    expect(config.auth.mode).toBe("loopback");
-    expect(config.operators[0]?.repositoryIds).toEqual([]);
-    expect(config.operators[0]?.allowRepositoryExecution).toBe(false);
-    expect(config.workers).toEqual([]);
-    expect(config.github).toBeUndefined();
-    expect(config.enableExternalWrites).toBe(false);
+    expect(config.auth).toMatchObject({
+      mode: "password",
+      bootstrapAdmin: undefined,
+      maxKdfConcurrency: 2,
+      maxKdfQueue: 8,
+    });
+    expect(config.authDatabasePath).toMatch(/investigation-accounts\.sqlite$/u);
     expect(config.authDatabasePath).not.toBe(config.databasePath);
+    expect(config).not.toHaveProperty("operators");
+    expect(config).not.toHaveProperty("oidc");
+    expect(config.workers).toEqual([]);
+    expect(config.enableExternalWrites).toBe(false);
   });
 
-  it("does not allow loopback authentication on any other listener or public host", () => {
-    for (const host of ["0.0.0.0", "::", "localhost", "127.0.0.2"]) {
+  it("rejects every no-password mode and non-loopback HTTP listener", () => {
+    for (const mode of ["loopback", "oidc", "none", "disabled"])
+      expect(() => loadInvestigationRuntimeConfig({ INVESTIGATION_AUTH_MODE: mode })).toThrow(
+        "only supports password",
+      );
+    for (const host of ["0.0.0.0", "::", "localhost", "127.0.0.2"])
       expect(() => loadInvestigationRuntimeConfig({ INVESTIGATION_HOST: host })).toThrow(
         "literal 127.0.0.1",
       );
-    }
     expect(() =>
-      loadInvestigationRuntimeConfig({
-        INVESTIGATION_PUBLIC_ORIGIN: "http://attacker.example:8000",
-      }),
-    ).toThrow("literal 127.0.0.1");
+      loadInvestigationRuntimeConfig({ INVESTIGATION_PUBLIC_ORIGIN: "http://127.0.0.1:9000" }),
+    ).toThrow("matching local public origin");
     expect(() =>
       loadInvestigationRuntimeConfig({ INVESTIGATION_PUBLIC_ORIGIN: "http://127.0.0.1:8000/path" }),
     ).toThrow("without a path");
   });
 
-  it("accepts exact OIDC bindings behind a loopback HTTPS reverse proxy", () => {
+  it("accepts a private loopback HTTPS proxy and requires TLS for public listeners", () => {
     const config = loadInvestigationRuntimeConfig({
-      INVESTIGATION_AUTH_MODE: "oidc",
       INVESTIGATION_PUBLIC_ORIGIN: "https://review.example",
-      INVESTIGATION_OIDC_ISSUER_URL: "https://identity.example",
-      INVESTIGATION_OIDC_CLIENT_ID: "client-1",
-      INVESTIGATION_OIDC_CLIENT_SECRET: "test-client-secret",
-      INVESTIGATION_OPERATORS_JSON: JSON.stringify([operator]),
     });
-    expect(config.auth).toMatchObject({ mode: "oidc", authorizedSubjects: ["subject-1"] });
-    expect(config.operators[0]).toEqual({ ...operator, issuer: "https://identity.example" });
-    expect(config.oidc?.redirectUri).toBe("https://review.example/api/auth/callback");
+    expect(config.auth.publicOrigin).toBe("https://review.example");
     expect(config.https).toBeUndefined();
-  });
-
-  it("rejects public HTTP deployment and malformed authority grants", () => {
     expect(() =>
       loadInvestigationRuntimeConfig({
-        INVESTIGATION_AUTH_MODE: "oidc",
         INVESTIGATION_HOST: "0.0.0.0",
         INVESTIGATION_PUBLIC_ORIGIN: "https://review.example",
       }),
     ).toThrow("requires TLS");
-    for (const invalid of [
-      { ...operator, repositoryIds: ["*"] },
-      { ...operator, permissions: ["administrator"] },
-      { ...operator, actionCapabilities: ["push"] },
-      { ...operator, allowRepositoryExecution: "true" },
-    ]) {
-      expect(() =>
-        loadInvestigationRuntimeConfig({ INVESTIGATION_OPERATORS_JSON: JSON.stringify([invalid]) }),
-      ).toThrow();
-    }
   });
 
-  it("binds long random bearer credentials to exact worker IDs and repository scopes", () => {
+  it("normalizes only the bootstrap username and preserves password file content verbatim", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "password-config-"));
+    directories.push(directory);
+    const path = join(directory, "password.txt");
+    const password = "  Synthetic bootstrap password  \n";
+    await writeFile(path, password);
+    const config = loadInvestigationRuntimeConfig({
+      INVESTIGATION_BOOTSTRAP_ADMIN_USERNAME: "  FIXTURE.Admin  ",
+      INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD_PATH: path,
+    });
+    expect(config.auth.bootstrapAdmin).toEqual({
+      username: "fixture.admin",
+      displayName: "fixture.admin",
+      password,
+    });
+    expect(() =>
+      loadInvestigationRuntimeConfig({ INVESTIGATION_BOOTSTRAP_ADMIN_USERNAME: "fixture-admin" }),
+    ).toThrow("username and password together");
+    expect(() =>
+      loadInvestigationRuntimeConfig({
+        INVESTIGATION_BOOTSTRAP_ADMIN_USERNAME: "fixture-admin",
+        INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD: " ".repeat(20),
+      }),
+    ).toThrow("non-whitespace");
+    expect(() =>
+      loadInvestigationRuntimeConfig({
+        INVESTIGATION_BOOTSTRAP_ADMIN_USERNAME: "fixture-admin",
+        INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD: "Synthetic bootstrap password",
+        INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD_PATH: path,
+      }),
+    ).toThrow("Configure only");
+  });
+
+  it("bounds password derivation and login throttling configuration", () => {
+    expect(() =>
+      loadInvestigationRuntimeConfig({ INVESTIGATION_PASSWORD_KDF_CONCURRENCY: "5" }),
+    ).toThrow("out of range");
+    expect(() =>
+      loadInvestigationRuntimeConfig({ INVESTIGATION_PASSWORD_KDF_QUEUE_LIMIT: "1000" }),
+    ).toThrow("out of range");
+    expect(() =>
+      loadInvestigationRuntimeConfig({ INVESTIGATION_LOGIN_ACCOUNT_LIMIT: "0" }),
+    ).toThrow("positive integer");
+    expect(() =>
+      loadInvestigationRuntimeConfig({ INVESTIGATION_SESSION_TTL_SECONDS: "86401" }),
+    ).toThrow("out of range");
+  });
+
+  it("retains explicitly scoped bearer workers and opt-in GitHub transport", () => {
     const worker = { id: "worker-1", token: "T".repeat(43), repositoryIds: ["repo-1"] };
     const config = loadInvestigationRuntimeConfig({
       INVESTIGATION_WORKERS_JSON: JSON.stringify([worker]),
+      INVESTIGATION_GITHUB_TOKEN: "synthetic-token",
+      INVESTIGATION_GITHUB_USER_ID: "123",
     });
     expect(config.workers).toEqual([worker]);
+    expect(config.github).toEqual({ token: "synthetic-token", expectedGitHubUserId: 123 });
+    expect(config.enableExternalWrites).toBe(false);
     expect(() =>
       loadInvestigationRuntimeConfig({
         INVESTIGATION_WORKERS_JSON: JSON.stringify([{ ...worker, token: "short" }]),
       }),
     ).toThrow("43 to 256");
-    expect(() =>
-      loadInvestigationRuntimeConfig({
-        INVESTIGATION_WORKERS_JSON: JSON.stringify([worker, { ...worker, id: "worker-2" }]),
-      }),
-    ).toThrow("unique");
-  });
-
-  it("requires an account binding for GitHub and keeps external writes an explicit setting", () => {
-    expect(() =>
-      loadInvestigationRuntimeConfig({ INVESTIGATION_GITHUB_TOKEN: "test-token" }),
-    ).toThrow("configured together");
-    expect(() =>
-      loadInvestigationRuntimeConfig({ INVESTIGATION_ENABLE_EXTERNAL_WRITES: "true" }),
-    ).toThrow("require configured");
-    const config = loadInvestigationRuntimeConfig({
-      INVESTIGATION_GITHUB_TOKEN: "test-token",
-      INVESTIGATION_GITHUB_USER_ID: "123",
-    });
-    expect(config.github).toEqual({ token: "test-token", expectedGitHubUserId: 123 });
-    expect(config.enableExternalWrites).toBe(false);
   });
 });

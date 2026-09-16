@@ -1,7 +1,21 @@
-import { Alert, Box, Button, CircularProgress, Stack, Typography } from "@mui/material";
+import {
+  INVESTIGATION_PASSWORD_MAX_LENGTH,
+  normalizeInvestigationUsername,
+} from "@agentic-review/contracts";
+import {
+  Alert,
+  Box,
+  Button,
+  CircularProgress,
+  Snackbar,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
+  type FormEvent,
   type ReactNode,
   useCallback,
   useContext,
@@ -10,50 +24,28 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { resumeInvestigationRequests, suspendInvestigationRequests } from "./transport";
+import {
+  type AuthApi,
+  authApi,
+  type InvestigationSession,
+  type PasswordChangeInput,
+  type PasswordLoginInput,
+} from "./auth-api";
+import {
+  resumeInvestigationRequests,
+  subscribeInvestigationSessionExpired,
+  suspendInvestigationRequests,
+} from "./transport";
 
-export interface InvestigationSession {
-  authenticated: boolean;
-  authMode: "loopback" | "oidc";
-  loginPath: string;
-  user: null | {
-    id: string;
-    displayName: string;
-    email?: string | null;
-    repositoryIds: string[];
-    permissions: string[];
-    actionCapabilities: string[];
-    allowRepositoryExecution: boolean;
-  };
-  expiresAt?: string;
-}
+export type { InvestigationSession } from "./auth-api";
+export { decodeSession } from "./auth-api";
 
-const sampleSession: InvestigationSession = {
-  authenticated: true,
-  authMode: "loopback",
+const signedOut = (): InvestigationSession => ({
+  authenticated: false,
+  authMode: "password",
   loginPath: "/api/auth/login",
-  user: {
-    id: "sample-operator",
-    displayName: "Development Operator",
-    repositoryIds: ["repo-powertoys-fork"],
-    permissions: [
-      "repository:manage",
-      "task:create",
-      "task:cancel",
-      "action:prepare",
-      "action:execute",
-    ],
-    actionCapabilities: [
-      "comment",
-      "approve",
-      "suggestion-comment",
-      "request-changes",
-      "start-task",
-      "reviews.verify",
-    ],
-    allowRepositoryExecution: false,
-  },
-};
+  user: null,
+});
 
 export function sessionIdentity(session: InvestigationSession | undefined): string {
   const user = session?.user;
@@ -61,6 +53,8 @@ export function sessionIdentity(session: InvestigationSession | undefined): stri
     user
       ? [
           user.id,
+          user.username,
+          user.isAdmin,
           [...user.repositoryIds].sort(),
           [...user.permissions].sort(),
           [...user.actionCapabilities].sort(),
@@ -70,40 +64,14 @@ export function sessionIdentity(session: InvestigationSession | undefined): stri
   );
 }
 
-export function decodeSession(value: unknown): InvestigationSession {
-  if (typeof value !== "object" || value === null)
-    throw new Error("The service returned an invalid session.");
-  const session = value as Partial<InvestigationSession>;
-  if (
-    typeof session.authenticated !== "boolean" ||
-    !["loopback", "oidc"].includes(session.authMode ?? "") ||
-    session.loginPath !== "/api/auth/login"
-  )
-    throw new Error("The service returned an invalid session.");
-  if (session.authenticated) {
-    const user = session.user;
-    if (
-      !user ||
-      typeof user.id !== "string" ||
-      typeof user.displayName !== "string" ||
-      !Array.isArray(user.repositoryIds) ||
-      !user.repositoryIds.every((item) => typeof item === "string") ||
-      !Array.isArray(user.permissions) ||
-      !user.permissions.every((item) => typeof item === "string") ||
-      !Array.isArray(user.actionCapabilities) ||
-      !user.actionCapabilities.every((item) => typeof item === "string") ||
-      typeof user.allowRepositoryExecution !== "boolean"
-    )
-      throw new Error("The service omitted the authenticated identity.");
-  } else if (session.user !== null) throw new Error("The signed-out session contains an identity.");
-  return session as InvestigationSession;
-}
-
-const SessionContext = createContext<{
+interface SessionContextValue {
   session: InvestigationSession;
   refresh: () => Promise<void>;
   logout: () => Promise<void>;
-} | null>(null);
+  changePassword: (input: PasswordChangeInput) => Promise<void>;
+  requireSignIn: (message?: string) => Promise<void>;
+}
+const SessionContext = createContext<SessionContextValue | null>(null);
 
 export function useInvestigationSession() {
   const context = useContext(SessionContext);
@@ -111,64 +79,200 @@ export function useInvestigationSession() {
   return context;
 }
 
-export function InvestigationSessionProvider({ children }: { children: ReactNode }) {
+export function PasswordSignInForm({
+  onLogin,
+  onRetry,
+  busy,
+  message,
+  severity = "info",
+}: {
+  onLogin: (input: PasswordLoginInput) => Promise<void>;
+  onRetry: () => Promise<void>;
+  busy: boolean;
+  message?: string;
+  severity?: "info" | "error" | "success";
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [validationError, setValidationError] = useState<string>();
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy) return;
+    const input = { username: normalizeInvestigationUsername(username), password };
+    setPassword("");
+    setValidationError(undefined);
+    if (!/^[a-z0-9][a-z0-9._-]{2,63}$/u.test(input.username) || !input.password) {
+      setValidationError("Enter a valid username and password.");
+      return;
+    }
+    await onLogin(input);
+  };
+  return (
+    <Box sx={{ maxWidth: 480, mx: "auto", pt: { xs: 6, sm: 12 }, px: 3, pb: 4 }}>
+      <Typography variant="h4" sx={{ mb: 1 }}>
+        Agentic Review
+      </Typography>
+      <Typography color="text.secondary" sx={{ mb: 3 }}>
+        Sign in with your workspace account.
+      </Typography>
+      {(message || validationError) && (
+        <Alert severity={validationError ? "error" : severity} sx={{ mb: 2 }}>
+          {validationError ?? message}
+        </Alert>
+      )}
+      <Box
+        component="form"
+        onSubmit={(event: FormEvent<HTMLFormElement>) => void submit(event)}
+        aria-label="Sign in"
+        noValidate
+      >
+        <Stack spacing={2}>
+          <TextField
+            label="Username"
+            name="username"
+            autoComplete="username"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            disabled={busy}
+            required
+            fullWidth
+            slotProps={{ htmlInput: { autoCapitalize: "none", spellCheck: false, maxLength: 128 } }}
+          />
+          <TextField
+            label="Password"
+            name="password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            disabled={busy}
+            required
+            fullWidth
+            slotProps={{ htmlInput: { maxLength: INVESTIGATION_PASSWORD_MAX_LENGTH * 2 } }}
+          />
+          <Button
+            type="submit"
+            variant="contained"
+            disabled={busy || !username.trim() || !password}
+          >
+            {busy ? "Signing in…" : "Sign in"}
+          </Button>
+          <Button disabled={busy} onClick={() => void onRetry()}>
+            Retry connection
+          </Button>
+        </Stack>
+      </Box>
+      {process.env.NODE_ENV === "development" && (
+        <Alert severity="info" sx={{ mt: 3 }}>
+          <Typography variant="subtitle2">Development sample only</Typography>
+          <Typography variant="body2">
+            Public demo account: <strong>demo</strong>
+            <br />
+            Demo password: <code>Demo-password-2026!</code>
+          </Typography>
+          <Typography variant="body2" sx={{ mt: 1 }}>
+            Accounts and PowerToys reports are held in memory. This preview does not access GitHub
+            or start a Worker.
+          </Typography>
+          <Button
+            disabled={busy}
+            onClick={() => {
+              setUsername("demo");
+              setPassword("Demo-password-2026!");
+            }}
+          >
+            Fill demo credentials
+          </Button>
+        </Alert>
+      )}
+    </Box>
+  );
+}
+
+export function InvestigationSessionProvider({
+  children,
+  api = authApi,
+}: {
+  children: ReactNode;
+  api?: AuthApi;
+}) {
   const queryClient = useQueryClient();
   const [session, setSession] = useState<InvestigationSession>();
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>();
+  const [signingIn, setSigningIn] = useState(false);
+  const [notice, setNotice] = useState<{
+    message: string;
+    severity: "info" | "error" | "success";
+  }>();
   const [accessSuspended, setAccessSuspended] = useState(false);
   const generation = useRef(0);
-  const identity = useRef(sessionIdentity(undefined));
-  const logoutInProgress = useRef(false);
-  const refresh = useCallback(async () => {
-    const currentGeneration = ++generation.current;
-    setLoading(true);
-    setError(undefined);
-    try {
-      await Promise.resolve();
-      const next =
-        process.env.NODE_ENV === "development"
-          ? sampleSession
-          : await fetch("/api/auth/session", {
-              credentials: "include",
-              cache: "no-store",
-              redirect: "error",
-            }).then(async (response) => {
-              if (!response.ok) throw new Error(`Session request failed (${response.status}).`);
-              return decodeSession(await response.json());
-            });
-      if (generation.current !== currentGeneration) return;
-      const nextIdentity = sessionIdentity(next);
-      if (identity.current !== nextIdentity) {
+  const currentSession = useRef<InvestigationSession | undefined>(undefined);
+  const mutationInProgress = useRef(false);
+
+  const commitSession = useCallback(
+    async (next: InvestigationSession, expectedGeneration: number) => {
+      if (generation.current !== expectedGeneration) return;
+      if (sessionIdentity(currentSession.current) !== sessionIdentity(next)) {
         suspendInvestigationRequests();
         flushSync(() => setAccessSuspended(true));
         await queryClient.cancelQueries();
-        if (generation.current !== currentGeneration) return;
+        if (generation.current !== expectedGeneration) return;
         queryClient.clear();
       }
-      identity.current = nextIdentity;
+      currentSession.current = next;
       if (next.authenticated) resumeInvestigationRequests();
       else suspendInvestigationRequests();
       flushSync(() => {
         setSession(next);
         setAccessSuspended(false);
       });
-    } catch (cause) {
-      if (generation.current !== currentGeneration) return;
-      identity.current = sessionIdentity(undefined);
+      setLoading(false);
+    },
+    [queryClient],
+  );
+
+  const requireSignIn = useCallback(
+    async (message = "Your session expired. Sign in again.") => {
+      const current = ++generation.current;
       suspendInvestigationRequests();
+      flushSync(() => setAccessSuspended(true));
+      await queryClient.cancelQueries();
+      if (generation.current !== current) return;
+      queryClient.clear();
+      currentSession.current = signedOut();
       flushSync(() => {
-        setSession(undefined);
+        setSession(signedOut());
         setAccessSuspended(false);
       });
-      await queryClient.cancelQueries();
-      if (generation.current !== currentGeneration) return;
-      queryClient.clear();
-      setError(cause instanceof Error ? cause.message : "The session could not be loaded.");
+      setLoading(false);
+      setSigningIn(false);
+      setNotice({ message, severity: "info" });
+    },
+    [queryClient],
+  );
+
+  const refresh = useCallback(async () => {
+    const current = ++generation.current;
+    try {
+      const next = await api.session();
+      if (next.authenticated && Date.parse(next.expiresAt) <= Date.now()) {
+        if (generation.current === current) await requireSignIn();
+        return;
+      }
+      await commitSession(next, current);
+    } catch (cause) {
+      if (generation.current !== current) return;
+      await requireSignIn(
+        "The current session could not be verified. Retry the connection or sign in again.",
+      );
+      setNotice({
+        message: cause instanceof Error ? cause.message : "The session could not be loaded.",
+        severity: "error",
+      });
     } finally {
-      if (generation.current === currentGeneration) setLoading(false);
+      if (generation.current === current) setLoading(false);
     }
-  }, [queryClient]);
+  }, [api, commitSession, requireSignIn]);
 
   useEffect(() => {
     void refresh();
@@ -176,112 +280,115 @@ export function InvestigationSessionProvider({ children }: { children: ReactNode
       generation.current += 1;
     };
   }, [refresh]);
+  useEffect(
+    () =>
+      subscribeInvestigationSessionExpired(() => {
+        void requireSignIn();
+      }),
+    [requireSignIn],
+  );
   useEffect(() => {
-    if (process.env.NODE_ENV === "development") return;
     const onFocus = () => {
-      if (!logoutInProgress.current) void refresh();
+      if (!mutationInProgress.current) void refresh();
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
+  useEffect(() => {
+    if (!session?.authenticated) return;
+    const expiry = session.expiresAt;
+    const timer = window.setTimeout(
+      () => {
+        if (
+          !mutationInProgress.current &&
+          currentSession.current?.authenticated &&
+          currentSession.current.expiresAt === expiry
+        )
+          void refresh();
+      },
+      Math.max(0, Math.min(Date.parse(expiry) - Date.now(), 2_147_483_647)),
+    );
+    return () => window.clearTimeout(timer);
+  }, [session, refresh]);
 
-  const login = async () => {
-    setError(undefined);
+  const login = async (input: PasswordLoginInput) => {
+    const current = ++generation.current;
+    mutationInProgress.current = true;
+    setSigningIn(true);
+    setNotice(undefined);
     try {
-      const response = await fetch("/api/auth/login", {
-        method: "POST",
-        credentials: "include",
-        redirect: "error",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-      if (!response.ok) throw new Error(`Sign in failed (${response.status}).`);
-      const value: unknown = await response.json();
-      if (
-        typeof value === "object" &&
-        value !== null &&
-        "authorizationUrl" in value &&
-        typeof value.authorizationUrl === "string"
-      ) {
-        const url = new URL(value.authorizationUrl);
-        if (url.protocol !== "https:") throw new Error("The identity provider URL is invalid.");
-        window.location.assign(url.href);
-      } else {
-        await refresh();
-      }
+      const next = await api.login(input);
+      if (!next.authenticated)
+        throw new Error("The service did not establish a signed-in session.");
+      if (Date.parse(next.expiresAt) <= Date.now())
+        throw new Error("The service returned an expired session. Try signing in again.");
+      await commitSession(next, current);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Sign in failed.");
+      if (generation.current === current)
+        setNotice({
+          message: cause instanceof Error ? cause.message : "Sign in failed.",
+          severity: "error",
+        });
+    } finally {
+      mutationInProgress.current = false;
+      setSigningIn(false);
     }
   };
-  const logout = async () => {
+
+  const changeSession = async (operation: () => Promise<void>, success: string) => {
     generation.current += 1;
-    logoutInProgress.current = true;
+    mutationInProgress.current = true;
     suspendInvestigationRequests();
     flushSync(() => setAccessSuspended(true));
     await queryClient.cancelQueries();
     try {
-      const response = await fetch("/api/auth/logout", {
-        method: "POST",
-        credentials: "include",
-        redirect: "error",
-      });
-      if (!response.ok) throw new Error(`Sign out failed (${response.status}).`);
-      queryClient.clear();
-      await refresh();
+      await operation();
+      await requireSignIn(success);
     } catch (cause) {
       await refresh();
-      const message =
-        cause instanceof Error
-          ? cause.message
-          : "Sign out failed. Your current session was checked again.";
-      setError(message);
+      const message = cause instanceof Error ? cause.message : "The account operation failed.";
+      setNotice({ message, severity: "error" });
       throw new Error(message);
     } finally {
-      logoutInProgress.current = false;
+      mutationInProgress.current = false;
       setAccessSuspended(false);
     }
   };
+  const logout = () => changeSession(() => api.logout(), "You have signed out.");
+  const changePassword = (input: PasswordChangeInput) =>
+    changeSession(
+      () => api.changePassword(input),
+      "Your password was changed. Sign in again with the new password.",
+    );
 
-  if (accessSuspended)
+  if (accessSuspended || (loading && !session))
     return (
       <Box sx={{ p: 6 }} role="status">
         <CircularProgress size={28} />
         <Typography sx={{ mt: 2 }}>
-          {logoutInProgress.current ? "Signing out…" : "Updating workspace access…"}
+          {mutationInProgress.current ? "Updating your account…" : "Opening your workspace…"}
         </Typography>
-      </Box>
-    );
-  if (loading && !session)
-    return (
-      <Box sx={{ p: 6 }} role="status">
-        <CircularProgress size={28} />
-        <Typography sx={{ mt: 2 }}>Opening your workspace…</Typography>
       </Box>
     );
   if (!session?.authenticated)
     return (
-      <Box sx={{ maxWidth: 600, mx: "auto", pt: 12, px: 3 }}>
-        <Typography variant="h4" sx={{ mb: 2 }}>
-          Agentic Review
-        </Typography>
-        <Alert severity={error ? "error" : "info"}>
-          {error ?? "Sign in to inspect investigations and prepare actions."}
-        </Alert>
-        <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-          <Button variant="contained" onClick={() => void login()}>
-            Sign in
-          </Button>
-          <Button onClick={() => void refresh()}>Retry connection</Button>
-        </Stack>
-      </Box>
+      <PasswordSignInForm
+        onLogin={login}
+        onRetry={refresh}
+        busy={signingIn}
+        message={notice?.message}
+        severity={notice?.severity}
+      />
     );
   return (
-    <SessionContext.Provider value={{ session, refresh, logout }}>
+    <SessionContext.Provider value={{ session, refresh, logout, changePassword, requireSignIn }}>
       <Box id="dashboard-session" key={sessionIdentity(session)}>
-        {error && (
-          <Alert severity="error" onClose={() => setError(undefined)}>
-            {error}
-          </Alert>
+        {notice && (
+          <Snackbar open anchorOrigin={{ vertical: "top", horizontal: "center" }}>
+            <Alert severity={notice.severity} onClose={() => setNotice(undefined)}>
+              {notice.message}
+            </Alert>
+          </Snackbar>
         )}
         {children}
       </Box>

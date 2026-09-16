@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
+import { InvestigationPasswordStore } from "../../dist/investigation/password-store.js";
 import { loadInvestigationRuntimeConfig } from "../../dist/investigation/runtime-config.js";
 import { createInvestigationRuntime } from "../../dist/investigation/runtime-main.js";
 
@@ -10,6 +11,7 @@ const applications: FastifyInstance[] = [];
 const directories: string[] = [];
 const origin = "http://127.0.0.1:8000";
 const host = "127.0.0.1:8000";
+const password = "Synthetic runtime administrator password";
 
 afterEach(async () => {
   for (const app of applications.splice(0)) await app.close();
@@ -17,7 +19,7 @@ afterEach(async () => {
     await rm(directory, { recursive: true, force: true });
 });
 
-async function fixture() {
+async function fixture(seedAccount = true) {
   const directory = await mkdtemp(join(tmpdir(), "investigation-runtime-"));
   directories.push(directory);
   const dashboard = join(directory, "dashboard");
@@ -30,18 +32,23 @@ async function fixture() {
     INVESTIGATION_DATABASE_PATH: join(directory, "investigation.sqlite"),
     INVESTIGATION_AUTH_DATABASE_PATH: join(directory, "auth.sqlite"),
     INVESTIGATION_DASHBOARD_DIRECTORY: dashboard,
-    INVESTIGATION_OPERATORS_JSON: JSON.stringify([
-      {
-        id: "operator-1",
-        subject: "operator-1",
+    INVESTIGATION_BOOTSTRAP_ADMIN_USERNAME: "fixture-admin",
+    INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD: password,
+  });
+  if (seedAccount) {
+    const accounts = new InvestigationPasswordStore(config.authDatabasePath);
+    try {
+      await accounts.initializeBootstrap({
+        username: "fixture-admin",
+        password,
         displayName: "Test Operator",
         repositoryIds: ["repo-1"],
-        permissions: ["repository:manage"],
-        actionCapabilities: [],
-        allowRepositoryExecution: false,
-      },
-    ]),
-  });
+        permissions: ["repository:manage", "task:create"],
+      });
+    } finally {
+      accounts.close();
+    }
+  }
   return config;
 }
 
@@ -75,7 +82,7 @@ describe("production investigation runtime assembly", () => {
       method: "POST",
       url: "/api/auth/login",
       headers: { host, origin },
-      payload: {},
+      payload: { username: "fixture-admin", password },
     });
     expect(login.statusCode).toBe(200);
     const cookie = login.cookies.map((entry) => `${entry.name}=${entry.value}`).join("; ");
@@ -145,7 +152,6 @@ describe("production investigation runtime assembly", () => {
 
   it("connects authenticated read-only import to the worker's complete frozen Issue input", async () => {
     const config = await fixture();
-    const configuredOperator = config.operators[0]!;
     const workerToken = "Q".repeat(43);
     const upstream = {
       number: 7,
@@ -160,7 +166,6 @@ describe("production investigation runtime assembly", () => {
       {
         ...config,
         github: { token: "synthetic-read-token", expectedGitHubUserId: 55 },
-        operators: [{ ...configuredOperator, permissions: ["repository:manage", "task:create"] }],
         workers: [{ id: "worker-1", token: workerToken, repositoryIds: ["repo-1"] }],
       },
       {
@@ -202,7 +207,7 @@ describe("production investigation runtime assembly", () => {
       method: "POST",
       url: "/api/auth/login",
       headers: { host, origin },
-      payload: {},
+      payload: { username: "fixture-admin", password },
     });
     const cookie = login.cookies.map((entry) => `${entry.name}=${entry.value}`).join("; ");
     const headers = { host, origin, cookie };
@@ -248,5 +253,15 @@ describe("production investigation runtime assembly", () => {
       source: null,
     });
     expect(calls).toHaveLength(5);
+  });
+
+  it("refuses to start an empty account database without explicit bootstrap credentials", async () => {
+    const config = await fixture(false);
+    await expect(
+      createInvestigationRuntime(
+        { ...config, auth: { ...config.auth, bootstrapAdmin: undefined } },
+        { logger: false },
+      ),
+    ).rejects.toMatchObject({ code: "bootstrap_required" });
   });
 });

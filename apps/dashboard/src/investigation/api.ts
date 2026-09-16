@@ -17,8 +17,15 @@ import {
   Sha256Schema,
 } from "@agentic-review/contracts";
 import { type Static, Type } from "@sinclair/typebox";
+import { authApi } from "./auth-api";
 import { createSampleInvestigationApi } from "./sample-adapter";
-import { createHttpTransport, type InvestigationTransport, queryString } from "./transport";
+import { createSessionScopedSampleApi } from "./sample-workspace-access";
+import {
+  createHttpTransport,
+  type InvestigationTransport,
+  notifyInvestigationSessionExpired,
+  queryString,
+} from "./transport";
 
 const object = <T extends Parameters<typeof Type.Object>[0]>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -130,5 +137,9 @@ export function createInvestigationApi(transport: InvestigationTransport) {
 export type InvestigationApi = ReturnType<typeof createInvestigationApi>;
 export const investigationApi: InvestigationApi =
   process.env.NODE_ENV === "development"
-    ? createSampleInvestigationApi()
+    ? createSessionScopedSampleApi(
+        createSampleInvestigationApi(),
+        () => authApi.session(),
+        notifyInvestigationSessionExpired,
+      )
     : createInvestigationApi(createHttpTransport());

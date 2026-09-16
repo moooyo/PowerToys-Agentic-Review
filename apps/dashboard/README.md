@@ -20,6 +20,8 @@ source files do not provide a compatibility API or a migration path.
 | `/tasks` | Lists tasks; `taskId` opens attempts, the saved checkpoint, the latest report, and linked tasks. |
 | `/reports` | Opens the immutable report identified by `reportId`; reached from an item or task. |
 | `/repositories` | Lists repositories shared with the account and offers scoped PR/Issue import when permitted. |
+| `/account` | Lets the signed-in user change their own password. |
+| `/accounts` | Lets administrators list, create, update, disable, and reset workspace accounts. |
 
 `/` and `/work-items` redirect to `/pull-requests`. The `repositoryId` query
 parameter preserves repository selection. A report link can also specify
@@ -116,9 +118,12 @@ sample data or fabricated success.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/auth/session` | Read the authenticated identity, repository grants, permissions, and action capabilities. |
-| `POST /api/auth/login` | Start loopback or OIDC sign-in. |
+| `POST /api/auth/login` | Sign in with a username and password. |
 | `POST /api/auth/logout` | End the session. |
-| `GET /api/auth/callback` | Complete the server's OIDC callback. |
+| `POST /api/auth/password` | Change the current account's password and revoke its sessions. |
+| `GET /api/accounts` and `POST /api/accounts` | List or create accounts as an administrator. |
+| `POST /api/accounts/:id/update` | Update an account's enabled state, administrator status, and explicit access grants using its version. |
+| `POST /api/accounts/:id/password` | Reset an account password as an administrator using its version. |
 | `GET /api/repositories` | List accessible repositories. |
 | `POST /api/repositories/:id/import-work-item` | Import a PR or Issue snapshot and complete comment history through read-only upstream requests. |
 | `GET /api/work-items` and `GET /api/work-items/:id` | Read registered items. |
@@ -135,8 +140,34 @@ sample data or fabricated success.
 | `POST /api/action-intents/:id/confirm` | Confirm the reviewed version and payload digest. |
 | `POST /api/action-intents/:id/reconcile` | Resolve an executing or unknown submission from its existing receipt. |
 
+Sign-in uses the workspace's built-in username and password system. There is no
+third-party sign-in entry or public registration. Usernames are normalized by
+trimming whitespace and converting to lowercase; canonical usernames use 3-64
+ASCII letters, digits, periods, underscores, or hyphens and start with a letter
+or digit. New passwords require 15-128 characters. Passwords are case-sensitive
+and are not trimmed.
+
+`isAdmin` controls the Accounts navigation entry and page. The server separately
+enforces account-administration authorization. Administrator status does not
+implicitly grant repository access, business permissions, or action capabilities.
+Account forms retain an explicit version for updates and resets. A conflict
+requires refreshing and reviewing the current account before trying again;
+the dashboard does not silently overwrite a concurrent administrator's changes.
+
+Password fields use the appropriate `username`, `current-password`, and
+`new-password` autocomplete attributes. They are held only in form memory and
+cleared after submission, including failures. The dashboard does not write
+passwords to URLs, `localStorage`, `sessionStorage`, query caches, logs, or
+account/session response objects.
+Changing one's password revokes the account's sessions and returns to sign-in.
+Resetting one's own password as an administrator also requires signing in again.
+Successful sign-in preserves the current protected page URL.
+
 Repository and operation authorization comes from the authenticated server
-session. Logout immediately removes protected views and suspends outstanding and
+session. A protected API's `401` response clears the old identity and cached
+workspace and presents sign-in. A rejected login does not start a session-refresh
+loop. Sessions are rechecked on window focus and at their recorded expiration.
+Logout immediately removes protected views and suspends outstanding and
 new investigation requests before clearing the cache. Late session responses
 cannot restore a signed-out identity. Changes to repository grants or action
 permissions replace the protected workspace and its cached data. If logout
@@ -151,15 +182,27 @@ of the production bundle does not supply these backend endpoints.
 
 ## Development preview
 
-Only `NODE_ENV=development` selects `createSampleInvestigationApi()`. The sample
-factory uses the pure shared `createInvestigationPreview` helper and owns isolated
-in-memory state. Production pages and the API selector use static imports; sample
+Only `NODE_ENV=development` selects the in-memory account and investigation
+adapters. Development starts signed out and clearly displays the public sample
+credentials: username `demo`, password `Demo-password-2026!`. These credentials
+exist only for the synthetic preview; they are not production bootstrap or
+deployment credentials. Login, logout, password changes, and administrator
+account forms operate on the in-memory example account store. Logging out really
+ends the sample session. Reloading resets the store and the demo password.
+The sample workspace facade applies each signed-in account's exact repository
+grants and business permissions, including ownership of prepared actions. Losing
+the sample session removes access to the reports until the user signs in again.
+
+The investigation sample factory uses the pure shared
+`createInvestigationPreview` helper and owns isolated in-memory state. Production
+pages and the API selector use static imports; sample
 initialization remains inside the removable development branch. Do not add
 dynamic loaders, eagerly instantiate sample state at module scope, or import
 test-only bridges from production modules.
 
 The repository selector contains `moooyo/PowerToys` as `repo-powertoys-fork`.
-Open `/pull-requests?repositoryId=repo-powertoys-fork` to inspect these five
+After signing in with the demo account, open
+`/pull-requests?repositoryId=repo-powertoys-fork` to inspect these five
 synthetic investigations:
 
 | Sample | Behavior to inspect |
@@ -215,7 +258,9 @@ pnpm --filter @agentic-review/dashboard build:only
 Also run the repository's production-source boundary checks when changing
 imports, entry points, or preview helpers. Browser verification should cover both
 development samples and the production bundle with a real test session, including
-report pagination, preparation versus confirmation, logout, and narrow layouts.
+password login and failure handling, session expiration, account access changes,
+self-service password changes, administrator conflicts and resets, report
+pagination, preparation versus confirmation, logout, and narrow layouts.
 If `test-env` is unavailable, report verification as blocked; do not fall back to
 local testing.
 

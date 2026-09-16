@@ -6,5 +6,7 @@ export default [
   { path: "/tasks", name: "Tasks", component: "./InvestigationTasks" },
   { path: "/reports", name: "Report", hideInMenu: true, component: "./InvestigationReport" },
   { path: "/repositories", name: "Repositories", component: "./InvestigationRepositories" },
+  { path: "/account", name: "My account", component: "./MyAccount" },
+  { path: "/accounts", name: "Accounts", component: "./Accounts", adminOnly: true },
   { path: "/*", hideInMenu: true, component: "./NotFound" },
 ];

@@ -13,6 +13,7 @@
     "clean": "node ./scripts/clean-build-output.mjs",
     "dev": "node --enable-source-maps dist/main.js",
     "start": "node --enable-source-maps dist/main.js",
+    "accounts:reset-admin": "node --enable-source-maps dist/investigation/password-admin-main.js",
     "test": "pnpm run build && pnpm run test:only",
     "test:only": "vitest run",
     "typecheck": "pnpm run prepare:workspace-dependencies && pnpm run typecheck:only",

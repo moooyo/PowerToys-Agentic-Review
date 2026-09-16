@@ -2,8 +2,6 @@ import { mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import fastifyStatic from "@fastify/static";
 import type { FastifyInstance } from "fastify";
-import type { OperatorOidcClient } from "../security/operator-auth.js";
-import { createOperatorOidcClient } from "../security/operator-auth-oidc.js";
 import { buildInvestigationApp } from "./app.js";
 import { InvestigationGitHubTransport } from "./github-transport.js";
 import { InvestigationRuntimeAuth } from "./runtime-auth.js";
@@ -20,7 +18,6 @@ import { InvestigationStore } from "./store.js";
 import type { InvestigationActionTransport } from "./types.js";
 
 export interface InvestigationRuntimeDependencies {
-  readonly oidc?: OperatorOidcClient;
   readonly actionTransport?: InvestigationActionTransport;
   readonly logger?: false;
   readonly sourceImportFetch?: typeof globalThis.fetch;
@@ -48,9 +45,6 @@ export async function createInvestigationRuntime(
       "The dashboard bundle is missing. Build the dashboard and configure INVESTIGATION_DASHBOARD_DIRECTORY.",
     );
   }
-  const oidc =
-    dependencies.oidc ??
-    (config.oidc === undefined ? undefined : await createOperatorOidcClient(config.oidc));
   if (config.databasePath !== ":memory:")
     mkdirSync(dirname(config.databasePath), { recursive: true });
   const store = new InvestigationStore(config.databasePath);
@@ -58,7 +52,8 @@ export async function createInvestigationRuntime(
   let app: FastifyInstance | undefined;
   let reaper: NodeJS.Timeout | undefined;
   try {
-    auth = new InvestigationRuntimeAuth(config, oidc);
+    auth = new InvestigationRuntimeAuth(config);
+    await auth.initialize();
     const sourceImporter = new InvestigationSourceImporter({
       store,
       ...(config.github === undefined ? {} : { github: config.github }),
@@ -89,7 +84,14 @@ export async function createInvestigationRuntime(
       ...(config.https === undefined ? {} : { https: config.https }),
       logger: dependencies.logger ?? {
         level: "info",
-        redact: ["req.headers.authorization", "req.headers.cookie", "res.headers['set-cookie']"],
+        redact: [
+          "req.headers.authorization",
+          "req.headers.cookie",
+          "res.headers['set-cookie']",
+          "req.body.password",
+          "req.body.currentPassword",
+          "req.body.newPassword",
+        ],
       },
       ...(actionTransport === undefined ? {} : { actionTransport }),
     });

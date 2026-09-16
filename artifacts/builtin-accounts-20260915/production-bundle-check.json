@@ -1,0 +1,18 @@
+{
+  "snapshot": "snapshot-002",
+  "checkedFiles": [
+    {
+      "path": "apps/dashboard/dist/assets/index-eSXsDMEj.js",
+      "bytes": 929026,
+      "sha256": "822bb12f1e842d8a22842da0981b2be00a2f7f415c7a77cb5766e1257a90ef1b"
+    }
+  ],
+  "excludedDevelopmentMarkers": {
+    "Demo-password-2026!": [],
+    "sample-operator": [],
+    "Public demo account:": [],
+    "Fill demo credentials": [],
+    "Development Operator": []
+  },
+  "status": "passed"
+}

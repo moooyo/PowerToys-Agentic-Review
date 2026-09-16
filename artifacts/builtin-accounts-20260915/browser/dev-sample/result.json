@@ -1,0 +1,843 @@
+{
+  "mode": "development-sample",
+  "startedAt": "2026-09-15T15:25:20.183Z",
+  "status": "passed",
+  "actions": [
+    {
+      "name": "Open /account while signed out",
+      "at": "2026-09-15T15:25:22.831Z"
+    },
+    {
+      "name": "Fill public demo credentials",
+      "at": "2026-09-15T15:25:22.889Z"
+    },
+    {
+      "name": "Sign in with demo account",
+      "at": "2026-09-15T15:25:23.027Z"
+    },
+    {
+      "name": "Change own password and observe forced sign-out",
+      "at": "2026-09-15T15:25:23.153Z"
+    },
+    {
+      "name": "Old password rejected within same SPA session",
+      "at": "2026-09-15T15:25:23.278Z"
+    },
+    {
+      "name": "New password accepted within same SPA session",
+      "at": "2026-09-15T15:25:23.408Z"
+    },
+    {
+      "name": "Sign out and observe signed-out confirmation",
+      "at": "2026-09-15T15:25:23.497Z"
+    }
+  ],
+  "checks": {
+    "initiallySignedOut": true,
+    "developmentSampleWarning": true,
+    "demoUsernameFilled": true,
+    "demoPasswordFilled": true,
+    "demoLoginSucceeded": true,
+    "passwordChangeSignsOut": true,
+    "oldPasswordRejected": true,
+    "failedPasswordCleared": true,
+    "newPasswordAccepted": true,
+    "accountPasswordFieldsEmpty": true,
+    "logoutSucceeded": true,
+    "noApiRequests": true,
+    "noExternalRequests": true,
+    "singleDocumentLoad": true,
+    "noPageErrors": true,
+    "noConsoleErrors": true,
+    "noRequestFailures": true,
+    "noHttpErrors": true
+  },
+  "console": [
+    {
+      "type": "debug",
+      "text": "[vite] connecting..."
+    },
+    {
+      "type": "debug",
+      "text": "[vite] connected."
+    },
+    {
+      "type": "info",
+      "text": "%cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold"
+    }
+  ],
+  "pageErrors": [],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/account",
+      "status": 200,
+      "type": "document",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@vite/client",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/main.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@react-refresh",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/@fontsource+roboto@5.3.0/node_modules/@fontsource/roboto/400.css",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/@fontsource+roboto@5.3.0/node_modules/@fontsource/roboto/500.css",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/@fontsource+roboto@5.3.0/node_modules/@fontsource/roboto/700.css",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/@fontsource+roboto-mono@5.3.0/node_modules/@fontsource/roboto-mono/400.css",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/react-dom_client.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/app.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/react_jsx-dev-runtime.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@mui_icons-material.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@mui_material.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@tanstack_react-query.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/react.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/react-router-dom.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/config/routes.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/accounts-page.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/my-account.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/report-workspace.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/repositories-page.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/repository-scope.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/session.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/task-workspace.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/pages/Issues/index.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/pages/PullRequests/index.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/theme.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/global.css",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/vite@8.2.2_@types+node@24.13.3_esbuild@0.28.2_jiti@2.7.0_less@4.9.0_supports-color@8.1.1__terser@5.51.2/node_modules/vite/dist/client/env.mjs",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/rolldown-runtime-DC62tzP2.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/react_jsx-runtime.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/react-dom.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/index.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/account-form.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/action-panel.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/api.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/auth-api.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/transport.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@sinclair_typebox_value.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/report-sections.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@mui_icons-material_DownloadRounded.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@mui_icons-material_RefreshRounded.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/feedback-selection.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/report-state.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/import-work-item.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/components/ui/index.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/resume-task.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/work-items-page.tsx",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/cli-model-execution.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/common.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/configuration-audit.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/dashboard.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/dashboard-reproduction.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/dashboard-runs.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/dashboard-runs-action.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-adjudication.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-assessments.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-batches.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-cases.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-evidence.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-execution.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-queries.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-reproduction.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-results.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-scoring.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-source.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evaluation-suites.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/evidence-assets.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/execution-evidence.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/finding-dispositions.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/github.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/investigation.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/investigation-auth.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/investigation-execution.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/investigation-preview.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/investigation-source.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/issue-reproduction.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/job-admission.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/job-envelope.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/notifications.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/operator-access.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/platform-configuration.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/publication.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/review-run.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/review-run-decisions.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/scheduling.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/scheduling-diagnostics.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/scheduling-policy.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/states.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/ui-observation.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/ui-scenarios.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/validation-job.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/validation-report.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/validation-summary-input.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/worker.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@sinclair_typebox.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/sample-adapter.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/sample-workspace-access.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/src/investigation/sample-auth.ts",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/createSvgIcon-DqCSLmiG.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@mui_icons-material_ExpandMoreRounded.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/extends-undefined-78Fbrq-W.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/node_modules/.vite/deps/@mui_icons-material_InboxOutlined.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/packages/contracts/dist/model-summary-input-reference.js",
+      "status": 200,
+      "type": "script",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/@fontsource+roboto@5.3.0/node_modules/@fontsource/roboto/files/roboto-latin-400-normal.woff2",
+      "status": 200,
+      "type": "font",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/@fontsource+roboto@5.3.0/node_modules/@fontsource/roboto/files/roboto-latin-500-normal.woff2",
+      "status": 200,
+      "type": "font",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/@fontsource+roboto@5.3.0/node_modules/@fontsource/roboto/files/roboto-latin-700-normal.woff2",
+      "status": 200,
+      "type": "font",
+      "sameOrigin": true
+    },
+    {
+      "method": "GET",
+      "path": "/@fs/var/tmp/powertoys-builtin-account-auth-20260915-0a8470c5ab3842dc8a5407c579e2a1e6/workspaces/snapshot-002/node_modules/.pnpm/@fontsource+roboto-mono@5.3.0/node_modules/@fontsource/roboto-mono/files/roboto-mono-latin-400-normal.woff2",
+      "status": 200,
+      "type": "font",
+      "sameOrigin": true
+    }
+  ],
+  "requestFailures": [],
+  "screenshot": "account-after-password-change.png",
+  "cleanup": {
+    "browserClosed": true,
+    "viteStopped": true
+  },
+  "finishedAt": "2026-09-15T15:25:23.557Z",
+  "summary": {
+    "checksPassed": 18,
+    "checksTotal": 18,
+    "apiRequestCount": 0,
+    "totalRequests": 108,
+    "pageErrorCount": 0,
+    "consoleErrorCount": 0
+  }
+}

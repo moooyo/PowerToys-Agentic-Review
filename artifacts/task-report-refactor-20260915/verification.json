@@ -174,17 +174,11 @@
     "priorScenarioRegressionSnapshot": "snapshot-004"
   },
   "roundtrip": {
-    "logEntries": [
-      "\u2713 src/investigation/worker-roundtrip.test.ts (1 test) 3094ms"
-    ],
+    "logEntries": ["\u2713 src/investigation/worker-roundtrip.test.ts (1 test) 3094ms"],
     "scope": "The real isolated Server and Worker protocol test resumed 137 durable synthetic hypotheses after interruption and Server restart, sealed the report, and paged the complete large result."
   },
   "sharedDist": {
-    "copiedToLocal": [
-      "packages/contracts/dist",
-      "packages/domain/dist",
-      "packages/codex/dist"
-    ],
+    "copiedToLocal": ["packages/contracts/dist", "packages/domain/dist", "packages/codex/dist"],
     "archiveSha256": "53563583863257b078af38f57c1b9f759f1037e4440483befe69e614784da119",
     "files": 288,
     "matchesFinalRootBuild": true,

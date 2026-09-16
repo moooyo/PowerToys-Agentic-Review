@@ -1,5 +1,29 @@
 # Implementation Status
 
+## Built-in accounts, 2026-09-15
+
+Application-owned username/password authentication is implemented. The production entry uses
+password mode with first-administrator initialization, login/logout, account management, password
+changes and resets, session revocation, and explicit repository/action permissions. Administrators
+can recover access through the offline reset tool. There is no default production password.
+The [account design](./design/2026-09-15-built-in-accounts.md) records the behavior and boundaries.
+Third-party identity integration, dedicated PowerToys UI scenarios, and model-quality evaluation
+are outside this delivery, following the user's scope decision.
+
+The final isolated `test-env` snapshot passed **11,403 tests** across the three affected packages,
+with **one existing skip** and **zero failures**: Contracts 1,666, Dashboard 3,735, and Server 6,002.
+All six package type checks and the complete root build passed. Production browser verification
+passed 12 real HTTP/password-account flows; the development preview passed 18 checks. Expected
+401/403/409 outcomes were tested, with zero unhandled page errors, unexpected console errors,
+or external requests. Desktop and 390-pixel forms were inspected. Temporary browser services
+and synthetic account databases were removed after verification.
+
+See the [account verification summary](../artifacts/builtin-accounts-20260915/summary.md) and
+[receipt](../artifacts/builtin-accounts-20260915/verification.json) for the exact frozen source,
+commands, source manifest, formatting checks, and evidence. Documentation closeout follows the
+verified code snapshot. Earlier Task/Report receipts retain their own scope; this delivery did not
+run real models, PowerToys-specific UI scenarios, or real GitHub mutations.
+
 ## Task / Report refactor, 2026-09-15
 
 The production Server, Windows Worker, and Dashboard entry points now select the native
@@ -276,22 +300,23 @@ authorize writes to actual repository PRs or issues.
 - **Worker deployment:** accept full Worker `main.ts` startup and consecutive tasks on the intended
   Windows VM, including account/session setup, credentials, restart, cancellation and cleanup.
   M39 accepted component composition with an owned Git transport substitution, not that deployment.
-- **Real PowerToys profile:** complete the intended UI profile, evidence and state restoration.
-  Accepted M26 Web and M34 Notepad++ cases retain their scopes. M42 accepted installation, the
-  Restore/Runner/Settings UI build and seven selected Settings tests, not the full unit-test suite.
-  UI acceptance requires an owned interactive environment and verified state restoration;
-  do not attach to or change the personal PowerToys instance.
-- **Additional model workflows:** accept Issue triage and Windows/Web or other application-specific
-  model-assisted workflows beyond M39 PR/static review and the accepted M40 headless Issue case.
-  Runner/evidence facts remain independent of model advice.
-- **Deployment identities and publication coverage:** complete the intended OIDC/multi-user and
-  repository-specific human/finding workflow acceptance. M41 accepts its exact fork PR review and
-  Issue comment through the production publisher; it does not authorize new targets, content or
-  reruns, or establish every deployed delivery channel. M31 fixtures retain their original scope.
-- **Quality and operational coverage:** use appropriately labeled/adjudicated cases for broader
-  model-quality comparisons, and verify intended workload capacity and evidence retention. M39's
-  provisional results and M40's adjudicated three-case observation have different scopes; neither
-  is a general quality benchmark or proof of full review coverage.
+- **Additional model workflows:** intended real Issue workflows retain their own execution and
+  evidence scope beyond M39 PR/static review and the accepted M40 headless Issue case. The user
+  deferred dedicated PowerToys UI scenarios; computer-use verification can be considered when an
+  actual task requires it. No additional fixed PowerToys scenario suite is required for the
+  account-system delivery. Runner/evidence facts remain independent of model advice.
+- **Publication coverage:** built-in account storage, password verification, administrator setup,
+  session handling, and account permissions are complete within the scope recorded above. OIDC
+  and other third-party identity integrations are deferred and are not current acceptance
+  requirements. Application login remains separate from the configured GitHub API credential.
+  Repository-specific human/finding workflow acceptance still needs its own evidence. M41 accepts
+  its exact fork PR review and Issue comment through the production publisher; it does not
+  authorize new targets, content or reruns, or establish every deployed delivery channel.
+  M31 fixtures retain their original scope.
+- **Operational coverage:** intended workload capacity and evidence retention remain separate
+  deployment concerns. The user removed model-quality evaluation from the current task; no
+  model-ranking or quality-scoring work is required for this delivery. Ordinary software tests,
+  report validation, and evidence/source checks remain part of implementation correctness.
 
 The removed split Worker, WindowsAttempt protected-journal/OS-attestation, provider registry and
 model HTTP relay are retired. Old-version upgrades, resets, conversions and compatibility migrations
