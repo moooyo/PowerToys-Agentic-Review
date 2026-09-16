@@ -9,7 +9,12 @@ import {
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CreateTaskInput, InvestigationApi, PrepareActionInput } from "./api";
+import type {
+  CreateTaskInput,
+  InvestigationApi,
+  PrepareActionInput,
+  UpdateRepositoryWebhookSettingsInput,
+} from "./api";
 import { createSampleInvestigationApi } from "./sample-adapter";
 import { createSampleAuthApi } from "./sample-auth";
 import { createSessionScopedSampleApi } from "./sample-workspace-access";
@@ -90,6 +95,10 @@ function createInput(overrides: Partial<CreateTaskInput> = {}): CreateTaskInput 
   };
 }
 
+function webhookInput(): UpdateRepositoryWebhookSettingsInput {
+  return { version: 0, enabled: true, reviewerUserId: 200, allowedActorUserIds: [100, 101] };
+}
+
 async function feedbackInput(raw: InvestigationApi): Promise<PrepareActionInput> {
   const item = await raw.workItem(workItemId);
   const context = await raw.actionContext(workItemId, reportId);
@@ -162,6 +171,8 @@ describe("sample workspace session and repository access", () => {
     const api = createSessionScopedSampleApi(raw, session, expired);
     const operations: Array<() => Promise<unknown>> = [
       () => api.repositories(),
+      () => api.repositoryWebhookSettings(repositoryId),
+      () => api.updateRepositoryWebhookSettings(repositoryId, webhookInput()),
       () => api.workItems(),
       () => api.workItem(workItemId),
       () => api.importWorkItem(repositoryId, { kind: "pull_request", number: 1 }),
@@ -184,6 +195,30 @@ describe("sample workspace session and repository access", () => {
     expect(session).toHaveBeenCalledTimes(operations.length);
     expect(expired).toHaveBeenCalledTimes(operations.length);
     for (const method of Object.values(raw)) expect(method).not.toHaveBeenCalled();
+  });
+
+  it("allows repository members to read webhook settings and managers to update them", async () => {
+    const raw = createSampleInvestigationApi();
+    const settings = await raw.repositoryWebhookSettings(repositoryId);
+    const reading = vi.spyOn(raw, "repositoryWebhookSettings");
+    const updating = vi.spyOn(raw, "updateRepositoryWebhookSettings");
+    let current = signedIn({ isAdmin: false, permissions: [], actionCapabilities: [] });
+    const api = createSessionScopedSampleApi(raw, async () => current);
+    expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(settings);
+    expect(reading).toHaveBeenCalledWith(repositoryId);
+    await expectDenied(api.updateRepositoryWebhookSettings(repositoryId, webhookInput()));
+    expect(updating).not.toHaveBeenCalled();
+
+    current = signedIn({
+      isAdmin: false,
+      permissions: ["repository:manage"],
+      actionCapabilities: [],
+    });
+    const input = webhookInput();
+    const updated = await api.updateRepositoryWebhookSettings(repositoryId, input);
+    expect(updating).toHaveBeenCalledWith(repositoryId, input);
+    expect(updated).toEqual({ ...input, repositoryId, version: 1, receiverConfigured: false });
+    expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(updated);
   });
 
   it("filters mixed repository, work item, and task lists by current repository grants", async () => {
@@ -243,10 +278,12 @@ describe("sample workspace session and repository access", () => {
     const findings = vi.spyOn(raw, "findings");
     const exportReport = vi.spyOn(raw, "exportReport");
     const context = vi.spyOn(raw, "actionContext");
+    const settings = vi.spyOn(raw, "repositoryWebhookSettings");
     const api = createSessionScopedSampleApi(raw, async () =>
       signedIn({ repositoryIds: [foreignRepositoryId] }),
     );
     for (const operation of [
+      () => api.repositoryWebhookSettings(repositoryId),
       () => api.workItem(workItemId),
       () => api.task(taskId),
       () => api.report(reportId),
@@ -259,6 +296,7 @@ describe("sample workspace session and repository access", () => {
     expect(findings).not.toHaveBeenCalled();
     expect(exportReport).not.toHaveBeenCalled();
     expect(context).not.toHaveBeenCalled();
+    expect(settings).not.toHaveBeenCalled();
   });
 
   it("filters unauthorized nested tasks and reports from an authorized task detail", async () => {
@@ -303,6 +341,7 @@ describe("sample workspace mutation authorization", () => {
     const input = await feedbackInput(raw);
     const intent = await raw.prepareAction(input);
     for (const method of [
+      "updateRepositoryWebhookSettings",
       "importWorkItem",
       "createTask",
       "resumeTask",
@@ -320,6 +359,11 @@ describe("sample workspace mutation authorization", () => {
       method: keyof InvestigationApi;
       run: () => Promise<unknown>;
     }> = [
+      {
+        permission: "repository:manage",
+        method: "updateRepositoryWebhookSettings",
+        run: () => api.updateRepositoryWebhookSettings(repositoryId, webhookInput()),
+      },
       {
         permission: "repository:manage",
         method: "importWorkItem",
@@ -362,6 +406,7 @@ describe("sample workspace mutation authorization", () => {
     const input = await feedbackInput(raw);
     const intent = await raw.prepareAction(input);
     const mutations = [
+      "updateRepositoryWebhookSettings",
       "importWorkItem",
       "createTask",
       "resumeTask",
@@ -375,6 +420,7 @@ describe("sample workspace mutation authorization", () => {
       signedIn({ repositoryIds: [foreignRepositoryId] }),
     );
     for (const operation of [
+      () => api.updateRepositoryWebhookSettings(repositoryId, webhookInput()),
       () => api.importWorkItem(repositoryId, { kind: "issue", number: 1 }),
       () => api.createTask(createInput()),
       () => api.resumeTask("sample-pr-partial-task", "foreign-resume"),
@@ -646,6 +692,93 @@ describe("sample action context access", () => {
 });
 
 describe("sample workspace isolation and changing sessions", () => {
+  it.each(["sign out", "switch account", "revoke repository"] as const)(
+    "does not return webhook settings after the session changes to %s during a read",
+    async (change) => {
+      const raw = createSampleInvestigationApi();
+      const settings = await raw.repositoryWebhookSettings(repositoryId);
+      let release!: () => void;
+      const paused = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let notifyStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        notifyStarted = resolve;
+      });
+      const reading = vi.spyOn(raw, "repositoryWebhookSettings").mockImplementation(async () => {
+        notifyStarted();
+        await paused;
+        return settings;
+      });
+      let current: InvestigationSession = signedIn();
+      const expired = vi.fn();
+      const api = createSessionScopedSampleApi(raw, async () => current, expired);
+      const sessionExpired = change !== "revoke repository";
+      const denied = expectDenied(
+        api.repositoryWebhookSettings(repositoryId),
+        sessionExpired ? 401 : 403,
+      );
+      await started;
+      current =
+        change === "sign out"
+          ? signedOut()
+          : change === "switch account"
+            ? signedIn({ id: "other-operator", username: "other" })
+            : signedIn({ repositoryIds: [] });
+      release();
+      await denied;
+      expect(reading).toHaveBeenCalledOnce();
+      expect(expired).toHaveBeenCalledTimes(sessionExpired ? 1 : 0);
+    },
+  );
+
+  it.each(["sign out", "switch account", "revoke repository", "revoke permission"] as const)(
+    "rechecks webhook update access before mutation when the session changes to %s",
+    async (change) => {
+      const raw = createSampleInvestigationApi();
+      const settings = await raw.repositoryWebhookSettings(repositoryId);
+      const updating = vi.spyOn(raw, "updateRepositoryWebhookSettings");
+      let release!: (value: InvestigationSession) => void;
+      const paused = new Promise<InvestigationSession>((resolve) => {
+        release = resolve;
+      });
+      let notifyStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        notifyStarted = resolve;
+      });
+      const session = vi
+        .fn<() => Promise<InvestigationSession>>()
+        .mockResolvedValueOnce(signedIn())
+        .mockImplementationOnce(() => {
+          notifyStarted();
+          return paused;
+        });
+      const expired = vi.fn();
+      const api = createSessionScopedSampleApi(raw, session, expired);
+      const sessionExpired = change === "sign out" || change === "switch account";
+      const denied = expectDenied(
+        api.updateRepositoryWebhookSettings(repositoryId, webhookInput()),
+        sessionExpired ? 401 : 403,
+      );
+      await started;
+      expect(updating).not.toHaveBeenCalled();
+      release(
+        change === "sign out"
+          ? signedOut()
+          : change === "switch account"
+            ? signedIn({ id: "other-operator", username: "other" })
+            : change === "revoke repository"
+              ? signedIn({ repositoryIds: [] })
+              : signedIn({ permissions: [] }),
+      );
+      await denied;
+      expect(session).toHaveBeenCalledTimes(2);
+      expect(updating).not.toHaveBeenCalled();
+      expect(await raw.repositoryWebhookSettings(repositoryId)).toEqual(settings);
+      expect(expired).toHaveBeenCalledTimes(sessionExpired ? 1 : 0);
+    },
+  );
+
   it.each(["sign out", "switch account", "revoke repository", "revoke permission"] as const)(
     "rechecks access after a delayed lookup before mutation when the session changes to %s",
     async (change) => {
@@ -743,6 +876,8 @@ describe("sample workspace isolation and changing sessions", () => {
     const savedCreate = structuredClone(creatingInput);
     const budget = structuredClone(detail.task.budget);
     const savedBudget = structuredClone(budget);
+    const webhook = webhookInput();
+    const savedWebhook = structuredClone(webhook);
     const importing = vi.spyOn(raw, "importWorkItem").mockResolvedValue({
       workItem: importedItem,
       snapshotRef: { id: "snapshot", digest: "a".repeat(64) },
@@ -751,17 +886,23 @@ describe("sample workspace isolation and changing sessions", () => {
     const creating = vi.spyOn(raw, "createTask").mockResolvedValue(detail.task);
     const resuming = vi.spyOn(raw, "resumeTask").mockResolvedValue(detail.task);
     const preparing = vi.spyOn(raw, "prepareAction");
+    const updatingWebhook = vi.spyOn(raw, "updateRepositoryWebhookSettings");
     let release!: (session: InvestigationSession) => void;
     const pendingSession = new Promise<InvestigationSession>((resolve) => {
       release = resolve;
     });
     const api = createSessionScopedSampleApi(raw, () => pendingSession);
     const operations = [
+      api.updateRepositoryWebhookSettings(repositoryId, webhook),
       api.importWorkItem(repositoryId, importInput),
       api.createTask(creatingInput),
       api.resumeTask(detail.task.id, "snapshot-resume", budget),
       api.prepareAction(input),
     ];
+    webhook.version = 99;
+    webhook.enabled = false;
+    webhook.reviewerUserId = null;
+    webhook.allowedActorUserIds.length = 0;
     importInput.kind = "issue";
     importInput.number = 999;
     creatingInput.workItemId = "foreign-work-item";
@@ -774,6 +915,7 @@ describe("sample workspace isolation and changing sessions", () => {
     input.payload.findingIds.push("foreign-finding");
     release(signedIn());
     await Promise.all(operations);
+    expect(updatingWebhook).toHaveBeenCalledWith(repositoryId, savedWebhook);
     expect(importing).toHaveBeenCalledWith(repositoryId, { kind: "pull_request", number: 1 });
     expect(creating).toHaveBeenCalledWith(
       expect.objectContaining({ workItemId: savedCreate.workItemId, budget: savedCreate.budget }),

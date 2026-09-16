@@ -45,6 +45,21 @@ export const WorkItemSchema = object({
 export type Repository = Static<typeof RepositorySchema>;
 export type WorkItem = Static<typeof WorkItemSchema>;
 
+const githubUserId = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
+export const RepositoryWebhookSettingsSchema = object({
+  repositoryId: EntityIdSchema,
+  enabled: Type.Boolean(),
+  reviewerUserId: Type.Union([githubUserId, Type.Null()]),
+  allowedActorUserIds: Type.Array(githubUserId, { uniqueItems: true, maxItems: 1024 }),
+  version: Type.Integer({ minimum: 0 }),
+  receiverConfigured: Type.Boolean(),
+});
+export type RepositoryWebhookSettings = Static<typeof RepositoryWebhookSettingsSchema>;
+export type UpdateRepositoryWebhookSettingsInput = Pick<
+  RepositoryWebhookSettings,
+  "version" | "enabled" | "reviewerUserId" | "allowedActorUserIds"
+>;
+
 export const TaskDetailSchema = object({
   task: InvestigationTaskV1Schema,
   attempts: Type.Array(InvestigationAttemptV1Schema),
@@ -61,6 +76,20 @@ export function createInvestigationApi(transport: InvestigationTransport) {
   return {
     repositories: () =>
       transport("/api/repositories", object({ items: Type.Array(RepositorySchema) })),
+    repositoryWebhookSettings: (repositoryId: string) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/webhook-settings`,
+        RepositoryWebhookSettingsSchema,
+      ),
+    updateRepositoryWebhookSettings: (
+      repositoryId: string,
+      input: UpdateRepositoryWebhookSettingsInput,
+    ) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/webhook-settings`,
+        RepositoryWebhookSettingsSchema,
+        { method: "PUT", body: input },
+      ),
     workItems: (repositoryId?: string, kind?: "pull_request" | "issue") =>
       transport(
         `/api/work-items${queryString({ repositoryId, kind })}`,

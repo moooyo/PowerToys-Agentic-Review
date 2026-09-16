@@ -15,7 +15,9 @@ import {
   type InvestigationApi,
   type PrepareActionInput,
   RepositorySchema,
+  RepositoryWebhookSettingsSchema,
   TaskDetailSchema,
+  type UpdateRepositoryWebhookSettingsInput,
   WorkItemSchema,
 } from "./api";
 import { createSampleInvestigationApi } from "./sample-adapter";
@@ -325,6 +327,116 @@ describe("sample investigation read contracts", () => {
   });
 });
 
+describe("sample repository webhook settings", () => {
+  it("persists versioned settings and rejects stale updates or unknown repositories", async () => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryWebhookSettings(repositoryId);
+    expectSchema(RepositoryWebhookSettingsSchema, initial);
+    expect(initial).toEqual({
+      repositoryId,
+      enabled: false,
+      reviewerUserId: null,
+      allowedActorUserIds: [],
+      version: 0,
+      receiverConfigured: false,
+    });
+    const input = {
+      version: initial.version,
+      enabled: true,
+      reviewerUserId: 200,
+      allowedActorUserIds: [100, 101],
+    };
+    const updated = await api.updateRepositoryWebhookSettings(repositoryId, input);
+    expectSchema(RepositoryWebhookSettingsSchema, updated);
+    expect(updated).toEqual({ ...input, repositoryId, version: 1, receiverConfigured: false });
+    expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(updated);
+    await expect(api.updateRepositoryWebhookSettings(repositoryId, input)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(updated);
+    await expect(api.repositoryWebhookSettings("missing-repository")).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(
+      api.updateRepositoryWebhookSettings("missing-repository", { ...input, version: 1 }),
+    ).rejects.toMatchObject({ status: 404 });
+    expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(updated);
+
+    const disabled = await api.updateRepositoryWebhookSettings(repositoryId, {
+      version: updated.version,
+      enabled: false,
+      reviewerUserId: null,
+      allowedActorUserIds: [],
+    });
+    expectSchema(RepositoryWebhookSettingsSchema, disabled);
+    expect(disabled).toEqual({ ...initial, version: 2 });
+    expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(disabled);
+  });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid numeric reviewer and actor IDs %s without saving them",
+    async (id) => {
+      const api = createSampleInvestigationApi();
+      const initial = await api.repositoryWebhookSettings(repositoryId);
+      const input = {
+        version: 0,
+        enabled: true,
+        reviewerUserId: 200,
+        allowedActorUserIds: [100],
+      };
+      await expect(
+        api.updateRepositoryWebhookSettings(repositoryId, { ...input, reviewerUserId: id }),
+      ).rejects.toMatchObject({ status: 400 });
+      await expect(
+        api.updateRepositoryWebhookSettings(repositoryId, { ...input, allowedActorUserIds: [id] }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(initial);
+    },
+  );
+
+  it.each<{
+    name: string;
+    overrides: Partial<UpdateRepositoryWebhookSettingsInput>;
+  }>([
+    { name: "an enabled configuration without a reviewer", overrides: { reviewerUserId: null } },
+    { name: "an enabled configuration without actors", overrides: { allowedActorUserIds: [] } },
+    { name: "duplicate actors", overrides: { allowedActorUserIds: [100, 100] } },
+    {
+      name: "more than 1024 actors",
+      overrides: { allowedActorUserIds: Array.from({ length: 1025 }, (_, index) => index + 1) },
+    },
+  ])("rejects $name without changing the saved configuration", async ({ overrides }) => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryWebhookSettings(repositoryId);
+    await expect(
+      api.updateRepositoryWebhookSettings(repositoryId, {
+        version: 0,
+        enabled: true,
+        reviewerUserId: 200,
+        allowedActorUserIds: [100],
+        ...overrides,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(initial);
+  });
+
+  it("accepts the safe numeric ID and actor count boundaries", async () => {
+    const api = createSampleInvestigationApi();
+    const actors = Array.from({ length: 1024 }, (_, index) =>
+      index === 1023 ? Number.MAX_SAFE_INTEGER : index + 1,
+    );
+    const updated = await api.updateRepositoryWebhookSettings(repositoryId, {
+      version: 0,
+      enabled: true,
+      reviewerUserId: Number.MAX_SAFE_INTEGER,
+      allowedActorUserIds: actors,
+    });
+    expectSchema(RepositoryWebhookSettingsSchema, updated);
+    expect(updated.reviewerUserId).toBe(Number.MAX_SAFE_INTEGER);
+    expect(updated.allowedActorUserIds).toEqual(actors);
+  });
+});
+
 describe("sample action preparation and confirmation", () => {
   it.each([
     { name: "one suggestion", indices: [0], summary: false },
@@ -496,6 +608,31 @@ describe("sample action preparation and confirmation", () => {
 });
 
 describe("sample data isolation", () => {
+  it("copies webhook settings on input and output and isolates independently created factories", async () => {
+    const firstApi = createSampleInvestigationApi();
+    const secondApi = createSampleInvestigationApi();
+    const initial = await secondApi.repositoryWebhookSettings(repositoryId);
+    const input = {
+      version: 0,
+      enabled: true,
+      reviewerUserId: 200,
+      allowedActorUserIds: [100, 101],
+    };
+    const savedInput = structuredClone(input);
+    const updated = await firstApi.updateRepositoryWebhookSettings(repositoryId, input);
+    const expected = { ...savedInput, repositoryId, version: 1, receiverConfigured: false };
+    input.reviewerUserId = 999;
+    input.allowedActorUserIds.push(999);
+    updated.enabled = false;
+    updated.allowedActorUserIds.length = 0;
+    expect(await firstApi.repositoryWebhookSettings(repositoryId)).toEqual(expected);
+    const retrieved = await firstApi.repositoryWebhookSettings(repositoryId);
+    retrieved.reviewerUserId = null;
+    retrieved.allowedActorUserIds.push(999);
+    expect(await firstApi.repositoryWebhookSettings(repositoryId)).toEqual(expected);
+    expect(await secondApi.repositoryWebhookSettings(repositoryId)).toEqual(initial);
+  });
+
   it("returns independent nested responses for lists, details, reports, pages, and contexts", async () => {
     const api = createSampleInvestigationApi();
     const repositories = await api.repositories();

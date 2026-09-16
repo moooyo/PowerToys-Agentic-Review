@@ -31,6 +31,12 @@ are not alternate production endpoints or migration inputs.
 
 ## Structured investigations
 
+Repositories can enable assignment Webhooks and configure a recipient plus trusted assigning
+GitHub user IDs in the Dashboard. A verified assignment imports a complete frozen source and
+automatically queues a native Task. Delivery deduplication and durable recovery preserve its
+identity across retries. This path does not poll GitHub; see the
+[receiver setup](./apps/server/README.md#listen-for-trusted-assignments).
+
 PR and Issue investigation use a persistent discovery and recheck loop. Every retained finding
 contains its priority, trigger, impact, root cause or explicit uncertainty, evidence, repair
 advice, feedback draft, and final-version recheck. Priorities order presentation; they never

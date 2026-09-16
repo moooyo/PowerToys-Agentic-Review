@@ -16,6 +16,7 @@ import type {
   CreateTaskInput,
   InvestigationApi,
   PrepareActionInput,
+  RepositoryWebhookSettings,
   TaskDetail,
   WorkItem,
 } from "./api";
@@ -281,6 +282,14 @@ function guard(code: string, satisfied: boolean, message: string): Investigation
 
 /** Each adapter owns isolated synthetic state and never dispatches network requests. */
 export function createSampleInvestigationApi(): InvestigationApi {
+  let webhookSettings: RepositoryWebhookSettings = {
+    repositoryId: repository.id,
+    enabled: false,
+    reviewerUserId: null,
+    allowedActorUserIds: [],
+    version: 0,
+    receiverConfigured: false,
+  };
   const workItems = new Map<string, WorkItem>();
   const tasks = new Map<string, TaskDetail>();
   const reports = new Map<string, InvestigationResultV1>();
@@ -593,6 +602,35 @@ export function createSampleInvestigationApi(): InvestigationApi {
 
   const api: InvestigationApi = {
     repositories: async () => ({ items: [structuredClone(repository)] }),
+    repositoryWebhookSettings: async (repositoryId) => {
+      if (repositoryId !== repository.id)
+        throw new InvestigationHttpError(404, "The sample repository was not found.");
+      return structuredClone(webhookSettings);
+    },
+    updateRepositoryWebhookSettings: async (repositoryId, input) => {
+      if (repositoryId !== repository.id)
+        throw new InvestigationHttpError(404, "The sample repository was not found.");
+      if (input.version !== webhookSettings.version)
+        throw new InvestigationHttpError(409, "The sample webhook settings changed.");
+      const validId = (id: number) => Number.isSafeInteger(id) && id > 0;
+      if (
+        (input.reviewerUserId !== null && !validId(input.reviewerUserId)) ||
+        input.allowedActorUserIds.some((id) => !validId(id)) ||
+        input.allowedActorUserIds.length > 1024 ||
+        new Set(input.allowedActorUserIds).size !== input.allowedActorUserIds.length ||
+        (input.enabled && (input.reviewerUserId === null || input.allowedActorUserIds.length === 0))
+      ) {
+        throw new InvestigationHttpError(400, "The sample webhook configuration is invalid.");
+      }
+      webhookSettings = {
+        ...webhookSettings,
+        enabled: input.enabled,
+        reviewerUserId: input.reviewerUserId,
+        allowedActorUserIds: [...input.allowedActorUserIds],
+        version: webhookSettings.version + 1,
+      };
+      return structuredClone(webhookSettings);
+    },
     workItems: async (repositoryId, kind) => ({
       items: structuredClone(
         [...workItems.values()].filter(

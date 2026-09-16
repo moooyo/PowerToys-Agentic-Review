@@ -1,8 +1,10 @@
 import { mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import fastifyStatic from "@fastify/static";
+import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import { buildInvestigationApp } from "./app.js";
+import { requireCondition } from "./errors.js";
 import { InvestigationGitHubTransport } from "./github-transport.js";
 import { InvestigationRuntimeAuth } from "./runtime-auth.js";
 import {
@@ -16,6 +18,9 @@ import {
 } from "./source-import.js";
 import { InvestigationStore } from "./store.js";
 import type { InvestigationActionTransport } from "./types.js";
+import { registerInvestigationWebhookRoute } from "./webhook-http.js";
+import { InvestigationWebhookIntake } from "./webhook-intake.js";
+import { InvestigationWebhookSettings } from "./webhook-settings.js";
 
 export interface InvestigationRuntimeDependencies {
   readonly actionTransport?: InvestigationActionTransport;
@@ -51,6 +56,8 @@ export async function createInvestigationRuntime(
   let auth: InvestigationRuntimeAuth | undefined;
   let app: FastifyInstance | undefined;
   let reaper: NodeJS.Timeout | undefined;
+  let webhook: InvestigationWebhookIntake | undefined;
+  const webhookShutdown = new AbortController();
   try {
     auth = new InvestigationRuntimeAuth(config);
     await auth.initialize();
@@ -73,6 +80,13 @@ export async function createInvestigationRuntime(
             resolveSubject: async (id, repositoryId, workItemId) =>
               resolveInvestigationSubject(store, repositoryId, workItemId, id) ?? null,
           }));
+    const webhookConfig = config.webhook;
+    const runtimeAuth = auth;
+    const webhookSettings = new InvestigationWebhookSettings(
+      store,
+      webhookConfig?.bindings ?? [],
+      webhookConfig !== undefined,
+    );
     app = buildInvestigationApp({
       store,
       authenticateOperator: auth.authenticateOperator,
@@ -95,11 +109,121 @@ export async function createInvestigationRuntime(
         ],
       },
       ...(actionTransport === undefined ? {} : { actionTransport }),
+      registerIngressRoutes: (ingressApp, service) => {
+        const params = Type.Object(
+          { id: Type.String({ minLength: 1, maxLength: 256 }) },
+          { additionalProperties: false },
+        );
+        ingressApp.get<{ Params: { id: string } }>(
+          "/api/repositories/:id/webhook-settings",
+          { schema: { params } },
+          async (request, reply) => {
+            const actor = await runtimeAuth.authenticateOperator(request);
+            requireCondition(
+              actor !== null,
+              401,
+              "operator_authentication_required",
+              "Operator authentication is required.",
+            );
+            reply.header("cache-control", "no-store");
+            return webhookSettings.read(actor, request.params.id);
+          },
+        );
+        ingressApp.put<{
+          Params: { id: string };
+          Body: Parameters<InvestigationWebhookSettings["update"]>[2];
+        }>(
+          "/api/repositories/:id/webhook-settings",
+          {
+            schema: {
+              params,
+              body: Type.Object(
+                {
+                  version: Type.Integer({ minimum: 0 }),
+                  enabled: Type.Boolean(),
+                  reviewerUserId: Type.Union([
+                    Type.Null(),
+                    Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+                  ]),
+                  allowedActorUserIds: Type.Array(
+                    Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+                    { maxItems: 1024, uniqueItems: true },
+                  ),
+                },
+                { additionalProperties: false },
+              ),
+            },
+          },
+          async (request, reply) => {
+            const actor = await runtimeAuth.authenticateOperator(request);
+            requireCondition(
+              actor !== null,
+              401,
+              "operator_authentication_required",
+              "Operator authentication is required.",
+            );
+            reply.header("cache-control", "no-store");
+            return webhookSettings.update(actor, request.params.id, request.body);
+          },
+        );
+        if (webhookConfig === undefined) return;
+        const webhookImporter = new InvestigationSourceImporter({
+          store,
+          ...(config.github === undefined ? {} : { github: config.github }),
+          maximumBytes: config.sourceImportMaximumBytes,
+          maximumPages: config.sourceImportMaximumPages,
+          fetch: (input, init) =>
+            (dependencies.sourceImportFetch ?? globalThis.fetch)(input, {
+              ...init,
+              signal: AbortSignal.any([
+                webhookShutdown.signal,
+                ...(init?.signal == null ? [] : [init.signal]),
+              ]),
+            }),
+        });
+        const intake = new InvestigationWebhookIntake({
+          store,
+          config: webhookConfig,
+          service,
+          importer: webhookImporter,
+          settings: webhookSettings,
+          onError: (code) => ingressApp.log.error({ code }, "Webhook task intake needs attention."),
+        });
+        webhook = intake;
+        registerInvestigationWebhookRoute(ingressApp, {
+          secret: webhookConfig.secret,
+          maximumPayloadBytes: webhookConfig.maximumPayloadBytes,
+          accept: (input) => intake.accept(input),
+        });
+        ingressApp.get<{ Params: { deliveryId: string } }>(
+          "/api/github/webhook-deliveries/:deliveryId",
+          {
+            schema: {
+              params: Type.Object(
+                { deliveryId: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }) },
+                { additionalProperties: false },
+              ),
+            },
+          },
+          async (request, reply) => {
+            const actor = await runtimeAuth.authenticateOperator(request);
+            requireCondition(
+              actor !== null,
+              401,
+              "operator_authentication_required",
+              "Operator authentication is required.",
+            );
+            reply.header("cache-control", "no-store");
+            return intake.readReceipt(actor, request.params.deliveryId);
+          },
+        );
+      },
     });
-    const runtimeAuth = auth;
     const runtimeApp = app;
     app.addHook("onClose", async () => {
       if (reaper !== undefined) clearInterval(reaper);
+      webhookShutdown.abort();
+      await webhook?.stop();
       try {
         runtimeAuth.close();
       } finally {
@@ -134,6 +258,7 @@ export async function createInvestigationRuntime(
         .send({ code: "not_found", message: "The requested resource does not exist." });
     });
     await app.ready();
+    webhook?.start();
     reaper = setInterval(() => {
       try {
         runtimeAuth.reapExpired();

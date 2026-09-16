@@ -174,6 +174,24 @@ export function createSessionScopedSampleApi(
       });
     },
 
+    async repositoryWebhookSettings(repositoryId) {
+      const user = await currentUser();
+      authorize(user, repositoryId);
+      const settings = await api.repositoryWebhookSettings(repositoryId);
+      return result(user, settings, repositoryId);
+    },
+
+    updateRepositoryWebhookSettings(repositoryId, input) {
+      const snapshot = structuredClone(input);
+      return (async () => {
+        const user = await currentUser();
+        const grant: Grant = { permission: "repository:manage" };
+        await currentAccess(user, repositoryId, grant);
+        const settings = await api.updateRepositoryWebhookSettings(repositoryId, snapshot);
+        return result(user, settings, repositoryId, grant);
+      })();
+    },
+
     async workItems(repositoryId, kind) {
       const user = await currentUser();
       if (repositoryId !== undefined && !user.repositoryIds.includes(repositoryId))

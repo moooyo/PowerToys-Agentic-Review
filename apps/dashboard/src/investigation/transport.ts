@@ -53,7 +53,7 @@ export function decodeResponse<T extends TSchema>(schema: T, value: unknown): St
 export type InvestigationTransport = <T extends TSchema>(
   path: string,
   schema: T,
-  options?: { method?: "POST"; body?: unknown; signal?: AbortSignal },
+  options?: { method?: "POST" | "PUT"; body?: unknown; signal?: AbortSignal },
 ) => Promise<Static<T>>;
 
 async function requireSuccessfulResponse(response: Response): Promise<void> {

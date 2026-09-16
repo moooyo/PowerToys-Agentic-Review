@@ -1,5 +1,33 @@
 # Implementation Status
 
+## Configurable assignment Webhook intake, 2026-09-16
+
+The native Task runtime now accepts signed `issues.assigned` and `pull_request.assigned`
+deliveries. Each registered repository can configure its listener switch, recipient GitHub user
+ID, and trusted assigning user IDs in the Dashboard. Settings are scoped, versioned, and persisted;
+the receiver secret remains a deployment setting. No repository or user is selected by default,
+and the runtime starts no GitHub polling loop.
+
+Authorized events enter a durable bounded inbox before acknowledgement. Delivery and assignment
+deduplication, renewable processing leases, exact source references, and the native Task transaction
+preserve task identity through retries and service restarts. Current assignment, PR revision,
+repository binding, and configuration grants are checked during preparation and again at the
+Task commit boundary. Recovery of an already committed Task completes its original receipt even
+if the listener is subsequently disabled, without creating work or reading GitHub again.
+
+The designated remote Windows environment passed **583 Server tests in 21 investigation files**
+and **161 Dashboard tests in 13 investigation files**, for **744 passing scoped tests**. Shared
+packages and Server built successfully; Dashboard type checking and production build passed.
+Changed-code Biome checks passed with non-blocking warnings. The initial Dashboard typing error
+and the error-state rendering test failure were corrected and retain their earlier failed receipts;
+reruns are not added to the final test totals.
+
+The acceptance uses isolated databases and injected read-only GitHub responses, including the
+production runtime's Webhook-to-Task-to-Worker claim path. It does not establish a public receiver
+deployment or a live GitHub subscription. No actual repository PR, Issue, or Webhook configuration
+was changed. [Server setup and operations](../apps/server/README.md#listen-for-trusted-assignments)
+describe the receiver secret, GitHub subscription, repository settings, receipts, and recovery.
+
 ## Native Windows investigation delivery, 2026-09-16
 
 The production Server and Worker entry points passed the scoped synthetic Windows lifecycle

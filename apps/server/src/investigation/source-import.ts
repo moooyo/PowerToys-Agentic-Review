@@ -140,6 +140,23 @@ export interface InvestigationSourceImportOptions {
   readonly executionBindings?: readonly InvestigationTrustedExecutionBinding[];
 }
 
+export interface InvestigationSourceImportExpectation {
+  readonly githubWorkItemId: number;
+  readonly assigneeUserId: number;
+  readonly baseSha?: string;
+  readonly headSha?: string;
+}
+
+const sourceImportExpectationSchema = Type.Object(
+  {
+    githubWorkItemId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    assigneeUserId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    baseSha: Type.Optional(GitObjectIdSchema),
+    headSha: Type.Optional(GitObjectIdSchema),
+  },
+  { additionalProperties: false },
+);
+
 function object(value: unknown): JsonObject {
   requireCondition(
     typeof value === "object" && value !== null && !Array.isArray(value),
@@ -391,6 +408,7 @@ export class InvestigationSourceImporter {
     actor: InvestigationOperatorPrincipal,
     repositoryId: string,
     request: { kind: "pull_request" | "issue"; number: number },
+    expectation?: InvestigationSourceImportExpectation,
   ) {
     this.#scope(actor, repositoryId);
     requireCondition(
@@ -407,6 +425,11 @@ export class InvestigationSourceImporter {
       "invalid_import_target",
       "A valid upstream work item kind and number are required.",
     );
+    request = { ...request };
+    if (expectation !== undefined) {
+      this.#validateExpectation(request.kind, expectation);
+      expectation = structuredClone(expectation);
+    }
     const repository = this.options.store.get<InvestigationRepositoryRecord>(
       "repositories",
       repositoryId,
@@ -434,6 +457,7 @@ export class InvestigationSourceImporter {
       "source_kind_mismatch",
       "This number identifies a pull request, not an Issue.",
     );
+    if (expectation !== undefined) this.#verifyAssignmentTarget(upstream, request, expectation);
     const conversation = await this.#comments(
       `${base}/issues/${request.number}/comments`,
       "issue-comment",
@@ -464,6 +488,7 @@ export class InvestigationSourceImporter {
       );
     }
     const after = object((await this.#get(endpoint, budget)).value);
+    if (expectation !== undefined) this.#verifyAssignmentTarget(after, request, expectation);
     requireCondition(
       digest(this.#targetState(after, request.kind)) ===
         digest(this.#targetState(upstream, request.kind)),
@@ -605,6 +630,51 @@ export class InvestigationSourceImporter {
     };
   }
 
+  async verifyAssignment(
+    actor: InvestigationOperatorPrincipal,
+    repositoryId: string,
+    request: { kind: "pull_request" | "issue"; number: number },
+    expectation: InvestigationSourceImportExpectation,
+  ): Promise<void> {
+    this.#scope(actor, repositoryId);
+    requireCondition(
+      Number.isSafeInteger(request.number) &&
+        request.number > 0 &&
+        (request.kind === "issue" || request.kind === "pull_request"),
+      400,
+      "invalid_import_target",
+      "A valid upstream work item kind and number are required.",
+    );
+    this.#validateExpectation(request.kind, expectation);
+    request = { ...request };
+    expectation = structuredClone(expectation);
+    const repository = this.options.store.get<InvestigationRepositoryRecord>(
+      "repositories",
+      repositoryId,
+    );
+    requireCondition(
+      repository !== undefined,
+      404,
+      "repository_not_found",
+      "The repository is not registered.",
+    );
+    const budget = { bytes: 0, pages: 0 };
+    await this.#verifyRepository(repository, budget);
+    const endpoint = `${sourcePath(repository)}/${request.kind === "pull_request" ? "pulls" : "issues"}/${request.number}`;
+    this.#verifyAssignmentTarget(
+      object((await this.#get(endpoint, budget)).value),
+      request,
+      expectation,
+    );
+    const currentRepository = this.options.store.get("repositories", repositoryId);
+    requireCondition(
+      currentRepository !== undefined && digest(currentRepository) === digest(repository),
+      409,
+      "repository_changed",
+      "The repository configuration changed during assignment verification.",
+    );
+  }
+
   readonly resolveTaskSource = async (
     repository: InvestigationRepositoryRecord,
     workItem: InvestigationWorkItemRecord,
@@ -711,6 +781,65 @@ export class InvestigationSourceImporter {
       "repository_forbidden",
       "This identity has no access to the repository.",
     );
+  }
+
+  #validateExpectation(
+    kind: "pull_request" | "issue",
+    expectation: InvestigationSourceImportExpectation,
+  ): void {
+    requireCondition(
+      Value.Check(sourceImportExpectationSchema, expectation) &&
+        (kind === "pull_request"
+          ? expectation.baseSha !== undefined && expectation.headSha !== undefined
+          : expectation.baseSha === undefined && expectation.headSha === undefined),
+      400,
+      "invalid_source_expectation",
+      "Assignment imports require positive numeric identities and the exact PR base/head revision.",
+    );
+  }
+
+  #verifyAssignmentTarget(
+    upstream: JsonObject,
+    request: { kind: "pull_request" | "issue"; number: number },
+    expectation: InvestigationSourceImportExpectation,
+  ): void {
+    requireCondition(
+      upstream.id === expectation.githubWorkItemId &&
+        upstream.number === request.number &&
+        (request.kind !== "issue" || upstream.pull_request === undefined),
+      409,
+      "source_assignment_target_changed",
+      "The current upstream identity differs from the assigned work item.",
+    );
+    requireCondition(
+      upstream.state === "open" &&
+        (request.kind !== "pull_request" ||
+          (upstream.merged_at == null && upstream.merged !== true)),
+      409,
+      "source_assignment_stale",
+      "The assigned work item is no longer open.",
+    );
+    requireCondition(
+      Array.isArray(upstream.assignees) &&
+        upstream.assignees.some(
+          (entry: unknown) =>
+            typeof entry === "object" &&
+            entry !== null &&
+            "id" in entry &&
+            entry.id === expectation.assigneeUserId,
+        ),
+      409,
+      "source_assignment_missing",
+      "The configured reviewer is no longer assigned to this work item.",
+    );
+    if (request.kind === "pull_request")
+      requireCondition(
+        object(upstream.base).sha === expectation.baseSha &&
+          object(upstream.head).sha === expectation.headSha,
+        409,
+        "source_assignment_revision_changed",
+        "The PR base/head revision changed after the assignment event.",
+      );
   }
 
   async #verifyRepository(

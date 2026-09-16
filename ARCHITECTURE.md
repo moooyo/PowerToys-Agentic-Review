@@ -86,6 +86,21 @@ artifact identity, and digest remain bound across follow-up tasks.
 
 ## Source import and task admission
 
+The production runtime can accept signed `issues.assigned` and `pull_request.assigned` Webhooks.
+Per-repository settings choose the recipient and trusted assigning numeric user IDs; the receiver
+secret remains deployment-owned. A scoped intake principal can import input and create a root
+Task, but has no repository-execution or external-action grants. The receiver does not use the
+legacy Job protocol and starts no GitHub polling loop.
+
+Accepted deliveries enter a durable bounded inbox before HTTP acknowledgement. A leased processor
+checks current assignment and exact PR revisions, saves an immutable source reference and Task
+request, and uses the native Task transaction for input/task/idempotency persistence. Duplicate
+deliveries, equivalent assignments, and post-commit recovery reuse the original work. Frozen
+imports remain exact even when a concurrent import moves the same PR revision's comment snapshot
+pointer. Settings and repository identities are checked again across asynchronous preparation.
+The inbox, assignment claims, and settings use separate namespaces in the existing idempotency
+collection. See the [receiver operations](./apps/server/README.md#listen-for-trusted-assignments).
+
 Operators register exact internal and GitHub numeric repository identities. The production import
 endpoint reads the current PR or Issue and every conversation page, including PR review comments
 and review summaries. It verifies the upstream repository, work item, and final revision before

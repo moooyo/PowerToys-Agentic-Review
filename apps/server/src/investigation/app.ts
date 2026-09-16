@@ -62,6 +62,7 @@ export interface InvestigationAppOptions
   readonly leaseDurationMs?: number;
   readonly https?: { key: string | Buffer; cert: string | Buffer; passphrase?: string };
   readonly logger?: FastifyServerOptions["logger"];
+  readonly registerIngressRoutes?: (app: FastifyInstance, service: InvestigationService) => void;
 }
 
 const idParamsSchema = Type.Object({ id: EntityIdSchema }, { additionalProperties: false });
@@ -476,5 +477,6 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
       await service.workerFinalize(worker(request), request.params.id, request.body),
   );
 
+  options.registerIngressRoutes?.(app, service);
   return app;
 }

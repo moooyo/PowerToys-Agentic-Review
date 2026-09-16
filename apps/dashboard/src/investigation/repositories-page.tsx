@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { investigationApi } from "./api";
 import { ImportWorkItemButton } from "./import-work-item";
 import { Section } from "./report-sections";
+import { RepositoryWebhookSettingsPanel } from "./webhook-settings";
 
 export default function RepositoriesPage() {
   const query = useQuery({
@@ -66,6 +67,7 @@ export default function RepositoriesPage() {
               Open on GitHub
             </Button>
           </Stack>
+          <RepositoryWebhookSettingsPanel repository={repository} />
         </Section>
       ))}
     </Stack>

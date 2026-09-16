@@ -13,6 +13,10 @@ import {
   type InvestigationEvidencePolicy,
 } from "./evidence-store.js";
 import type { InvestigationWorkerPrincipal } from "./types.js";
+import {
+  type InvestigationWebhookConfig,
+  parseInvestigationWebhookConfig,
+} from "./webhook-config.js";
 
 export interface InvestigationWorkerCredential extends InvestigationWorkerPrincipal {
   readonly token: string;
@@ -40,6 +44,7 @@ export interface InvestigationRuntimeConfig {
   readonly workers: readonly InvestigationWorkerCredential[];
   readonly https: { key: string; cert: string; passphrase?: string } | undefined;
   readonly github: { token: string; expectedGitHubUserId: number } | undefined;
+  readonly webhook?: InvestigationWebhookConfig;
   readonly enableExternalWrites: boolean;
   readonly executionBindingsPath: string | undefined;
   readonly sourceImportMaximumBytes: number;
@@ -279,6 +284,18 @@ export function loadInvestigationRuntimeConfig(
   const enableExternalWrites = boolean(environment, "INVESTIGATION_ENABLE_EXTERNAL_WRITES", false);
   if (enableExternalWrites && githubToken === undefined)
     throw new Error("External writes require configured GitHub transport credentials.");
+  const webhook = parseInvestigationWebhookConfig(
+    secret(environment, "INVESTIGATION_GITHUB_WEBHOOK_SECRET"),
+    parseJson(environment, "INVESTIGATION_GITHUB_WEBHOOK_BINDINGS_JSON", undefined),
+    integer(
+      environment,
+      "INVESTIGATION_GITHUB_WEBHOOK_MAXIMUM_BYTES",
+      2 * 1024 * 1024,
+      32 * 1024 * 1024,
+    ),
+  );
+  if (webhook !== undefined && githubToken === undefined)
+    throw new Error("Webhook intake requires GitHub credentials for complete source reads.");
   const databasePath = resolve(
     environment.INVESTIGATION_DATABASE_PATH ?? ".data/investigation.sqlite",
   );
@@ -300,6 +317,7 @@ export function loadInvestigationRuntimeConfig(
     workers,
     https,
     enableExternalWrites,
+    ...(webhook === undefined ? {} : { webhook }),
     executionBindingsPath:
       environment.INVESTIGATION_EXECUTION_BINDINGS_PATH === undefined
         ? undefined

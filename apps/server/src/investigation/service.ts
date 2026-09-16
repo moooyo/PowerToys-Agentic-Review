@@ -22,6 +22,10 @@ import type {
   InvestigationWorkerLease,
 } from "@agentic-review/contracts";
 import {
+  EntityIdSchema,
+  InvestigationCreateTaskRequestV1Schema,
+  InvestigationInputSnapshotV1Schema,
+  Sha256Schema,
   validateInvestigationAnalysisForTask,
   validateInvestigationTask,
 } from "@agentic-review/contracts";
@@ -36,14 +40,18 @@ import {
   restoreCompletedInvestigationForDelivery,
   restoreInvestigationCheckpoint,
 } from "@agentic-review/domain";
+import { FormatRegistry, Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { InvestigationActions } from "./actions.js";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
 import { type InvestigationEvidencePolicy, InvestigationEvidenceStore } from "./evidence-store.js";
 import { constantTimeEqual, encodeCursor, parseCursor } from "./integrity.js";
-import type {
-  InvestigationDirectoryQuery,
-  InvestigationFindingsQuery,
-  InvestigationResumeTaskRequest,
+import {
+  type InvestigationDirectoryQuery,
+  type InvestigationFindingsQuery,
+  InvestigationRepositoryRecordSchema,
+  type InvestigationResumeTaskRequest,
+  InvestigationWorkItemRecordSchema,
 } from "./protocol.js";
 import { assembleInvestigationReport, reportHeader } from "./report.js";
 import type { InvestigationStore } from "./store.js";
@@ -69,6 +77,28 @@ interface FrozenTaskInput {
   execution: InvestigationPlanExecutionBinding | null;
 }
 export type InvestigationPreparedTaskInput = FrozenTaskInput;
+export interface InvestigationImportedTaskSource {
+  readonly workItem: InvestigationWorkItemRecord;
+  readonly snapshotRef: { readonly id: string; readonly digest: string };
+}
+const importedTaskSourceSchema = Type.Object(
+  {
+    workItem: InvestigationWorkItemRecordSchema,
+    snapshotRef: Type.Object(
+      { id: EntityIdSchema, digest: Sha256Schema },
+      { additionalProperties: false },
+    ),
+  },
+  { additionalProperties: false },
+);
+const importedSnapshotSchema = Type.Object(
+  {
+    id: EntityIdSchema,
+    digest: Sha256Schema,
+    inputSnapshot: InvestigationInputSnapshotV1Schema,
+  },
+  { additionalProperties: false },
+);
 interface IdempotencyRecord {
   digest: string;
   entityId: string;
@@ -279,11 +309,54 @@ export class InvestigationService {
     request: InvestigationCreateTaskRequestV1,
     persist = true,
   ): Promise<InvestigationTaskV1> {
+    return this.createTaskWithSource(actor, request, persist);
+  }
+
+  async createImportedTask(
+    actor: InvestigationOperatorPrincipal,
+    request: InvestigationCreateTaskRequestV1,
+    source: InvestigationImportedTaskSource,
+    beforePersist?: () => void,
+  ): Promise<InvestigationTaskV1> {
+    if (!FormatRegistry.Has("date-time"))
+      FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
+    requireCondition(
+      Value.Check(InvestigationCreateTaskRequestV1Schema, request) &&
+        (request.kind === "pr-review" || request.kind === "issue-investigate") &&
+        request.executionMode !== "execute" &&
+        request.parentReportRef === undefined &&
+        request.planRef === undefined,
+      400,
+      "invalid_imported_task_request",
+      "Imported tasks require a root investigation without an executable or parent plan.",
+    );
+    requireCondition(
+      Value.Check(importedTaskSourceSchema, source),
+      409,
+      "imported_source_mismatch",
+      "An imported task requires the complete frozen work item and exact saved snapshot reference.",
+    );
+    return this.createTaskWithSource(
+      actor,
+      structuredClone(request),
+      true,
+      structuredClone(source),
+      beforePersist,
+    );
+  }
+
+  private async createTaskWithSource(
+    actor: InvestigationOperatorPrincipal,
+    request: InvestigationCreateTaskRequestV1,
+    persist: boolean,
+    importedSource?: InvestigationImportedTaskSource,
+    beforePersist?: () => void,
+  ): Promise<InvestigationTaskV1> {
     this.permit(actor, "task:create");
-    const item = this.getWorkItem(actor, request.workItemId);
+    const registeredItem = this.getWorkItem(actor, request.workItemId);
     const repository = this.required<InvestigationRepositoryRecord>(
       "repositories",
-      item.repositoryId,
+      registeredItem.repositoryId,
     );
     requireCondition(
       request.budget === undefined || request.budget.maxReportBytes <= this.maxReportBytes,
@@ -303,10 +376,16 @@ export class InvestigationService {
       );
       return this.task(actor, previous.entityId);
     }
+    const importedInput =
+      importedSource === undefined
+        ? undefined
+        : this.prepareImportedTaskSource(importedSource, registeredItem, repository);
+    const item = importedSource?.workItem ?? registeredItem;
     if (this.options.actionTransport !== undefined) {
       const current = await this.options.actionTransport.readTarget(repository, item, actor);
       requireCondition(
-        current.revisionKey === item.subject.revisionKey,
+        current.revisionKey === item.subject.revisionKey &&
+          (importedSource === undefined || current.state === "open"),
         409,
         "stale_subject",
         "Refresh the work item before investigating its changed upstream revision.",
@@ -591,23 +670,33 @@ export class InvestigationService {
       taskValidation.errors.map((error) => error.message).join(" "),
     );
     const input: InvestigationPreparedTaskInput =
-      this.options.prepareTaskInput === undefined
+      importedInput !== undefined
         ? {
             inputSnapshot: {
-              schemaVersion: "InvestigationInputSnapshotV1" as const,
-              repositoryId: repository.id,
-              workItemId: item.id,
+              ...importedInput,
               subjectRef: subject.id,
               subjectRevisionKey: subject.revisionKey,
-              title: item.title,
-              body: item.body,
-              comments: [],
-              source: null,
             },
             plan,
             execution: null,
           }
-        : await this.options.prepareTaskInput(task, item, plan, actor);
+        : this.options.prepareTaskInput === undefined
+          ? {
+              inputSnapshot: {
+                schemaVersion: "InvestigationInputSnapshotV1" as const,
+                repositoryId: repository.id,
+                workItemId: item.id,
+                subjectRef: subject.id,
+                subjectRevisionKey: subject.revisionKey,
+                title: item.title,
+                body: item.body,
+                comments: [],
+                source: null,
+              },
+              plan,
+              execution: null,
+            }
+          : await this.options.prepareTaskInput(task, item, plan, actor);
     requireCondition(
       input.inputSnapshot.repositoryId === repository.id &&
         input.inputSnapshot.workItemId === item.id &&
@@ -660,13 +749,119 @@ export class InvestigationService {
         );
         return this.task(actor, concurrent.entityId);
       }
+      if (importedSource !== undefined) this.requireImportedSourceCurrent(repository, item);
       this.evidence.requireTaskSources(task, parent ?? null);
+      beforePersist?.();
       this.store.insert("tasks", task.id, task);
       this.evidence.pinParent(task);
       this.store.insert("idempotency", `input:${task.id}`, input);
       this.store.insert("idempotency", key, { digest, entityId: task.id });
       return task;
     });
+  }
+
+  private prepareImportedTaskSource(
+    source: InvestigationImportedTaskSource,
+    registeredItem: InvestigationWorkItemRecord,
+    repository: InvestigationRepositoryRecord,
+  ): InvestigationInputSnapshotV1 {
+    requireCondition(
+      Value.Check(importedTaskSourceSchema, source) &&
+        source.workItem.id === registeredItem.id &&
+        source.workItem.repositoryId === repository.id &&
+        source.workItem.subject.repositoryId === repository.id &&
+        source.workItem.subject.workItemId === source.workItem.id &&
+        (source.workItem.kind === "pull_request"
+          ? source.workItem.subject.kind === "original_pr"
+          : source.workItem.subject.kind === "issue_snapshot"),
+      409,
+      "imported_source_mismatch",
+      "The imported source must retain the registered work item and original subject identities.",
+    );
+    this.requireImportedSourceCurrent(repository, source.workItem);
+    const snapshot = this.store.get<unknown>("sourceSnapshots", source.snapshotRef.id);
+    requireCondition(
+      Value.Check(importedSnapshotSchema, snapshot) &&
+        snapshot.id === source.snapshotRef.id &&
+        snapshot.id === `snapshot:${snapshot.digest}` &&
+        snapshot.digest === source.snapshotRef.digest &&
+        investigationContentDigest(snapshot.inputSnapshot) === snapshot.digest &&
+        snapshot.inputSnapshot.repositoryId === repository.id &&
+        snapshot.inputSnapshot.workItemId === source.workItem.id &&
+        snapshot.inputSnapshot.subjectRef === source.workItem.subject.id &&
+        snapshot.inputSnapshot.subjectRevisionKey === source.workItem.subject.revisionKey &&
+        snapshot.inputSnapshot.title === source.workItem.title &&
+        snapshot.inputSnapshot.body === source.workItem.body &&
+        snapshot.inputSnapshot.source === null,
+      409,
+      "source_snapshot_missing",
+      "The exact complete imported snapshot is missing or no longer matches its content binding.",
+    );
+    const subject = source.workItem.subject;
+    requireCondition(
+      subject.kind === "original_pr"
+        ? subject.revisionKey ===
+            createHash("sha256").update(`${subject.baseSha}\0${subject.headSha}`).digest("hex")
+        : subject.kind === "issue_snapshot" &&
+            subject.snapshotDigest ===
+              investigationContentDigest({
+                title: snapshot.inputSnapshot.title,
+                body: snapshot.inputSnapshot.body,
+                comments: snapshot.inputSnapshot.comments,
+              }),
+      409,
+      "imported_subject_mismatch",
+      "The imported subject revision does not match its frozen source content.",
+    );
+    return structuredClone(snapshot.inputSnapshot);
+  }
+
+  private requireImportedSourceCurrent(
+    repository: InvestigationRepositoryRecord,
+    item: InvestigationWorkItemRecord,
+  ): void {
+    const currentRepository = this.store.get<unknown>("repositories", repository.id);
+    requireCondition(
+      Value.Check(InvestigationRepositoryRecordSchema, currentRepository) &&
+        investigationContentDigest(currentRepository) === investigationContentDigest(repository),
+      409,
+      "repository_changed",
+      "The repository binding changed while the imported task was being prepared.",
+    );
+    const currentItem = this.store.get<unknown>("workItems", item.id);
+    requireCondition(
+      Value.Check(InvestigationWorkItemRecordSchema, currentItem) &&
+        currentItem.id === item.id &&
+        currentItem.repositoryId === repository.id &&
+        currentItem.kind === item.kind &&
+        currentItem.number === item.number &&
+        currentItem.state === "open" &&
+        item.state === "open" &&
+        currentItem.subject.kind === item.subject.kind &&
+        currentItem.subject.repositoryId === repository.id &&
+        currentItem.subject.workItemId === item.id &&
+        currentItem.subject.revisionKey === item.subject.revisionKey &&
+        (currentItem.subject.kind !== "original_pr" ||
+          (item.subject.kind === "original_pr" &&
+            currentItem.subject.id === item.subject.id &&
+            currentItem.subject.baseSha === item.subject.baseSha &&
+            currentItem.subject.headSha === item.subject.headSha)),
+      409,
+      "stale_subject",
+      "The registered work item identity, state, or revision changed after the source was imported.",
+    );
+    requireCondition(
+      this.store.list<InvestigationWorkItemRecord>(
+        "workItems",
+        (entry) =>
+          entry.repositoryId === repository.id &&
+          entry.kind === item.kind &&
+          entry.number === item.number,
+      ).length === 1,
+      409,
+      "work_item_identity_conflict",
+      "Multiple local records identify the imported upstream work item.",
+    );
   }
 
   async validateTaskAction(

@@ -146,6 +146,60 @@ alongside `INVESTIGATION_GITHUB_USER_ID`. Without credentials, remote operations
 External writes also require `INVESTIGATION_ENABLE_EXTERNAL_WRITES=true` and the normal confirmed
 action-intent workflow. Account administration or test execution does not authorize writes to any
 actual repository PR or issue.
+## Listen for trusted assignments
+
+The native runtime accepts GitHub Webhooks at `POST /api/github/webhook`. Configure
+`INVESTIGATION_GITHUB_WEBHOOK_SECRET` or its `_PATH` variant with a random secret of at least
+32 UTF-8 bytes, together with the ordinary GitHub read credentials. Set the GitHub Webhook URL
+to the HTTPS public origin followed by `/api/github/webhook`, choose `application/json`, and
+subscribe to **Issues** and **Pull requests**. The receiver validates the raw payload's SHA-256
+HMAC. Browser cookies and Origin headers do not authenticate this endpoint.
+
+In the Dashboard's repository settings, select which registered repositories listen for
+assignments, the recipient's numeric GitHub user ID, and the trusted assigning user IDs.
+Only a trusted `User` assigning an open PR or Issue to that recipient starts an investigation.
+User IDs remain stable across login renames. Repository management permission and exact repository
+scope are required to change these settings; administrator status alone grants neither. Settings
+are versioned, persisted, and rechecked during preparation. They can be saved before the receiver
+secret is configured. Disabling a repository stops new intake and pending preparation; existing
+Tasks retain their ordinary lifecycle and can be cancelled separately.
+
+`GET` and `PUT /api/repositories/:id/webhook-settings` expose these settings. Updates contain
+`version`, `enabled`, `reviewerUserId`, and `allowedActorUserIds`; conflicting versions return
+HTTP `409`. An enabled configuration needs a recipient and a nonempty trusted-user list.
+Optional deployment defaults use `INVESTIGATION_GITHUB_WEBHOOK_BINDINGS_JSON` or its `_PATH`
+variant, with entries such as
+`{"repositoryId":"repo-example","reviewerUserId":12345678,"allowedActorUserIds":[23456789]}`.
+Saved repository settings override those defaults. No repository is watched by default.
+
+The receiver only handles `issues.assigned` and `pull_request.assigned`. Other events, including
+review requests, pushes, edits, and comments, do not start Tasks. There is no periodic GitHub
+discovery or polling. Reads occur to prepare a received event, retry that event, or serve an
+explicit import. The configurable payload limit defaults to 2 MiB through
+`INVESTIGATION_GITHUB_WEBHOOK_MAXIMUM_BYTES`.
+
+After checking the exact repository and assignment grant, the Server durably records the event
+and returns HTTP `202`. Background processing imports complete input and atomically creates an
+ordinary `pr-review` (`source_read`) or `issue-investigate` (`snapshot_only`) Task. It verifies that
+the same upstream item is still open and assigned, and that a PR still has the signed event's
+base/head SHAs. Root intake never grants repository execution or a GitHub write capability.
+
+Delivery ID plus payload digest prevent replay conflicts; equivalent assignment events and
+the same actor/recipient's identical frozen input also share the original Task. The exact imported
+snapshot and Task request are saved before Task creation, so service restart cannot substitute a
+later comment snapshot or create a second Task after an uncertain local commit. Processing uses
+durable leases and renewals. The inbox admits at most 1,000 pending events and returns HTTP `503`
+when full. Transient processing failures retry the received event up to three attempts; a failed
+record can be retried by explicitly redelivering the same GitHub delivery. Unsupported or
+unauthorized events return `ignored` without importing source or creating a Task.
+
+Authenticated repository readers can inspect
+`GET /api/github/webhook-deliveries/:deliveryId` for preparation state, failure reason, source
+reference, and Task identity. HTTP `202` acknowledges durable intake, not completed investigation.
+Receiver subscriptions and public hosting are deployment configuration; starting the application
+does not create or edit GitHub Webhooks. Comments, reviews, closure, and merging retain the separate
+confirmed ActionIntent path and external-write switch.
+
 ## Import complete upstream inputs
 
 After registering an exact repository ID, an operator with `repository:manage` can call

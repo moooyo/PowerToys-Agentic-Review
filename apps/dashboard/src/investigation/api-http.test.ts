@@ -4,6 +4,48 @@ import { createSampleInvestigationApi } from "./sample-adapter";
 import { createHttpTransport } from "./transport";
 
 describe("typed investigation HTTP operations", () => {
+  it("reads and updates webhook settings for the selected repository with a versioned PUT", async () => {
+    const settings = {
+      repositoryId: "repo:selected",
+      enabled: true,
+      reviewerUserId: 1001,
+      allowedActorUserIds: [2001, 2002],
+      version: 3,
+      receiverConfigured: false,
+    };
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json(settings));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    expect(await api.repositoryWebhookSettings("repo:selected")).toEqual(settings);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/repositories/repo%3Aselected/webhook-settings",
+      expect.objectContaining({ method: "GET", credentials: "include", cache: "no-store" }),
+    );
+    const input = {
+      version: 2,
+      enabled: true,
+      reviewerUserId: 1001,
+      allowedActorUserIds: [2001, 2002],
+    };
+    expect(await api.updateRepositoryWebhookSettings("repo:selected", input)).toEqual(settings);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/repositories/repo%3Aselected/webhook-settings",
+      expect.objectContaining({ method: "PUT", body: JSON.stringify(input) }),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    for (const invalid of [
+      { ...settings, reviewerUserId: "username" },
+      { ...settings, reviewerUserId: 0 },
+      { ...settings, allowedActorUserIds: [2001, 2001] },
+      { ...settings, allowedActorUserIds: [Number.MAX_SAFE_INTEGER + 1] },
+      { ...settings, version: -1 },
+    ]) {
+      fetcher.mockResolvedValueOnce(Response.json(invalid));
+      await expect(api.repositoryWebhookSettings("repo:selected")).rejects.toThrow(
+        "invalid structured response",
+      );
+    }
+  });
+
   it("reads and validates current artifact retention independently of report snapshots", async () => {
     const sample = createSampleInvestigationApi();
     const report = await sample.exportReport("sample-pr-partial-report");

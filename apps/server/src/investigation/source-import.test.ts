@@ -42,7 +42,11 @@ function harness(
     comments?: number;
     maximumBytes?: number;
     maximumPages?: number;
-    override?: (path: string, ordinal: number) => Response | undefined;
+    override?: (
+      path: string,
+      ordinal: number,
+      upstream: Record<string, unknown>,
+    ) => Response | undefined;
   } = {},
 ) {
   const store = new InvestigationStore();
@@ -51,10 +55,12 @@ function harness(
   const count = options.comments ?? 101;
   const calls: { path: string; method: string | undefined }[] = [];
   const upstream = {
+    id: 77,
     number: 7,
     title: "Complete reported behavior",
     body: "Full original body\nincluding every reproduction detail.",
     state: "open",
+    assignees: [{ id: 55, login: "configured-operator" }],
     comments: count,
     updated_at: "2026-09-15T10:00:00.000Z",
     ...(options.kind === "pull_request"
@@ -73,7 +79,11 @@ function harness(
     expect(init?.redirect).toBe("error");
     const path = `${url.pathname}${url.search}`;
     calls.push({ path, method: init?.method });
-    const overridden = options.override?.(path, calls.filter((call) => call.path === path).length);
+    const overridden = options.override?.(
+      path,
+      calls.filter((call) => call.path === path).length,
+      upstream,
+    );
     if (overridden !== undefined) return overridden;
     if (path === "/user") return Response.json({ id: 55 });
     if (path === "/repos/fixture/repository")
@@ -282,6 +292,275 @@ describe("read-only GitHub source import", () => {
       wrong.importer.resolveTaskSource(repository, workItem, sha, operator),
     ).rejects.toMatchObject({ code: "source_commit_mismatch" });
   });
+});
+
+function webhookExpectation(kind: "issue" | "pull_request") {
+  return {
+    githubWorkItemId: 77,
+    assigneeUserId: 55,
+    ...(kind === "pull_request" ? { baseSha: "b".repeat(40), headSha: sha } : {}),
+  };
+}
+
+describe("assignment-bound Webhook source import", () => {
+  it.each(["issue", "pull_request"] as const)(
+    "imports an open assigned %s whose identity and revision match the event",
+    async (kind) => {
+      const { importer, store, calls } = harness({ kind, comments: 1 });
+      const imported = await importer.importWorkItem(
+        operator,
+        repository.id,
+        { kind, number: 7 },
+        webhookExpectation(kind),
+      );
+      expect(imported.workItem).toMatchObject({ kind, number: 7, state: "open" });
+      expect(store.get("workItems", imported.workItem.id)).toEqual(imported.workItem);
+      expect(store.get("sourceSnapshots", imported.snapshotRef.id)).toMatchObject({
+        digest: imported.snapshotRef.digest,
+      });
+      expect(
+        calls.filter(
+          (call) =>
+            call.path === `/repos/fixture/repository/${kind === "issue" ? "issues" : "pulls"}/7`,
+        ),
+      ).toHaveLength(2);
+      expect(calls.every((call) => call.method === "GET")).toBe(true);
+    },
+  );
+
+  const staleTargets = [
+    { change: "unassigned", patch: { assignees: [] } },
+    { change: "missing assignment data", patch: { assignees: undefined } },
+    {
+      change: "assigned to another numeric user with the same login",
+      patch: { assignees: [{ id: 99, login: "configured-operator" }] },
+    },
+    { change: "closed", patch: { state: "closed" } },
+    { change: "another work item ID", patch: { id: 88 } },
+  ];
+  it.each(
+    (["issue", "pull_request"] as const).flatMap((kind) =>
+      [1, 2].flatMap((ordinal) => staleTargets.map((target) => ({ kind, ordinal, ...target }))),
+    ),
+  )(
+    "rejects $kind with $change on source read $ordinal without persisting a partial snapshot",
+    async ({ kind, ordinal, patch }) => {
+      const endpoint = `/repos/fixture/repository/${kind === "issue" ? "issues" : "pulls"}/7`;
+      const { importer, store, calls } = harness({
+        kind,
+        comments: 1,
+        override: (path, observedOrdinal, upstream) =>
+          path === endpoint && observedOrdinal === ordinal
+            ? Response.json({ ...upstream, ...patch })
+            : undefined,
+      });
+      await expect(
+        importer.importWorkItem(
+          operator,
+          repository.id,
+          { kind, number: 7 },
+          webhookExpectation(kind),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(store.list("workItems")).toEqual([]);
+      expect(store.list("sourceSnapshots")).toEqual([]);
+      expect(calls.filter((call) => call.path === endpoint)).toHaveLength(ordinal);
+      if (ordinal === 1)
+        expect(calls.filter((call) => call.path.includes("/comments?"))).toHaveLength(0);
+    },
+  );
+
+  it.each(
+    [1, 2].flatMap((ordinal) =>
+      [
+        { change: "base SHA", patch: { base: { sha: "c".repeat(40), repo: { id: 123 } } } },
+        { change: "head SHA", patch: { head: { sha: "c".repeat(40) } } },
+        { change: "merge timestamp", patch: { merged_at: "2026-09-15T10:01:00.000Z" } },
+        { change: "merged flag", patch: { merged: true } },
+      ].map((target) => ({ ordinal, ...target })),
+    ),
+  )("rejects a stale PR $change on source read $ordinal", async ({ ordinal, patch }) => {
+    const endpoint = "/repos/fixture/repository/pulls/7";
+    const { importer, store, calls } = harness({
+      kind: "pull_request",
+      comments: 1,
+      override: (path, observedOrdinal, upstream) =>
+        path === endpoint && observedOrdinal === ordinal
+          ? Response.json({ ...upstream, ...patch })
+          : undefined,
+    });
+    await expect(
+      importer.importWorkItem(
+        operator,
+        repository.id,
+        { kind: "pull_request", number: 7 },
+        webhookExpectation("pull_request"),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(store.list("workItems")).toEqual([]);
+    expect(store.list("sourceSnapshots")).toEqual([]);
+    expect(calls.filter((call) => call.path === endpoint)).toHaveLength(ordinal);
+    if (ordinal === 1)
+      expect(calls.filter((call) => call.path.includes("/comments?"))).toHaveLength(0);
+  });
+
+  it("uses the assignee numeric identity when the login changes between source reads", async () => {
+    const { importer } = harness({
+      comments: 1,
+      override: (path, ordinal, upstream) =>
+        path === "/repos/fixture/repository/issues/7" && ordinal === 2
+          ? Response.json({
+              ...upstream,
+              assignees: [{ id: 55, login: "renamed-configured-operator" }],
+            })
+          : undefined,
+    });
+    const imported = await importer.importWorkItem(
+      operator,
+      repository.id,
+      { kind: "issue", number: 7 },
+      webhookExpectation("issue"),
+    );
+    expect(imported.workItem.state).toBe("open");
+  });
+
+  it.each([
+    { name: "null expectation", kind: "issue" as const, expectation: null },
+    { name: "missing work item ID", kind: "issue" as const, expectation: { assigneeUserId: 55 } },
+    { name: "missing assignee ID", kind: "issue" as const, expectation: { githubWorkItemId: 77 } },
+    ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "77"].map((githubWorkItemId) => ({
+      name: `invalid work item ID ${githubWorkItemId}`,
+      kind: "issue" as const,
+      expectation: { ...webhookExpectation("issue"), githubWorkItemId },
+    })),
+    ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "55"].map((assigneeUserId) => ({
+      name: `invalid assignee ID ${assigneeUserId}`,
+      kind: "issue" as const,
+      expectation: { ...webhookExpectation("issue"), assigneeUserId },
+    })),
+    ...[{ baseSha: sha }, { headSha: sha }, { baseSha: sha, headSha: sha }].map((revision) => ({
+      name: `unexpected Issue revision ${Object.keys(revision).join("/")}`,
+      kind: "issue" as const,
+      expectation: { ...webhookExpectation("issue"), ...revision },
+    })),
+    ...[
+      {},
+      { baseSha: "b".repeat(40) },
+      { headSha: sha },
+      { baseSha: "not-a-sha", headSha: sha },
+      { baseSha: "b".repeat(40), headSha: "not-a-sha" },
+    ].map((revision) => ({
+      name: `missing or invalid PR revision ${JSON.stringify(revision)}`,
+      kind: "pull_request" as const,
+      expectation: { ...webhookExpectation("issue"), ...revision },
+    })),
+  ])("rejects $name before reading or persisting source", async ({ kind, expectation }) => {
+    const { importer, store, calls } = harness({ kind, comments: 1 });
+    await expect(
+      importer.importWorkItem(
+        operator,
+        repository.id,
+        { kind, number: 7 },
+        expectation as Parameters<InvestigationSourceImporter["importWorkItem"]>[3],
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(calls).toHaveLength(0);
+    expect(store.list("workItems")).toEqual([]);
+    expect(store.list("sourceSnapshots")).toEqual([]);
+  });
+
+  it("preserves existing work item and snapshot records when assignment is lost during reimport", async () => {
+    const { importer, store, upstream } = harness({
+      comments: 1,
+      override: (path, ordinal, source) =>
+        path === "/repos/fixture/repository/issues/7" && ordinal === 4
+          ? Response.json({ ...source, assignees: [] })
+          : undefined,
+    });
+    await importer.importWorkItem(
+      operator,
+      repository.id,
+      { kind: "issue", number: 7 },
+      webhookExpectation("issue"),
+    );
+    const workItems = store.list("workItems");
+    const snapshots = store.list("sourceSnapshots");
+    upstream.title = "New title awaiting a consistent import";
+    upstream.body = "New complete source body";
+    upstream.updated_at = "2026-09-15T10:02:00.000Z";
+    await expect(
+      importer.importWorkItem(
+        operator,
+        repository.id,
+        { kind: "issue", number: 7 },
+        webhookExpectation("issue"),
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(store.list("workItems")).toEqual(workItems);
+    expect(store.list("sourceSnapshots")).toEqual(snapshots);
+  });
+
+  it.each(["issue", "pull_request"] as const)(
+    "preserves three-argument manual import of a closed unassigned %s",
+    async (kind) => {
+      const { importer, upstream } = harness({ kind, comments: 1 });
+      upstream.state = "closed";
+      upstream.assignees = [];
+      const imported = await importer.importWorkItem(operator, repository.id, { kind, number: 7 });
+      expect(imported.workItem.state).toBe("closed");
+    },
+  );
+
+  it.each(["issue", "pull_request"] as const)(
+    "rechecks a saved %s assignment without reading comments or saving source",
+    async (kind) => {
+      const { importer, store, calls } = harness({ kind, comments: 1 });
+      await expect(
+        importer.verifyAssignment(
+          operator,
+          repository.id,
+          { kind, number: 7 },
+          webhookExpectation(kind),
+        ),
+      ).resolves.toBeUndefined();
+      expect(calls).toEqual([
+        { path: "/user", method: "GET" },
+        { path: "/repos/fixture/repository", method: "GET" },
+        {
+          path: `/repos/fixture/repository/${kind === "issue" ? "issues" : "pulls"}/7`,
+          method: "GET",
+        },
+      ]);
+      expect(store.list("workItems")).toEqual([]);
+      expect(store.list("sourceSnapshots")).toEqual([]);
+    },
+  );
+
+  it.each(["issue", "pull_request"] as const)(
+    "rejects a removed %s assignment during recheck without importing source",
+    async (kind) => {
+      const { importer, store, calls, upstream } = harness({ kind, comments: 1 });
+      upstream.assignees = [];
+      await expect(
+        importer.verifyAssignment(
+          operator,
+          repository.id,
+          { kind, number: 7 },
+          webhookExpectation(kind),
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect(calls).toEqual([
+        { path: "/user", method: "GET" },
+        { path: "/repos/fixture/repository", method: "GET" },
+        {
+          path: `/repos/fixture/repository/${kind === "issue" ? "issues" : "pulls"}/7`,
+          method: "GET",
+        },
+      ]);
+      expect(store.list("workItems")).toEqual([]);
+      expect(store.list("sourceSnapshots")).toEqual([]);
+    },
+  );
 });
 
 function planFixture() {

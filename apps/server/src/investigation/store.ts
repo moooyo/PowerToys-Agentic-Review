@@ -205,6 +205,28 @@ export class InvestigationStore {
     );
   }
 
+  /** Reads a bounded namespace without deserializing unrelated idempotency records. */
+  pagePrefix<T>(collection: InvestigationCollection, prefix: string, limit: number): T[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
+      throw new InvestigationStoreError("invalid_value", "Page size must be between 1 and 1,000.");
+    return this.database
+      .prepare(
+        `SELECT "value" FROM ${collectionName(collection)} WHERE "id" >= ? AND "id" < ? ORDER BY "id" LIMIT ?`,
+      )
+      .all(prefix, `${prefix}\uffff`, limit)
+      .map((row) => JSON.parse(row.value as string) as T);
+  }
+
+  countPrefix(collection: InvestigationCollection, prefix: string): number {
+    return Number(
+      this.database
+        .prepare(
+          `SELECT count(*) AS total FROM ${collectionName(collection)} WHERE "id" >= ? AND "id" < ?`,
+        )
+        .get(prefix, `${prefix}\uffff`)!.total,
+    );
+  }
+
   insert<T>(collection: InvestigationCollection, id: string, value: T): void {
     const table = collectionName(collection);
     const serialized = serialize(value);
