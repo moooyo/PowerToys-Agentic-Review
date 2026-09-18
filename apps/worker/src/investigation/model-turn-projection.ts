@@ -29,6 +29,36 @@ import { Value } from "@sinclair/typebox/value";
 const text = Type.String({ minLength: 1 });
 const objectOptions = { additionalProperties: false } as const;
 
+/** Status-specific wire constraints supplement, never replace, ledger reference validation. */
+export const InvestigationModelCandidateSchema = Type.Union([
+  Type.Object(
+    {
+      ...InvestigationCandidateSchema.properties,
+      status: Type.Union([Type.Literal("confirmed"), Type.Literal("unresolved")]),
+      findingId: EntityIdSchema,
+      findingVersion: PositiveIntegerSchema,
+      mergedIntoCandidateId: Type.Null(),
+    },
+    objectOptions,
+  ),
+  Type.Object(
+    {
+      ...InvestigationCandidateSchema.properties,
+      status: Type.Union([Type.Literal("pending"), Type.Literal("withdrawn")]),
+      mergedIntoCandidateId: Type.Null(),
+    },
+    objectOptions,
+  ),
+  Type.Object(
+    {
+      ...InvestigationCandidateSchema.properties,
+      status: Type.Literal("merged"),
+      mergedIntoCandidateId: EntityIdSchema,
+    },
+    objectOptions,
+  ),
+]);
+
 /** Model updates are bounded independently of the complete Worker-owned ledger. */
 export const InvestigationModelTurnDeltaV1Schema = Type.Object(
   {
@@ -44,7 +74,7 @@ export const InvestigationModelTurnDeltaV1Schema = Type.Object(
         assessment: Type.Union([InvestigationAssessmentSchema, Type.Null()]),
         coverageUnits: Type.Array(InvestigationCoverageUnitSchema),
         findings: Type.Array(InvestigationFindingV1Schema),
-        candidates: Type.Array(InvestigationCandidateSchema),
+        candidates: Type.Array(InvestigationModelCandidateSchema),
         rechecks: Type.Array(InvestigationRecheckSchema),
         evidence: Type.Array(InvestigationAnalysisEvidenceSchema),
         plans: Type.Array(InvestigationPlanDraftSchema),
@@ -61,7 +91,12 @@ export const InvestigationModelTurnDeltaV1Schema = Type.Object(
   },
   objectOptions,
 );
-export type InvestigationModelTurnDeltaV1 = Static<typeof InvestigationModelTurnDeltaV1Schema>;
+type ModelTurnDeltaWire = Static<typeof InvestigationModelTurnDeltaV1Schema>;
+/** Callers reuse ledger records; runtime wire validation enforces their status-specific shape. */
+export type InvestigationModelTurnDeltaV1 = Omit<ModelTurnDeltaWire, "analysis"> & {
+  analysis: Omit<ModelTurnDeltaWire["analysis"], "candidates"> &
+    Pick<InvestigationAnalysisV1, "candidates">;
+};
 
 const collectionNames = [
   "findings",
@@ -78,6 +113,15 @@ type CollectionName = (typeof collectionNames)[number];
 type AnalysisCollections = Pick<InvestigationAnalysisV1, CollectionName>;
 type Phase = InvestigationLoopRoundV1["phase"];
 type Preview = { readonly text: string; readonly truncated: boolean };
+
+export interface ModelTurnSourceCoverageUnit {
+  readonly id: string;
+  readonly subjectRef: string;
+  readonly kind: InvestigationAnalysisV1["coverage"]["includedUnits"][number]["kind"];
+  readonly paths: readonly string[];
+  readonly status: InvestigationAnalysisV1["coverage"]["includedUnits"][number]["status"];
+  readonly evidenceRefs: readonly string[];
+}
 
 export interface ModelTurnProjectionContext {
   readonly schemaVersion: "InvestigationModelTurnContextV1";
@@ -97,8 +141,17 @@ export interface ModelTurnProjectionContext {
   readonly inputCheckpointRef: InvestigationLoopRoundV1["inputCheckpointRef"];
   readonly round: number;
   readonly phase: Phase;
+  readonly budgetState: {
+    readonly consumed: InvestigationLoopCheckpointV1["consumed"];
+    readonly remaining: InvestigationLoopCheckpointV1["consumed"];
+  };
   readonly subjects: InvestigationTaskV1["subjects"];
   readonly counts: Readonly<Record<string, number>>;
+  /** Source dependencies are readable context, not editable coverage selections. */
+  readonly sourceCoverage: {
+    readonly digest: string;
+    readonly units: readonly ModelTurnSourceCoverageUnit[];
+  };
   readonly analysis: AnalysisCollections & {
     readonly summary: Preview;
     readonly assessment: {
@@ -149,10 +202,11 @@ export class ModelTurnProjectionError extends Error {
   }
 }
 
-type Selections = { units: Set<string>; observations: Set<string> } & Record<
-  CollectionName,
-  Set<string>
->;
+type Selections = {
+  units: Set<string>;
+  sourceUnits: Set<string>;
+  observations: Set<string>;
+} & Record<CollectionName, Set<string>>;
 const projectionObservations = new WeakMap<
   ModelTurnProjection,
   readonly InvestigationEvidenceV1[]
@@ -201,8 +255,15 @@ export function prepareModelTurnProjection(input: {
   const pendingDiffChunks = baseAnalysis.coverage.includedUnits
     .filter((unit) => unit.kind === "pr_diff_chunk" && unit.status !== "completed")
     .map((unit) => unit.id);
+  const unblockedUnitIds = baseAnalysis.coverage.includedUnits
+    .filter((unit) => unit.status !== "completed" && unit.status !== "blocked")
+    .map((unit) => unit.id);
+  const blockedUnitIds = baseAnalysis.coverage.includedUnits
+    .filter((unit) => unit.status === "blocked")
+    .map((unit) => unit.id);
   const queuedUnitIds = pendingDiffChunks.length > 0 ? pendingDiffChunks : pending.units;
   const queuedUnitIdSet = new Set(queuedUnitIds);
+  const pendingCandidateIds = new Set(pending.candidates);
   const round = initial.round + 1;
   const phase: Phase =
     initial.round === 0
@@ -216,6 +277,21 @@ export function prepareModelTurnProjection(input: {
             : "finalize";
   const indexes = makeIndexes(baseAnalysis, observations);
   const summarizeRuntimeFirst = task.kind !== "pr-review" && task.kind !== "issue-investigate";
+  const restoreCompletedTypedContext =
+    !summarizeRuntimeFirst && task.executionPolicy.mode === "source_read";
+  // Keep typed source work separate from seeds that can restore the full diff.
+  // New pending source work precedes a complete batch of interdependent blocked source work.
+  const typedSourceUnits =
+    !summarizeRuntimeFirst && task.executionPolicy.mode === "source_read"
+      ? baseAnalysis.coverage.includedUnits.filter(
+          (unit) => unit.kind === "source_file" && unit.paths.length > 0,
+        )
+      : [];
+  const blockedSourceUnits = typedSourceUnits.filter((unit) => unit.status === "blocked");
+  const pendingSourceUnit = typedSourceUnits.find((unit) => unit.status === "pending");
+  const focusedSourceUnits =
+    pendingSourceUnit === undefined ? blockedSourceUnits : [pendingSourceUnit];
+  const atomicSourceBatch = pendingDiffChunks.length === 0 && focusedSourceUnits.length > 0;
   const summarizedRuntimeEvidence = baseAnalysis.evidence.filter((entry) =>
     entry.evidenceRefs.some((id) => indexes.observations.has(id)),
   );
@@ -261,9 +337,20 @@ export function prepareModelTurnProjection(input: {
     const selectedObservations = observations.filter((entry) =>
       selection.observations.has(entry.id),
     );
+    const sourceUnits = baseAnalysis.coverage.includedUnits
+      .filter((unit) => selection.sourceUnits.has(unit.id))
+      .map(({ id, subjectRef, kind, paths, status, evidenceRefs }) => ({
+        id,
+        subjectRef,
+        kind,
+        paths,
+        status,
+        evidenceRefs,
+      }));
     const subjectIds = new Set([task.subjectRef]);
     for (const entry of [
       ...coverageUnits,
+      ...sourceUnits,
       ...collections.findings,
       ...collections.candidates,
       ...collections.evidence,
@@ -291,12 +378,22 @@ export function prepareModelTurnProjection(input: {
           : { id: checkpoint.id, version: checkpoint.version, digest: checkpoint.digest },
       round,
       phase,
+      budgetState: {
+        consumed: initial.consumed,
+        remaining: {
+          rounds: Math.max(0, task.budget.maxRounds - initial.consumed.rounds),
+          durationMs: Math.max(0, task.budget.maxDurationMs - initial.consumed.durationMs),
+          tokens: Math.max(0, task.budget.maxTokens - initial.consumed.tokens),
+          reportBytes: Math.max(0, task.budget.maxReportBytes - initial.consumed.reportBytes),
+        },
+      },
       subjects: [
         ...new Map(
           [...task.subjects, ...initial.runtime.subjects].map((subject) => [subject.id, subject]),
         ).values(),
       ].filter((subject) => subjectIds.has(subject.id)),
       counts,
+      sourceCoverage: { digest: investigationContentDigest(sourceUnits), units: sourceUnits },
       analysis: {
         ...collections,
         coverageUnits,
@@ -320,18 +417,29 @@ export function prepareModelTurnProjection(input: {
   const seeds: readonly {
     readonly collection: "units" | "observations" | "candidates" | "findings";
     readonly id: string;
-  }[] =
-    summarizeRuntimeFirst && pending.observations.length > 0
+  }[] = summarizeRuntimeFirst
+    ? pending.observations.length > 0
       ? pending.observations.map((id) => ({ collection: "observations", id }))
       : queuedUnitIds.length > 0
         ? queuedUnitIds.map((id) => ({ collection: "units", id }))
-        : pending.observations.length > 0
-          ? pending.observations.map((id) => ({ collection: "observations", id }))
-          : pending.candidates.length > 0
-            ? pending.candidates.map((id) => ({ collection: "candidates", id }))
-            : phase === "recheck"
-              ? pending.findings.map((id) => ({ collection: "findings", id }))
-              : [];
+        : pending.candidates.length > 0
+          ? pending.candidates.map((id) => ({ collection: "candidates", id }))
+          : phase === "recheck"
+            ? pending.findings.map((id) => ({ collection: "findings", id }))
+            : []
+    : pendingDiffChunks.length > 0
+      ? pendingDiffChunks.map((id) => ({ collection: "units", id }))
+      : focusedSourceUnits.length > 0
+        ? focusedSourceUnits.map((unit) => ({ collection: "units", id: unit.id }))
+        : [
+            ...unblockedUnitIds.map((id) => ({ collection: "units" as const, id })),
+            ...pending.observations.map((id) => ({ collection: "observations" as const, id })),
+            ...pending.candidates.map((id) => ({ collection: "candidates" as const, id })),
+            ...blockedUnitIds.map((id) => ({ collection: "units" as const, id })),
+            ...(phase === "recheck"
+              ? pending.findings.map((id) => ({ collection: "findings" as const, id }))
+              : []),
+          ];
   for (const seed of seeds) {
     if (selected[seed.collection].has(seed.id)) continue;
     const expanded = cloneSelections(selected);
@@ -345,8 +453,19 @@ export function prepareModelTurnProjection(input: {
       );
       if (related !== undefined) expanded.evidence.add(related.id);
     }
-    expandSelection(expanded, baseAnalysis, indexes);
+    expandSelection(
+      expanded,
+      baseAnalysis,
+      indexes,
+      pendingCandidateIds,
+      restoreCompletedTypedContext,
+    );
     if (byteLength(buildContext(expanded)) > maximumContextBytes) {
+      if (atomicSourceBatch)
+        throw new ModelTurnProjectionError(
+          "MODEL_INPUT_LIMIT_EXCEEDED",
+          "The complete focused source batch exceeds the per-turn context budget; its units cannot be silently separated.",
+        );
       if (
         selected.units.size +
           selected.observations.size +
@@ -368,7 +487,13 @@ export function prepareModelTurnProjection(input: {
       if (unit !== undefined && !expanded.units.has(unit.id)) {
         const withUnit = cloneSelections(expanded);
         withUnit.units.add(unit.id);
-        expandSelection(withUnit, baseAnalysis, indexes);
+        expandSelection(
+          withUnit,
+          baseAnalysis,
+          indexes,
+          pendingCandidateIds,
+          restoreCompletedTypedContext,
+        );
         if (byteLength(buildContext(withUnit)) <= maximumContextBytes) {
           selected = withUnit;
           continue;
@@ -387,7 +512,13 @@ export function prepareModelTurnProjection(input: {
       if (!subjects.has(evidence.subjectRef) || selected.evidence.has(evidence.id)) continue;
       const expanded = cloneSelections(selected);
       expanded.evidence.add(evidence.id);
-      expandSelection(expanded, baseAnalysis, indexes);
+      expandSelection(
+        expanded,
+        baseAnalysis,
+        indexes,
+        pendingCandidateIds,
+        restoreCompletedTypedContext,
+      );
       if (byteLength(buildContext(expanded)) > maximumContextBytes) break;
       selected = expanded;
     }
@@ -677,6 +808,7 @@ function pendingRecords(
 function emptySelections(): Selections {
   return {
     units: new Set(),
+    sourceUnits: new Set(),
     observations: new Set(),
     findings: new Set(),
     candidates: new Set(),
@@ -691,7 +823,7 @@ function emptySelections(): Selections {
 }
 function cloneSelections(selection: Selections): Selections {
   const cloned = emptySelections();
-  for (const name of ["units", "observations", ...collectionNames] as const)
+  for (const name of ["units", "sourceUnits", "observations", ...collectionNames] as const)
     cloned[name] = new Set(selection[name]);
   return cloned;
 }
@@ -719,6 +851,7 @@ function makeIndexes(
 ) {
   return {
     units: new Map(analysis.coverage.includedUnits.map((entry) => [entry.id, entry])),
+    sourceUnits: new Map(analysis.coverage.includedUnits.map((entry) => [entry.id, entry])),
     findings: new Map(analysis.findings.map((entry) => [entry.id, entry])),
     candidates: new Map(analysis.candidates.map((entry) => [entry.id, entry])),
     rechecks: new Map(analysis.rechecks.map((entry) => [entry.id, entry])),
@@ -736,6 +869,8 @@ function expandSelection(
   selected: Selections,
   analysis: InvestigationAnalysisV1,
   indexes: ReturnType<typeof makeIndexes>,
+  pendingCandidateIds: ReadonlySet<string>,
+  restoreCompletedTypedContext: boolean,
 ): void {
   const queue: Array<{ collection: keyof Selections; id: string }> = [];
   const visited = emptySelections();
@@ -751,7 +886,7 @@ function expandSelection(
     visited[collection].add(id);
     queue.push({ collection, id });
   };
-  for (const collection of ["units", "observations", ...collectionNames] as const)
+  for (const collection of ["units", "sourceUnits", "observations", ...collectionNames] as const)
     for (const id of selected[collection]) add(collection, id);
   for (let index = 0; index < queue.length; index += 1) {
     const current = queue[index]!;
@@ -766,10 +901,63 @@ function expandSelection(
     collectReferenceIds(record, "draftRef").forEach((id) => {
       add("feedbackDrafts", id);
     });
+    if (current.collection === "units") {
+      const unit = indexes.units.get(current.id)!;
+      if (unit.kind === "full_diff")
+        for (const dependency of analysis.coverage.includedUnits)
+          if (
+            dependency.subjectRef === unit.subjectRef &&
+            dependency.status === "completed" &&
+            (dependency.kind === "pr_diff_chunk" ||
+              (dependency.kind === "source_file" && dependency.paths.length > 0))
+          )
+            add("sourceUnits", dependency.id);
+      if (
+        restoreCompletedTypedContext &&
+        unit.kind === "source_file" &&
+        unit.paths.length > 0 &&
+        (unit.status === "pending" || unit.status === "blocked")
+      )
+        for (const dependency of analysis.coverage.includedUnits)
+          if (
+            dependency.subjectRef === unit.subjectRef &&
+            dependency.status === "completed" &&
+            dependency.kind === "source_file" &&
+            dependency.paths.length > 0
+          )
+            add("sourceUnits", dependency.id);
+    }
     if (current.collection === "candidates") {
       const candidate = indexes.candidates.get(current.id)!;
       add("findings", candidate.findingId);
       add("candidates", candidate.mergedIntoCandidateId);
+      if (pendingCandidateIds.has(candidate.id)) {
+        const evidenceIds = evidenceDependencyIds(
+          candidate.evidenceRefs,
+          candidate.subjectRef,
+          indexes,
+        );
+        const sourceUnits = analysis.coverage.includedUnits.filter(
+          (unit) =>
+            unit.subjectRef === candidate.subjectRef &&
+            (unit.kind === "pr_diff_chunk" || unit.paths.length > 0) &&
+            [...evidenceDependencyIds(unit.evidenceRefs, unit.subjectRef, indexes)].some((id) =>
+              evidenceIds.has(id),
+            ),
+        );
+        // Empty metadata paths cannot recover source. The frozen completed diff is the
+        // explicit fallback when the candidate has no typed source association.
+        const dependencies =
+          sourceUnits.length > 0
+            ? sourceUnits
+            : analysis.coverage.includedUnits.filter(
+                (unit) =>
+                  unit.subjectRef === candidate.subjectRef &&
+                  unit.kind === "pr_diff_chunk" &&
+                  unit.status === "completed",
+              );
+        for (const unit of dependencies) add("sourceUnits", unit.id);
+      }
     }
     if (current.collection === "findings") {
       const finding = indexes.findings.get(current.id)!;
@@ -783,6 +971,24 @@ function expandSelection(
         if (action.planRef?.id === current.id || action.draftRef === current.id)
           add("nextActions", action.id);
   }
+}
+
+function evidenceDependencyIds(
+  references: readonly string[],
+  subjectRef: string,
+  indexes: ReturnType<typeof makeIndexes>,
+): ReadonlySet<string> {
+  const found = new Set<string>();
+  const queue = [...references];
+  for (let index = 0; index < queue.length; index += 1) {
+    const id = queue[index]!;
+    if (found.has(id)) continue;
+    const entry = indexes.evidence.get(id) ?? indexes.observations.get(id);
+    if (entry === undefined || entry.subjectRef !== subjectRef) continue;
+    found.add(id);
+    queue.push(...entry.evidenceRefs);
+  }
+  return found;
 }
 
 function collectReferenceIds(value: unknown, key: string): string[] {

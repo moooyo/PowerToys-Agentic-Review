@@ -8,6 +8,7 @@ import type {
 import { contentDigest } from "./integrity.js";
 import type {
   InvestigationActionTransport,
+  InvestigationGitHubIdentity,
   InvestigationOperatorPrincipal,
   InvestigationRepositoryRecord,
   InvestigationWorkItemRecord,
@@ -53,6 +54,15 @@ const positiveId = (value: unknown): number => {
   if (!Number.isSafeInteger(value) || Number(value) <= 0)
     throw new GitHubActionFailure("invalid_github_identity");
   return Number(value);
+};
+const githubLogin = (value: unknown): string => {
+  if (
+    typeof value !== "string" ||
+    value !== value.trim() ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?(?:\[bot\])?$/u.test(value)
+  )
+    throw new GitHubActionFailure("invalid_github_login");
+  return value;
 };
 const sha = (value: unknown): string => {
   if (typeof value !== "string" || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(value))
@@ -115,6 +125,14 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 60_000)
       throw new TypeError("The GitHub request timeout must be between 1 and 60000 milliseconds.");
     this.requestFetch = options.fetch ?? globalThis.fetch;
+  }
+
+  async readPublisherIdentity(): Promise<InvestigationGitHubIdentity> {
+    const user = object((await this.request("/user")).value);
+    const githubUserId = positiveId(user.id);
+    if (githubUserId !== this.options.expectedGitHubUserId)
+      throw new GitHubActionFailure("publisher_identity_changed");
+    return { githubUserId, githubLogin: githubLogin(user.login) };
   }
 
   async readTarget(
@@ -285,6 +303,7 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
     repository: InvestigationRepositoryRecord,
     workItem: InvestigationWorkItemRecord,
     actor: InvestigationOperatorPrincipal,
+    beforeDispatch?: () => void,
   ): Promise<Delivery> {
     let request: RemoteRequest;
     try {
@@ -312,6 +331,7 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
           "failed",
           "The target changed while preparing the action. Refresh the preview before sending.",
         );
+      beforeDispatch?.();
     } catch (error) {
       return delivery("failed", this.failureMessage(error));
     }
@@ -504,8 +524,13 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
   ): Promise<{ repository: Json; value: Json }> {
     if (workItem.repositoryId !== repository.id || !actor.repositoryIds.includes(repository.id))
       throw new GitHubActionFailure("repository_scope_denied");
-    const user = object((await this.request("/user")).value);
-    if (positiveId(user.id) !== this.options.expectedGitHubUserId)
+    const publisher = await this.readPublisherIdentity();
+    if (
+      actor.githubIdentity !== undefined &&
+      (positiveId(actor.githubIdentity.githubUserId) !== publisher.githubUserId ||
+        githubLogin(actor.githubIdentity.githubLogin).toLowerCase() !==
+          publisher.githubLogin.toLowerCase())
+    )
       throw new GitHubActionFailure("publisher_identity_changed");
     const base = repositoryPath(repository);
     const remoteRepository = object((await this.request(base)).value);

@@ -70,7 +70,7 @@ import { ConsoleJsonLogger } from "./logging/logger.js";
 import { HttpWorkerEvidenceApi } from "./server-client/evidence-api.js";
 import type { ModelSummaryInputApi } from "./server-client/summary-input-api.js";
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   if (process.platform !== "win32") {
     throw new Error("Agentic Review Worker can run only on Windows.");
   }
@@ -104,10 +104,8 @@ async function main(): Promise<void> {
   try {
     await runtime.run();
   } catch {
-    if (!shutdownRequested) {
-      logger.error("The investigation Worker stopped because of an unrecoverable error.");
-      process.exitCode = 1;
-    }
+    logger.error("The investigation Worker stopped because of an unrecoverable error.");
+    process.exitCode = 1;
   } finally {
     for (const [signal, handler] of handlers) process.removeListener(signal, handler);
     await runtime.stop();

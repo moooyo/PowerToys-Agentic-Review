@@ -16,10 +16,16 @@ import type {
   CreateTaskInput,
   InvestigationApi,
   PrepareActionInput,
+  RepositoryAutoReplySettings,
   RepositoryWebhookSettings,
   TaskDetail,
   WorkItem,
 } from "./api";
+import { validateAutoReplyTemplate } from "./auto-reply-settings-form";
+import {
+  sampleIssueAutoReplyTemplate,
+  samplePullRequestAutoReplyTemplate,
+} from "./sample-auto-reply-templates";
 import { InvestigationHttpError } from "./transport";
 
 const repository = {
@@ -282,6 +288,17 @@ function guard(code: string, satisfied: boolean, message: string): Investigation
 
 /** Each adapter owns isolated synthetic state and never dispatches network requests. */
 export function createSampleInvestigationApi(): InvestigationApi {
+  let autoReplySettings: RepositoryAutoReplySettings = {
+    repositoryId: repository.id,
+    enabled: false,
+    version: 0,
+    publisherConfigured: false,
+    authorizedById: null,
+    updatedAt: null,
+    templateVersion: 4,
+    pullRequestTemplate: samplePullRequestAutoReplyTemplate,
+    issueTemplate: sampleIssueAutoReplyTemplate,
+  };
   let webhookSettings: RepositoryWebhookSettings = {
     repositoryId: repository.id,
     enabled: false,
@@ -630,6 +647,54 @@ export function createSampleInvestigationApi(): InvestigationApi {
         version: webhookSettings.version + 1,
       };
       return structuredClone(webhookSettings);
+    },
+    repositoryAutoReplySettings: async (repositoryId) => {
+      if (repositoryId !== repository.id)
+        throw new InvestigationHttpError(404, "The sample repository was not found.");
+      return structuredClone(autoReplySettings);
+    },
+    updateRepositoryAutoReplySettings: async (repositoryId, input) => {
+      if (repositoryId !== repository.id)
+        throw new InvestigationHttpError(404, "The sample repository was not found.");
+      if (
+        !Number.isSafeInteger(input.version) ||
+        input.version < 0 ||
+        typeof input.enabled !== "boolean"
+      ) {
+        throw new InvestigationHttpError(400, "The sample automatic reply settings are invalid.");
+      }
+      if (input.version !== autoReplySettings.version)
+        throw new InvestigationHttpError(409, "The sample automatic reply settings changed.");
+      try {
+        validateAutoReplyTemplate(
+          input.pullRequestTemplate,
+          "Pull request template",
+          "pullRequest",
+        );
+        validateAutoReplyTemplate(input.issueTemplate, "Issue template", "issue");
+      } catch (error) {
+        throw new InvestigationHttpError(
+          400,
+          error instanceof Error
+            ? error.message
+            : "The sample automatic reply template is invalid.",
+        );
+      }
+      autoReplySettings = {
+        ...autoReplySettings,
+        enabled: input.enabled,
+        version: autoReplySettings.version + 1,
+        authorizedById: input.enabled ? "sample-operator" : null,
+        updatedAt: sampleTime,
+        pullRequestTemplate: input.pullRequestTemplate,
+        issueTemplate: input.issueTemplate,
+      };
+      return structuredClone(autoReplySettings);
+    },
+    repositoryAutoReplies: async (repositoryId) => {
+      if (repositoryId !== repository.id)
+        throw new InvestigationHttpError(404, "The sample repository was not found.");
+      return { items: [] };
     },
     workItems: async (repositoryId, kind) => ({
       items: structuredClone(

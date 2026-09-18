@@ -116,6 +116,7 @@ interface ActiveProcess {
   readonly stderr: PassThrough;
   readonly started: Deferred<ManagedProcess>;
   readonly completed: Deferred<ProcessExitedEvent>;
+  readonly exited: Deferred<ProcessExitedEvent>;
   readonly lifecycleDone: Deferred<void>;
   readonly signal: AbortSignal;
   readonly onAbort: () => void;
@@ -362,7 +363,11 @@ export class StdioProcessHostClient implements ProcessHostClient {
     }
   }
 
-  public async start(spec: ProcessLaunchSpec, signal: AbortSignal): Promise<ManagedProcess> {
+  public async start(
+    spec: ProcessLaunchSpec,
+    signal: AbortSignal,
+    onDispatch?: () => void,
+  ): Promise<ManagedProcess> {
     assertValidProcessLaunchSpec(spec);
     spec = JSON.parse(JSON.stringify(spec)) as ProcessLaunchSpec;
     if (this.#captureResourceUsage) spec = { ...spec, captureResourceUsage: true };
@@ -389,6 +394,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
       stderr,
       started: new Deferred<ManagedProcess>(),
       completed: new Deferred<ProcessExitedEvent>(),
+      exited: new Deferred<ProcessExitedEvent>(),
       lifecycleDone: new Deferred<void>(),
       signal,
       onAbort: () => this.#abortProcess(requestId),
@@ -408,12 +414,18 @@ export class StdioProcessHostClient implements ProcessHostClient {
     signal.addEventListener("abort", entry.onAbort, { once: true });
 
     try {
-      await this.#writeRequest({
-        protocolVersion: processHostProtocolVersion,
-        type: "start",
-        requestId,
-        spec,
-      });
+      await this.#writeRequest(
+        {
+          protocolVersion: processHostProtocolVersion,
+          type: "start",
+          requestId,
+          spec,
+        },
+        () => {
+          onDispatch?.();
+          return true;
+        },
+      );
       return await this.#withHostDeadline(
         entry.started.promise,
         `ProcessHost did not acknowledge start for ${requestId}.`,
@@ -774,6 +786,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
       stdout: entry.stdout,
       stderr: entry.stderr,
       completed: entry.completed.promise,
+      exited: entry.exited.promise,
       ...(entry.input === undefined
         ? {}
         : {
@@ -1143,6 +1156,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
     }
     const firstObservedExit = entry.exitEvent === undefined;
     entry.exitEvent = event;
+    entry.exited.resolve(event);
     this.#releaseProcessId(entry);
     entry.stdout.end();
     entry.stderr.end();
@@ -1378,6 +1392,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
     const failure = entry.completionFailure ?? error;
     entry.started.reject(failure);
     entry.completed.reject(failure);
+    entry.exited.reject(failure);
     this.#finishEntry(entry);
   }
 
@@ -1514,6 +1529,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
       entry.signal.removeEventListener("abort", entry.onAbort);
       entry.started.reject(error);
       entry.completed.reject(error);
+      entry.exited.reject(error);
       entry.termination?.acknowledged.reject(error);
       if (entry.inputDrainTimer !== undefined) clearTimeout(entry.inputDrainTimer);
       if (entry.input?.pending !== undefined) {

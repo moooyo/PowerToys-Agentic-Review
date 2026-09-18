@@ -9,9 +9,12 @@ import {
   investigationContentDigest,
   normalizeInvestigationAnalysisPlanReferences,
 } from "@agentic-review/domain";
+import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+  InvestigationModelCandidateSchema,
   type InvestigationModelTurnDeltaV1,
+  InvestigationModelTurnDeltaV1Schema,
   type ModelTurnProjection,
   ModelTurnProjectionError,
   mergeModelTurnDelta,
@@ -66,6 +69,143 @@ function fixture(findingCount = 4) {
   checkpoint.round = 1;
   checkpoint.lastPhase = "discovery";
   return { task, attempt: synthetic.attempt, checkpoint: seal(checkpoint) };
+}
+
+function sourceContinuationFixture() {
+  const f = fixture(1);
+  const analysis = f.checkpoint.analysis;
+  const candidate = analysis.candidates[0]!;
+  candidate.status = "pending";
+  candidate.findingId = null;
+  candidate.findingVersion = null;
+  candidate.evidenceRefs = ["candidate-source-evidence"];
+  analysis.findings = [];
+  analysis.rechecks = [];
+  analysis.evidence = [
+    {
+      id: "first-chunk-leaf",
+      subjectRef: f.task.subjectRef,
+      source: "static_analysis",
+      summary: "The first complete diff chunk exposes the source condition.",
+      evidenceRefs: [],
+    },
+    {
+      id: "first-chunk-summary",
+      subjectRef: f.task.subjectRef,
+      source: "static_analysis",
+      summary: "The accepted first-chunk review preserves its original evidence.",
+      evidenceRefs: ["first-chunk-leaf"],
+    },
+    {
+      id: "candidate-source-evidence",
+      subjectRef: f.task.subjectRef,
+      source: "static_analysis",
+      summary: "The candidate requires a separate disposition using the first chunk.",
+      evidenceRefs: ["first-chunk-summary"],
+    },
+    {
+      id: "second-chunk-summary",
+      subjectRef: f.task.subjectRef,
+      source: "static_analysis",
+      summary: "The second complete diff chunk was also inspected.",
+      evidenceRefs: [],
+    },
+  ];
+  const metadata: InvestigationAnalysisV1["coverage"]["includedUnits"][number] = {
+    id: "original-full-diff",
+    subjectRef: f.task.subjectRef,
+    kind: "full_diff",
+    paths: [],
+    requiredWork: "Review the full frozen diff and resolve its source-backed candidates.",
+    status: "blocked",
+    evidenceRefs: [],
+  };
+  const chunks: InvestigationAnalysisV1["coverage"]["includedUnits"] = [
+    {
+      id: "first-completed-chunk",
+      subjectRef: f.task.subjectRef,
+      kind: "pr_diff_chunk",
+      paths: ["src/first.ts"],
+      requiredWork: "Inspect the first complete diff chunk.",
+      status: "completed",
+      evidenceRefs: ["first-chunk-summary"],
+    },
+    {
+      id: "second-completed-chunk",
+      subjectRef: f.task.subjectRef,
+      kind: "pr_diff_chunk",
+      paths: ["src/second.ts"],
+      requiredWork: "Inspect the second complete diff chunk.",
+      status: "completed",
+      evidenceRefs: ["second-chunk-summary"],
+    },
+  ];
+  analysis.coverage.includedUnits = [metadata, ...chunks];
+  analysis.coverage.completedUnitRefs = chunks.map((unit) => unit.id);
+  analysis.coverage.unresolvedUnitRefs = [metadata.id];
+  return { ...f, metadata, chunks, candidate };
+}
+
+function focusedSourceContinuationFixture() {
+  const f = sourceContinuationFixture();
+  f.task.executionPolicy.mode = "source_read";
+  f.candidate.evidenceRefs = [];
+  const chunks = Array.from({ length: 68 }, (_, index) => ({
+    ...f.chunks[0]!,
+    id: `completed-changed-chunk-${index}`,
+    paths: [`src/changed/file-${index}.ts`],
+  }));
+  const core: InvestigationAnalysisV1["coverage"]["includedUnits"][number] = {
+    id: "pending-core-source",
+    subjectRef: f.task.subjectRef,
+    kind: "source_file",
+    paths: ["src/Core.cs"],
+    requiredWork: "Read Core and preserve all source-backed dependencies.",
+    status: "pending",
+    evidenceRefs: ["core-summary"],
+  };
+  f.checkpoint.analysis.evidence.push(
+    {
+      id: "core-leaf",
+      subjectRef: f.task.subjectRef,
+      source: "static_analysis",
+      summary: "The retained Core source condition needs further investigation.",
+      evidenceRefs: [],
+    },
+    {
+      id: "core-summary",
+      subjectRef: f.task.subjectRef,
+      source: "static_analysis",
+      summary: "The pending Core analysis retains its accepted evidence dependency.",
+      evidenceRefs: ["core-leaf"],
+    },
+  );
+  f.checkpoint.analysis.coverage.includedUnits = [f.metadata, ...chunks, core];
+  f.checkpoint.analysis.coverage.completedUnitRefs = chunks.map((unit) => unit.id);
+  f.checkpoint.analysis.coverage.unresolvedUnitRefs = [f.metadata.id, core.id];
+  f.checkpoint.runtime.evidence = [
+    {
+      id: "unrelated-worker-observation",
+      subjectRef: f.task.subjectRef,
+      source: "executor_observation",
+      authority: "worker",
+      summary: "An unrelated authorized check still needs an analysis summary.",
+      artifactRefs: [],
+      evidenceRefs: [],
+      provenance: {
+        taskId: f.task.id,
+        attemptId: f.attempt.id,
+        producer: "Synthetic executor",
+        recordedAt: f.task.updatedAt,
+      },
+    },
+  ];
+  return { ...f, chunks, core };
+}
+
+function readonlySourceRecord(unit: InvestigationAnalysisV1["coverage"]["includedUnits"][number]) {
+  const { id, subjectRef, kind, paths, status, evidenceRefs } = unit;
+  return { id, subjectRef, kind, paths, status, evidenceRefs };
 }
 
 function seal(checkpoint: InvestigationLoopCheckpointV1): InvestigationLoopCheckpointV1 {
@@ -148,6 +288,127 @@ function recheckDelta(projection: ModelTurnProjection): InvestigationModelTurnDe
 }
 
 describe("bounded investigation model context", () => {
+  it.each(["confirmed", "unresolved"] as const)(
+    "requires concrete finding links for a model %s disposition before merging",
+    (status) => {
+      const f = fixture(1);
+      const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+      const candidate = { ...projection.context.analysis.candidates[0]!, status };
+      expect(Value.Check(InvestigationModelCandidateSchema, candidate)).toBe(true);
+      for (const invalidFields of [
+        { findingId: null },
+        { findingVersion: null },
+        { findingVersion: 0 },
+        { findingVersion: -1 },
+        { findingVersion: 1.5 },
+        { mergedIntoCandidateId: "another-candidate" },
+      ]) {
+        const delta = emptyDelta(projection);
+        delta.analysis.candidates = [{ ...candidate, ...invalidFields }];
+        expect(Value.Check(InvestigationModelTurnDeltaV1Schema, delta)).toBe(false);
+        expect(() => mergeModelTurnDelta(projection, delta)).toThrow(/schema/u);
+      }
+    },
+  );
+
+  it("requires merge targets only for merged candidates without erasing historical finding links", () => {
+    const candidate = fixture(1).checkpoint.analysis.candidates[0]!;
+    for (const status of ["pending", "withdrawn"] as const) {
+      expect(Value.Check(InvestigationModelCandidateSchema, { ...candidate, status })).toBe(true);
+      expect(
+        Value.Check(InvestigationModelCandidateSchema, {
+          ...candidate,
+          status,
+          findingId: null,
+          findingVersion: null,
+        }),
+      ).toBe(true);
+      expect(
+        Value.Check(InvestigationModelCandidateSchema, {
+          ...candidate,
+          status,
+          mergedIntoCandidateId: "target-candidate",
+        }),
+      ).toBe(false);
+    }
+    expect(
+      Value.Check(InvestigationModelCandidateSchema, {
+        ...candidate,
+        status: "merged",
+        mergedIntoCandidateId: "target-candidate",
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(InvestigationModelCandidateSchema, {
+        ...candidate,
+        status: "merged",
+        mergedIntoCandidateId: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the domain finding-version check authoritative after candidate shape validation", () => {
+    const f = fixture(1);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    const delta = emptyDelta(projection);
+    const candidate = projection.context.analysis.candidates[0]!;
+    delta.analysis.candidates = [{ ...candidate, findingVersion: candidate.findingVersion! + 1 }];
+    expect(Value.Check(InvestigationModelTurnDeltaV1Schema, delta)).toBe(true);
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(() =>
+      applyInvestigationLoopRound(f.checkpoint, round, {
+        recordedAt: f.checkpoint.recordedAt,
+        usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+      }),
+    ).toThrow(/current finding version/u);
+  });
+  it("exposes the accepted consumption and clamped remaining budget without spending the next round", () => {
+    const f = fixture(0);
+    const budget = structuredClone(f.task.budget);
+    for (const consumed of [
+      { rounds: 0, durationMs: 0, tokens: 0, reportBytes: 0 },
+      { rounds: 7, durationMs: 1234, tokens: 4567, reportBytes: 8910 },
+      {
+        rounds: budget.maxRounds,
+        durationMs: budget.maxDurationMs,
+        tokens: budget.maxTokens,
+        reportBytes: budget.maxReportBytes,
+      },
+      {
+        rounds: budget.maxRounds + 1,
+        durationMs: budget.maxDurationMs + 1,
+        tokens: budget.maxTokens + 1,
+        reportBytes: budget.maxReportBytes + 1,
+      },
+    ]) {
+      f.checkpoint.consumed = consumed;
+      const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 32 * 1024 });
+      expect(projection.context.task.budget).toEqual(budget);
+      expect(projection.context.budgetState).toEqual({
+        consumed,
+        remaining: {
+          rounds: Math.max(0, budget.maxRounds - consumed.rounds),
+          durationMs: Math.max(0, budget.maxDurationMs - consumed.durationMs),
+          tokens: Math.max(0, budget.maxTokens - consumed.tokens),
+          reportBytes: Math.max(0, budget.maxReportBytes - consumed.reportBytes),
+        },
+      });
+      expect(f.checkpoint.consumed).toEqual(consumed);
+    }
+    const initial = prepareModelTurnProjection({
+      ...f,
+      checkpoint: null,
+      maximumContextBytes: 32 * 1024,
+    });
+    expect(initial.context.budgetState.consumed).toEqual({
+      rounds: 0,
+      durationMs: 0,
+      tokens: 0,
+      reportBytes: 0,
+    });
+    expect(f.task.budget).toEqual(budget);
+  });
+
   it("rechecks every finding across byte-bounded batches without sending a multi-megabyte ledger", () => {
     const f = fixture(145);
     f.checkpoint.analysis.summary = "Historical summary. ".repeat(100_000);
@@ -364,10 +625,49 @@ describe("bounded investigation model context", () => {
       status: "withdrawn",
       rationale: "Rechecking the source disproved the candidate.",
     }));
+    expect(Value.Check(InvestigationModelTurnDeltaV1Schema, delta)).toBe(true);
     const round = mergeModelTurnDelta(projection, delta);
     expect(round.analysis.findings).toEqual([]);
     expect(round.analysis.candidates).toHaveLength(f.checkpoint.analysis.candidates.length);
     expect(round.analysis.rechecks).toEqual(f.checkpoint.analysis.rechecks);
+    expect(round.analysis.candidates.map((candidate) => candidate.findingId)).toEqual(
+      projection.context.analysis.candidates.map((candidate) => candidate.findingId),
+    );
+  });
+
+  it("retains historical finding ownership when merging a candidate and explicitly removing its finding", () => {
+    const f = fixture(1);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    const original = projection.context.analysis.candidates[0]!;
+    const delta = emptyDelta(projection);
+    delta.analysis.removedFindingIds = [...projection.selectedFindingIds];
+    delta.analysis.candidates = [
+      {
+        ...original,
+        status: "merged",
+        mergedIntoCandidateId: "replacement-candidate",
+        rationale: "The retained concern is represented by the explicitly identified candidate.",
+      },
+      {
+        ...original,
+        id: "replacement-candidate",
+        status: "pending",
+        findingId: null,
+        findingVersion: null,
+        discoveredRound: projection.context.round,
+      },
+    ];
+    expect(Value.Check(InvestigationModelTurnDeltaV1Schema, delta)).toBe(true);
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.findings).toEqual([]);
+    expect(
+      round.analysis.candidates.find((candidate) => candidate.id === original.id),
+    ).toMatchObject({
+      status: "merged",
+      findingId: original.findingId,
+      findingVersion: original.findingVersion,
+      mergedIntoCandidateId: "replacement-candidate",
+    });
   });
 
   it("rejects duplicate updates, immutable evidence changes, and stale round binding", () => {
@@ -554,6 +854,7 @@ describe("bounded investigation model context", () => {
     if (location.kind !== "source")
       throw new Error("The synthetic PR fixture must have a source location.");
     f.checkpoint.analysis.coverage.includedUnits[0]!.paths = [location.path];
+    f.checkpoint.analysis.coverage.includedUnits[0]!.kind = "pr_diff_chunk";
     f.checkpoint.analysis.coverage.includedUnits[0]!.evidenceRefs =
       f.checkpoint.analysis.evidence.map((entry) => entry.id);
     f.checkpoint.analysis.evidence.push({
@@ -569,6 +870,7 @@ describe("bounded investigation model context", () => {
     const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 16 * 1024 });
     expect(projection.selectedFindingIds).toContain(finding.id);
     expect(projection.selectedUnitIds).toEqual([]);
+    expect(projection.context.sourceCoverage.units).toEqual([]);
     expect(projection.context.analysis.evidence.map((entry) => entry.id)).not.toContain(
       "large-unrelated-scope-evidence",
     );
@@ -746,5 +1048,544 @@ describe("bounded investigation model context", () => {
     expect(projection.selectedFindingIds).toEqual(
       f.checkpoint.analysis.findings.map((finding) => finding.id),
     );
+  });
+
+  it("keeps unfinished diff chunks ahead of candidates, other scope, and runtime observation seeds", () => {
+    const f = sourceContinuationFixture();
+    f.chunks[0]!.status = "pending";
+    f.chunks[0]!.evidenceRefs = [];
+    f.checkpoint.analysis.coverage.includedUnits.push({
+      ...f.metadata,
+      id: "pending-caller-unit",
+      kind: "source",
+      paths: ["src/caller.ts"],
+      status: "pending",
+    });
+    f.checkpoint.runtime.evidence = [
+      {
+        id: "unsummarized-worker-observation",
+        subjectRef: f.task.subjectRef,
+        source: "executor_observation",
+        authority: "worker",
+        summary: "A separate authorized runtime check produced this observation.",
+        artifactRefs: [],
+        evidenceRefs: [],
+        provenance: {
+          taskId: f.task.id,
+          attemptId: f.attempt.id,
+          producer: "Synthetic executor",
+          recordedAt: f.task.updatedAt,
+        },
+      },
+    ];
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 64 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([f.chunks[0]!.id]);
+    expect(projection.selectedCandidateIds).toEqual([]);
+    expect(projection.context.observations).toEqual([]);
+    expect(projection.context.sourceCoverage.units).toEqual([]);
+    expect(projection.context.counts.pendingDiffChunks).toBe(1);
+  });
+
+  it.each(["pr-review", "issue-investigate"] as const)(
+    "focuses %s on Core without appending candidate, full-diff, or observation seeds",
+    (kind) => {
+      const f = focusedSourceContinuationFixture();
+      f.task.kind = kind;
+      const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+      expect(projection.selectedUnitIds).toEqual([f.core.id]);
+      expect(projection.context.analysis.coverageUnits).toEqual([f.core]);
+      expect(projection.selectedCandidateIds).toEqual([]);
+      expect(projection.selectedFindingIds).toEqual([]);
+      expect(projection.context.sourceCoverage.units).toEqual([]);
+      expect(projection.context.observations).toEqual([]);
+      expect(projection.context.analysis.evidence.map((entry) => entry.id)).toEqual([
+        "core-leaf",
+        "core-summary",
+      ]);
+      expect(projection.context.counts.pendingDiffChunks).toBe(0);
+      expect(projection.context.counts.coverageUnits).toBe(70);
+      expect(projection.context.counts.pendingCandidates).toBe(1);
+      expect(projection.context.counts.pendingObservations).toBe(1);
+    },
+  );
+
+  it("preserves the original full-diff requirements and blocked status after Core completes", () => {
+    const f = focusedSourceContinuationFixture();
+    const originalMetadata = structuredClone(f.metadata);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    const delta = emptyDelta(projection);
+    delta.analysis.coverageUnits = [{ ...f.core, status: "completed" }];
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.coverage.includedUnits.find((unit) => unit.id === f.metadata.id)).toEqual(
+      originalMetadata,
+    );
+    expect(round.analysis.coverage.unresolvedUnitRefs).toEqual([f.metadata.id]);
+    expect(round.analysis.candidates).toEqual([f.candidate]);
+    expect(round.continue).toBe(true);
+    const checkpoint = seal({
+      ...f.checkpoint,
+      analysis: round.analysis,
+      round: round.round,
+      version: f.checkpoint.version + 1,
+    });
+    const continuation = prepareModelTurnProjection({
+      ...f,
+      checkpoint,
+      maximumContextBytes: 1024 * 1024,
+    });
+    expect(continuation.selectedUnitIds).toEqual([f.metadata.id]);
+    expect(continuation.selectedCandidateIds).toEqual([f.candidate.id]);
+    expect(continuation.context.analysis.coverageUnits).toEqual([originalMetadata]);
+    expect(continuation.context.sourceCoverage.units.map((unit) => unit.id)).toEqual([
+      ...f.chunks.map((unit) => unit.id),
+      f.core.id,
+    ]);
+    expect(
+      continuation.context.sourceCoverage.units.find((unit) => unit.id === f.core.id),
+    ).toMatchObject({ kind: "source_file", paths: ["src/Core.cs"], status: "completed" });
+  });
+
+  it("selects only the first pending source file even when all source files fit", () => {
+    const f = focusedSourceContinuationFixture();
+    const second = { ...f.core, id: "pending-second-source", paths: ["src/Second.cs"] };
+    f.checkpoint.analysis.coverage.includedUnits.push(second);
+    f.checkpoint.analysis.coverage.unresolvedUnitRefs.push(second.id);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([f.core.id]);
+    expect(projection.context.analysis.coverageUnits).toEqual([f.core]);
+    expect(projection.selectedCandidateIds).toEqual([]);
+  });
+
+  it("supplies every blocked source unit together without mixing the full diff or completing any obligation", () => {
+    const f = focusedSourceContinuationFixture();
+    f.core.status = "blocked";
+    const subscriber = { ...f.core, id: "blocked-subscriber-source", paths: ["src/Subscriber.cs"] };
+    const consumer = {
+      ...f.core,
+      id: "blocked-consumer-source",
+      paths: [...f.core.paths, "src/Consumer.cs"],
+      requiredWork:
+        "Evaluate the consumer with its subscriber and shared source available together.",
+    };
+    const unrelated = {
+      ...f.core,
+      id: "blocked-source-dependency",
+      kind: "source_dependency" as const,
+      paths: ["src/Other.cs"],
+    };
+    f.checkpoint.analysis.coverage.includedUnits.push(subscriber, consumer, unrelated);
+    f.checkpoint.analysis.coverage.unresolvedUnitRefs.push(
+      subscriber.id,
+      consumer.id,
+      unrelated.id,
+    );
+    const original = structuredClone(f.checkpoint.analysis);
+    const expectedIds = [f.core.id, subscriber.id, consumer.id];
+    for (const maximumContextBytes of [1024 * 1024, 256 * 1024]) {
+      const projection = prepareModelTurnProjection({ ...f, maximumContextBytes });
+      expect(projection.selectedUnitIds).toEqual(expectedIds);
+      expect(projection.context.analysis.coverageUnits).toEqual([f.core, subscriber, consumer]);
+      expect(projection.context.sourceCoverage.units).toEqual([]);
+      expect(projection.selectedCandidateIds).toEqual([]);
+      expect(projection.context.observations).toEqual([]);
+      const round = mergeModelTurnDelta(projection, emptyDelta(projection));
+      expect(round.analysis.coverage).toEqual(original.coverage);
+      expect(round.analysis.candidates).toEqual(original.candidates);
+      expect(round.continue).toBe(true);
+    }
+  });
+
+  it("rejects a joint blocked source batch when only an individual unit fits the metadata budget", () => {
+    const f = focusedSourceContinuationFixture();
+    f.core.status = "blocked";
+    const single = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    const singletonBudget = Buffer.byteLength(JSON.stringify(single.context), "utf8") + 256;
+    expect(
+      prepareModelTurnProjection({ ...f, maximumContextBytes: singletonBudget }).selectedUnitIds,
+    ).toEqual([f.core.id]);
+    const extra = ["subscriber", "consumer"].map((name) => ({
+      ...f.core,
+      id: `blocked-${name}-source`,
+      paths: [`src/${name}.cs`],
+      requiredWork: `Inspect the complete ${name} in the joint context. `.repeat(80),
+    }));
+    f.checkpoint.analysis.coverage.includedUnits.push(...extra);
+    f.checkpoint.analysis.coverage.unresolvedUnitRefs.push(...extra.map((unit) => unit.id));
+    const full = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    expect(full.selectedUnitIds).toEqual([f.core.id, ...extra.map((unit) => unit.id)]);
+    expect(() =>
+      prepareModelTurnProjection({ ...f, maximumContextBytes: singletonBudget }),
+    ).toThrow(ModelTurnProjectionError);
+    expect(
+      f.checkpoint.analysis.coverage.includedUnits
+        .filter((unit) => unit.kind === "source_file")
+        .every((unit) => unit.status === "blocked"),
+    ).toBe(true);
+  });
+  it("removes completed source from blocked retries without marking other work complete", () => {
+    const f = focusedSourceContinuationFixture();
+    f.core.status = "completed";
+    const blocked = {
+      ...f.core,
+      id: "remaining-blocked-source",
+      paths: ["src/Remaining.cs"],
+      status: "blocked" as const,
+    };
+    f.checkpoint.analysis.coverage.includedUnits.push(blocked);
+    f.checkpoint.analysis.coverage.completedUnitRefs.push(f.core.id);
+    f.checkpoint.analysis.coverage.unresolvedUnitRefs = [f.metadata.id, blocked.id];
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([blocked.id]);
+    expect(projection.context.analysis.coverageUnits).toEqual([blocked]);
+    expect(projection.context.sourceCoverage.units).toEqual([readonlySourceRecord(f.core)]);
+    expect(
+      projection.baseAnalysis.coverage.includedUnits.find((unit) => unit.id === f.metadata.id),
+    ).toEqual(f.metadata);
+  });
+
+  it.each(["pending", "blocked"] as const)(
+    "restores same-subject completed typed source as read-only context for a %s focused unit",
+    (status) => {
+      const f = focusedSourceContinuationFixture();
+      f.core.status = status;
+      const completed = {
+        ...f.core,
+        id: "completed-lifecycle",
+        status: "completed" as const,
+        paths: ["src/Entry.cs", "src/Application.cs", "src/Core.cs"],
+        requiredWork: "Retain the complete application lifecycle evidence.",
+      };
+      const duplicatePath = {
+        ...completed,
+        id: "completed-application-owner",
+        paths: ["src/Application.cs"],
+      };
+      const foreign = {
+        ...completed,
+        id: "completed-other-subject",
+        subjectRef: "other-subject",
+        paths: ["other/Entry.cs"],
+      };
+      const otherKind = {
+        ...completed,
+        id: "completed-other-kind",
+        kind: "source_dependency",
+        paths: ["src/Other.cs"],
+      };
+      const empty = { ...completed, id: "completed-empty-source", paths: [] };
+      f.checkpoint.analysis.coverage.includedUnits.push(
+        completed,
+        duplicatePath,
+        foreign,
+        otherKind,
+        empty,
+      );
+      f.checkpoint.analysis.coverage.completedUnitRefs.push(
+        ...[completed, duplicatePath, foreign, otherKind, empty].map((unit) => unit.id),
+      );
+      const original = structuredClone(f.checkpoint.analysis.coverage);
+      const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+      expect(projection.selectedUnitIds).toEqual([f.core.id]);
+      expect(projection.context.analysis.coverageUnits).toEqual([f.core]);
+      expect(projection.context.sourceCoverage.units).toEqual(
+        [completed, duplicatePath].map(readonlySourceRecord),
+      );
+      expect(
+        projection.context.sourceCoverage.units.some(
+          (unit) => unit.kind === "pr_diff_chunk" || unit.kind === "full_diff",
+        ),
+      ).toBe(false);
+      expect(mergeModelTurnDelta(projection, emptyDelta(projection)).analysis.coverage).toEqual(
+        original,
+      );
+      const invalidUpdate = emptyDelta(projection);
+      invalidUpdate.analysis.coverageUnits = [{ ...completed, status: "blocked" }];
+      expect(() => mergeModelTurnDelta(projection, invalidUpdate)).toThrow(
+        ModelTurnProjectionError,
+      );
+    },
+  );
+
+  it("refuses to omit required completed source context when only the selected unit fits", () => {
+    const f = focusedSourceContinuationFixture();
+    f.core.status = "blocked";
+    const selectedOnly = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    const selectedOnlyBudget =
+      Buffer.byteLength(JSON.stringify(selectedOnly.context), "utf8") + 256;
+    expect(
+      prepareModelTurnProjection({ ...f, maximumContextBytes: selectedOnlyBudget }).selectedUnitIds,
+    ).toEqual([f.core.id]);
+    const completed = {
+      ...f.core,
+      id: "completed-lifecycle",
+      status: "completed" as const,
+      paths: ["src/Entry.cs", "src/Application.cs"],
+      requiredWork: "Preserve the complete accepted lifecycle obligation as read-only context.",
+      evidenceRefs: ["accepted-lifecycle-evidence"],
+    };
+    f.checkpoint.analysis.coverage.includedUnits.push(completed);
+    f.checkpoint.analysis.coverage.completedUnitRefs.push(completed.id);
+    f.checkpoint.analysis.evidence.push({
+      id: "accepted-lifecycle-evidence",
+      subjectRef: f.task.subjectRef,
+      source: "static_analysis",
+      summary:
+        "The retained lifecycle evidence must accompany its completed source context. ".repeat(100),
+      evidenceRefs: [],
+    });
+    const complete = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    expect(complete.selectedUnitIds).toEqual([f.core.id]);
+    expect(complete.context.sourceCoverage.units).toEqual([readonlySourceRecord(completed)]);
+    expect(() =>
+      prepareModelTurnProjection({ ...f, maximumContextBytes: selectedOnlyBudget }),
+    ).toThrow(ModelTurnProjectionError);
+    expect(f.core.status).toBe("blocked");
+    expect(completed.status).toBe("completed");
+  });
+
+  it("keeps pending diff chunks ahead of completed typed source restoration", () => {
+    const f = focusedSourceContinuationFixture();
+    f.core.status = "blocked";
+    const completed = {
+      ...f.core,
+      id: "completed-lifecycle",
+      paths: ["src/Entry.cs"],
+      status: "completed" as const,
+    };
+    f.checkpoint.analysis.coverage.includedUnits.push(completed);
+    f.checkpoint.analysis.coverage.completedUnitRefs.push(completed.id);
+    const chunk = f.chunks[0]!;
+    chunk.status = "pending";
+    f.checkpoint.analysis.coverage.completedUnitRefs =
+      f.checkpoint.analysis.coverage.completedUnitRefs.filter((id) => id !== chunk.id);
+    f.checkpoint.analysis.coverage.unresolvedUnitRefs.push(chunk.id);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([chunk.id]);
+    expect(projection.context.sourceCoverage.units).toEqual([]);
+  });
+
+  it("prioritizes newly pending typed source over an earlier blocked source unit", () => {
+    const f = focusedSourceContinuationFixture();
+    f.core.status = "blocked";
+    const pending = {
+      ...f.core,
+      id: "new-pending-source",
+      paths: ["src/NewDependency.cs"],
+      status: "pending" as const,
+    };
+    f.checkpoint.analysis.coverage.includedUnits.push(pending);
+    f.checkpoint.analysis.coverage.unresolvedUnitRefs.push(pending.id);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([pending.id]);
+    expect(projection.context.analysis.coverageUnits).toEqual([pending]);
+    expect(projection.context.sourceCoverage.units).toEqual([]);
+    expect(
+      projection.baseAnalysis.coverage.includedUnits.find((unit) => unit.id === f.core.id),
+    ).toEqual(f.core);
+  });
+
+  it("retains ordinary combined seeding for snapshot-only analysis tasks", () => {
+    const f = focusedSourceContinuationFixture();
+    f.task.executionPolicy.mode = "snapshot_only";
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([f.metadata.id, f.core.id]);
+    expect(projection.selectedCandidateIds).toEqual([f.candidate.id]);
+    expect(projection.context.observations.map((entry) => entry.id)).toEqual([
+      "unrelated-worker-observation",
+    ]);
+    expect(projection.context.sourceCoverage.units).toHaveLength(68);
+  });
+
+  it("retains observation-first seeding for non-analysis tasks with pending source files", () => {
+    const f = focusedSourceContinuationFixture();
+    f.task.kind = "pr-verify";
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([f.metadata.id]);
+    expect(projection.selectedCandidateIds).toEqual([]);
+    expect(projection.context.observations.map((entry) => entry.id)).toEqual([
+      "unrelated-worker-observation",
+    ]);
+    expect(projection.context.sourceCoverage.units.map((unit) => unit.id)).toEqual(
+      f.chunks.map((unit) => unit.id),
+    );
+  });
+
+  it.each(["pending", "blocked"] as const)(
+    "keeps a pending diff chunk ahead of %s source-file continuation",
+    (status) => {
+      const f = focusedSourceContinuationFixture();
+      f.core.status = status;
+      const chunk = f.chunks[0]!;
+      chunk.status = "pending";
+      chunk.evidenceRefs = [];
+      f.checkpoint.analysis.coverage.completedUnitRefs = f.chunks.slice(1).map((unit) => unit.id);
+      f.checkpoint.analysis.coverage.unresolvedUnitRefs.push(chunk.id);
+      const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 1024 * 1024 });
+      expect(projection.selectedUnitIds).toEqual([chunk.id]);
+      expect(projection.selectedCandidateIds).toEqual([]);
+      expect(projection.context.observations).toEqual([]);
+      expect(projection.context.sourceCoverage.units).toEqual([]);
+      expect(projection.context.counts.pendingDiffChunks).toBe(1);
+    },
+  );
+
+  it("supplies completed diff evidence as read-only context for a stateless full-diff continuation", () => {
+    const f = sourceContinuationFixture();
+    f.checkpoint.analysis.candidates = [];
+    f.checkpoint.analysis.evidence.push({
+      id: "unrelated-historical-evidence",
+      subjectRef: f.task.subjectRef,
+      source: "static_analysis",
+      summary: "Unrelated accepted history. ".repeat(10_000),
+      evidenceRefs: [],
+    });
+    f.checkpoint.runtime.evidence = [
+      {
+        id: "chunk-worker-observation",
+        subjectRef: f.task.subjectRef,
+        source: "executor_observation",
+        authority: "worker",
+        summary: "The original accepted observation supports the chunk evidence.",
+        artifactRefs: [],
+        evidenceRefs: [],
+        provenance: {
+          taskId: f.task.id,
+          attemptId: f.attempt.id,
+          producer: "Synthetic source executor",
+          recordedAt: f.task.updatedAt,
+        },
+      },
+    ];
+    f.checkpoint.analysis.evidence[0]!.evidenceRefs = ["chunk-worker-observation"];
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 32 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([f.metadata.id]);
+    expect(projection.context.sourceCoverage.units).toEqual(
+      f.chunks.map(({ requiredWork: _requiredWork, ...unit }) => unit),
+    );
+    expect(projection.context.sourceCoverage.digest).toBe(
+      investigationContentDigest(projection.context.sourceCoverage.units),
+    );
+    expect(projection.context.analysis.evidence.map((entry) => entry.id)).toEqual([
+      "first-chunk-leaf",
+      "first-chunk-summary",
+      "second-chunk-summary",
+    ]);
+    expect(projection.context.observations.map((entry) => entry.id)).toEqual([
+      "chunk-worker-observation",
+    ]);
+    const illegalUpdate = emptyDelta(projection);
+    illegalUpdate.analysis.coverageUnits = [{ ...f.chunks[0]!, status: "blocked" }];
+    expect(() => mergeModelTurnDelta(projection, illegalUpdate)).toThrow(
+      /outside its supplied batch/u,
+    );
+    const delta = emptyDelta(projection);
+    delta.analysis.coverageUnits = [
+      {
+        ...f.metadata,
+        status: "completed",
+        evidenceRefs: f.chunks.flatMap((unit) => unit.evidenceRefs),
+      },
+    ];
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.coverage.includedUnits.slice(1)).toEqual(f.chunks);
+    expect(round.continue).toBe(true);
+    const checkpoint = seal({
+      ...f.checkpoint,
+      analysis: round.analysis,
+      round: round.round,
+      version: f.checkpoint.version + 1,
+    });
+    const finalProjection = prepareModelTurnProjection({
+      ...f,
+      checkpoint,
+      maximumContextBytes: 32 * 1024,
+    });
+    expect(finalProjection.phase).toBe("finalize");
+    expect(mergeModelTurnDelta(finalProjection, emptyDelta(finalProjection)).continue).toBe(false);
+  });
+
+  it("selects a pending candidate before blocked full-diff work and retains both when they fit", () => {
+    const f = sourceContinuationFixture();
+    const combined = prepareModelTurnProjection({ ...f, maximumContextBytes: 64 * 1024 });
+    expect(combined.selectedCandidateIds).toEqual([f.candidate.id]);
+    expect(combined.selectedUnitIds).toEqual([f.metadata.id]);
+    expect(combined.context.sourceCoverage.units.map((unit) => unit.id)).toEqual(
+      f.chunks.map((unit) => unit.id),
+    );
+    f.metadata.requiredWork = "The original complete scope must remain required. ".repeat(2000);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 16 * 1024 });
+    expect(projection.selectedCandidateIds).toEqual([f.candidate.id]);
+    expect(projection.selectedUnitIds).toEqual([]);
+    expect(projection.context.sourceCoverage.units.map((unit) => unit.id)).toEqual([
+      f.chunks[0]!.id,
+    ]);
+    expect(projection.context.analysis.evidence.map((entry) => entry.id)).toEqual([
+      "first-chunk-leaf",
+      "first-chunk-summary",
+      "candidate-source-evidence",
+    ]);
+    const delta = emptyDelta(projection);
+    delta.analysis.candidates = [
+      {
+        ...f.candidate,
+        status: "withdrawn",
+        rationale: "The supplied source evidence disproves the candidate after independent review.",
+      },
+    ];
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.candidates[0]!.status).toBe("withdrawn");
+    expect(round.analysis.coverage.includedUnits[0]).toEqual(f.metadata);
+    expect(round.analysis.coverage.unresolvedUnitRefs).toEqual([f.metadata.id]);
+    expect(round.continue).toBe(true);
+  });
+
+  it("recovers candidate source paths only through typed evidence dependencies", () => {
+    const f = sourceContinuationFixture();
+    f.metadata.status = "completed";
+    const caller = {
+      ...f.metadata,
+      id: "typed-caller-source",
+      kind: "source",
+      paths: ["src/caller.ts"],
+      requiredWork: "Complete all original caller analysis. ".repeat(2000),
+      status: "blocked" as const,
+      evidenceRefs: ["first-chunk-leaf"],
+    };
+    f.checkpoint.analysis.coverage.includedUnits.push(caller);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 16 * 1024 });
+    expect(projection.selectedCandidateIds).toEqual([f.candidate.id]);
+    expect(projection.selectedUnitIds).toEqual([]);
+    expect(projection.context.sourceCoverage.units.map((unit) => unit.id)).toEqual([
+      f.chunks[0]!.id,
+      caller.id,
+    ]);
+    expect(
+      projection.context.sourceCoverage.units.find((unit) => unit.id === caller.id)?.paths,
+    ).toEqual(["src/caller.ts"]);
+    expect(projection.context.analysis.evidence.map((entry) => entry.id)).not.toContain(
+      "second-chunk-summary",
+    );
+    const delta = emptyDelta(projection);
+    delta.analysis.coverageUnits = [{ ...caller, status: "completed" }];
+    expect(() => mergeModelTurnDelta(projection, delta)).toThrow(/outside its supplied batch/u);
+  });
+
+  it("falls back to the completed frozen diff when candidate evidence only matches empty metadata", () => {
+    const f = sourceContinuationFixture();
+    f.metadata.status = "completed";
+    f.metadata.evidenceRefs = [...f.candidate.evidenceRefs];
+    f.checkpoint.analysis.evidence.find(
+      (entry) => entry.id === "candidate-source-evidence",
+    )!.evidenceRefs = [];
+    f.candidate.title = "A prose-only reference to src/unproven-caller.ts must not invent a path.";
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 32 * 1024 });
+    expect(projection.selectedUnitIds).toEqual([]);
+    expect(projection.context.sourceCoverage.units.map((unit) => unit.id)).toEqual(
+      f.chunks.map((unit) => unit.id),
+    );
+    expect(projection.context.sourceCoverage.units.flatMap((unit) => unit.paths)).toEqual([
+      "src/first.ts",
+      "src/second.ts",
+    ]);
   });
 });

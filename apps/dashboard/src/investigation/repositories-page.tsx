@@ -2,6 +2,7 @@ import { Alert, Box, Button, CircularProgress, Stack, Typography } from "@mui/ma
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { investigationApi } from "./api";
+import { RepositoryAutoReplySettingsPanel } from "./auto-reply-settings";
 import { ImportWorkItemButton } from "./import-work-item";
 import { Section } from "./report-sections";
 import { RepositoryWebhookSettingsPanel } from "./webhook-settings";
@@ -68,6 +69,7 @@ export default function RepositoriesPage() {
             </Button>
           </Stack>
           <RepositoryWebhookSettingsPanel repository={repository} />
+          <RepositoryAutoReplySettingsPanel repository={repository} />
         </Section>
       ))}
     </Stack>

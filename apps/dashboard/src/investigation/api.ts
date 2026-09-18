@@ -60,6 +60,50 @@ export type UpdateRepositoryWebhookSettingsInput = Pick<
   "version" | "enabled" | "reviewerUserId" | "allowedActorUserIds"
 >;
 
+export const RepositoryAutoReplySettingsSchema = object({
+  repositoryId: EntityIdSchema,
+  enabled: Type.Boolean(),
+  version: Type.Integer({ minimum: 0 }),
+  pullRequestTemplate: Type.String({ minLength: 1 }),
+  issueTemplate: Type.String({ minLength: 1 }),
+  publisherConfigured: Type.Boolean(),
+  authorizedById: Type.Union([EntityIdSchema, Type.Null()]),
+  updatedAt: Type.Union([DateTimeSchema, Type.Null()]),
+  templateVersion: Type.Integer({ minimum: 1 }),
+});
+export type RepositoryAutoReplySettings = Static<typeof RepositoryAutoReplySettingsSchema>;
+export type UpdateRepositoryAutoReplySettingsInput = Pick<
+  RepositoryAutoReplySettings,
+  "version" | "enabled" | "pullRequestTemplate" | "issueTemplate"
+>;
+
+export const RepositoryAutoReplySchema = object({
+  id: EntityIdSchema,
+  reportId: EntityIdSchema,
+  taskId: EntityIdSchema,
+  workItemId: EntityIdSchema,
+  workItemKind: Type.Union([Type.Literal("pull_request"), Type.Literal("issue")]),
+  workItemNumber: Type.Integer({ minimum: 1 }),
+  state: Type.Union([
+    Type.Literal("pending"),
+    Type.Literal("prepared"),
+    Type.Literal("sending"),
+    Type.Literal("sent"),
+    Type.Literal("blocked"),
+    Type.Literal("failed"),
+    Type.Literal("unknown"),
+  ]),
+  body: Type.Union([Type.String(), Type.Null()]),
+  intentId: Type.Union([EntityIdSchema, Type.Null()]),
+  externalId: Type.Union([Type.String(), Type.Null()]),
+  reason: Type.Union([Type.String(), Type.Null()]),
+  settingsVersion: Type.Integer({ minimum: 1 }),
+  templateVersion: Type.Integer({ minimum: 1 }),
+  createdAt: DateTimeSchema,
+  updatedAt: DateTimeSchema,
+});
+export type RepositoryAutoReply = Static<typeof RepositoryAutoReplySchema>;
+
 export const TaskDetailSchema = object({
   task: InvestigationTaskV1Schema,
   attempts: Type.Array(InvestigationAttemptV1Schema),
@@ -89,6 +133,25 @@ export function createInvestigationApi(transport: InvestigationTransport) {
         `/api/repositories/${encodeURIComponent(repositoryId)}/webhook-settings`,
         RepositoryWebhookSettingsSchema,
         { method: "PUT", body: input },
+      ),
+    repositoryAutoReplySettings: (repositoryId: string) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/auto-reply-settings`,
+        RepositoryAutoReplySettingsSchema,
+      ),
+    updateRepositoryAutoReplySettings: (
+      repositoryId: string,
+      input: UpdateRepositoryAutoReplySettingsInput,
+    ) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/auto-reply-settings`,
+        RepositoryAutoReplySettingsSchema,
+        { method: "PUT", body: input },
+      ),
+    repositoryAutoReplies: (repositoryId: string) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/auto-replies`,
+        object({ items: Type.Array(RepositoryAutoReplySchema) }),
       ),
     workItems: (repositoryId?: string, kind?: "pull_request" | "issue") =>
       transport(

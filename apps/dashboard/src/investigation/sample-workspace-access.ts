@@ -5,7 +5,7 @@ import type {
   InvestigationActionKind,
   InvestigationSession,
 } from "@agentic-review/contracts";
-import type { InvestigationApi } from "./api";
+import type { InvestigationApi, RepositoryAutoReplySettings } from "./api";
 import { InvestigationHttpError } from "./transport";
 
 type User = NonNullable<InvestigationSession["user"]>;
@@ -94,6 +94,7 @@ export function createSessionScopedSampleApi(
   onExpired?: () => void,
 ): InvestigationApi {
   let intentOwners: Map<string, { actorId: string; idempotencyKey: string }> | undefined;
+  const autoReplyOwners = new Map<string, { version: number; authorizedById: string | null }>();
 
   function expired(): never {
     onExpired?.();
@@ -126,6 +127,23 @@ export function createSessionScopedSampleApi(
 
   function requireGrant(user: User, grant: Grant): void {
     if (!canPerform(user, grant)) forbidden();
+  }
+
+  function authorizeAutoReply(user: User, repositoryId: string, enabled: boolean): void {
+    authorize(user, repositoryId, { permission: "repository:manage" });
+    if (enabled) {
+      requireGrant(user, { permission: "action:prepare", action: "comment" });
+      requireGrant(user, { permission: "action:execute", action: "comment" });
+    }
+  }
+
+  function scopedAutoReplySettings(
+    settings: RepositoryAutoReplySettings,
+  ): RepositoryAutoReplySettings {
+    const owner = autoReplyOwners.get(settings.repositoryId);
+    return owner?.version === settings.version
+      ? { ...settings, authorizedById: owner.authorizedById }
+      : settings;
   }
 
   async function workItem(user: User, id: string) {
@@ -190,6 +208,38 @@ export function createSessionScopedSampleApi(
         const settings = await api.updateRepositoryWebhookSettings(repositoryId, snapshot);
         return result(user, settings, repositoryId, grant);
       })();
+    },
+
+    async repositoryAutoReplySettings(repositoryId) {
+      const user = await currentUser();
+      authorize(user, repositoryId);
+      const settings = await api.repositoryAutoReplySettings(repositoryId);
+      return result(user, scopedAutoReplySettings(settings), repositoryId);
+    },
+
+    updateRepositoryAutoReplySettings(repositoryId, input) {
+      const snapshot = structuredClone(input);
+      return (async () => {
+        const user = await currentUser();
+        authorizeAutoReply(user, repositoryId, snapshot.enabled);
+        const current = await currentUser(user.id);
+        authorizeAutoReply(current, repositoryId, snapshot.enabled);
+        const settings = await api.updateRepositoryAutoReplySettings(repositoryId, snapshot);
+        autoReplyOwners.set(repositoryId, {
+          version: settings.version,
+          authorizedById: settings.enabled ? current.id : null,
+        });
+        const latest = await currentUser(user.id);
+        authorizeAutoReply(latest, repositoryId, snapshot.enabled);
+        return structuredClone(scopedAutoReplySettings(settings));
+      })();
+    },
+
+    async repositoryAutoReplies(repositoryId) {
+      const user = await currentUser();
+      authorize(user, repositoryId);
+      const replies = await api.repositoryAutoReplies(repositoryId);
+      return result(user, replies, repositoryId);
     },
 
     async workItems(repositoryId, kind) {

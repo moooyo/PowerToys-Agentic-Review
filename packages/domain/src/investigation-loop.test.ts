@@ -103,6 +103,106 @@ function finalAnalysis(
 }
 
 describe("complete investigation loop", () => {
+  it("records trusted model identity only for accepted analysis rounds", () => {
+    const { checkpoint, analysis } = setup();
+    const modelIdentity = { engine: "codex" as const, model: "gpt-6-astra" };
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), {
+      ...options,
+      modelIdentity,
+    });
+    expect(first.runtime.modelExecutions).toEqual([
+      { ...modelIdentity, attemptId: checkpoint.attemptId, round: 1 },
+    ]);
+    expect(checkpoint.runtime.modelExecutions).toBeUndefined();
+    const changed = structuredClone(analysis);
+    changed.findings[0]!.title = "Rejected same-version finding edit";
+    const accepted = structuredClone(first);
+    expect(() =>
+      applyInvestigationLoopRound(first, round(first, changed), {
+        ...options,
+        modelIdentity: { engine: "copilot", model: null },
+      }),
+    ).toThrow();
+    expect(first).toEqual(accepted);
+  });
+
+  it("preserves mixed model history and exact round ownership across resume", () => {
+    const { checkpoint, task, analysis } = setup();
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), {
+      ...options,
+      modelIdentity: { engine: "codex", model: "gpt-6-astra" },
+    });
+    const restored = restoreInvestigationCheckpoint({
+      checkpoint: interruptInvestigationLoop(first, "interrupted"),
+      task,
+      attemptId: "attempt-2",
+      leaseVersion: 2,
+      recordedAt,
+    });
+    expect(restored.runtime.modelExecutions).toEqual(first.runtime.modelExecutions);
+    const second = applyInvestigationLoopRound(restored, round(restored, analysis), {
+      ...options,
+      modelIdentity: { engine: "copilot", model: null },
+    });
+    expect(second.adoptedAttemptIds).toEqual([checkpoint.attemptId, "attempt-2"]);
+    expect(second.runtime.modelExecutions).toEqual([
+      { attemptId: checkpoint.attemptId, round: 1, engine: "codex", model: "gpt-6-astra" },
+      { attemptId: "attempt-2", round: 2, engine: "copilot", model: null },
+    ]);
+    expect(first.runtime.modelExecutions).toHaveLength(1);
+  });
+
+  it("does not invent model identities for legacy rounds when recording a later round", () => {
+    const { checkpoint, analysis } = setup();
+    const legacy = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    expect(legacy.runtime.modelExecutions).toBeUndefined();
+    const next = applyInvestigationLoopRound(legacy, round(legacy, analysis), {
+      ...options,
+      modelIdentity: { engine: "codex", model: null },
+    });
+    expect(next.runtime.modelExecutions).toEqual([
+      { attemptId: checkpoint.attemptId, round: 2, engine: "codex", model: null },
+    ]);
+  });
+
+  it.each(["model", "engine", "attempt", "round", "discard", "omit", "append"])(
+    "rejects generic runtime changes to trusted model history: %s",
+    (mutation) => {
+      const { checkpoint, analysis } = setup();
+      const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), {
+        ...options,
+        modelIdentity: { engine: "codex", model: "gpt-6-astra" },
+      });
+      const runtime = structuredClone(first.runtime);
+      const execution = runtime.modelExecutions![0]!;
+      if (mutation === "model") execution.model = "forged-model";
+      if (mutation === "engine") execution.engine = "copilot";
+      if (mutation === "attempt") execution.attemptId = "forged-attempt";
+      if (mutation === "round") execution.round = 2;
+      if (mutation === "discard") runtime.modelExecutions = [];
+      if (mutation === "omit") delete runtime.modelExecutions;
+      if (mutation === "append") runtime.modelExecutions!.push({ ...execution, round: 2 });
+      expect(() => applyInvestigationRuntimeCheckpoint(first, runtime, { recordedAt })).toThrow(
+        "Execution receipts cannot add, replace, or remove accepted analysis model identities",
+      );
+      expect(first.runtime.modelExecutions).toEqual([
+        { attemptId: checkpoint.attemptId, round: 1, engine: "codex", model: "gpt-6-astra" },
+      ]);
+    },
+  );
+
+  it("does not let a generic runtime update invent history for legacy analysis", () => {
+    const { checkpoint, analysis } = setup();
+    const legacy = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const runtime = structuredClone(legacy.runtime);
+    runtime.modelExecutions = [
+      { attemptId: legacy.attemptId, round: 1, engine: "codex", model: "forged-model" },
+    ];
+    expect(() => applyInvestigationRuntimeCheckpoint(legacy, runtime, { recordedAt })).toThrow(
+      "Execution receipts cannot add, replace, or remove accepted analysis model identities",
+    );
+  });
+
   it("retains every finding in a report larger than 100 entries", () => {
     const { checkpoint, analysis, result } = setup(137);
     const discovered = applyInvestigationLoopRound(
@@ -401,7 +501,10 @@ describe("complete investigation loop", () => {
 
   it("recovers delivery of a complete checkpoint without restarting analysis or execution", () => {
     const { checkpoint, task, analysis, result } = setup();
-    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), {
+      ...options,
+      modelIdentity: { engine: "codex", model: "gpt-6-astra" },
+    });
     const completed = applyInvestigationLoopRound(
       first,
       round(first, finalAnalysis(result, analysis, 2), "finalize"),
@@ -417,6 +520,9 @@ describe("complete investigation loop", () => {
     expect(recovered.stopReason).toBe("complete");
     expect(recovered.analysis).toEqual(completed.analysis);
     expect(recovered.runtime).toEqual(completed.runtime);
+    expect(recovered.runtime.modelExecutions).toEqual([
+      { attemptId: checkpoint.attemptId, round: 1, engine: "codex", model: "gpt-6-astra" },
+    ]);
     expect(recovered.consumed).toEqual(completed.consumed);
     expect(recovered.adoptedAttemptIds).toContain("delivery-attempt");
     expect(() =>
@@ -441,6 +547,156 @@ describe("complete investigation loop", () => {
     expect(interrupted.consumed.durationMs).toBe(100);
     expect(interrupted.consumed.rounds).toBe(0);
     expect(interrupted.stopReason).toBe("cancelled");
+  });
+
+  it("charges a rejected model invocation without accepting its analysis or a completed round", () => {
+    const { checkpoint, analysis } = setup();
+    const accepted = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const interrupted = interruptInvestigationLoop(accepted, "error", recordedAt, [], 30, {
+      round: 2,
+      tokens: 37,
+    });
+    expect(interrupted.consumed.tokens).toBe(137);
+    expect(interrupted.consumed.rounds).toBe(1);
+    expect(interrupted.round).toBe(1);
+    expect(interrupted.consumed.durationMs).toBe(40);
+    expect(interrupted.analysis).toEqual(accepted.analysis);
+    expect(interrupted.runtime.unacceptedModelUsage).toEqual([
+      { attemptId: checkpoint.attemptId, round: 2, tokens: 37 },
+    ]);
+    expect(accepted.runtime.unacceptedModelUsage).toBeUndefined();
+  });
+
+  it("deduplicates rejected invocation usage independently of interruption diagnostics", () => {
+    const { checkpoint } = setup();
+    const usage = { round: 1, tokens: 37 };
+    const interrupted = interruptInvestigationLoop(checkpoint, "error", recordedAt, [], 10, usage);
+    const repeated = interruptInvestigationLoop(
+      interrupted,
+      "interrupted",
+      recordedAt,
+      [
+        {
+          id: "additional-interruption-detail",
+          code: "MODEL_PROTOCOL_ERROR",
+          category: "error",
+          message: "The same invocation is being reported with an additional diagnostic.",
+          retryable: false,
+          evidenceRefs: [],
+          prerequisiteRefs: [],
+        },
+      ],
+      20,
+      usage,
+    );
+    expect(repeated.consumed.tokens).toBe(37);
+    expect(repeated.consumed.durationMs).toBe(30);
+    expect(repeated.runtime.unacceptedModelUsage).toEqual(interrupted.runtime.unacceptedModelUsage);
+    expect(repeated.analysis.diagnostics).toHaveLength(1);
+    for (const tokens of [38, null])
+      expect(() =>
+        interruptInvestigationLoop(repeated, "error", recordedAt, [], 0, { round: 1, tokens }),
+      ).toThrow("different token usage receipt");
+    expect(() =>
+      interruptInvestigationLoop(repeated, "error", recordedAt, [], 0, { round: 2, tokens: 1 }),
+    ).toThrow("next unaccepted analysis round");
+  });
+
+  it("retains unavailable usage and its subtotal diagnostic across explicit recovery", () => {
+    const { checkpoint, task, analysis } = setup();
+    const interrupted = interruptInvestigationLoop(checkpoint, "cancelled", recordedAt, [], 10, {
+      round: 1,
+      tokens: null,
+    });
+    expect(interrupted.consumed.tokens).toBe(0);
+    expect(interrupted.consumed.rounds).toBe(0);
+    expect(interrupted.runtime.unacceptedModelUsage).toEqual([
+      { attemptId: checkpoint.attemptId, round: 1, tokens: null },
+    ]);
+    expect(interrupted.analysis.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "MODEL_USAGE_UNAVAILABLE",
+        message: expect.stringContaining("only known usage"),
+      }),
+    );
+    const revised = increaseInvestigationBudget(
+      interrupted,
+      task,
+      { ...task.budget, maxTokens: task.budget.maxTokens + 100 },
+      { recordedAt },
+    );
+    const restored = restoreInvestigationCheckpoint({
+      checkpoint: revised.checkpoint,
+      task: revised.task,
+      attemptId: "explicit-recovery-attempt",
+      leaseVersion: 2,
+      recordedAt,
+    });
+    const conflicting = structuredClone(analysis);
+    conflicting.diagnostics = interrupted.analysis.diagnostics.map((diagnostic) => ({
+      ...diagnostic,
+      message: "The rejected invocation used zero tokens.",
+    }));
+    expect(() =>
+      applyInvestigationLoopRound(restored, round(restored, conflicting), options),
+    ).toThrow("unavailable model usage diagnostic cannot be replaced");
+    const proposed = structuredClone(analysis);
+    proposed.diagnostics = [];
+    const next = applyInvestigationLoopRound(restored, round(restored, proposed), options);
+    expect(next.consumed.tokens).toBe(100);
+    expect(next.runtime.unacceptedModelUsage).toEqual(interrupted.runtime.unacceptedModelUsage);
+    expect(next.analysis.diagnostics).toEqual(interrupted.analysis.diagnostics);
+  });
+
+  it.each(["omit", "replace", "append"] as const)(
+    "prevents execution receipts from changing rejected invocation usage by %s",
+    (mutation) => {
+      const { checkpoint, task } = setup();
+      const interrupted = interruptInvestigationLoop(checkpoint, "error", recordedAt, [], 0, {
+        round: 1,
+        tokens: 37,
+      });
+      const restored = restoreInvestigationCheckpoint({
+        checkpoint: interrupted,
+        task,
+        attemptId: "execution-recovery-attempt",
+        leaseVersion: 2,
+        recordedAt,
+      });
+      const runtime = structuredClone(restored.runtime);
+      if (mutation === "omit") delete runtime.unacceptedModelUsage;
+      if (mutation === "replace") runtime.unacceptedModelUsage![0]!.tokens = 0;
+      if (mutation === "append")
+        runtime.unacceptedModelUsage!.push({ attemptId: restored.attemptId, round: 1, tokens: 1 });
+      expect(() => applyInvestigationRuntimeCheckpoint(restored, runtime, { recordedAt })).toThrow(
+        "cannot add, replace, or remove unaccepted model usage",
+      );
+    },
+  );
+
+  it("charges a distinct invocation after recovery even when its analysis round number is unchanged", () => {
+    const { checkpoint, task } = setup();
+    const interrupted = interruptInvestigationLoop(checkpoint, "error", recordedAt, [], 0, {
+      round: 1,
+      tokens: 37,
+    });
+    const restored = restoreInvestigationCheckpoint({
+      checkpoint: interrupted,
+      task,
+      attemptId: "second-model-attempt",
+      leaseVersion: 2,
+      recordedAt,
+    });
+    const failed = interruptInvestigationLoop(restored, "error", recordedAt, [], 0, {
+      round: 1,
+      tokens: 41,
+    });
+    expect(failed.consumed.tokens).toBe(78);
+    expect(failed.consumed.rounds).toBe(0);
+    expect(failed.runtime.unacceptedModelUsage).toEqual([
+      { attemptId: checkpoint.attemptId, round: 1, tokens: 37 },
+      { attemptId: restored.attemptId, round: 1, tokens: 41 },
+    ]);
   });
 
   it("rejects altered frozen source, execution authorization, or content digest on resume", () => {

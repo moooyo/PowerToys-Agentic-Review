@@ -4,18 +4,37 @@ import type { StdioProcessHostClientOptions } from "../execution/process-host-cl
 import type { Logger } from "../logging/logger.js";
 import type { InvestigationGitSourceOptions } from "./git-source.js";
 import type { InvestigationWorkerClient } from "./http-client.js";
+import type { InvestigationLoopCoordinatorOptions } from "./loop-coordinator.js";
 import type { ModelTurnRunnerOptions } from "./model-turn-runner.js";
 import {
   createInvestigationExecutionRuntime,
   type InvestigationRuntimeDependencies,
 } from "./runtime.js";
 import { loadInvestigationWorkerRuntimeConfig } from "./runtime-config.js";
-import type { ClaimedInvestigationTask, InvestigationTaskServiceOptions } from "./task-service.js";
+import {
+  type ClaimedInvestigationTask,
+  InvestigationTaskService,
+  type InvestigationTaskServiceOptions,
+} from "./task-service.js";
 
 const never = async (): Promise<never> => {
   throw new Error("This fixture does not execute a model, command, or request.");
 };
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
+
+function claimFixture(): ClaimedInvestigationTask {
+  const { task, attempt } = createInvestigationFixture("pr");
+  return {
+    task,
+    attempt,
+    lease: { attemptId: attempt.id, fence: attempt.leaseVersion, leaseToken: "synthetic-lease" },
+    checkpoint: null,
+    reportId: "synthetic-report",
+    inputSnapshot: null,
+    plan: null,
+    execution: null,
+  } as unknown as ClaimedInvestigationTask;
+}
 
 function fixture() {
   const config = loadInvestigationWorkerRuntimeConfig({
@@ -51,6 +70,7 @@ function fixture() {
     host?: StdioProcessHostClientOptions;
     model?: ModelTurnRunnerOptions;
     source?: InvestigationGitSourceOptions;
+    coordinator?: InvestigationLoopCoordinatorOptions;
     service?: InvestigationTaskServiceOptions;
   } = {};
   const host = {
@@ -104,7 +124,10 @@ function fixture() {
       return { materialize: never };
     },
     createWorkspaceProvider: () => ({ prepare: never }),
-    createCoordinator: () => coordinator,
+    createCoordinator: (options) => {
+      captured.coordinator = options;
+      return coordinator;
+    },
     createTaskService: (options) => {
       captured.service = options;
       return service;
@@ -136,17 +159,7 @@ describe("production investigation runtime composition", () => {
   it("constructs an independent source adapter for the exact claim without making legacy job envelopes", async () => {
     const f = fixture();
     const runtime = await createInvestigationExecutionRuntime(f.config, logger, f.dependencies);
-    const { task, attempt } = createInvestigationFixture("pr");
-    const claim = {
-      task,
-      attempt,
-      lease: { attemptId: attempt.id, fence: attempt.leaseVersion, leaseToken: "synthetic-lease" },
-      checkpoint: null,
-      reportId: "synthetic-report",
-      inputSnapshot: null,
-      plan: null,
-      execution: null,
-    } as unknown as ClaimedInvestigationTask;
+    const claim = claimFixture();
     const signal = new AbortController().signal;
     await f.captured.service!.executor.execute(claim, signal);
     expect(f.coordinator.execute).toHaveBeenCalledWith(claim, signal);
@@ -154,6 +167,42 @@ describe("production investigation runtime composition", () => {
     expect(f.captured.source?.allowedRepositories).toEqual(["moooyo/PowerToys"]);
     expect(JSON.stringify(f.captured.source?.environment)).not.toContain(f.config.workerToken);
     await runtime.stop();
+  });
+
+  it("rejects a node lifecycle fault after the active attempt and process host stop", async () => {
+    const f = fixture();
+    const claim = vi.fn(async () => claimFixture());
+    f.coordinator.execute.mockImplementation(async () => {
+      f.captured.coordinator!.onNodeFault!("MODEL_PROCESS_CLEANUP_UNCONFIRMED");
+      await Promise.resolve();
+      f.events.push("coordinator.terminal.cleanup");
+    });
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, {
+      ...f.dependencies,
+      createClient: () => ({ ...f.client, claim }),
+      createTaskService: (options) => new InvestigationTaskService(options),
+    });
+    await expect(runtime.run()).rejects.toThrow("MODEL_PROCESS_CLEANUP_UNCONFIRMED");
+    await runtime.stop();
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(f.events).toEqual(["directories.prepare", "coordinator.terminal.cleanup", "host.close"]);
+  });
+
+  it("rejects a terminal submission failure and still closes the process host exactly once", async () => {
+    const f = fixture();
+    const claim = vi.fn(async () => claimFixture());
+    f.coordinator.execute.mockImplementation(async () => {
+      throw new Error("Synthetic sensitive upstream response.");
+    });
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, {
+      ...f.dependencies,
+      createClient: () => ({ ...f.client, claim }),
+      createTaskService: (options) => new InvestigationTaskService(options),
+    });
+    await expect(runtime.run()).rejects.toThrow(/terminal submission/);
+    await expect(runtime.stop()).rejects.toThrow(/terminal submission/);
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(f.events).toEqual(["directories.prepare", "host.close"]);
   });
 
   it("closes ProcessHost when a dependent runtime factory fails during startup", async () => {

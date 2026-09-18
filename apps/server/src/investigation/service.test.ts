@@ -2,12 +2,16 @@ import { createHash } from "node:crypto";
 import {
   type ActionContextV1,
   createInvestigationPreview as createInvestigationFixture,
+  type InvestigationAnalysisV1,
   type InvestigationArtifactV1,
+  type InvestigationCheckpointRequest,
+  type InvestigationCheckpointResponse,
   type InvestigationClaim,
   type InvestigationClaimResponse,
   type InvestigationCreateTaskRequestV1,
   type InvestigationFindingsPageV1,
   type InvestigationHeartbeatResponse,
+  type InvestigationLoopCheckpointV1,
   type InvestigationPlanExecutionBinding,
   type InvestigationResultV1,
   type InvestigationTaskV1,
@@ -204,6 +208,58 @@ function artifactFor(claimed: InvestigationClaim, bytes: Buffer): InvestigationA
     availability: "available",
   };
 }
+
+function checkpointFor(claimed: InvestigationClaim): InvestigationLoopCheckpointV1 {
+  if (claimed.checkpoint === null)
+    throw new Error("Expected an isolated claim with an accepted checkpoint.");
+  return claimed.checkpoint;
+}
+
+async function acceptAnalysis(
+  app: FastifyInstance,
+  claimed: InvestigationClaim,
+  checkpoint: InvestigationLoopCheckpointV1,
+  tokens: number,
+  options: { analysis?: InvestigationAnalysisV1; finalize?: boolean } = {},
+): Promise<InvestigationLoopCheckpointV1> {
+  const response = await post(
+    app,
+    `/api/worker/tasks/${claimed.task.id}/checkpoints`,
+    {
+      kind: "analysis",
+      lease: claimed.lease,
+      round: {
+        schemaVersion: "InvestigationLoopRoundV1",
+        taskId: claimed.task.id,
+        attemptId: claimed.attempt.id,
+        inputCheckpointRef: {
+          id: checkpoint.id,
+          version: checkpoint.version,
+          digest: checkpoint.digest,
+        },
+        round: checkpoint.round + 1,
+        phase: options.finalize ? "finalize" : "discovery",
+        analysis: structuredClone(options.analysis ?? checkpoint.analysis),
+        continue: !options.finalize,
+        continuationReason: "Record isolated synthetic analysis for usage accounting.",
+      },
+      usage: { durationMs: 0, tokens, reportBytes: 0 },
+    } satisfies InvestigationCheckpointRequest,
+    "worker",
+  );
+  expect(response.statusCode, response.body).toBe(200);
+  return response.json<InvestigationCheckpointResponse>().checkpoint;
+}
+
+const unacceptedUsageDiagnostic = {
+  id: "synthetic-unaccepted-model-output",
+  code: "MODEL_OUTPUT_REJECTED",
+  category: "recovery" as const,
+  message: "The synthetic model invocation ended without accepted analysis.",
+  retryable: false,
+  evidenceRefs: [],
+  prerequisiteRefs: [],
+};
 
 describe("investigation service API", () => {
   it("fails closed without authenticators while keeping liveness public", async () => {
@@ -944,6 +1000,256 @@ describe("investigation service API", () => {
       );
     expect(audit).toBeDefined();
   });
+
+  it.each([0, 127, null])(
+    "retains unaccepted model usage %s without adding an accepted round or losing prior tokens",
+    async (tokens) => {
+      const { app, item, store } = await harness();
+      const task = await createTask(app, item);
+      const claimed = await claim(app);
+      const accepted = await acceptAnalysis(app, claimed, checkpointFor(claimed), 41);
+      const response = await post(
+        app,
+        `/api/worker/tasks/${task.id}/checkpoints`,
+        {
+          kind: "interrupt",
+          lease: claimed.lease,
+          reason: "error",
+          diagnostics: [unacceptedUsageDiagnostic],
+          modelUsage: { round: 2, tokens },
+        },
+        "worker",
+      );
+      expect(response.statusCode, response.body).toBe(200);
+      const checkpoint = response.json<InvestigationCheckpointResponse>().checkpoint;
+      expect(checkpoint).toMatchObject({
+        round: 1,
+        stopReason: "error",
+        consumed: { rounds: 1, tokens: 41 + (tokens ?? 0) },
+        runtime: {
+          unacceptedModelUsage: [{ attemptId: claimed.attempt.id, round: 2, tokens }],
+        },
+      });
+      expect(checkpoint.analysis.summary).toBe(accepted.analysis.summary);
+      expect(checkpoint.analysis.findings).toEqual(accepted.analysis.findings);
+      expect(checkpoint.runtime.modelExecutions).toEqual(accepted.runtime.modelExecutions);
+      expect(checkpoint.analysis.diagnostics).toContainEqual(unacceptedUsageDiagnostic);
+      if (tokens === null)
+        expect(checkpoint.analysis.diagnostics).toEqual(
+          expect.arrayContaining([expect.objectContaining({ code: "MODEL_USAGE_UNAVAILABLE" })]),
+        );
+      expect(store.get("checkpoints", task.id)).toEqual(checkpoint);
+    },
+  );
+
+  it.each([187, null])(
+    "deduplicates unaccepted usage %s across changed diagnostics and rejects conflicting tokens",
+    async (tokens) => {
+      const { app, item, store, advance } = await harness();
+      const task = await createTask(app, item);
+      const claimed = await claim(app);
+      const path = `/api/worker/tasks/${task.id}/checkpoints`;
+      const request = {
+        kind: "interrupt",
+        lease: claimed.lease,
+        reason: "error",
+        diagnostics: [unacceptedUsageDiagnostic],
+        modelUsage: { round: 1, tokens },
+      };
+      const first = await post(app, path, request, "worker");
+      expect(first.statusCode, first.body).toBe(200);
+      advance(100);
+      const replay = await post(
+        app,
+        path,
+        {
+          ...request,
+          diagnostics: [{ ...unacceptedUsageDiagnostic, id: "synthetic-delayed-ack" }],
+        },
+        "worker",
+      );
+      expect(replay.statusCode, replay.body).toBe(200);
+      const checkpoint = replay.json<InvestigationCheckpointResponse>().checkpoint;
+      expect(checkpoint.consumed.tokens).toBe(tokens ?? 0);
+      expect(checkpoint.consumed.rounds).toBe(0);
+      expect(checkpoint.round).toBe(0);
+      expect(checkpoint.runtime.unacceptedModelUsage).toEqual([
+        { attemptId: claimed.attempt.id, round: 1, tokens },
+      ]);
+      const conflict = await post(
+        app,
+        path,
+        { ...request, modelUsage: { round: 1, tokens: tokens === null ? 1 : tokens + 1 } },
+        "worker",
+      );
+      expect(conflict.statusCode).toBe(409);
+      expect(conflict.json()).toMatchObject({ code: "model_usage_receipt_conflict" });
+      expect(store.get("checkpoints", task.id)).toEqual(checkpoint);
+    },
+  );
+
+  it.each([
+    { legacy: false, tokens: 41 },
+    { legacy: false, tokens: null },
+    { legacy: true, tokens: 41 },
+    { legacy: true, tokens: null },
+  ])(
+    "does not charge an accepted round again after a lost ACK (legacy=$legacy, tokens=$tokens)",
+    async ({ legacy, tokens }) => {
+      const { app, item, store } = await harness();
+      const task = await createTask(app, item);
+      const claimed = await claim(app);
+      const accepted = await acceptAnalysis(app, claimed, checkpointFor(claimed), 41);
+      const key = `checkpoint:${claimed.attempt.id}:analysis:1`;
+      const receipt = store.get<{
+        digest: string;
+        checkpoint: InvestigationLoopCheckpointV1;
+        usageTokens?: number;
+      }>("idempotency", key);
+      expect(receipt?.usageTokens).toBe(41);
+      if (receipt === undefined) throw new Error("Expected the accepted analysis receipt.");
+      if (legacy) {
+        const { usageTokens: _usageTokens, ...legacyReceipt } = receipt;
+        store.put("idempotency", key, legacyReceipt);
+      }
+      const response = await post(
+        app,
+        `/api/worker/tasks/${task.id}/checkpoints`,
+        {
+          kind: "interrupt",
+          lease: claimed.lease,
+          reason: "error",
+          diagnostics: [unacceptedUsageDiagnostic],
+          modelUsage: { round: 1, tokens },
+        },
+        "worker",
+      );
+      expect(response.statusCode, response.body).toBe(200);
+      const checkpoint = response.json<InvestigationCheckpointResponse>().checkpoint;
+      expect(checkpoint.consumed.tokens).toBe(41);
+      expect(checkpoint.consumed.rounds).toBe(1);
+      expect(checkpoint.round).toBe(1);
+      expect(checkpoint.analysis.summary).toBe(accepted.analysis.summary);
+      expect(checkpoint.runtime.unacceptedModelUsage ?? []).toEqual([]);
+      expect(checkpoint.analysis.diagnostics).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: "MODEL_USAGE_UNAVAILABLE" })]),
+      );
+    },
+  );
+
+  it("rejects conflicting known usage for an already accepted analysis round", async () => {
+    const { app, item, store } = await harness();
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const accepted = await acceptAnalysis(app, claimed, checkpointFor(claimed), 41);
+    const response = await post(
+      app,
+      `/api/worker/tasks/${task.id}/checkpoints`,
+      {
+        kind: "interrupt",
+        lease: claimed.lease,
+        reason: "error",
+        diagnostics: [unacceptedUsageDiagnostic],
+        modelUsage: { round: 1, tokens: 42 },
+      },
+      "worker",
+    );
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ code: "model_usage_receipt_conflict" });
+    expect(store.get("checkpoints", task.id)).toEqual(accepted);
+  });
+
+  it("returns completed analysis unchanged when its final ACK is lost", async () => {
+    const { app, item, store } = await harness();
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const subject = task.subjects.find((entry) => entry.id === task.subjectRef);
+    if (subject?.kind !== "original_pr") throw new Error("Expected the original PR subject.");
+    const manifestContent = {
+      schemaVersion: "InvestigationPrDiffManifestV1" as const,
+      subjectRef: subject.id,
+      baseSha: subject.baseSha,
+      headSha: subject.headSha,
+      mergeBaseSha: subject.baseSha,
+      files: [],
+      chunks: [],
+    };
+    const source = await post(
+      app,
+      `/api/worker/tasks/${task.id}/checkpoints`,
+      {
+        kind: "source",
+        lease: claimed.lease,
+        manifest: { ...manifestContent, digest: investigationContentDigest(manifestContent) },
+      },
+      "worker",
+    );
+    expect(source.statusCode, source.body).toBe(200);
+    const checkpoint = source.json<InvestigationCheckpointResponse>().checkpoint;
+    const analysis = structuredClone(checkpoint.analysis);
+    analysis.coverage.includedUnits = analysis.coverage.includedUnits.map((unit) => ({
+      ...unit,
+      status: "completed",
+    }));
+    analysis.coverage.completedUnitRefs = analysis.coverage.includedUnits.map((unit) => unit.id);
+    analysis.coverage.unresolvedUnitRefs = [];
+    const discovery = await acceptAnalysis(app, claimed, checkpoint, 41, { analysis });
+    const completed = await acceptAnalysis(app, claimed, discovery, 59, {
+      analysis,
+      finalize: true,
+    });
+    expect(completed.stopReason).toBe("complete");
+    const response = await post(
+      app,
+      `/api/worker/tasks/${task.id}/checkpoints`,
+      {
+        kind: "interrupt",
+        lease: claimed.lease,
+        reason: "error",
+        diagnostics: [unacceptedUsageDiagnostic],
+        modelUsage: { round: 2, tokens: 59 },
+      },
+      "worker",
+    );
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json<InvestigationCheckpointResponse>().checkpoint).toEqual(completed);
+    expect(store.get("checkpoints", task.id)).toEqual(completed);
+    expect(completed.consumed).toMatchObject({ rounds: 2, tokens: 100 });
+  });
+
+  it.each([187, null])(
+    "does not record model usage %s from expired or superseded leases",
+    async (tokens) => {
+      const { app, item, store, advance } = await harness();
+      const task = await createTask(app, item);
+      const expiredClaim = await claim(app);
+      const path = `/api/worker/tasks/${task.id}/checkpoints`;
+      const request = {
+        kind: "interrupt",
+        lease: expiredClaim.lease,
+        reason: "error",
+        diagnostics: [unacceptedUsageDiagnostic],
+        modelUsage: { round: 1, tokens },
+      };
+      advance(1_001);
+      const expired = await post(app, path, request, "worker");
+      expect(expired.statusCode).toBe(409);
+      expect(expired.json()).toMatchObject({ code: "lease_lost" });
+      expect(store.get("checkpoints", task.id)).toEqual(expiredClaim.checkpoint);
+      const resume = await post(app, `/api/tasks/${task.id}/resume`, {
+        idempotencyKey: "resume-after-rejected-stale-usage",
+      });
+      expect(resume.statusCode, resume.body).toBe(200);
+      const current = await claim(app);
+      expect(current.attempt.id).not.toBe(expiredClaim.attempt.id);
+      const superseded = await post(app, path, request, "worker");
+      expect(superseded.statusCode).toBe(409);
+      expect(superseded.json()).toMatchObject({ code: "lease_lost" });
+      expect(store.get("checkpoints", task.id)).toEqual(current.checkpoint);
+      expect(checkpointFor(current).consumed.tokens).toBe(0);
+      expect(checkpointFor(current).runtime.unacceptedModelUsage ?? []).toEqual([]);
+    },
+  );
 
   it("persists a large checkpoint and protects accepted terminal delivery from cancellation", async () => {
     const { app, item, store } = await harness();

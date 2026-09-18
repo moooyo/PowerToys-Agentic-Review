@@ -392,6 +392,9 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
       },
       attempt: { id: attempt.id, number: attempt.number },
       adoptedAttemptIds: checkpoint.adoptedAttemptIds,
+      ...(checkpoint.runtime.modelExecutions === undefined
+        ? {}
+        : { modelExecutions: checkpoint.runtime.modelExecutions }),
       subjects: reportSubjects(task, checkpoint),
       ...(task.sourceArtifacts === undefined ? {} : { sourceArtifacts: task.sourceArtifacts }),
       profileRef: task.profileRef,

@@ -142,10 +142,14 @@ export async function createInvestigationExecutionRuntime(
     shutdownTimeoutMs: config.shutdownTimeoutMs,
     interactiveStdin: true,
     captureResourceUsage: true,
+    onExitObservation: (observation) => {
+      logger.info("Investigation native process exit observed.", { ...observation });
+    },
   });
   let service: InvestigationRuntimeService | undefined;
   let closePromise: Promise<void> | undefined;
   let stopPromise: Promise<void> | undefined;
+  let nodeFault: Error | undefined;
   const closeHost = (): Promise<void> => {
     closePromise ??= processHost.close();
     return closePromise;
@@ -179,6 +183,9 @@ export async function createInvestigationExecutionRuntime(
       limits: config.processLimits,
       staticConfiguration: config.modelStaticConfiguration,
       protectedValues: [config.workerToken],
+      onProcessDiagnostic: (observation) => {
+        logger.info("Investigation model process lifecycle observed.", { ...observation });
+      },
     };
     const modelTurnRunner = (dependencies.createModelTurnRunner ?? createModelTurnRunner)(
       modelOptions,
@@ -284,6 +291,9 @@ export async function createInvestigationExecutionRuntime(
           logger,
           terminalTimeoutMs: config.shutdownTimeoutMs,
           onNodeFault: (code) => {
+            nodeFault ??= new Error(
+              `The investigation Worker encountered an execution lifecycle fault (${code}).`,
+            );
             logger.error(
               "The investigation Worker is draining after an execution lifecycle fault.",
               { code },
@@ -318,6 +328,7 @@ export async function createInvestigationExecutionRuntime(
         } finally {
           await stop();
         }
+        if (nodeFault !== undefined) throw nodeFault;
       },
       stop,
     };

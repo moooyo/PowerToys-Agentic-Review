@@ -50,6 +50,8 @@ export interface InvestigationAppOptions
     | "resolvePlanPrerequisites"
     | "maxReportBytes"
     | "evidencePolicy"
+    | "onReportSealed"
+    | "onRepositoryChanged"
   > {
   readonly databasePath?: string;
   readonly store?: InvestigationStore;

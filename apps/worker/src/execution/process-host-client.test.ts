@@ -213,6 +213,39 @@ async function closeNormally(
 }
 
 describe("StdioProcessHostClient", () => {
+  it("observes dispatch only after launch validation and immediately before the start write", async () => {
+    const { child, client } = await connect();
+    const onDispatch = vi.fn(() => {
+      expect(child.requests.filter((request) => request.type === "start")).toHaveLength(0);
+    });
+    await expect(
+      client.start(
+        { ...launchSpec(), executable: "relative.exe" },
+        new AbortController().signal,
+        onDispatch,
+      ),
+    ).rejects.toBeInstanceOf(ProcessHostProtocolError);
+    const aborted = new AbortController();
+    aborted.abort(new Error("Cancelled before dispatch."));
+    await expect(client.start(launchSpec(), aborted.signal, onDispatch)).rejects.toThrow(
+      "Cancelled before dispatch.",
+    );
+    expect(onDispatch).not.toHaveBeenCalled();
+    const starting = client.start(launchSpec(), new AbortController().signal, onDispatch);
+    const request = (await waitForRequests(child, "start")).at(-1)!;
+    expect(onDispatch).toHaveBeenCalledOnce();
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "started",
+      requestId: request.requestId,
+      processId: 5001,
+    });
+    const managed = await starting;
+    exitProcess(child, request.requestId);
+    await managed.completed;
+    await closeNormally(client, child);
+  });
+
   it.each([0, 1816])(
     "observes a real exit code %s once with bounded metadata only",
     async (exitCode) => {
@@ -301,6 +334,11 @@ describe("StdioProcessHostClient", () => {
         resourceUsage,
       });
       await completion;
+      await expect(managed.exited).resolves.toMatchObject({
+        requestId: request.requestId,
+        exitCode: 3_221_225_786,
+        resourceUsage,
+      });
       expect(onExitObservation.mock.calls).toEqual([
         [
           {
@@ -1079,6 +1117,7 @@ describe("StdioProcessHostClient", () => {
       child[streamName].emit("error", new Error(`${streamName} failed`));
 
       await expect(managed.completed).rejects.toBeInstanceOf(ProcessHostProtocolError);
+      await expect(managed.exited).rejects.toBeInstanceOf(ProcessHostProtocolError);
       expect(child.killed).toBe(true);
     },
   );

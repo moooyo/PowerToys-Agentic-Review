@@ -192,7 +192,8 @@ describe("production investigation runtime assembly", () => {
           const url = new URL(String(input));
           expect(url.origin).toBe("https://api.github.com");
           calls.push(url.pathname);
-          if (url.pathname === "/user") return Response.json({ id: 55 });
+          if (url.pathname === "/user")
+            return Response.json({ id: 55, login: "synthetic-publisher" });
           if (url.pathname === "/repos/fixture/repository")
             return Response.json({ id: 123, full_name: "fixture/repository" });
           if (url.pathname === "/repos/fixture/repository/issues/7") return Response.json(upstream);

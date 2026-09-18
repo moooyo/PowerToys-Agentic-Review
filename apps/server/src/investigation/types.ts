@@ -8,6 +8,11 @@ import type {
 } from "@agentic-review/contracts";
 import type { FastifyRequest } from "fastify";
 
+export interface InvestigationGitHubIdentity {
+  readonly githubUserId: number;
+  readonly githubLogin: string;
+}
+
 export interface InvestigationOperatorPrincipal {
   readonly id: string;
   readonly username?: string;
@@ -23,6 +28,8 @@ export interface InvestigationOperatorPrincipal {
   )[];
   readonly actionCapabilities: readonly InvestigationActionKind[];
   readonly allowRepositoryExecution: boolean;
+  /** The verified publisher identity frozen into an automatically generated comment. */
+  readonly githubIdentity?: InvestigationGitHubIdentity;
 }
 
 export interface InvestigationWorkerPrincipal {
@@ -59,6 +66,7 @@ export interface InvestigationWorkItemRecord {
 
 export interface InvestigationActionTransport {
   readonly supportedActions: readonly InvestigationActionKind[];
+  readPublisherIdentity?(): Promise<InvestigationGitHubIdentity>;
   readTarget(
     repository: InvestigationRepositoryRecord,
     workItem: InvestigationWorkItemRecord,
@@ -86,6 +94,8 @@ export interface InvestigationActionTransport {
     repository: InvestigationRepositoryRecord,
     workItem: InvestigationWorkItemRecord,
     actor: InvestigationOperatorPrincipal,
+    /** Must run synchronously after the final awaited preflight and before any mutation. */
+    beforeDispatch?: () => void,
   ): Promise<{
     state: "succeeded" | "failed" | "unknown";
     message: string;

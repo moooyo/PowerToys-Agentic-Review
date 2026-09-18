@@ -269,6 +269,35 @@ Historical evidence services and schema numbers do not describe this active stor
 
 ## Recommendations and action delivery
 
+Repositories may grant standing authorization for automatic conclusion comments on new complete
+root investigations. Report sealing synchronously registers an outbox entry with the frozen
+template, policy version, and report reference in the same transaction. The dispatcher verifies
+the publishing account through GitHub `/user`, rechecks authorization and its lease, and freezes
+the rendered body, publishing identity, and ActionIntent request before preparing the comment.
+It confirms that intent without per-report human review. The Worker and model have no publication
+credential or authority. The authorizing account, repository policy, frozen publisher identity,
+and target are checked again before the outbound mutation. Changing the policy blocks unsent
+entries from its old version; enabling never backfills historical reports.
+
+The dispatcher uses durable claims and the existing ActionIntent transition and reconciliation
+rules. Already sent comments can be recovered after policy revocation; unresolved sends receive
+only GET reconciliation. Scoped receipt APIs expose automatic delivery without weakening the
+manual ActionIntent actor ownership checks. Version 4 templates start with the AI/model and
+represented GitHub-user disclosure. PR replies retain Conclusion, Summary, and Findings; Issue
+replies use Triage result and Next steps, with a short summary incorporated into the conclusion.
+Bug triage shows Runtime reproduction separately and exposes missing information, proposed
+verification, or existing fix/duplicate references without requiring the reader to expand
+Investigation details. Feature and other Issue classifications remain distinct from bugs and
+omit the runtime reproduction field. Both templates end with an initially collapsed section,
+named Details for PRs and Investigation details for Issues, retaining full findings, uncertainty,
+validation, source scope, plans, and
+limitations. Model names come from accepted per-round Worker CLI selections preserved in
+checkpoint and report context; missing attribution is disclosed without guessing. Older template
+policies, including versions 2 and 3, require a new save before publication. Frozen comment bodies are
+never rewritten by a template change. Oversized comments remain blocked instead of being truncated.
+[Automatic reply operations](./apps/server/README.md#automatically-reply-with-investigation-results)
+document configuration and the ordinary-comment scope.
+
 Recommendations describe what the complete report supports. Current operation guards separately
 check the actor, installed handler, target state, revision, source, and pending delivery. An
 unresolved, confirmed, rechecked P0 on the current original PR blocks Approve, including qualifying

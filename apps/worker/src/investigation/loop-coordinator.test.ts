@@ -156,6 +156,7 @@ function fixture(count = 2, maxRounds = 8, kind: "pr" | "bug" = "bug") {
           recordedAt,
           usage: request.usage,
           sourceUnitIds: request.sourceUnitIds ?? [],
+          ...(request.modelIdentity === undefined ? {} : { modelIdentity: request.modelIdentity }),
         });
       else if (request.kind === "execution")
         current = applyInvestigationRuntimeCheckpoint(current, request.execution, { recordedAt });
@@ -169,10 +170,10 @@ function fixture(count = 2, maxRounds = 8, kind: "pr" | "bug" = "bug") {
           current,
           request.reason === "error" ? "failed" : request.reason,
           recordedAt,
+          request.diagnostics,
+          0,
+          request.modelUsage,
         );
-        current.analysis.diagnostics.push(...request.diagnostics);
-        const { digest: _digest, ...content } = current;
-        current = { ...current, digest: investigationContentDigest(content) };
       }
       return { checkpoint: structuredClone(current) };
     }),
@@ -301,6 +302,37 @@ function fixture(count = 2, maxRounds = 8, kind: "pr" | "bug" = "bug") {
 }
 
 describe("InvestigationLoopCoordinator", () => {
+  it("sends trusted model identities with accepted analysis rounds and preserves them in the report", async () => {
+    const f = fixture();
+    const original = vi.mocked(f.model.execute).getMockImplementation()!;
+    vi.mocked(f.model.execute).mockImplementation(async (input) => ({
+      ...(await original(input)),
+      modelIdentity:
+        input.checkpoint!.round === 0
+          ? { engine: "codex", model: "provider/analysis-model" }
+          : { engine: "copilot", model: null },
+    }));
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    const expected = [
+      {
+        attemptId: f.claim.attempt.id,
+        round: 1,
+        engine: "codex",
+        model: "provider/analysis-model",
+      },
+      { attemptId: f.claim.attempt.id, round: 2, engine: "copilot", model: null },
+    ];
+    expect(f.current().runtime.modelExecutions).toEqual(expected);
+    expect(f.submissions[0]?.header.context.modelExecutions).toEqual(expected);
+    const requests = vi.mocked(f.client.checkpoint).mock.calls.map(([, request]) => request);
+    expect(requests.filter((request) => request.kind === "analysis")).toEqual([
+      expect.objectContaining({
+        modelIdentity: { engine: "codex", model: "provider/analysis-model" },
+      }),
+      expect.objectContaining({ modelIdentity: { engine: "copilot", model: null } }),
+    ]);
+  });
+
   it("persists every trusted PR source chunk before allowing a full diff conclusion", async () => {
     const f = fixture(0, 8, "pr");
     const base = {
@@ -416,6 +448,13 @@ describe("InvestigationLoopCoordinator", () => {
       f.parts.filter((part) => part.collection === "findings").flatMap((part) => part.items),
     ).toHaveLength(137);
     expect(f.current().analysis.rechecks).toHaveLength(0);
+    expect(f.current().consumed.tokens).toBe(100);
+    expect(f.current().runtime.unacceptedModelUsage).toBeUndefined();
+    const interrupt = vi
+      .mocked(f.client.checkpoint)
+      .mock.calls.find(([, request]) => request.kind === "interrupt")?.[1];
+    expect(interrupt).toBeDefined();
+    expect(interrupt).not.toHaveProperty("modelUsage");
   });
 
   it("retains the last valid checkpoint when a later model turn drops a candidate", async () => {
@@ -556,6 +595,103 @@ describe("InvestigationLoopCoordinator", () => {
         .analysis.diagnostics.some((diagnostic) => diagnostic.code === "MODEL_USAGE_UNAVAILABLE"),
     ).toBe(true);
     expect(f.current().round).toBe(0);
+    expect(f.current().runtime.unacceptedModelUsage).toEqual([
+      { attemptId: f.claim.attempt.id, round: 1, tokens: null },
+    ]);
+  });
+
+  it.each(["runner", "analysis", "cancellation"] as const)(
+    "accounts completed model usage after a %s failure without accepting its analysis",
+    async (stage) => {
+      const f = fixture();
+      vi.mocked(f.model.execute).mockImplementation(async (input) => {
+        input.onUsage?.({ tokens: null, source: "unavailable" });
+        input.onUsage?.({ tokens: 371, source: "cli" });
+        if (stage === "runner") throw new Error("Synthetic merge failure.");
+        const analysis = proposedAnalysis(f.initial.result);
+        if (stage === "analysis") {
+          const candidate = analysis.candidates[0]!;
+          candidate.status = "unresolved";
+          candidate.findingId = null;
+          candidate.findingVersion = null;
+        } else f.shutdown.abort(new InvestigationWorkerShutdown());
+        return {
+          ...modelRound(input, analysis, "discovery"),
+          usage: { tokens: 371, source: "cli" },
+        };
+      });
+      await f.coordinator.execute(f.claim, f.shutdown.signal);
+      expect(f.current().round).toBe(0);
+      expect(f.current().consumed.tokens).toBe(371);
+      expect(f.current().runtime.unacceptedModelUsage).toEqual([
+        { attemptId: f.claim.attempt.id, round: 1, tokens: 371 },
+      ]);
+      expect(f.model.execute).toHaveBeenCalledOnce();
+      expect(f.submissions[0]?.header.outcome).toBe(
+        stage === "cancellation" ? "interrupted" : "failed",
+      );
+      expect(f.submissions[0]?.header.report.loop.consumed.tokens).toBe(371);
+    },
+  );
+
+  it("persists unknown usage when a dispatched call is cancelled without a CLI usage record", async () => {
+    const f = fixture();
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      input.onUsage?.({ tokens: null, source: "unavailable" });
+      f.shutdown.abort(new InvestigationWorkerShutdown());
+      throw f.shutdown.signal.reason;
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.current().consumed.tokens).toBe(0);
+    expect(f.current().runtime.unacceptedModelUsage).toEqual([
+      { attemptId: f.claim.attempt.id, round: 1, tokens: null },
+    ]);
+    expect(f.current().analysis.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "MODEL_USAGE_UNAVAILABLE" })]),
+    );
+    expect(f.submissions[0]?.header.outcome).toBe("interrupted");
+  });
+
+  it.each([null, 999])(
+    "retains the first complete usage receipt when a runner later reports %s",
+    async (laterTokens) => {
+      const f = fixture();
+      vi.mocked(f.model.execute).mockImplementation(async (input) => {
+        input.onUsage?.({ tokens: 371, source: "cli" });
+        return {
+          ...modelRound(input, proposedAnalysis(f.initial.result), "discovery"),
+          usage: { tokens: laterTokens, source: laterTokens === null ? "unavailable" : "cli" },
+        };
+      });
+      await f.coordinator.execute(f.claim, f.shutdown.signal);
+      expect(f.current().round).toBe(0);
+      expect(f.current().consumed.tokens).toBe(371);
+      expect(f.current().runtime.unacceptedModelUsage).toEqual([
+        { attemptId: f.claim.attempt.id, round: 1, tokens: 371 },
+      ]);
+      expect(f.model.execute).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("delivers a complete checkpoint when terminal usage reconciliation finds a lost analysis acknowledgement", async () => {
+    const f = fixture();
+    const checkpoint = vi.mocked(f.client.checkpoint).getMockImplementation()!;
+    vi.mocked(f.client.checkpoint).mockImplementation(async (...args) => {
+      const request = args[1];
+      if (request.kind === "interrupt") {
+        expect(request.modelUsage).toEqual({ round: 2, tokens: 100 });
+        return { checkpoint: structuredClone(f.current()) };
+      }
+      const response = await checkpoint(...args);
+      if (request.kind === "analysis" && request.round.round === 2)
+        throw new Error("The final acknowledgement was lost after acceptance.");
+      return response;
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.current().consumed.tokens).toBe(200);
+    expect(f.current().runtime.unacceptedModelUsage).toBeUndefined();
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+    expect(f.model.execute).toHaveBeenCalledTimes(2);
   });
 
   it("retains owned files when a model process cannot be confirmed stopped", async () => {

@@ -37,6 +37,7 @@ export class InvestigationTaskService {
   #draining = false;
   #runPromise: Promise<void> | undefined;
   #shutdownPromise: Promise<void> | undefined;
+  #executionFailure: Error | undefined;
 
   public constructor(private readonly options: InvestigationTaskServiceOptions) {
     this.#capacity = positiveInteger(options.maximumConcurrentTasks ?? 1, "maximumConcurrentTasks");
@@ -92,10 +93,15 @@ export class InvestigationTaskService {
       }
       const attemptId = claim.attempt.id;
       const taskId = claim.task.id;
-      const execution = this.options.executor
-        .execute(claim, this.#shutdown.signal)
+      const execution = Promise.resolve()
+        .then(() => this.options.executor.execute(claim, this.#shutdown.signal))
         .catch(() => {
           // An executor owns durable termination. Never log model output, credentials, or server response bodies.
+          this.#executionFailure ??= new Error(
+            "Investigation attempt could not complete its terminal submission.",
+          );
+          this.requestDrain();
+          this.#shutdown.abort(new InvestigationWorkerShutdown());
           this.options.logger.error(
             "Investigation attempt could not complete its terminal submission.",
             { taskId, attemptId },
@@ -107,6 +113,7 @@ export class InvestigationTaskService {
       this.#active.set(attemptId, execution);
     }
     await Promise.allSettled(this.#active.values());
+    if (this.#executionFailure !== undefined) throw this.#executionFailure;
   }
 
   async #stop(): Promise<void> {

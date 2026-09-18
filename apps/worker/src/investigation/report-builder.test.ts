@@ -558,6 +558,54 @@ function expectBuildError(
 beforeAll(() => registerWorkerContractFormats());
 
 describe("investigation report builder", () => {
+  it("preserves legacy reports without claiming an unrecorded model identity", () => {
+    const input = fixture();
+    expect(input.checkpoint.runtime.modelExecutions).toBeUndefined();
+    const submission = buildInvestigationReportSubmission(input);
+    expect(submission.header.context.modelExecutions).toBeUndefined();
+    expect(Object.hasOwn(submission.header.context, "modelExecutions")).toBe(false);
+  });
+
+  it("copies trusted model history with known and unknown identities across adopted attempts", () => {
+    const input = fixture();
+    input.checkpoint.adoptedAttemptIds.unshift("attempt:prior-model");
+    input.checkpoint.runtime.modelExecutions = [
+      { attemptId: "attempt:prior-model", round: 1, engine: "codex", model: "gpt-6-astra" },
+      { attemptId: input.attempt.id, round: 3, engine: "copilot", model: null },
+    ];
+    input.checkpoint = seal(input.checkpoint);
+    const submission = buildInvestigationReportSubmission(input);
+    expect(submission.header.context.modelExecutions).toEqual(
+      input.checkpoint.runtime.modelExecutions,
+    );
+    expect(submission.header.context.adoptedAttemptIds).toEqual(input.checkpoint.adoptedAttemptIds);
+    expect(submission.header.context.modelExecutions).not.toBe(
+      input.checkpoint.runtime.modelExecutions,
+    );
+    submission.header.context.modelExecutions![0]!.model = "changed-report-copy";
+    expect(input.checkpoint.runtime.modelExecutions![0]!.model).toBe("gpt-6-astra");
+  });
+
+  it.each(["unknown_attempt", "duplicate_round", "future_round"])(
+    "rejects semantically invalid model history before building a report: %s",
+    (invalid) => {
+      const input = fixture();
+      const execution = {
+        attemptId: input.attempt.id,
+        round: 1,
+        engine: "codex" as const,
+        model: "provider/model-under-test",
+      };
+      input.checkpoint.runtime.modelExecutions = [execution];
+      if (invalid === "unknown_attempt") execution.attemptId = "unadopted-attempt";
+      if (invalid === "duplicate_round")
+        input.checkpoint.runtime.modelExecutions.push({ ...execution });
+      if (invalid === "future_round") execution.round = input.checkpoint.round + 1;
+      input.checkpoint = seal(input.checkpoint);
+      expectBuildError(() => buildInvestigationReportSubmission(input), "INVALID_INPUT");
+    },
+  );
+
   it("assembles valid worker protocols from schema-valid frozen inputs", () => {
     const input = fixture();
     expect(Value.Check(InvestigationTaskV1Schema, input.task)).toBe(true);

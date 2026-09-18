@@ -237,6 +237,9 @@ function modelResult(
         : "Recheck every candidate before delivering a complete investigation.",
     },
     usage: { tokens: 200, source: "cli" },
+    modelIdentity: final
+      ? { engine: "copilot", model: "provider/recheck-model" }
+      : { engine: "codex", model: "provider/investigation-model" },
   };
 }
 
@@ -389,6 +392,14 @@ describe("investigation Worker and Server HTTP roundtrip", () => {
     expect(partialExport.statusCode).toBe(200);
     const partial = partialExport.json<InvestigationResultV1>();
     expect(partial.outcome).toBe("interrupted");
+    expect(partial.context.modelExecutions).toEqual([
+      {
+        attemptId: first.attempt.id,
+        round: 1,
+        engine: "codex",
+        model: "provider/investigation-model",
+      },
+    ]);
     expect(partial.report.completeness).toBe("partial");
     expect(partial.findings).toHaveLength(findingCount);
     expect(partial.report.recheck.pendingFindingIds).toHaveLength(findingCount);
@@ -468,6 +479,21 @@ describe("investigation Worker and Server HTTP roundtrip", () => {
       collections: { findings: findingCount, candidates: findingCount, rechecks: findingCount },
     });
     expect(result.context.adoptedAttemptIds).toEqual([first.attempt.id, second.attempt.id]);
+    expect(result.context.modelExecutions).toEqual([
+      {
+        attemptId: first.attempt.id,
+        round: 1,
+        engine: "codex",
+        model: "provider/investigation-model",
+      },
+      {
+        attemptId: second.attempt.id,
+        round: 2,
+        engine: "copilot",
+        model: "provider/recheck-model",
+      },
+    ]);
+    expect(completed.checkpoint?.runtime.modelExecutions).toEqual(result.context.modelExecutions);
     expect(result.findings.map((finding) => finding.id)).toEqual(
       initial.result.findings.map((finding) => finding.id),
     );

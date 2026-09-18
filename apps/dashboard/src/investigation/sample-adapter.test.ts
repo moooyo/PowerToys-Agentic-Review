@@ -14,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type InvestigationApi,
   type PrepareActionInput,
+  RepositoryAutoReplySchema,
+  RepositoryAutoReplySettingsSchema,
   RepositorySchema,
   RepositoryWebhookSettingsSchema,
   TaskDetailSchema,
@@ -21,6 +23,10 @@ import {
   WorkItemSchema,
 } from "./api";
 import { createSampleInvestigationApi } from "./sample-adapter";
+import {
+  sampleIssueAutoReplyTemplate,
+  samplePullRequestAutoReplyTemplate,
+} from "./sample-auto-reply-templates";
 
 FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
 
@@ -324,6 +330,165 @@ describe("sample investigation read contracts", () => {
         }),
       ]),
     );
+  });
+});
+
+describe("sample repository automatic replies", () => {
+  it("saves versioned templates without fabricating deliveries or enabling a publisher", async () => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    expectSchema(RepositoryAutoReplySettingsSchema, initial);
+    expect(initial).toEqual({
+      repositoryId,
+      enabled: false,
+      version: 0,
+      publisherConfigured: false,
+      authorizedById: null,
+      updatedAt: null,
+      templateVersion: 4,
+      pullRequestTemplate: samplePullRequestAutoReplyTemplate,
+      issueTemplate: sampleIssueAutoReplyTemplate,
+    });
+    const input = {
+      version: initial.version,
+      enabled: true,
+      pullRequestTemplate: initial.pullRequestTemplate.replace(
+        "## Summary",
+        "## Sample PR summary",
+      ),
+      issueTemplate: initial.issueTemplate.replace("## Triage result", "## Sample issue triage"),
+    };
+    const updated = await api.updateRepositoryAutoReplySettings(repositoryId, input);
+    expectSchema(RepositoryAutoReplySettingsSchema, updated);
+    expect(updated).toEqual({
+      ...initial,
+      ...input,
+      version: 1,
+      authorizedById: "sample-operator",
+      updatedAt: "2026-09-15T03:00:00.000Z",
+    });
+    expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(updated);
+    await expect(api.updateRepositoryAutoReplySettings(repositoryId, input)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(updated);
+    const deliveries = await api.repositoryAutoReplies(repositoryId);
+    expectSchema(Type.Object({ items: Type.Array(RepositoryAutoReplySchema) }), deliveries);
+    expect(deliveries).toEqual({ items: [] });
+    const disabled = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...input,
+      version: updated.version,
+      enabled: false,
+    });
+    expect(disabled).toMatchObject({ enabled: false, version: 2, authorizedById: null });
+    expect(await api.repositoryAutoReplies(repositoryId)).toEqual({ items: [] });
+  });
+
+  it("rejects settings and delivery requests for an unknown repository", async () => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    for (const operation of [
+      () => api.repositoryAutoReplySettings("missing-repository"),
+      () => api.repositoryAutoReplies("missing-repository"),
+      () => api.updateRepositoryAutoReplySettings("missing-repository", initial),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({ status: 404 });
+    }
+    expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(initial);
+  });
+
+  it.each([
+    {
+      name: "a missing placeholder",
+      transform: (template: string) => template.replace("{{details}}", ""),
+    },
+    {
+      name: "a duplicated placeholder",
+      transform: (template: string) => `${template}{{details}}`,
+    },
+    { name: "an unknown placeholder", transform: (template: string) => `${template}{{secret}}` },
+    {
+      name: "an incomplete placeholder",
+      transform: (template: string) => `${template}{{details`,
+    },
+    {
+      name: "nested placeholder braces",
+      transform: (template: string) => template.replace("{{details}}", "{{{details}}}"),
+    },
+    {
+      name: "content before the identity statement",
+      transform: (template: string) => `# Automated review\n${template}`,
+    },
+    {
+      name: "content after collapsed details",
+      transform: (template: string) => `${template}\nAdditional footer.`,
+    },
+    {
+      name: "details before the conclusion",
+      transform: (template: string) =>
+        template.replace(/\{\{(conclusion|details)\}\}/gu, (_, token) =>
+          token === "conclusion" ? "{{details}}" : "{{conclusion}}",
+        ),
+    },
+    {
+      name: "a multibyte template larger than 12,000 bytes",
+      transform: (template: string) => `${template}${"é".repeat(6_000)}`,
+    },
+  ])("rejects $name in either template without changing saved settings", async ({ transform }) => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    for (const field of ["pullRequestTemplate", "issueTemplate"] as const) {
+      await expect(
+        api.updateRepositoryAutoReplySettings(repositoryId, {
+          ...initial,
+          [field]: transform(initial[field]),
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(initial);
+    }
+  });
+
+  it("rejects swapped PR and Issue template placeholders without changing saved settings", async () => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    for (const input of [
+      { ...initial, pullRequestTemplate: sampleIssueAutoReplyTemplate },
+      { ...initial, issueTemplate: samplePullRequestAutoReplyTemplate },
+      {
+        ...initial,
+        issueTemplate: sampleIssueAutoReplyTemplate.replace(
+          "{{conclusion}}",
+          "{{conclusion}}\n\n## Summary\n\n{{summary}}",
+        ),
+      },
+    ]) {
+      await expect(
+        api.updateRepositoryAutoReplySettings(repositoryId, input),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(initial);
+    }
+  });
+
+  it("isolates the saved settings and empty delivery list across adapter instances and callers", async () => {
+    const first = createSampleInvestigationApi();
+    const second = createSampleInvestigationApi();
+    const original = await second.repositoryAutoReplySettings(repositoryId);
+    const input = {
+      enabled: true,
+      version: original.version,
+      pullRequestTemplate: original.pullRequestTemplate,
+      issueTemplate: original.issueTemplate,
+    };
+    const saved = await first.updateRepositoryAutoReplySettings(repositoryId, input);
+    const expected = structuredClone(saved);
+    input.pullRequestTemplate = "Changed after saving.";
+    saved.issueTemplate = "Changed after reading.";
+    expect(await first.repositoryAutoReplySettings(repositoryId)).toEqual(expected);
+    expect(await second.repositoryAutoReplySettings(repositoryId)).toEqual(original);
+    const replies = await first.repositoryAutoReplies(repositoryId);
+    replies.items.length = 10;
+    expect(await first.repositoryAutoReplies(repositoryId)).toEqual({ items: [] });
+    expect(await second.repositoryAutoReplies(repositoryId)).toEqual({ items: [] });
   });
 });
 

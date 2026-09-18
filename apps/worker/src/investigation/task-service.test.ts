@@ -128,4 +128,80 @@ describe("InvestigationTaskService", () => {
     expect(f.claim).toHaveBeenCalledTimes(1);
     expect(execute).not.toHaveBeenCalled();
   });
+
+  it("rejects after a terminal submission failure without leaking the executor error", async () => {
+    const f = fixture();
+    const execute = vi.fn<InvestigationClaimExecutor["execute"]>(async () => {
+      throw new Error("Synthetic sensitive upstream response.");
+    });
+    const service = new InvestigationTaskService({
+      client: f.client,
+      executor: { execute },
+      supportedKinds: ["issue-investigate"],
+      logger: f.logger,
+    });
+    await expect(service.run()).rejects.toThrow(
+      "Investigation attempt could not complete its terminal submission.",
+    );
+    await expect(service.stop()).rejects.toThrow(/terminal submission/);
+    expect(f.claim).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(f.logger.error).toHaveBeenCalledWith(
+      "Investigation attempt could not complete its terminal submission.",
+      {
+        taskId: execute.mock.calls[0]![0].task.id,
+        attemptId: execute.mock.calls[0]![0].attempt.id,
+      },
+    );
+    expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain("sensitive upstream response");
+  });
+
+  it("aborts concurrent attempts and waits for their cleanup before rejecting", async () => {
+    const f = fixture();
+    const first = claimFixture();
+    const second = {
+      ...claimFixture(),
+      attempt: { ...first.attempt, id: "second-attempt" },
+    };
+    f.claim.mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValue(null);
+    const secondStarted = Promise.withResolvers<void>();
+    const secondAborted = Promise.withResolvers<void>();
+    const finishCleanup = Promise.withResolvers<void>();
+    const order: string[] = [];
+    const service = new InvestigationTaskService({
+      client: f.client,
+      executor: {
+        execute: async (claim, signal) => {
+          if (claim.attempt.id === first.attempt.id) {
+            await secondStarted.promise;
+            throw new Error("Synthetic terminal submission failure.");
+          }
+          secondStarted.resolve();
+          await new Promise<void>((resolve) =>
+            signal.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          order.push("peer.aborted");
+          secondAborted.resolve();
+          await finishCleanup.promise;
+          order.push("peer.cleanup");
+        },
+      },
+      supportedKinds: ["issue-investigate"],
+      maximumConcurrentTasks: 2,
+      logger: f.logger,
+    });
+    const running = service.run().catch((error: unknown) => {
+      order.push("run.rejected");
+      return error;
+    });
+    await secondAborted.promise;
+    expect(order).toEqual(["peer.aborted"]);
+    finishCleanup.resolve();
+    expect(await running).toMatchObject({
+      message: "Investigation attempt could not complete its terminal submission.",
+    });
+    await expect(service.stop()).rejects.toThrow(/terminal submission/);
+    expect(order).toEqual(["peer.aborted", "peer.cleanup", "run.rejected"]);
+    expect(f.claim).toHaveBeenCalledTimes(2);
+  });
 });

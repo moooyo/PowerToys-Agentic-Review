@@ -70,6 +70,26 @@ export const InvestigationWorkItemSchema = object({
 });
 export type InvestigationWorkItem = Static<typeof InvestigationWorkItemSchema>;
 
+/** The trusted Worker's explicit CLI selection; null means no model was explicitly selected. */
+export const InvestigationModelIdentitySchema = object({
+  engine: Type.Union([Type.Literal("codex"), Type.Literal("copilot")]),
+  model: Type.Union([
+    Type.String({
+      minLength: 1,
+      maxLength: 256,
+      pattern: "^(?=.*\\S)[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+    }),
+    Type.Null(),
+  ]),
+});
+export type InvestigationModelIdentity = Static<typeof InvestigationModelIdentitySchema>;
+export const InvestigationModelExecutionSchema = object({
+  attemptId: EntityIdSchema,
+  round: PositiveIntegerSchema,
+  ...InvestigationModelIdentitySchema.properties,
+});
+export type InvestigationModelExecution = Static<typeof InvestigationModelExecutionSchema>;
+
 const subjectProperties = {
   id: EntityIdSchema,
   repositoryId: EntityIdSchema,
@@ -655,6 +675,7 @@ export const InvestigationResultContextSchema = object({
   }),
   attempt: object({ id: EntityIdSchema, number: PositiveIntegerSchema }),
   adoptedAttemptIds: ids,
+  modelExecutions: Type.Optional(Type.Array(InvestigationModelExecutionSchema)),
   subjects: Type.Array(InvestigationSubjectV1Schema, { minItems: 1 }),
   sourceArtifacts: Type.Optional(Type.Array(InvestigationArtifactV1Schema)),
   profileRef: InvestigationVersionRefSchema,
@@ -718,8 +739,19 @@ export const InvestigationLoopRoundV1Schema = object({
   continuationReason: text,
 });
 export type InvestigationLoopRoundV1 = Static<typeof InvestigationLoopRoundV1Schema>;
+/** Trusted usage is retained even when a model proposal is not accepted as an analysis round. */
+export const InvestigationUnacceptedModelUsageSchema = object({
+  attemptId: EntityIdSchema,
+  round: PositiveIntegerSchema,
+  tokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]),
+});
+export type InvestigationUnacceptedModelUsage = Static<
+  typeof InvestigationUnacceptedModelUsageSchema
+>;
 export const InvestigationRuntimeStateSchema = object({
   sourceCoverage: Type.Optional(InvestigationSourceCoverageSchema),
+  modelExecutions: Type.Optional(Type.Array(InvestigationModelExecutionSchema)),
+  unacceptedModelUsage: Type.Optional(Type.Array(InvestigationUnacceptedModelUsageSchema)),
   completedStepIds: ids,
   checks: Type.Array(InvestigationValidationCheckSchema),
   evidence: Type.Array(InvestigationEvidenceV1Schema),
@@ -1123,6 +1155,7 @@ export const InvestigationCheckpointRequestSchema = Type.Union([
     lease: InvestigationWorkerLeaseSchema,
     round: InvestigationLoopRoundV1Schema,
     usage: Type.Omit(InvestigationConsumptionSchema, ["rounds"]),
+    modelIdentity: Type.Optional(InvestigationModelIdentitySchema),
     sourceUnitIds: Type.Optional(ids),
   }),
   object({
@@ -1146,6 +1179,7 @@ export const InvestigationCheckpointRequestSchema = Type.Union([
       Type.Literal("interrupted"),
     ]),
     diagnostics: Type.Array(InvestigationDiagnosticSchema),
+    modelUsage: Type.Optional(Type.Omit(InvestigationUnacceptedModelUsageSchema, ["attemptId"])),
   }),
 ]);
 export const InvestigationCheckpointResponseSchema = object({
@@ -1240,6 +1274,68 @@ export interface InvestigationSemanticValidation {
   errors: InvestigationSemanticIssue[];
 }
 
+/** Validates accepted model history without inventing identities for unrecorded rounds. */
+export function validateInvestigationModelExecutions(
+  executions: readonly InvestigationModelExecution[],
+  adoptedAttemptIds: readonly string[],
+  completedRounds: number,
+): InvestigationSemanticValidation {
+  const errors: InvestigationSemanticIssue[] = [];
+  const add = (path: string, code: string, message: string) => {
+    errors.push({ path, code, message });
+  };
+  if (executions.length > completedRounds)
+    add(
+      "/modelExecutions",
+      "MODEL_EXECUTION_COUNT_EXCEEDED",
+      "Model execution records cannot outnumber accepted analysis rounds.",
+    );
+  const rounds = new Set<number>();
+  for (const [index, execution] of executions.entries()) {
+    const path = `/modelExecutions/${index}`;
+    if (!adoptedAttemptIds.includes(execution.attemptId))
+      add(
+        `${path}/attemptId`,
+        "MODEL_EXECUTION_ATTEMPT_MISMATCH",
+        "Model execution must belong to an adopted task attempt.",
+      );
+    if (
+      !Number.isSafeInteger(execution.round) ||
+      execution.round < 1 ||
+      execution.round > completedRounds
+    )
+      add(
+        `${path}/round`,
+        "MODEL_EXECUTION_ROUND_MISMATCH",
+        "Model execution must identify an accepted analysis round.",
+      );
+    if (rounds.has(execution.round))
+      add(
+        `${path}/round`,
+        "DUPLICATE_MODEL_EXECUTION_ROUND",
+        "Each accepted analysis round can have only one model execution record.",
+      );
+    rounds.add(execution.round);
+    if (
+      (execution.engine !== "codex" && execution.engine !== "copilot") ||
+      (execution.model !== null &&
+        (typeof execution.model !== "string" ||
+          execution.model.length > 256 ||
+          !/\S/u.test(execution.model) ||
+          [...execution.model].some((character) => {
+            const code = character.charCodeAt(0);
+            return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+          })))
+    )
+      add(
+        path,
+        "INVALID_MODEL_IDENTITY",
+        "Model identity must preserve a supported CLI engine and its explicit nonempty model selection, or null.",
+      );
+  }
+  return { valid: errors.length === 0, errors };
+}
+
 /** Checks relationships after structural schema validation. Persistence and external-state checks remain server responsibilities. */
 export function validateInvestigationResult(
   result: InvestigationResultV1,
@@ -1314,6 +1410,13 @@ export function validateInvestigationResult(
     result.plans.flatMap((plan) => plan.prerequisites.map((prerequisite) => prerequisite.id)),
   );
   const adoptedAttempts = new Set(result.context.adoptedAttemptIds);
+  errors.push(
+    ...validateInvestigationModelExecutions(
+      result.context.modelExecutions ?? [],
+      result.context.adoptedAttemptIds,
+      result.report.loop.completedRounds,
+    ).errors.map((issue) => ({ ...issue, path: `/context${issue.path}` })),
+  );
   const subject = (id: string, path: string) => {
     const value = subjects.get(id);
     if (!value) add(path, "UNKNOWN_SUBJECT", `Subject ${id} is not part of this result.`);
@@ -2039,7 +2142,7 @@ export function validateInvestigationResult(
       );
     if (
       detail.status === "needs_information" &&
-      (detail.missingInformation.length === 0 || result.feedbackDrafts.length === 0)
+      (detail.missingInformation.length === 0 || drafts.size === 0)
     )
       add(
         "/assessment/bugAssessment",
@@ -2147,7 +2250,7 @@ export function validateInvestigationResult(
       );
     if (
       detail.status === "needs_information" &&
-      (detail.missingInformation.length === 0 || result.feedbackDrafts.length === 0)
+      (detail.missingInformation.length === 0 || drafts.size === 0)
     )
       add(
         "/assessment/featureAssessment",

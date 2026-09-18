@@ -27,6 +27,7 @@ import {
   type InvestigationValidation,
   InvestigationValidationSchema,
   PositiveIntegerSchema,
+  validateInvestigationModelExecutions,
   validateInvestigationTask,
 } from "@agentic-review/contracts";
 import {
@@ -164,6 +165,9 @@ export function buildInvestigationReportSubmission(
     },
     attempt: { id: attempt.id, number: attempt.number },
     adoptedAttemptIds: [...checkpoint.adoptedAttemptIds],
+    ...(checkpoint.runtime.modelExecutions === undefined
+      ? {}
+      : { modelExecutions: structuredClone(checkpoint.runtime.modelExecutions) }),
     subjects: runtime.subjects,
     ...(task.sourceArtifacts === undefined
       ? {}
@@ -349,6 +353,11 @@ function validateInput(input: BuildInvestigationReportSubmissionInput): void {
     checkpoint.taskId !== task.id ||
     checkpoint.attemptId !== attempt.id ||
     checkpoint.leaseVersion !== attempt.leaseVersion ||
+    !validateInvestigationModelExecutions(
+      checkpoint.runtime.modelExecutions ?? [],
+      checkpoint.adoptedAttemptIds,
+      checkpoint.round,
+    ).valid ||
     !checkpoint.adoptedAttemptIds.includes(attempt.id) ||
     checkpoint.subjectRevisionKey !==
       task.subjects.find((subject) => subject.id === task.subjectRef)?.revisionKey ||

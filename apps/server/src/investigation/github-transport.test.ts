@@ -19,6 +19,7 @@ type Json = Record<string, unknown>;
 type RequestRecord = { method: string; path: string; body: Json | null; init: RequestInit };
 
 const publisherId = 42;
+const publisherLogin = "fixture-publisher";
 const baseSha = "a".repeat(40);
 const headSha = "b".repeat(40);
 const branchSha = "c".repeat(40);
@@ -225,7 +226,7 @@ function harness(
 ) {
   const requests: RequestRecord[] = [];
   const gets = new Map<string, unknown>([
-    ["/user", { id: publisherId }],
+    ["/user", { id: publisherId, login: publisherLogin }],
     [basePath, structuredClone(remoteRepository)],
     [`${basePath}/pulls/3`, structuredClone(remotePull)],
     [
@@ -373,6 +374,168 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("investigation GitHub publisher identity", () => {
+  it.each(["A", publisherLogin, "GitHub-Actions[bot]", "a".repeat(100)])(
+    "reads the verified publisher login %s without a mutation",
+    async (login) => {
+      const h = harness();
+      h.gets.set("/user", { id: publisherId, login });
+      await expect(h.transport.readPublisherIdentity()).resolves.toEqual({
+        githubUserId: publisherId,
+        githubLogin: login,
+      });
+      expect(h.requests.map(({ method, path }) => [method, path])).toEqual([["GET", "/user"]]);
+      expect(h.writes()).toEqual([]);
+    },
+  );
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "42", null, undefined])(
+    "rejects an invalid publisher numeric identity %s",
+    async (id) => {
+      const h = harness();
+      h.gets.set("/user", { id, login: publisherLogin });
+      await expect(h.transport.readPublisherIdentity()).rejects.toThrow("invalid_github_identity");
+      expect(h.writes()).toEqual([]);
+    },
+  );
+
+  it.each([
+    undefined,
+    null,
+    42,
+    "",
+    "-publisher",
+    "publisher-",
+    "publisher name",
+    "publisher\n",
+    "publisher\r",
+    "publisher\u2028",
+    "publisher\u007f",
+    "@publisher",
+    "<publisher>",
+    "publisher`",
+    "publisher[admin]",
+    "publisher[bot][bot]",
+    "a".repeat(101),
+  ])("rejects an unsafe or missing publisher login %s", async (login) => {
+    const h = harness();
+    h.gets.set("/user", { id: publisherId, login });
+    await expect(h.transport.readPublisherIdentity()).rejects.toThrow("invalid_github_login");
+    await expect(
+      h.transport.execute(intent("comment"), repository, workItem(), actor),
+    ).resolves.toMatchObject({
+      state: "failed",
+      message: expect.stringContaining("invalid_github_login"),
+    });
+    expect(h.writes()).toEqual([]);
+  });
+
+  it("does not reuse a previously read publisher identity or cache a failed read", async () => {
+    const h = harness();
+    await expect(h.transport.readPublisherIdentity()).resolves.toMatchObject({
+      githubUserId: publisherId,
+      githubLogin: publisherLogin,
+    });
+    h.gets.set("/user", { id: publisherId + 1, login: publisherLogin });
+    await expect(h.transport.readPublisherIdentity()).rejects.toThrow("publisher_identity_changed");
+    h.gets.set("/user", { id: publisherId, login: "renamed-publisher" });
+    await expect(h.transport.readPublisherIdentity()).resolves.toEqual({
+      githubUserId: publisherId,
+      githubLogin: "renamed-publisher",
+    });
+    expect(h.requests).toHaveLength(3);
+    expect(h.writes()).toEqual([]);
+  });
+
+  it("accepts the frozen publisher identity with case-insensitive login matching", async () => {
+    const h = harness();
+    const principal = {
+      ...actor,
+      githubIdentity: { githubUserId: publisherId, githubLogin: publisherLogin.toUpperCase() },
+    };
+    const beforeDispatch = vi.fn();
+    await expect(
+      h.transport.execute(intent("comment"), repository, workItem(), principal, beforeDispatch),
+    ).resolves.toMatchObject({ state: "succeeded" });
+    expect(beforeDispatch).toHaveBeenCalledTimes(1);
+    expect(h.writes()).toHaveLength(1);
+  });
+
+  it.each([
+    { githubUserId: publisherId + 1, githubLogin: publisherLogin },
+    { githubUserId: publisherId, githubLogin: "another-publisher" },
+  ])("rejects a frozen publisher mismatch before any POST", async (githubIdentity) => {
+    const h = harness();
+    const beforeDispatch = vi.fn();
+    await expect(
+      h.transport.execute(
+        intent("comment"),
+        repository,
+        workItem(),
+        { ...actor, githubIdentity },
+        beforeDispatch,
+      ),
+    ).resolves.toMatchObject({
+      state: "failed",
+      message: expect.stringContaining("publisher_identity_changed"),
+    });
+    expect(h.requests.map(({ method, path }) => [method, path])).toEqual([["GET", "/user"]]);
+    expect(beforeDispatch).not.toHaveBeenCalled();
+    expect(h.writes()).toEqual([]);
+  });
+
+  it.each(["pull_request", "issue"] as const)(
+    "rejects a publisher rename during the final %s preflight before any POST",
+    async (kind) => {
+      const h = harness();
+      const item = workItem(kind);
+      const principal = {
+        ...actor,
+        githubIdentity: { githubUserId: publisherId, githubLogin: publisherLogin },
+      };
+      const readTarget = h.transport.readTarget.bind(h.transport);
+      vi.spyOn(h.transport, "readTarget").mockImplementation(async (...args) => {
+        h.gets.set("/user", { id: publisherId, login: "renamed-publisher" });
+        return readTarget(...args);
+      });
+      const beforeDispatch = vi.fn();
+      await expect(
+        h.transport.execute(
+          intent("comment", feedback(), item),
+          repository,
+          item,
+          principal,
+          beforeDispatch,
+        ),
+      ).resolves.toMatchObject({
+        state: "failed",
+        message: expect.stringContaining("publisher_identity_changed"),
+      });
+      expect(beforeDispatch).not.toHaveBeenCalled();
+      expect(h.writes()).toEqual([]);
+    },
+  );
+
+  it("reconciles by numeric publisher identity after a rename when no frozen write identity is supplied", async () => {
+    const h = harness();
+    const item = workItem("issue");
+    const action = intent("comment", feedback("Already posted for the previous login."), item);
+    h.gets.set("/user", { id: publisherId, login: "renamed-publisher" });
+    h.gets.set(`${basePath}/issues/5/comments?per_page=100&page=1`, [
+      {
+        id: 502,
+        body: bodyWithMarker(action, "Already posted for the previous login."),
+        user: { id: publisherId, login: "renamed-publisher" },
+      },
+    ]);
+    await expect(h.transport.reconcile(action, repository, item, actor)).resolves.toMatchObject({
+      state: "succeeded",
+      externalId: "502",
+    });
+    expect(h.writes()).toEqual([]);
+  });
+});
+
 describe("investigation GitHub target identity", () => {
   it("reads the exact numeric repository and current PR base/head revision through injected fetch", async () => {
     const { transport, requests } = harness();
@@ -401,7 +564,7 @@ describe("investigation GitHub target identity", () => {
   });
 
   it.each([
-    ["publisher", "/user", { id: publisherId + 1 }],
+    ["publisher", "/user", { id: publisherId + 1, login: publisherLogin }],
     ["repository numeric identity", basePath, { ...remoteRepository, id: 999 }],
     ["repository name", basePath, { ...remoteRepository, full_name: "foreign/example" }],
     ["work item number", `${basePath}/pulls/3`, { ...remotePull, number: 99 }],
@@ -471,6 +634,55 @@ describe("investigation GitHub target identity", () => {
       h.transport.execute(intent("approve"), repository, workItem(), actor),
     ).resolves.toMatchObject({ state: "failed" });
     expect(h.writes()).toEqual([]);
+  });
+});
+
+describe("investigation GitHub dispatch authorization", () => {
+  it.each(["pull_request", "issue"] as const)(
+    "does not POST when authorization is revoked during the final %s target read",
+    async (kind) => {
+      const h = harness();
+      const item = workItem(kind);
+      const action = intent("comment", feedback(), item);
+      let authorized = true;
+      const readTarget = h.transport.readTarget.bind(h.transport);
+      vi.spyOn(h.transport, "readTarget").mockImplementation(async (...args) => {
+        const target = await readTarget(...args);
+        authorized = false;
+        return target;
+      });
+      const beforeDispatch = vi.fn(() => {
+        if (!authorized) throw new Error("The synthetic publication policy was revoked.");
+      });
+      await expect(
+        h.transport.execute(action, repository, item, actor, beforeDispatch),
+      ).resolves.toMatchObject({ state: "failed", externalId: null });
+      expect(beforeDispatch).toHaveBeenCalledTimes(1);
+      expect(h.writes()).toEqual([]);
+    },
+  );
+
+  it("checks trusted authorization immediately before its single comment POST", async () => {
+    const h = harness();
+    const item = workItem("issue");
+    const action = intent("comment", feedback(), item);
+    const beforeDispatch = vi.fn(() => {
+      expect(h.requests.at(-1)).toMatchObject({
+        method: "GET",
+        path: `${basePath}/issues/5`,
+      });
+      expect(h.writes()).toEqual([]);
+    });
+    await expect(
+      h.transport.execute(action, repository, item, actor, beforeDispatch),
+    ).resolves.toMatchObject({ state: "succeeded", externalId: "502" });
+    expect(beforeDispatch).toHaveBeenCalledTimes(1);
+    expect(h.writes()).toHaveLength(1);
+    expect(h.writes()[0]).toMatchObject({
+      method: "POST",
+      path: `${basePath}/issues/5/comments`,
+      body: { body: bodyWithMarker(action, "Reviewed synthetic feedback.") },
+    });
   });
 });
 

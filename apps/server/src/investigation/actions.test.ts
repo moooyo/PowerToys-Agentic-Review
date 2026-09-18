@@ -1,6 +1,7 @@
 import {
   type ActionContextV1,
   createInvestigationPreview as createInvestigationFixture,
+  type InvestigationActionIntentV1,
   type InvestigationActionKind,
   type InvestigationCreateActionIntentRequest,
   type InvestigationCreateTaskRequestV1,
@@ -9,6 +10,7 @@ import {
 import { investigationContentDigest } from "@agentic-review/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationActions, type InvestigationActionsDependencies } from "./actions.js";
+import { InvestigationRequestError } from "./errors.js";
 import { InvestigationStore } from "./store.js";
 import type {
   InvestigationActionTransport,
@@ -258,6 +260,63 @@ describe("investigation action preparation and confirmation", () => {
     expect(h.execute).not.toHaveBeenCalled();
   });
 
+  it.each(["prepared", "succeeded", "unknown"] as const)(
+    "looks up a saved %s intent without current publication permissions or transport calls",
+    async (state) => {
+      const h = harness();
+      const request = h.request();
+      expect(h.actions.findIntentByIdempotencyKey(h.actor, request.idempotencyKey)).toBeNull();
+      const prepared = await h.actions.createIntent(h.actor, request);
+      let expected = prepared;
+      if (state !== "prepared") {
+        h.execute.mockResolvedValue({ state, message: "Synthetic receipt", externalId: null });
+        expected = await h.actions.confirmIntent(h.actor, prepared.id, {
+          version: prepared.version,
+          payloadDigest: prepared.payloadDigest,
+        });
+      }
+      const readTarget = vi.fn<InvestigationActionTransport["readTarget"]>();
+      h.transport.readTarget = readTarget;
+      h.execute.mockClear();
+      const previousRecords = h.store.list("idempotency");
+      expect(
+        h.actions.findIntentByIdempotencyKey(
+          { ...h.actor, permissions: [], actionCapabilities: [] },
+          request.idempotencyKey,
+        ),
+      ).toEqual(expected);
+      expect(h.actions.findIntentByIdempotencyKey(h.actor, "missing-key")).toBeNull();
+      expect(h.store.list("idempotency")).toEqual(previousRecords);
+      expect(h.store.list("actionIntents")).toEqual([expected]);
+      expect(readTarget).not.toHaveBeenCalled();
+      expect(h.execute).not.toHaveBeenCalled();
+      expect(h.reconcile).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps idempotency lookup scoped to the owning actor and repository grants", async () => {
+    const h = harness();
+    const request = h.request();
+    const prepared = await h.actions.createIntent(h.actor, request);
+    expect(() =>
+      h.actions.findIntentByIdempotencyKey(
+        { ...h.actor, repositoryIds: [] },
+        request.idempotencyKey,
+      ),
+    ).toThrow(InvestigationRequestError);
+    const otherActor = { ...h.actor, id: "other-synthetic-operator" };
+    expect(h.actions.findIntentByIdempotencyKey(otherActor, request.idempotencyKey)).toBeNull();
+    h.store.insert(
+      "idempotency",
+      `action-request:${investigationContentDigest([otherActor.id, request.idempotencyKey])}`,
+      { intentId: prepared.id, requestDigest: investigationContentDigest(request) },
+    );
+    expect(() => h.actions.findIntentByIdempotencyKey(otherActor, request.idempotencyKey)).toThrow(
+      InvestigationRequestError,
+    );
+    expect(h.execute).not.toHaveBeenCalled();
+  });
+
   it("dispatches a concurrently confirmed intent at most once", async () => {
     const h = harness();
     const intent = await h.actions.createIntent(h.actor, h.request());
@@ -267,6 +326,7 @@ describe("investigation action preparation and confirmation", () => {
       h.actions.confirmIntent(h.actor, intent.id, confirmation),
     ]);
     expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(h.execute.mock.calls[0]).toHaveLength(4);
     expect(h.actions.getIntent(h.actor, intent.id).state).toBe("succeeded");
     expect((await h.actions.confirmIntent(h.actor, intent.id, confirmation)).state).toBe(
       "succeeded",
@@ -325,6 +385,146 @@ describe("investigation action preparation and confirmation", () => {
     ).rejects.toMatchObject({ code: "current_p0_prohibits_approval" });
     expect(h.execute).not.toHaveBeenCalled();
   });
+
+  it.each(["prepare", "confirm"] as const)(
+    "rolls back %s when trusted authorization is revoked during asynchronous target checks",
+    async (phase) => {
+      const h = harness();
+      const request = h.request();
+      const prepared = phase === "confirm" ? await h.actions.createIntent(h.actor, request) : null;
+      let authorized = true;
+      h.transport.readTarget = async () => {
+        await Promise.resolve();
+        authorized = false;
+        return structuredClone(h.target);
+      };
+      const assertAuthorized = vi.fn(() => {
+        h.store.insert("idempotency", "synthetic-authorization-transaction", { checked: true });
+        if (!authorized)
+          throw new InvestigationRequestError(
+            403,
+            "synthetic_authorization_revoked",
+            "The synthetic publication policy was revoked.",
+          );
+      });
+      const pending =
+        prepared === null
+          ? h.actions.createIntent(h.actor, request, assertAuthorized)
+          : h.actions.confirmIntent(
+              h.actor,
+              prepared.id,
+              { version: prepared.version, payloadDigest: prepared.payloadDigest },
+              assertAuthorized,
+            );
+      await expect(pending).rejects.toMatchObject({ code: "synthetic_authorization_revoked" });
+      expect(assertAuthorized).toHaveBeenCalledTimes(1);
+      expect(h.store.has("idempotency", "synthetic-authorization-transaction")).toBe(false);
+      expect(h.store.list("actionIntents")).toEqual(prepared === null ? [] : [prepared]);
+      expect(h.execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it("fails before calling the transport when authorization is revoked after confirmation", async () => {
+    const h = harness();
+    const prepared = await h.actions.createIntent(h.actor, h.request());
+    const assertAuthorized = vi.fn((intent: InvestigationActionIntentV1) => {
+      if (intent.state === "executing")
+        throw new InvestigationRequestError(
+          403,
+          "synthetic_authorization_revoked",
+          "The synthetic publication policy was revoked.",
+        );
+    });
+    await expect(
+      h.actions.confirmIntent(
+        h.actor,
+        prepared.id,
+        { version: prepared.version, payloadDigest: prepared.payloadDigest },
+        assertAuthorized,
+      ),
+    ).resolves.toMatchObject({
+      state: "failed",
+      result: { message: "The synthetic publication policy was revoked." },
+    });
+    expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  it("treats an injected transport's final authorization refusal as an unsent failure", async () => {
+    const h = harness();
+    const prepared = await h.actions.createIntent(h.actor, h.request());
+    let authorized = true;
+    const send = vi.fn();
+    h.execute.mockImplementation(
+      async (_intent, _repository, _workItem, _actor, beforeDispatch) => {
+        await Promise.resolve();
+        authorized = false;
+        beforeDispatch?.();
+        send();
+        return { state: "succeeded", message: "Synthetic receipt", externalId: "receipt" };
+      },
+    );
+    await expect(
+      h.actions.confirmIntent(
+        h.actor,
+        prepared.id,
+        { version: prepared.version, payloadDigest: prepared.payloadDigest },
+        () => {
+          if (!authorized) throw new Error("Synthetic authorization was revoked.");
+        },
+      ),
+    ).resolves.toMatchObject({
+      state: "failed",
+      result: { message: "The action is no longer authorized for dispatch." },
+    });
+    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(["succeeded", "unknown"] as const)(
+    "does not require renewed publication authorization to return or reconcile a %s receipt",
+    async (state) => {
+      const h = harness();
+      let authorized = true;
+      const assertAuthorized = vi.fn(() => {
+        if (!authorized) throw new Error("Synthetic authorization was revoked.");
+      });
+      h.execute.mockImplementation(
+        async (_intent, _repository, _workItem, _actor, beforeDispatch) => {
+          await Promise.resolve();
+          beforeDispatch?.();
+          return { state, message: "Synthetic receipt", externalId: null };
+        },
+      );
+      const request = h.request();
+      const prepared = await h.actions.createIntent(h.actor, request, assertAuthorized);
+      const confirmation = { version: prepared.version, payloadDigest: prepared.payloadDigest };
+      const finished = await h.actions.confirmIntent(
+        h.actor,
+        prepared.id,
+        confirmation,
+        assertAuthorized,
+      );
+      expect(finished.state).toBe(state);
+      expect(h.execute).toHaveBeenCalledTimes(1);
+      expect(h.execute.mock.calls[0]).toHaveLength(5);
+      expect(assertAuthorized).toHaveBeenCalledTimes(4);
+      authorized = false;
+      assertAuthorized.mockClear();
+      expect(await h.actions.createIntent(h.actor, request, assertAuthorized)).toEqual(finished);
+      expect(
+        await h.actions.confirmIntent(h.actor, prepared.id, confirmation, assertAuthorized),
+      ).toEqual(finished);
+      h.reconcile.mockResolvedValue({
+        state: "succeeded",
+        message: "The synthetic comment receipt was found.",
+        externalId: "receipt",
+      });
+      expect((await h.actions.reconcileIntent(h.actor, prepared.id)).state).toBe("succeeded");
+      expect(h.reconcile).toHaveBeenCalledTimes(state === "unknown" ? 1 : 0);
+      expect(assertAuthorized).not.toHaveBeenCalled();
+      expect(h.execute).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("retains unknown delivery and reconciles without resubmitting any mutation", async () => {
     const h = harness();

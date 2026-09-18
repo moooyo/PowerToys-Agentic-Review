@@ -34,6 +34,11 @@ export interface InvestigationSourceBinding {
   readonly sourceSha: string;
   readonly patchDigest: string | null;
   readonly artifactRef: string | null;
+  /** Exact Git symlink blobs represented as ordinary target text; their targets are never followed. */
+  readonly inertSymlinks?: readonly {
+    readonly path: string;
+    readonly revisionSha: string;
+  }[];
 }
 
 export interface InvestigationArtifactInput {
@@ -50,6 +55,100 @@ export interface InvestigationSourceFile {
   readonly path: string;
   readonly content: string | null;
   readonly digest: string | null;
+}
+
+export const investigationSourceDependencyLimits = Object.freeze({
+  maximumSeedPaths: 64,
+  maximumFiles: 64,
+  maximumSymbols: 128,
+  maximumBytes: 256 * 1024,
+  maximumIdentityScanBytes: 1024 * 1024,
+  maximumDepth: 2,
+});
+
+export interface InvestigationSourceDependencies {
+  readonly sourceSha: string;
+  readonly seedPaths: readonly string[];
+  /** Exact-head ordinary seeds whose file kinds have no supported lexical dependency search. */
+  readonly unsupportedSeedPaths?: readonly string[];
+  readonly symbols: readonly string[];
+  readonly searchDepth: number;
+  readonly identityScanBytes?: number;
+  readonly files: readonly {
+    readonly path: string;
+    readonly content: string;
+    readonly digest: string;
+  }[];
+  readonly queries: readonly {
+    readonly revisionSha: string;
+    readonly symbols: readonly string[];
+    readonly paths: readonly string[];
+    readonly depth: number;
+    readonly anchorIdentities?: readonly { readonly name: string; readonly namespace: string }[];
+    readonly excludedMatches?: readonly {
+      readonly path: string;
+      readonly reason: "namespace_or_import_only" | "different_type_identity";
+      readonly matchedSymbols: readonly string[];
+    }[];
+    readonly provenReferencePaths?: readonly string[];
+    readonly unpropagatedMatches?: readonly {
+      readonly path: string;
+      readonly reason: "unresolved_reference_identity";
+    }[];
+  }[];
+}
+
+export const investigationSourceContextLimits = Object.freeze({
+  ...investigationSourceDependencyLimits,
+  maximumCatalogPaths: 256,
+  maximumQueries: 256,
+  maximumOptionalFiles: 8,
+  maximumForwardOptionalFiles: 4,
+  maximumOwnerOptionalFiles: 4,
+  maximumOptionalBytes: 128 * 1024,
+});
+
+export interface InvestigationSourceContext {
+  readonly sourceSha: string;
+  readonly seedPaths: readonly string[];
+  readonly requiredFiles: readonly {
+    readonly path: string;
+    readonly content: string;
+    readonly digest: string;
+  }[];
+  readonly contextFiles: readonly {
+    readonly path: string;
+    readonly content: string;
+    readonly digest: string;
+    readonly role: "definition_candidate" | "related_context";
+    readonly relation: "unresolved_reference_identity";
+    readonly lexicalDeclaration?: { readonly name: string; readonly namespace: string };
+  }[];
+  readonly queries: readonly {
+    readonly kind: "definition" | "reference";
+    readonly revisionSha: string;
+    readonly symbols: readonly string[];
+    readonly paths: readonly string[];
+    readonly matchedPathCount: number;
+    readonly omittedPathCount: number;
+  }[];
+  readonly deferred: readonly {
+    readonly path: string;
+    readonly reason:
+      | "definition_identity_unresolved"
+      | "namespace_or_import_only"
+      | "different_type_identity"
+      | "candidate_scan_files_budget"
+      | "candidate_scan_bytes_budget"
+      | "optional_context_budget"
+      | "prompt_input_budget"
+      | "optional_candidate_unselected";
+  }[];
+  readonly identityScanFiles: number;
+  readonly identityScanBytes: number;
+  readonly catalogComplete: boolean;
+  readonly omittedCandidateCount: number;
+  readonly queryBudgetExhausted?: true;
 }
 
 export interface InvestigationPrDiffChunkDescriptor {
@@ -103,6 +202,9 @@ export interface PreparedInvestigationWorkspace {
   readSourceFile(path: string): Promise<InvestigationSourceFile>;
   readPrDiffManifest(): Promise<InvestigationPrDiffManifest>;
   readPrDiffChunk(id: string): Promise<InvestigationPrDiffChunk>;
+  readPrDiffChunks?(ids: readonly string[]): Promise<readonly InvestigationPrDiffChunk[]>;
+  readSourceDependencies?(paths: readonly string[]): Promise<InvestigationSourceDependencies>;
+  readSourceContext?(paths: readonly string[]): Promise<InvestigationSourceContext>;
   applyEdits(input: {
     readonly edits: readonly InvestigationSourceEdit[];
     readonly allowedPaths: readonly string[];
@@ -166,6 +268,9 @@ export interface InvestigationSourceMaterializer {
     capturePatch?(signal: AbortSignal): Promise<Uint8Array>;
     readPrDiffManifest?(): Promise<InvestigationPrDiffManifest>;
     readPrDiffChunk?(id: string): Promise<InvestigationPrDiffChunk>;
+    readPrDiffChunks?(ids: readonly string[]): Promise<readonly InvestigationPrDiffChunk[]>;
+    readSourceDependencies?(paths: readonly string[]): Promise<InvestigationSourceDependencies>;
+    readSourceContext?(paths: readonly string[]): Promise<InvestigationSourceContext>;
   }>;
 }
 
@@ -449,7 +554,6 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
       { readonly baseSha: string; readonly patchDigest: string }
     >();
     let frozenPrDiffManifest: InvestigationPrDiffManifest | null = null;
-    const prDiffChunks = new Map<string, InvestigationPrDiffChunkDescriptor>();
     const assertOpen = () => {
       if (cleaned || cleaning)
         throw failure("WORKSPACE_CLOSED", "The investigation workspace is closed.");
@@ -555,11 +659,11 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
         await materializedSource.assertBinding();
         await assertIntegrity();
       };
-      const readPrDiffManifest = async (): Promise<InvestigationPrDiffManifest> => {
-        await assertSourceBinding();
+      const readAndValidatePrDiffManifest = async (): Promise<InvestigationPrDiffManifest> => {
         if (
           materializedSource?.readPrDiffManifest === undefined ||
-          materializedSource.readPrDiffChunk === undefined ||
+          (materializedSource.readPrDiffChunk === undefined &&
+            materializedSource.readPrDiffChunks === undefined) ||
           binding === null
         ) {
           throw failure(
@@ -581,32 +685,440 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
             "The PR diff manifest changed after it was frozen for this workspace.",
           );
         }
-        await assertSourceBinding();
-        if (frozenPrDiffManifest === null) {
-          frozenPrDiffManifest = manifest;
-          for (const descriptor of manifest.chunks) prDiffChunks.set(descriptor.id, descriptor);
-        }
-        return structuredClone(frozenPrDiffManifest);
+        return manifest;
       };
-      const readPrDiffChunk = async (id: string): Promise<InvestigationPrDiffChunk> => {
-        await readPrDiffManifest();
-        const expected = prDiffChunks.get(id);
-        if (expected === undefined) {
+      const freezePrDiffManifest = (manifest: InvestigationPrDiffManifest): void => {
+        if (frozenPrDiffManifest !== null && manifest.digest !== frozenPrDiffManifest.digest)
           throw failure(
             "SOURCE_BINDING_MISMATCH",
-            "The requested PR diff chunk does not belong to the frozen manifest.",
+            "The PR diff manifest changed while its source batch was being validated.",
+          );
+        frozenPrDiffManifest ??= manifest;
+      };
+      const readPrDiffManifest = async (): Promise<InvestigationPrDiffManifest> => {
+        await assertSourceBinding();
+        const manifest = await readAndValidatePrDiffManifest();
+        await assertSourceBinding();
+        freezePrDiffManifest(manifest);
+        return structuredClone(manifest);
+      };
+      const readPrDiffChunks = async (
+        ids: readonly string[],
+      ): Promise<readonly InvestigationPrDiffChunk[]> => {
+        if (
+          !Array.isArray(ids) ||
+          ids.length > this.#maximumTreeEntries ||
+          ids.some((id) => typeof id !== "string") ||
+          new Set(ids).size !== ids.length
+        ) {
+          throw failure(
+            "SOURCE_BINDING_MISMATCH",
+            "A PR source batch must contain bounded, unique chunk IDs.",
           );
         }
-        if (materializedSource?.readPrDiffChunk === undefined) {
+        const requestedIds = [...ids];
+        await assertSourceBinding();
+        const manifest = await readAndValidatePrDiffManifest();
+        const descriptors = new Map(manifest.chunks.map((chunk) => [chunk.id, chunk]));
+        const expected = requestedIds.map((id) => {
+          const descriptor = descriptors.get(id);
+          if (descriptor === undefined)
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "The requested PR diff chunk does not belong to the frozen manifest.",
+            );
+          return descriptor;
+        });
+        let chunks: readonly InvestigationPrDiffChunk[];
+        if (materializedSource?.readPrDiffChunks !== undefined) {
+          chunks = structuredClone(await materializedSource.readPrDiffChunks(requestedIds));
+        } else if (materializedSource?.readPrDiffChunk !== undefined) {
+          const collected: InvestigationPrDiffChunk[] = [];
+          for (const id of requestedIds)
+            collected.push(structuredClone(await materializedSource.readPrDiffChunk(id)));
+          chunks = collected;
+        } else {
           throw failure(
             "SOURCE_UNAVAILABLE",
             "The trusted source materializer cannot read complete PR diff chunks.",
           );
         }
-        const chunk = structuredClone(await materializedSource.readPrDiffChunk(id));
-        validatePrDiffChunk(chunk, expected);
+        if (!Array.isArray(chunks) || chunks.length !== expected.length)
+          throw failure(
+            "SOURCE_BINDING_MISMATCH",
+            "The PR source batch does not contain every requested chunk exactly once.",
+          );
+        for (let index = 0; index < expected.length; index++)
+          validatePrDiffChunk(chunks[index]!, expected[index]!);
         await assertSourceBinding();
-        return chunk;
+        freezePrDiffManifest(manifest);
+        return chunks;
+      };
+      const readPrDiffChunk = async (id: string): Promise<InvestigationPrDiffChunk> => {
+        const chunks = await readPrDiffChunks([id]);
+        return chunks[0]!;
+      };
+      const readSourceContext = async (
+        paths: readonly string[],
+      ): Promise<InvestigationSourceContext> => {
+        if (
+          input.task.executionPolicy.mode !== "source_read" ||
+          materializedSource?.readSourceContext === undefined ||
+          binding === null ||
+          binding.patchDigest !== null
+        )
+          throw failure(
+            "SOURCE_UNAVAILABLE",
+            "This workspace cannot prepare focused immutable source context.",
+          );
+        if (
+          !Array.isArray(paths) ||
+          paths.length === 0 ||
+          paths.length > investigationSourceContextLimits.maximumSeedPaths
+        )
+          throw failure(
+            "SOURCE_UNAVAILABLE",
+            "Focused context requires a bounded set of explicit source paths.",
+          );
+        const requested = paths
+          .map((path) => {
+            const absolute = resolveEditableSourcePath(layout.source, path);
+            if (win32.relative(layout.source, absolute).replaceAll("\\", "/") !== path)
+              throw failure(
+                "WORKSPACE_PATH_UNSAFE",
+                "Focused source paths must be exact repository paths.",
+              );
+            return path;
+          })
+          .toSorted();
+        if (new Set(requested.map((path) => path.toLowerCase())).size !== requested.length)
+          throw failure(
+            "SOURCE_BINDING_MISMATCH",
+            "Focused source paths must be unique on Windows.",
+          );
+        await assertSourceBinding();
+        const result: unknown = structuredClone(
+          await materializedSource.readSourceContext(requested),
+        );
+        assertInvestigationSourceContext(result, binding.sourceSha, requested);
+        await assertSourceBinding();
+        return result;
+      };
+      const readSourceDependencies = async (
+        paths: readonly string[],
+      ): Promise<InvestigationSourceDependencies> => {
+        if (
+          input.task.executionPolicy.mode !== "source_read" ||
+          materializedSource?.readSourceDependencies === undefined ||
+          binding === null
+        )
+          throw failure(
+            "SOURCE_UNAVAILABLE",
+            "This workspace cannot discover frozen source dependencies.",
+          );
+        const canonicalPaths = (values: readonly string[], maximum: number): string[] => {
+          if (!Array.isArray(values) || values.length > maximum)
+            throw failure(
+              "SOURCE_UNAVAILABLE",
+              "The complete dependency path set exceeds its limit.",
+            );
+          const result = values.map((path) => {
+            const absolute = resolveEditableSourcePath(layout.source, path);
+            const canonical = win32.relative(layout.source, absolute).replaceAll("\\", "/");
+            if (path !== canonical)
+              throw failure(
+                "WORKSPACE_PATH_UNSAFE",
+                "Dependency paths must be exact repository paths.",
+              );
+            return canonical;
+          });
+          if (new Set(result.map((path) => path.toLowerCase())).size !== result.length)
+            throw failure("SOURCE_BINDING_MISMATCH", "Dependency paths must be unique on Windows.");
+          return result.toSorted();
+        };
+        if (!Array.isArray(paths))
+          throw failure("SOURCE_UNAVAILABLE", "Dependency seeds must be a concrete path array.");
+        const requested = canonicalPaths(
+          [...paths],
+          investigationSourceDependencyLimits.maximumSeedPaths,
+        );
+        if (requested.length === 0)
+          throw failure(
+            "SOURCE_UNAVAILABLE",
+            "Dependency discovery requires explicit source seed paths.",
+          );
+        await assertSourceBinding();
+        const result = structuredClone(await materializedSource.readSourceDependencies(requested));
+        const { unsupportedSeedPaths, ...discovery } = result;
+        if (
+          (!hasExactKeys(discovery, [
+            "sourceSha",
+            "seedPaths",
+            "symbols",
+            "searchDepth",
+            "files",
+            "queries",
+          ]) &&
+            !hasExactKeys(discovery, [
+              "sourceSha",
+              "seedPaths",
+              "symbols",
+              "searchDepth",
+              "files",
+              "queries",
+              "identityScanBytes",
+            ])) ||
+          result.sourceSha !== binding.sourceSha ||
+          JSON.stringify(
+            canonicalPaths(result.seedPaths, investigationSourceDependencyLimits.maximumSeedPaths),
+          ) !== JSON.stringify(requested) ||
+          !Number.isSafeInteger(result.searchDepth) ||
+          result.searchDepth < 0 ||
+          result.searchDepth > investigationSourceDependencyLimits.maximumDepth ||
+          (result.identityScanBytes !== undefined &&
+            (!Number.isSafeInteger(result.identityScanBytes) ||
+              result.identityScanBytes < 0 ||
+              result.identityScanBytes >
+                investigationSourceDependencyLimits.maximumIdentityScanBytes)) ||
+          !Array.isArray(result.symbols) ||
+          result.symbols.length > investigationSourceDependencyLimits.maximumSymbols ||
+          new Set(result.symbols).size !== result.symbols.length ||
+          result.symbols.some(
+            (symbol) =>
+              typeof symbol !== "string" ||
+              symbol.length > 128 ||
+              !/^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$/u.test(symbol),
+          ) ||
+          !Array.isArray(result.files) ||
+          !Array.isArray(result.queries) ||
+          result.queries.length !== result.searchDepth
+        )
+          throw failure(
+            "SOURCE_BINDING_MISMATCH",
+            "The source dependency result does not match its frozen request.",
+          );
+        if (
+          unsupportedSeedPaths !== undefined &&
+          (!Array.isArray(unsupportedSeedPaths) ||
+            unsupportedSeedPaths.length === 0 ||
+            JSON.stringify(
+              canonicalPaths(
+                unsupportedSeedPaths,
+                investigationSourceDependencyLimits.maximumSeedPaths,
+              ),
+            ) !== JSON.stringify(unsupportedSeedPaths) ||
+            unsupportedSeedPaths.some((path) => !requested.includes(path)))
+        )
+          throw failure(
+            "SOURCE_BINDING_MISMATCH",
+            "Unsupported dependency seeds must be a unique exact subset of the frozen request.",
+          );
+        if (
+          unsupportedSeedPaths?.length === requested.length &&
+          (result.symbols.length > 0 ||
+            result.searchDepth !== 0 ||
+            result.files.length > 0 ||
+            (result.identityScanBytes ?? 0) !== 0)
+        )
+          throw failure(
+            "SOURCE_BINDING_MISMATCH",
+            "An entirely unsupported seed set cannot claim lexical search or dependency results.",
+          );
+        const dependencyPaths = canonicalPaths(
+          result.files.map((file) => file.path),
+          investigationSourceDependencyLimits.maximumFiles,
+        );
+        let bytes = 0;
+        for (const file of result.files) {
+          if (
+            requested.includes(file.path) ||
+            typeof file.content !== "string" ||
+            file.content.includes("\0") ||
+            !/^[a-f0-9]{64}$/u.test(file.digest) ||
+            digest(Buffer.from(file.content, "utf8")) !== file.digest
+          )
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "A complete source dependency has changed or has invalid text.",
+            );
+          bytes += Buffer.byteLength(file.content, "utf8");
+          if (bytes > investigationSourceDependencyLimits.maximumBytes)
+            throw failure(
+              "SOURCE_UNAVAILABLE",
+              "The complete dependency content exceeds its byte limit.",
+            );
+        }
+        const matchedPaths = new Set<string>();
+        const queriedSymbols = new Set<string>();
+        for (const [index, query] of result.queries.entries()) {
+          if (
+            query.revisionSha !== result.sourceSha ||
+            query.depth !== index + 1 ||
+            !Array.isArray(query.symbols) ||
+            query.symbols.length === 0 ||
+            new Set(query.symbols).size !== query.symbols.length ||
+            query.symbols.some(
+              (symbol: unknown) => typeof symbol !== "string" || !result.symbols.includes(symbol),
+            )
+          )
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "A dependency query is bound to a different source or symbol set.",
+            );
+          if (query.anchorIdentities !== undefined) {
+            if (
+              !Array.isArray(query.anchorIdentities) ||
+              query.anchorIdentities.length > investigationSourceDependencyLimits.maximumSymbols ||
+              query.anchorIdentities.some((identity: unknown) => {
+                if (!hasExactKeys(identity, ["name", "namespace"])) return true;
+                const entry = identity as { name: unknown; namespace: unknown };
+                return (
+                  typeof entry.name !== "string" ||
+                  !query.symbols.includes(entry.name) ||
+                  typeof entry.namespace !== "string" ||
+                  entry.namespace.length > 2048 ||
+                  !/^[A-Za-z0-9_:.$]*$/u.test(entry.namespace)
+                );
+              })
+            )
+              throw failure(
+                "SOURCE_BINDING_MISMATCH",
+                "Dependency anchor identities do not match the queried symbols.",
+              );
+          }
+          const excluded = query.excludedMatches ?? [];
+          if (
+            !Array.isArray(excluded) ||
+            excluded.length > investigationSourceDependencyLimits.maximumFiles ||
+            excluded.some((entry: unknown) => {
+              if (!hasExactKeys(entry, ["path", "reason", "matchedSymbols"])) return true;
+              const exclusion = entry as {
+                path: unknown;
+                reason: unknown;
+                matchedSymbols: unknown;
+              };
+              return (
+                typeof exclusion.path !== "string" ||
+                typeof exclusion.reason !== "string" ||
+                !["namespace_or_import_only", "different_type_identity"].includes(
+                  exclusion.reason,
+                ) ||
+                !Array.isArray(exclusion.matchedSymbols) ||
+                exclusion.matchedSymbols.length === 0 ||
+                exclusion.matchedSymbols.some(
+                  (symbol: unknown) =>
+                    typeof symbol !== "string" || !query.symbols.includes(symbol),
+                )
+              );
+            })
+          )
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "A dependency exclusion lacks bounded symbol and identity evidence.",
+            );
+          const excludedPaths = new Set(
+            canonicalPaths(
+              excluded.map((entry: { path: string }) => entry.path),
+              investigationSourceDependencyLimits.maximumFiles,
+            ),
+          );
+          if (
+            excludedPaths.size > 0 &&
+            (query.anchorIdentities === undefined || result.identityScanBytes === undefined)
+          )
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "Filtered matches require explicit identities and scan accounting.",
+            );
+          for (const symbol of query.symbols) queriedSymbols.add(symbol);
+          const queryPaths = canonicalPaths(
+            query.paths,
+            investigationSourceDependencyLimits.maximumFiles +
+              investigationSourceDependencyLimits.maximumSeedPaths,
+          );
+          if (queryPaths.some((path) => unsupportedSeedPaths?.includes(path)))
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "An unsupported dependency seed cannot also be reported as lexically searched.",
+            );
+          if ([...excludedPaths].some((path) => !queryPaths.includes(path)))
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "A dependency exclusion is absent from the original exact-revision matches.",
+            );
+          const hasPropagation =
+            query.provenReferencePaths !== undefined || query.unpropagatedMatches !== undefined;
+          const proven = new Set(
+            canonicalPaths(
+              query.provenReferencePaths ?? [],
+              investigationSourceDependencyLimits.maximumFiles,
+            ),
+          );
+          const unresolved = query.unpropagatedMatches ?? [];
+          if (
+            !Array.isArray(unresolved) ||
+            unresolved.length > investigationSourceDependencyLimits.maximumFiles ||
+            unresolved.some(
+              (entry: unknown) =>
+                !hasExactKeys(entry, ["path", "reason"]) ||
+                (entry as { reason: unknown }).reason !== "unresolved_reference_identity",
+            )
+          )
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "Unpropagated dependency metadata is invalid.",
+            );
+          const unpropagated = new Set(
+            canonicalPaths(
+              unresolved.map((entry: { path: string }) => entry.path),
+              investigationSourceDependencyLimits.maximumFiles,
+            ),
+          );
+          if (
+            [...proven, ...unpropagated].some(
+              (path) => !queryPaths.includes(path) || excludedPaths.has(path),
+            ) ||
+            [...unpropagated].some(
+              (path) =>
+                proven.has(path) || requested.includes(path) || !dependencyPaths.includes(path),
+            )
+          )
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "Dependency propagation metadata differs from the retained query matches.",
+            );
+          for (const path of queryPaths) {
+            if (excludedPaths.has(path)) continue;
+            if (!requested.includes(path) && !dependencyPaths.includes(path))
+              throw failure(
+                "SOURCE_BINDING_MISMATCH",
+                "A matched dependency file was omitted from the complete result.",
+              );
+            if (
+              hasPropagation &&
+              !requested.includes(path) &&
+              !matchedPaths.has(path) &&
+              !proven.has(path) &&
+              !unpropagated.has(path)
+            )
+              throw failure(
+                "SOURCE_BINDING_MISMATCH",
+                "A retained dependency lacks explicit propagation or unresolved identity evidence.",
+              );
+            matchedPaths.add(path);
+          }
+        }
+        if (
+          (result.identityScanBytes !== undefined && result.identityScanBytes < bytes) ||
+          dependencyPaths.some((path) => !matchedPaths.has(path)) ||
+          result.symbols.some((symbol) => !queriedSymbols.has(symbol))
+        )
+          throw failure(
+            "SOURCE_BINDING_MISMATCH",
+            "Dependency files or symbols lack exact-revision query evidence.",
+          );
+        await assertSourceBinding();
+        return result;
       };
       const inspectSourceFile = async (relativePath: string): Promise<SourceFileObservation> => {
         const absolutePath = resolveEditableSourcePath(layout.source, relativePath);
@@ -968,6 +1480,11 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
         },
         readPrDiffManifest,
         readPrDiffChunk,
+        readPrDiffChunks,
+        ...(materializedSource?.readSourceDependencies === undefined
+          ? {}
+          : { readSourceDependencies }),
+        ...(materializedSource?.readSourceContext === undefined ? {} : { readSourceContext }),
         applyEdits,
         capturePatch: async (signal = context.signal) => {
           signal.throwIfAborted();
@@ -1521,6 +2038,220 @@ function hasExactKeys(value: unknown, keys: readonly string[]): boolean {
     Object.keys(value).length === keys.length &&
     keys.every((key) => Object.hasOwn(value, key))
   );
+}
+
+/** Validate complete delivered files separately from the bounded, unread candidate catalog. */
+export function assertInvestigationSourceContext(
+  value: unknown,
+  sourceSha: string,
+  seedPaths: readonly string[],
+): asserts value is InvestigationSourceContext {
+  const invalid: () => never = () => {
+    throw failure(
+      "SOURCE_BINDING_MISMATCH",
+      "The focused source context does not match its frozen request.",
+    );
+  };
+  const record = (entry: unknown, keys: readonly string[]): Record<string, unknown> => {
+    if (!hasExactKeys(entry, keys)) return invalid();
+    return entry as Record<string, unknown>;
+  };
+  const integer = (entry: unknown, maximum: number): entry is number =>
+    typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0 && entry <= maximum;
+  const paths = (entry: unknown, maximum: number): string[] => {
+    if (!Array.isArray(entry) || entry.length > maximum) return invalid();
+    const result = entry.map((path: unknown) => {
+      if (typeof path !== "string") return invalid();
+      const root = "C:\\source-context";
+      const resolved = resolveEditableSourcePath(root, path);
+      if (win32.relative(root, resolved).replaceAll("\\", "/") !== path) return invalid();
+      return path;
+    });
+    if (new Set(result.map((path) => path.toLowerCase())).size !== result.length) return invalid();
+    return result.toSorted();
+  };
+  const limits = investigationSourceContextLimits;
+  const resultKeys = [
+    "sourceSha",
+    "seedPaths",
+    "requiredFiles",
+    "contextFiles",
+    "queries",
+    "deferred",
+    "identityScanFiles",
+    "identityScanBytes",
+    "catalogComplete",
+    "omittedCandidateCount",
+  ];
+  const result = hasExactKeys(value, [...resultKeys, "queryBudgetExhausted"])
+    ? record(value, [...resultKeys, "queryBudgetExhausted"])
+    : record(value, resultKeys);
+  const requested = paths(seedPaths, limits.maximumSeedPaths);
+  if (
+    requested.length === 0 ||
+    result.sourceSha !== sourceSha ||
+    (result.queryBudgetExhausted !== undefined && result.queryBudgetExhausted !== true) ||
+    JSON.stringify(paths(result.seedPaths, limits.maximumSeedPaths)) !==
+      JSON.stringify(requested) ||
+    !integer(result.identityScanFiles, limits.maximumFiles) ||
+    !integer(result.identityScanBytes, limits.maximumIdentityScanBytes) ||
+    !integer(result.omittedCandidateCount, Number.MAX_SAFE_INTEGER) ||
+    typeof result.catalogComplete !== "boolean" ||
+    result.catalogComplete !== (result.omittedCandidateCount === 0) ||
+    !Array.isArray(result.requiredFiles) ||
+    !Array.isArray(result.contextFiles) ||
+    !Array.isArray(result.queries) ||
+    result.queries.length > limits.maximumQueries ||
+    !Array.isArray(result.deferred) ||
+    result.deferred.length > limits.maximumCatalogPaths
+  )
+    return invalid();
+  const delivered = new Map<string, string>();
+  const required: string[] = [];
+  const context: string[] = [];
+  let deliveredBytes = 0;
+  let relatedFiles = 0;
+  let relatedBytes = 0;
+  const readFile = (entry: unknown, optional: boolean): void => {
+    const keys = optional
+      ? ["path", "content", "digest", "role", "relation"]
+      : ["path", "content", "digest"];
+    const file =
+      optional && hasExactKeys(entry, [...keys, "lexicalDeclaration"])
+        ? record(entry, [...keys, "lexicalDeclaration"])
+        : record(entry, keys);
+    const path = paths([file.path], 1)[0]!;
+    if (
+      typeof file.content !== "string" ||
+      typeof file.digest !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(file.digest)
+    )
+      invalid();
+    const bytes = encodeSourceText(file.content);
+    if (digest(bytes) !== file.digest || delivered.has(path.toLowerCase())) invalid();
+    if (optional) {
+      if (
+        file.relation !== "unresolved_reference_identity" ||
+        typeof file.role !== "string" ||
+        !["definition_candidate", "related_context"].includes(file.role)
+      )
+        invalid();
+      if (file.role === "related_context") {
+        relatedFiles++;
+        relatedBytes += bytes.byteLength;
+      } else if (file.lexicalDeclaration === undefined) invalid();
+      if (file.lexicalDeclaration !== undefined) {
+        const declaration = record(file.lexicalDeclaration, ["name", "namespace"]);
+        if (
+          file.role !== "definition_candidate" ||
+          typeof declaration.name !== "string" ||
+          declaration.name.length > 128 ||
+          !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(declaration.name) ||
+          typeof declaration.namespace !== "string" ||
+          declaration.namespace.length > 2048 ||
+          !/^[A-Za-z0-9_:.$]*$/u.test(declaration.namespace)
+        )
+          invalid();
+      }
+      context.push(path);
+    } else required.push(path);
+    delivered.set(path.toLowerCase(), path);
+    deliveredBytes += bytes.byteLength;
+  };
+  for (const entry of result.requiredFiles) readFile(entry, false);
+  for (const entry of result.contextFiles) readFile(entry, true);
+  if (
+    JSON.stringify(required.toSorted()) !== JSON.stringify(requested) ||
+    delivered.size > limits.maximumFiles ||
+    deliveredBytes > limits.maximumBytes ||
+    relatedFiles > limits.maximumOptionalFiles ||
+    relatedBytes > limits.maximumOptionalBytes ||
+    result.identityScanFiles < delivered.size ||
+    result.identityScanBytes < deliveredBytes
+  )
+    return invalid();
+  const deferredPaths = new Set<string>();
+  const deferredKeys = new Set<string>();
+  const reasons = [
+    "definition_identity_unresolved",
+    "namespace_or_import_only",
+    "different_type_identity",
+    "candidate_scan_files_budget",
+    "candidate_scan_bytes_budget",
+    "optional_context_budget",
+    "prompt_input_budget",
+    "optional_candidate_unselected",
+  ];
+  for (const entry of result.deferred) {
+    const deferred = record(entry, ["path", "reason"]);
+    const path = paths([deferred.path], 1)[0]!;
+    const key = path.toLowerCase();
+    if (
+      typeof deferred.reason !== "string" ||
+      !reasons.includes(deferred.reason) ||
+      delivered.has(key) ||
+      deferredKeys.has(key)
+    )
+      return invalid();
+    deferredKeys.add(key);
+    deferredPaths.add(path);
+  }
+  const queriedPaths = new Set<string>();
+  const queryKeys = new Map<string, string>();
+  let maximumQueryOmitted = 0;
+  let totalQueryOmitted = 0;
+  for (const entry of result.queries) {
+    const query = record(entry, [
+      "kind",
+      "revisionSha",
+      "symbols",
+      "paths",
+      "matchedPathCount",
+      "omittedPathCount",
+    ]);
+    if (
+      typeof query.kind !== "string" ||
+      !["definition", "reference"].includes(query.kind) ||
+      query.revisionSha !== sourceSha ||
+      !Array.isArray(query.symbols) ||
+      query.symbols.length === 0 ||
+      query.symbols.length > limits.maximumSymbols ||
+      new Set(query.symbols).size !== query.symbols.length ||
+      query.symbols.some(
+        (symbol: unknown) =>
+          typeof symbol !== "string" ||
+          symbol.length > 128 ||
+          !/^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$/u.test(symbol),
+      ) ||
+      !integer(query.matchedPathCount, Number.MAX_SAFE_INTEGER) ||
+      !integer(query.omittedPathCount, Number.MAX_SAFE_INTEGER)
+    )
+      return invalid();
+    const matched = paths(query.paths, limits.maximumCatalogPaths);
+    maximumQueryOmitted = Math.max(maximumQueryOmitted, query.omittedPathCount);
+    totalQueryOmitted += query.omittedPathCount;
+    if (!Number.isSafeInteger(totalQueryOmitted)) return invalid();
+    if (
+      query.matchedPathCount !== matched.length + query.omittedPathCount ||
+      (query.omittedPathCount > 0 && result.catalogComplete)
+    )
+      return invalid();
+    for (const path of matched) {
+      const key = path.toLowerCase();
+      if (queryKeys.has(key) && queryKeys.get(key) !== path) return invalid();
+      queryKeys.set(key, path);
+      queriedPaths.add(path);
+      if (!delivered.has(key) && !deferredPaths.has(path)) return invalid();
+    }
+  }
+  if (
+    queriedPaths.size > limits.maximumCatalogPaths ||
+    result.omittedCandidateCount < maximumQueryOmitted ||
+    result.omittedCandidateCount > totalQueryOmitted ||
+    [...context, ...deferredPaths].some((path) => !queriedPaths.has(path)) ||
+    Buffer.byteLength(JSON.stringify(value), "utf8") > limits.maximumIdentityScanBytes
+  )
+    return invalid();
 }
 
 function isEntityIdentifier(value: string): boolean {

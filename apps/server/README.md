@@ -146,6 +146,110 @@ alongside `INVESTIGATION_GITHUB_USER_ID`. Without credentials, remote operations
 External writes also require `INVESTIGATION_ENABLE_EXTERNAL_WRITES=true` and the normal confirmed
 action-intent workflow. Account administration or test execution does not authorize writes to any
 actual repository PR or issue.
+
+## Automatically reply with investigation results
+
+The repository workspace includes **Automatic investigation replies**. Saving an enabled policy
+authorizes the Server to comment on future complete `pr-review` and `issue-investigate` reports
+in that repository, without a per-report preview or confirmation step. The automatic action is
+an ordinary conversation comment. Other review, merge, closure, and implementation operations
+retain their existing explicit action workflows.
+
+Enabling the policy requires the exact repository scope, `repository:manage`, `action:prepare`,
+`action:execute`, and the `comment` action capability. A scoped repository manager can disable
+the policy. The Server re-reads the authorizing account, repository identity, and policy version
+before preparation, confirmation, and the final outbound request. Disabled accounts, revoked
+grants, changed settings, or a stale upstream target prevent new publication. Repository identity
+changes atomically disable the policy and advance its version, including when a previous name
+is later restored.
+
+Configure the ordinary GitHub transport credential and `INVESTIGATION_ENABLE_EXTERNAL_WRITES=true`
+in the deployment before publication. The application can save repository settings while the
+publisher is unavailable; its UI shows that state. The default is disabled. Enabling does not
+backfill old reports, and changing templates does not rewrite a queued comment. A policy-version
+change blocks unsent replies authorized by the previous version.
+
+Version 4 English templates contain exactly one of each supported placeholder, in this order:
+
+- PR: `{{identity}}`, `{{conclusion}}`, `{{summary}}`, `{{findings}}`, and `{{details}}`.
+- Issue: `{{identity}}`, `{{conclusion}}`, `{{next_steps}}`, and `{{details}}`.
+
+Identity must be the first nonempty content and Details must be last. Unknown, missing, repeated,
+reordered, or wrong-kind placeholders and executable expressions are rejected. Templates are
+limited to 12,000 UTF-8 bytes. Older template policies, including versions 2 and 3, do not authorize new
+replies; save the current templates again to enable publication. This does not rewrite an existing
+frozen comment body or backfill earlier reports.
+
+The disclosure starts with the recorded model name, states that the automation acts on behalf
+of the verified publishing GitHub account, and notes that the content is AI-generated and may
+contain errors. Model attribution comes from trusted Worker records for every accepted analysis
+round, using `INVESTIGATION_WORKER_CLI_MODEL` as the explicit CLI selection. Resumed tasks retain
+earlier model selections. Missing records or a CLI default without an explicit selection are
+disclosed as unavailable model identity; the Server never guesses a model from generated text.
+This records the CLI selection rather than proving a provider's internal model routing.
+
+PR replies keep Conclusion, Summary, and Findings visible. Issue replies instead show Triage
+result and Next steps. The Issue conclusion incorporates a short summary in two or three
+sentences rather than adding a separate Summary section. A bug triage disclosure says it is
+conducting automated bug triage; feature and other Issue reports use the broader issue-triage
+wording. Bug conclusions distinguish confirmed bugs, missing information, needed verification,
+upstream fixes, duplicates, and expected behavior. A separate Runtime reproduction field shows
+Not attempted, Reproduced, Not reproduced, or Blocked. Feature and other Issue reports omit this
+field. Failure to reproduce does not establish expected behavior, and a confirmed static finding
+does not imply runtime reproduction.
+
+Issue next steps expose the recorded information requests, unconfirmed hypotheses and proposed
+verification plan, suggested fixes, upstream fix or duplicate reference, or expected-behavior
+guidance as appropriate. Feature requests keep their own requirements, decisions, usage guidance,
+and alternatives. Other classifications remain visible without an invented bug result. These
+sections recommend follow-up; they do not claim that a fix, label change, closure, or other
+repository action has occurred.
+
+The renderer supplies an initially collapsed section for both templates, using a `<details>`
+element without an `open` attribute. The PR toggle is `<summary>Details</summary>`; the Issue
+toggle is `<summary>Investigation details</summary>`. It retains scope, limitations, full findings,
+assessment rationale, actual validation, complete plans, and supporting evidence. Issue findings
+are available here rather than presented as the PR's priority-based list. Rendering does not make
+another model call.
+Investigation prompts require English narrative content while preserving source identifiers and
+necessary original-language quotations. Confirmed findings, hypotheses, and validation status stay
+distinct. No finding is silently dropped. The renderer excludes private execution diagnostics,
+escapes model Markdown and mentions, and only constructs validated GitHub source links. The
+default templates are documented under
+[`docs/templates`](../../docs/templates/auto-reply-pr.md).
+
+Report sealing and outbox registration share the same SQLite transaction. A pending entry freezes
+the report reference, template text, and policy/template version. After that transaction, the
+dispatcher reads GitHub `/user` and verifies its numeric ID against `INVESTIGATION_GITHUB_USER_ID`.
+It then rechecks authorization and its lease before saving the verified login, exact body, source
+revision, and deterministic ActionIntent request together. Retries preserve that frozen body and
+identity. Transport preflight rejects a changed publisher instead of silently changing attribution.
+No model output or console display name supplies the GitHub identity.
+
+A durable dispatcher recovers existing entries on startup; it does not scan reports to create
+retroactive work. Each report has one native ActionIntent. Repeated finalization, concurrent
+dispatchers, and restart cannot create another comment for that report. The configured transport
+appends its existing correlation marker for exact readback.
+
+The dispatcher automatically confirms the prepared intent. If delivery becomes unknown or was
+interrupted in `executing`, recovery performs read-only reconciliation of that same intent. It
+never resends an uncertain comment. Preparation/reconciliation retries are bounded, and the
+repository UI displays pending, prepared, sending, sent, blocked, failed, or unknown delivery.
+A report that is incomplete, failed, cancelled, or part of a verification/implementation follow-up
+is not automatically published. A rendered comment exceeding 59,000 UTF-8 bytes is blocked with
+a visible explanation instead of truncating the conclusion or findings; this reserves space for
+the native marker within the transport's 60,000-byte limit.
+
+`GET` and `PUT /api/repositories/:id/auto-reply-settings` expose the versioned policy. Updates
+contain `version`, `enabled`, `pullRequestTemplate`, and `issueTemplate`; stale updates return
+HTTP `409`. `GET /api/repositories/:id/auto-replies` returns the latest 20 scoped delivery records,
+including the frozen comment, source report, delivery status, and returned GitHub comment ID.
+These are observation controls, not a required human approval step.
+
+Software verification must use isolated state and mocked transports. Enabling product automation
+does not authorize an acceptance harness to write arbitrary real repository comments; the exact
+live-test scope still follows [AGENTS.md](../../AGENTS.md).
+
 ## Listen for trusted assignments
 
 The native runtime accepts GitHub Webhooks at `POST /api/github/webhook`. Configure

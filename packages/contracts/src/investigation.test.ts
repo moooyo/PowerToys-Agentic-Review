@@ -8,10 +8,15 @@ import {
   InvestigationAnalysisV1Schema,
   type InvestigationArtifactV1,
   InvestigationAttemptV1Schema,
+  InvestigationCheckpointRequestSchema,
+  InvestigationModelExecutionSchema,
+  InvestigationModelIdentitySchema,
   type InvestigationResultV1,
   InvestigationResultV1Schema,
+  InvestigationRuntimeStateSchema,
   type InvestigationSubjectV1,
   InvestigationTaskV1Schema,
+  InvestigationUnacceptedModelUsageSchema,
   investigationCanonicalJson,
   investigationPlanDigestPayload,
   validateInvestigationAnalysisForTask,
@@ -209,6 +214,14 @@ describe("model analysis authority boundary", () => {
     { saved: true },
     { sourceUnitIds: ["claimed-source-chunk"] },
     { sourceCoverage: { brokeredUnitIds: ["claimed-source-chunk"] } },
+    { modelIdentity: { engine: "codex", model: "gpt-6-astra" } },
+    {
+      modelExecutions: [
+        { attemptId: "claimed-attempt", round: 1, engine: "codex", model: "gpt-6-astra" },
+      ],
+    },
+    { unacceptedModelUsage: [{ attemptId: "claimed-attempt", round: 1, tokens: null }] },
+    { modelUsage: { round: 1, tokens: 100 } },
   ])("rejects trusted top-level fields in model output: %j", (injected) => {
     expect(Value.Check(InvestigationAnalysisV1Schema, { ...modelAnalysis(), ...injected })).toBe(
       false,
@@ -250,6 +263,209 @@ describe("model analysis authority boundary", () => {
     };
     expect(Value.Check(InvestigationAnalysisV1Schema, value)).toBe(false);
   });
+});
+
+describe("trusted unaccepted model usage", () => {
+  const runtime = {
+    completedStepIds: [],
+    checks: [],
+    evidence: [],
+    artifacts: [],
+    subjects: [],
+    startedSteps: [],
+    completedSteps: [],
+  };
+  const interrupt = {
+    kind: "interrupt",
+    lease: { attemptId: "synthetic-attempt", fence: 1, leaseToken: "synthetic-lease-token" },
+    reason: "interrupted",
+    diagnostics: [],
+  };
+
+  it("keeps legacy runtime states and interrupt requests compatible", () => {
+    expect(Value.Check(InvestigationRuntimeStateSchema, runtime)).toBe(true);
+    expect(Value.Check(InvestigationCheckpointRequestSchema, interrupt)).toBe(true);
+  });
+
+  it.each([{ tokens: 0 }, { tokens: 100 }, { tokens: null }])(
+    "preserves known or explicitly unknown usage independently of accepted analysis: %j",
+    ({ tokens }) => {
+      const usage = { attemptId: "synthetic-attempt", round: 1, tokens };
+      expect(Value.Check(InvestigationUnacceptedModelUsageSchema, usage)).toBe(true);
+      expect(
+        Value.Check(InvestigationRuntimeStateSchema, {
+          ...runtime,
+          unacceptedModelUsage: [usage],
+        }),
+      ).toBe(true);
+      expect(
+        Value.Check(InvestigationCheckpointRequestSchema, {
+          ...interrupt,
+          modelUsage: { round: 1, tokens },
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    { round: 0, tokens: 100 },
+    { round: -1, tokens: 100 },
+    { round: 1.5, tokens: 100 },
+    { round: Number.MAX_SAFE_INTEGER + 1, tokens: 100 },
+    { round: 1, tokens: -1 },
+    { round: 1, tokens: 1.5 },
+    { round: 1, tokens: Number.MAX_SAFE_INTEGER + 1 },
+    { round: 1, tokens: "unknown" },
+    { round: 1 },
+    { tokens: 100 },
+    { round: 1, tokens: 100, analysis: {} },
+  ])("rejects invalid or unbounded usage metadata: %j", (modelUsage) => {
+    expect(
+      Value.Check(InvestigationUnacceptedModelUsageSchema, {
+        attemptId: "synthetic-attempt",
+        ...modelUsage,
+      }),
+    ).toBe(false);
+    expect(Value.Check(InvestigationCheckpointRequestSchema, { ...interrupt, modelUsage })).toBe(
+      false,
+    );
+  });
+
+  it("requires a valid persisted attempt identity and derives request identity from the lease", () => {
+    for (const usage of [
+      { round: 1, tokens: null },
+      { attemptId: "", round: 1, tokens: null },
+      { attemptId: "invalid attempt", round: 1, tokens: null },
+    ]) {
+      expect(Value.Check(InvestigationUnacceptedModelUsageSchema, usage)).toBe(false);
+      expect(
+        Value.Check(InvestigationRuntimeStateSchema, {
+          ...runtime,
+          unacceptedModelUsage: [usage],
+        }),
+      ).toBe(false);
+    }
+    expect(
+      Value.Check(InvestigationCheckpointRequestSchema, {
+        ...interrupt,
+        modelUsage: { attemptId: "another-attempt", round: 1, tokens: null },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("trusted investigation model identity", () => {
+  it.each(["codex", "copilot"] as const)(
+    "accepts a known or explicitly unknown model from the %s engine",
+    (engine) => {
+      for (const model of ["gpt-6-astra", null]) {
+        const identity = { engine, model };
+        expect(Value.Check(InvestigationModelIdentitySchema, identity)).toBe(true);
+        expect(
+          Value.Check(InvestigationModelExecutionSchema, {
+            ...identity,
+            attemptId: "synthetic-attempt",
+            round: 1,
+          }),
+        ).toBe(true);
+      }
+    },
+  );
+
+  it.each(["", "   ", "x".repeat(257), "model\nname", "model\u0000name", "model\u009fname"])(
+    "rejects an invalid model identifier: %j",
+    (model) => {
+      expect(Value.Check(InvestigationModelIdentitySchema, { engine: "codex", model })).toBe(false);
+    },
+  );
+
+  it("rejects unrecognized engines and unbound execution records", () => {
+    expect(
+      Value.Check(InvestigationModelIdentitySchema, { engine: "unknown", model: "gpt-6-astra" }),
+    ).toBe(false);
+    for (const round of [0, -1, 1.5]) {
+      expect(
+        Value.Check(InvestigationModelExecutionSchema, {
+          attemptId: "synthetic-attempt",
+          round,
+          engine: "codex",
+          model: null,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it("keeps legacy checkpoint requests compatible and accepts identity only in trusted metadata", () => {
+    const { task, attempt } = createInvestigationFixture("pr");
+    const request = {
+      kind: "analysis",
+      lease: { attemptId: attempt.id, fence: 1, leaseToken: "synthetic-lease-token" },
+      round: {
+        schemaVersion: "InvestigationLoopRoundV1",
+        taskId: task.id,
+        attemptId: attempt.id,
+        inputCheckpointRef: { id: "synthetic-checkpoint", version: 1, digest: "a".repeat(64) },
+        round: 1,
+        phase: "discovery",
+        analysis: modelAnalysis(),
+        continue: false,
+        continuationReason: "The proposed analysis is ready for trusted completion checks.",
+      },
+      usage: { durationMs: 10, tokens: 100, reportBytes: 1_000 },
+    };
+    expect(Value.Check(InvestigationCheckpointRequestSchema, request)).toBe(true);
+    for (const model of ["gpt-6-astra", null]) {
+      expect(
+        Value.Check(InvestigationCheckpointRequestSchema, {
+          ...request,
+          modelIdentity: { engine: "codex", model },
+        }),
+      ).toBe(true);
+    }
+    expect(
+      Value.Check(InvestigationCheckpointRequestSchema, {
+        ...request,
+        modelIdentity: { engine: "codex", model: "" },
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts legacy reports without model history and mixed identities from adopted attempts", () => {
+    const { result } = createInvestigationFixture("pr");
+    expect(result.context.modelExecutions).toBeUndefined();
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+    result.context.adoptedAttemptIds.push("synthetic-prior-attempt");
+    result.context.modelExecutions = [
+      { attemptId: "synthetic-prior-attempt", round: 1, engine: "codex", model: "gpt-6-astra" },
+      { attemptId: result.context.attempt.id, round: 3, engine: "copilot", model: null },
+    ];
+    expect(Value.Check(InvestigationResultV1Schema, result)).toBe(true);
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+  });
+
+  it.each(["unknown_attempt", "duplicate_round", "future_round", "too_many_records"])(
+    "rejects model execution history with %s",
+    (invalid) => {
+      const { result } = createInvestigationFixture("pr");
+      const execution = {
+        attemptId: result.context.attempt.id,
+        round: 1,
+        engine: "codex" as const,
+        model: "gpt-6-astra",
+      };
+      result.context.modelExecutions = [execution];
+      if (invalid === "unknown_attempt") execution.attemptId = "unadopted-attempt";
+      if (invalid === "duplicate_round") result.context.modelExecutions.push({ ...execution });
+      if (invalid === "future_round") execution.round = result.report.loop.completedRounds + 1;
+      if (invalid === "too_many_records") {
+        result.context.modelExecutions = Array.from(
+          { length: result.report.loop.completedRounds + 1 },
+          (_, index) => ({ ...execution, round: index + 1 }),
+        );
+      }
+      expectSemanticFailure(result);
+    },
+  );
 });
 
 describe("investigation semantic completion", () => {
@@ -408,6 +624,78 @@ describe("investigation semantic completion", () => {
     const { result } = createInvestigationFixture("feature");
     removeSavedPlans(result);
     expectSemanticFailure(result);
+  });
+});
+
+describe.each(["bug", "feature"] as const)("%s information inquiry draft registry", (kind) => {
+  function informationResult(findingCount = 1) {
+    const { result } = createInvestigationFixture(kind, { findingCount });
+    const assessment = result.assessment;
+    if (assessment.kind !== "bug" && assessment.kind !== "feature")
+      throw new Error("Expected an issue assessment.");
+    const detail =
+      assessment.kind === "bug" ? assessment.bugAssessment : assessment.featureAssessment;
+    detail.status = "needs_information";
+    detail.missingInformation = [
+      "The exact version and observed behavior needed to assess this request.",
+    ];
+    for (const finding of result.findings) {
+      finding.feedbackDraft.body =
+        "Please provide the exact version and observed behavior so this request can be assessed.";
+      finding.feedbackDraft.suggestion = null;
+    }
+    result.feedbackDrafts = [];
+    result.nextActions = [];
+    result.report.collections.nextActions = 0;
+    return result;
+  }
+
+  it("accepts an existing finding inquiry without duplicating it at the top level", () => {
+    const result = informationResult();
+    const before = investigationCanonicalJson(result);
+    expect(result.feedbackDrafts).toHaveLength(0);
+    expect(first(result.findings).feedbackDraft.suggestion).toBeNull();
+    expect(Value.Check(InvestigationResultV1Schema, result)).toBe(true);
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+    expect(investigationCanonicalJson(result)).toBe(before);
+  });
+
+  it("still rejects a missing-information assessment without any saved inquiry", () => {
+    const result = informationResult(0);
+    expect(result.findings).toHaveLength(0);
+    expect(Value.Check(InvestigationResultV1Schema, result)).toBe(true);
+    expect(validateInvestigationResult(result).errors).toContainEqual(
+      expect.objectContaining({
+        code: kind === "bug" ? "BUG_INFORMATION_REQUIRED" : "FEATURE_INFORMATION_REQUIRED",
+      }),
+    );
+  });
+
+  it("still requires explicit missing information when an inquiry is saved on a finding", () => {
+    const result = informationResult();
+    const assessment = result.assessment;
+    if (assessment.kind === "bug") assessment.bugAssessment.missingInformation = [];
+    else if (assessment.kind === "feature") assessment.featureAssessment.missingInformation = [];
+    expect(Value.Check(InvestigationResultV1Schema, result)).toBe(true);
+    expect(validateInvestigationResult(result).errors).toContainEqual(
+      expect.objectContaining({
+        code: kind === "bug" ? "BUG_INFORMATION_REQUIRED" : "FEATURE_INFORMATION_REQUIRED",
+      }),
+    );
+  });
+
+  it("still rejects conflicting content for a shared top-level and finding draft identity", () => {
+    const result = informationResult();
+    result.feedbackDrafts = [
+      {
+        ...first(result.findings).feedbackDraft,
+        body: "A different saved inquiry with the same identity.",
+      },
+    ];
+    expect(Value.Check(InvestigationResultV1Schema, result)).toBe(true);
+    expect(validateInvestigationResult(result).errors).toContainEqual(
+      expect.objectContaining({ code: "DRAFT_CONTENT_CONFLICT" }),
+    );
   });
 });
 

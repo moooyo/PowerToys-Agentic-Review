@@ -4,6 +4,53 @@ import { createSampleInvestigationApi } from "./sample-adapter";
 import { createHttpTransport } from "./transport";
 
 describe("typed investigation HTTP operations", () => {
+  it("reads and updates automatic reply settings and lists deliveries through scoped routes", async () => {
+    const sample = createSampleInvestigationApi();
+    const settings = {
+      ...(await sample.repositoryAutoReplySettings("repo-powertoys-fork")),
+      repositoryId: "repo:selected",
+    };
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json(settings));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    expect(await api.repositoryAutoReplySettings("repo:selected")).toEqual(settings);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/repositories/repo%3Aselected/auto-reply-settings",
+      expect.objectContaining({ method: "GET", credentials: "include", cache: "no-store" }),
+    );
+    const input = {
+      version: 0,
+      enabled: true,
+      pullRequestTemplate: settings.pullRequestTemplate,
+      issueTemplate: settings.issueTemplate,
+    };
+    await api.updateRepositoryAutoReplySettings("repo:selected", input);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/repositories/repo%3Aselected/auto-reply-settings",
+      expect.objectContaining({ method: "PUT", body: JSON.stringify(input) }),
+    );
+    fetcher.mockResolvedValueOnce(Response.json({ items: [] }));
+    expect(await api.repositoryAutoReplies("repo:selected")).toEqual({ items: [] });
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/repositories/repo%3Aselected/auto-replies",
+      expect.objectContaining({ method: "GET", credentials: "include", cache: "no-store" }),
+    );
+    for (const invalid of [
+      { ...settings, version: -1 },
+      { ...settings, templateVersion: 0 },
+      { ...settings, authorizedById: 42 },
+      { ...settings, updatedAt: "invalid date" },
+    ]) {
+      fetcher.mockResolvedValueOnce(Response.json(invalid));
+      await expect(api.repositoryAutoReplySettings("repo:selected")).rejects.toThrow(
+        "invalid structured response",
+      );
+    }
+    fetcher.mockResolvedValueOnce(Response.json({ items: [{ state: "confirmed" }] }));
+    await expect(api.repositoryAutoReplies("repo:selected")).rejects.toThrow(
+      "invalid structured response",
+    );
+  });
+
   it("reads and updates webhook settings for the selected repository with a versioned PUT", async () => {
     const settings = {
       repositoryId: "repo:selected",

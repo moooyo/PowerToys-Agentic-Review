@@ -1,5 +1,285 @@
 # Implementation Status
 
+## Unsupported lexical dependency seeds, 2026-09-18
+
+Full-diff review now records ordinary files with unsupported extensions as unsearched
+dependency seeds instead of failing code dependency discovery for the entire batch.
+Documentation remains available through the complete frozen diff and head chunks. Mixed
+batches still search supported code; missing paths, symlinks and malformed results are
+rejected. The prompt explicitly distinguishes unsearched seeds from absent dependencies,
+and does not report complete dependency coverage for these seeds.
+
+Remote Windows verification passed 17 targeted regression cases, Biome, Worker type
+checking and bundle construction. The original failure was reproduced without a model
+call. The patched production provider and runner then prepared the same next round with
+complete diff and head chunks: prompt plus output schema totaled 58,192 bytes within the
+65,536-byte limit. The proof preserved stored records and accepted analysis, with no model,
+API or database writes. Authorized acceptance then resumed the same Task and completed
+three accepted analysis rounds, persisted its final report and posted one automatic report
+comment. An independent API readback matched the complete body and marker; owned processes
+exited successfully. This PR acceptance used native manual import and Task creation.
+
+## Unified inquiry draft validation, 2026-09-18
+
+BUG and FEATURE assessments with `needs_information` now use the existing combined
+top-level and finding draft registry for their inquiry checks. A valid draft attached to a
+finding is recognized without generating, moving or changing draft content. Empty missing
+information, absent drafts and conflicting draft identities are still rejected.
+
+Remote verification passed 108 contracts tests, including eight new cases, plus type checking,
+build and Biome. Both pure assembly paths completed a 27,059-byte report from unchanged stored
+parts using the patched validator and existing report assembler. The proof preserved all eight
+database JSON snapshots and made no model, API or write calls. The corrected paired runtime
+also passed normal package loading and completed-checkpoint adoption. Authorized remote
+acceptance then resumed the completed Issue through native APIs, persisted its final report,
+published one automatic comment, and verified independent API and page readbacks. Recovery
+added no model rounds or token usage; assignment cleanup and owned-process shutdown passed.
+The separate minimal-PR acceptance also completed native analysis, report persistence,
+automatic publication, independent readback and owned-process shutdown.
+
+## Completed source context in focused turns, 2026-09-18
+
+Focused source turns now retain completed source coverage from the same subject as read-only
+context. The selected work and completed context form one required, deduplicated file set,
+so later turns receive complete lifecycle bodies without reopening completed coverage or
+introducing unrelated diff chunks. Missing bodies and required-set limits fail before model
+dispatch; existing coverage identities, source limits and completion gates remain unchanged.
+
+Remote Windows verification passed 167 projection and runner tests, Worker type checking,
+Biome and bundle construction. An actual production workspace-to-prompt check supplied all
+13 required bodies and 17 additional context files: 245,640 source bytes in a 404,325-byte
+prompt, below the 524,288-byte limit. It preserved the complete checkpoint and both task
+database snapshots and confirmed process cleanup. Deferred context and lexical uncertainty
+remain explicit; the check invoked no model and does not establish semantic correctness or
+complete live report publication.
+
+## Typed source batches and XAML discovery, 2026-09-18
+
+Blocked `source_file` units now share one atomic source batch with complete, deduplicated
+required file bodies. Unfinished PR diff chunks and newly pending typed source work retain
+priority. Metadata and prompt fitting cannot silently return a prefix of the blocked batch.
+Coverage unit identities, obligations, source limits and global completion gates remain intact.
+
+Explicit XAML namespace and element type references now participate in bounded definition
+discovery before broader C# candidates consume the scan budget. Local namespace shadowing,
+property elements, comments and quoted attributes are handled separately from C# syntax.
+Malformed structures do not produce partial guesses; unsupported mappings remain unknown.
+No XML entities, DTDs or assemblies are loaded. Delivered relationships remain lexical
+candidates with unresolved reference identity, rather than compiler binding proofs.
+
+Remote Windows verification passed 74 Git source tests and 153 projection and runner tests,
+with Worker typechecks, Biome and bundle construction. A production workspace-to-prompt probe
+delivered all seven required files and the previously missing control declaration body, with
+29 complete files totaling 200,437 source bytes in a 334,809-byte prompt. It preserved the
+complete checkpoint and both task database snapshots and confirmed process cleanup.
+The separate class/member inspector remained explicitly uncertain about interpolated strings;
+definition delivery was verified without claiming CLR binding or runtime behavior. The probe
+did not invoke a model or establish live report publication.
+
+## Focused source context, 2026-09-18
+
+Explicit pending `source_file` coverage now receives a separate model batch. The required
+file is read in full before bounded discovery selects complete declaration candidates,
+callers and related tests at the frozen revision. All focused relationships remain lexical
+candidates with unresolved reference identity. Deferred candidates, incomplete catalogs and
+exhausted query or scan budgets remain explicit and do not count as read or completed coverage.
+
+Later `full_diff` batches retain completed source files as independent context. Those paths
+are excluded from the reverse dependency seeds, including paths introduced through finding
+locations, unless the original PR manifest requires them. Prompt fitting preserves required
+files and complete reverse dependency results; it can remove only whole optional context files.
+
+The final repair passed 313 targeted tests, Worker typecheck, Biome and bundle construction on
+the designated remote Windows environment. A production workspace-to-prompt check supplied
+16 complete files totaling 127,646 source bytes in a 220,626-byte prompt, excluding the separate
+output schema. It confirmed the required file, referenced type definition, associated test and
+caller bodies and hashes, preserved the database snapshots and confirmed process cleanup.
+That check selected only the `source_file` batch and did not invoke a model or establish live
+report publication.
+
+## Bounded dependency source context, 2026-09-17
+
+Read-only investigations can now discover complete dependency files at the frozen source
+revision. The reverse broker uses lexical namespace and type information to classify candidate
+references, imported aliases and namesakes; these classifications are not compiler binding
+proofs. Files with unresolved reference identity remain available to the model, but only
+references classified as proven propagate another search hop. `provenReferencePaths` and
+`unpropagatedMatches` preserve that distinction through the workspace boundary and model prompt;
+discovery never marks investigation coverage complete.
+
+The broker retains its limits of 64 seed paths, 128 symbols, 64 complete files, 256 KiB of
+delivered source, and a maximum of two hops. Candidate identity scans have a separate 1 MiB
+bound. Exact revision, path, UTF-8 content, digest, query and limit checks remain mandatory.
+Selected PR content and dependency content are deduplicated without dropping required chunks.
+
+The final repair passed 257 targeted tests, Worker typecheck, bundle construction and formatting
+checks on the designated remote Windows environment. A real production workspace-to-prompt
+check included 17 complete dependency files and all 10 frozen PR diff/base/head chunks in a
+332,019-byte prompt, excluding the separately supplied output schema. It preserved the original
+database state and confirmed process cleanup without calling a model. Seventeen retained files
+had unresolved reference identity and were explicitly not propagated. Dependency-graph
+completeness and complete live report publication remain unverified.
+
+## Candidate links and failed investigation usage, 2026-09-17
+
+The model-only delta schema now requires a concrete finding ID and positive version for
+confirmed or unresolved candidates. It also constrains merge targets by candidate status,
+while retaining historical finding ownership for withdrawal and merge records. The domain
+still validates the actual finding, subject, version, confirmation state and merge relationships;
+the Worker does not manufacture a finding or accept an invalid analysis to complete a task.
+
+PR and Issue investigation rounds now retain trusted usage observations across output parsing,
+schema, merge and semantic failures. An optional interrupt receipt identifies the attempt's
+target round and either reported tokens or an explicit unknown value. The Server accounts
+known rejected-round tokens idempotently without incrementing accepted rounds, and reconciles
+an already accepted round when its acknowledgement was lost. Pre-dispatch rejection does not
+create a model usage observation. Uncertain dispatch or missing complete usage is recorded as
+unknown instead of zero. Historical missing measurements are not reconstructed or backfilled.
+
+Recorded token subtotals are not a hard bound on unreported provider usage. This accounting
+change covers investigation analysis rounds; saved-plan model-edit steps retain their separate
+usage path. Existing checkpoint and report fields remain compatible when new optional receipts
+are absent. The accepted-round, coverage, recheck and finalization requirements remain unchanged.
+
+Remote direct checks cover Contracts, Domain, Server and Worker behavior, including invalid
+candidate links, known and unknown failed usage, cancellation, duplicate receipt rejection,
+lost acknowledgements and budget completion. These regression checks do not establish a complete
+live assignment-to-comment result.
+
+## Stateless source context repair, 2026-09-17
+
+Later model turns could select a blocked aggregate diff unit after all individual chunks had
+been covered, yet receive no source content because that aggregate had no concrete paths.
+Since each model turn is stateless, this repeatedly produced missing-source diagnostics and
+prevented a pending candidate from being investigated.
+
+The Worker now supplies the complete frozen diff for selected aggregate review and restores
+candidate source context through typed evidence and coverage associations. Source context is
+read-only and does not make completed units editable. Concrete caller or test paths use the
+existing trusted reader; paths are never inferred from narrative text, and a different subject
+cannot be read through the primary checkout. Pending candidates can proceed ahead of blocked
+aggregate units. Model prompts also show recorded consumption and remaining task budgets;
+token amounts represent known reported usage, while unreported usage remains explicitly unknown.
+
+The original coverage requirements, finding rechecks, and separate finalization round remain
+required. Oversized aggregate input fails rather than dropping required source. This repair
+does not guarantee that an existing task's remaining budget is sufficient for completion.
+
+Remote verification passed 91 direct projection and runner tests, Worker type checking,
+the Worker build, and formatting checks for all four changed code and test files. Live
+workflow results remain separate; these regression checks do not establish a successful
+assignment-to-comment result.
+
+## Source preparation and model lifecycle repairs, 2026-09-17
+
+Immutable `source_read` tasks now retain Git symlink blobs as ordinary files containing their
+exact target text. The materializer verifies file identity and blob content without following
+the target; execution and mutable-patch modes retain their stricter entry restrictions. Model
+context identifies this representation explicitly. PR type changes and UTF-8 BOM bytes remain
+part of the complete frozen source coverage.
+
+PR source readers now support complete batches with binding checks before and after each batch,
+plus individual chunk identity, digest, encoding, ordinal and size validation. A prompt-local
+cache reuses validated chunks during line indexing and projection-size retries. Only source
+actually included in the final prompt is recorded as model coverage, and binding is checked
+again after model execution. This removes repeated whole-tree checks for every individual
+chunk while retaining the integrity boundary.
+
+Managed model execution distinguishes a matching native exit from an operation-completion
+failure. Cleanup still requires the true exit and fully drained output streams; failed output
+is not accepted. Safe lifecycle diagnostics expose process metadata and failure codes without
+raw output or configuration. Terminal-submission failures, runtime faults and faults racing
+with shutdown now propagate to a nonzero Worker exit.
+
+The designated remote Windows environment passed 200 direct source/workspace/model tests,
+Worker type checking and build, and the changed-file Biome check for the final batch revision.
+The earlier broader application run passed 1,222 cases across Worker, Server and Dashboard,
+with their applicable type checks and builds. These overlapping scopes are not summed. Actual
+model invocations subsequently demonstrated accepted analysis and confirmed process cleanup;
+the time-limited partial results do not establish complete assignment-to-comment acceptance.
+
+## Automatic investigation conclusion replies, 2026-09-16
+
+Repositories can now authorize automatic English comments for future complete PR-review and
+Issue-investigation reports. Both templates are editable in the repository workspace. Enabling
+requires repository management and comment-publication grants; each new complete report freezes
+its policy version, template, and report reference in an outbox record registered atomically
+with report sealing. The dispatcher asynchronously verifies the publishing GitHub identity,
+rechecks authorization and its lease, and saves the rendered body, identity, source revision, and
+native ActionIntent request before preparation. No per-report human confirmation is required,
+and enabling does not backfill historical reports.
+
+The dispatcher reuses native preparation, confirmation, and GET-only delivery reconciliation.
+It rechecks the current authorizing account, policy, repository, payload binding, and lease at the
+final write boundary. Duplicate finalization and restarts retain one intent per report. Disabling
+or changing the policy blocks unsent old-version replies; already completed writes can still be
+recovered. Graceful shutdown finishes the owned in-flight reply and retains queued work for
+restart. The wake-up path preserves reports enqueued between an empty drain and its finalizer.
+
+Version 4 templates begin with the model/GitHub-user attribution and AI error disclosure. PR replies
+retain Conclusion, Summary, Findings, and initially collapsed Details, with the ordered placeholders
+`identity`, `conclusion`, `summary`, `findings`, and `details`. Issue replies instead use Triage
+result and Next steps, followed by collapsed Investigation details. Their ordered placeholders
+are `identity`, `conclusion`, `next_steps`, and `details`; the short summary is incorporated into
+the conclusion without a separate Summary section. Bug triage distinguishes six assessments from
+the independent Runtime reproduction field: Not attempted, Reproduced, Not reproduced, or Blocked.
+It exposes information requests, proposed verification, suggested repairs, duplicate or upstream
+fix references, and expected-behavior guidance as appropriate. Feature and other Issue
+classifications retain their own follow-up and omit the runtime reproduction field. These are
+recommendations, not claims of executed repository changes. Full findings, rationale, hypotheses,
+validation, source scope, plans, limitations, and evidence remain in the collapsed section. Both
+`<details>` elements omit the `open` attribute.
+
+Worker CLI selections are recorded per accepted analysis round and preserved through checkpoint
+recovery and report sealing; missing identity is disclosed without guessing. The represented
+account comes from verified GitHub `/user`, and its frozen identity is checked again before sending.
+Older template policies, including versions 2 and 3, require a new save using the current format;
+existing frozen comment bodies are not rewritten.
+Worker prompts require English narrative content while preserving necessary source identifiers
+and original-language quotations. Incomplete reports, execution follow-ups, and comments exceeding
+59,000 UTF-8 bytes are not published as truncated final conclusions; blocked
+and uncertain outcomes remain visible in the repository's delivery list.
+
+The earlier automatic-reply baseline passed **1,017 scoped tests** in the designated remote
+Windows environment: Server investigation 25 files / 788 tests, Dashboard investigation 198 tests,
+and the affected Worker model-turn file
+31 tests. Shared, Server, Dashboard, and Worker builds, applicable type checks, and changed-code
+Biome checks passed. Native runtime tests exercise report checkpoints, report-part delivery,
+finalization, and automatic comment execution through mocked transports. The earlier lint errors
+and incomplete mock-permission declarations retain their failed receipts; reruns are not added
+to the final totals.
+
+The template-v2 attribution and deferred-rendering revision subsequently passed **1,432 unique
+scoped tests**: Contracts 96, Domain 78, Server investigation 884, Worker investigation 172, and
+Dashboard investigation 202. Shared and application builds, applicable type checks, and the final
+changed-code Biome check passed. Biome retained 327 warnings and 4 informational findings with no
+errors. The final renderer rerun passed all 120 cases; those cases are counted only once in the
+Server total. Failed execution-wrapper, test-type, and misplaced-assertion attempts remain in the
+verification receipts and are not counted as passes or additional cases.
+
+The template-v3 Issue-triage revision passed **320 scoped tests** in the remote Windows
+environment: four Server automatic-reply files with 264 tests and two Dashboard template/settings
+files with 56 tests. Server and Dashboard type checks and builds, plus Biome checks for the
+11 changed TypeScript files, passed. Coverage includes the distinct PR/Issue template contracts,
+six bug classifications with independent reproduction states, visible information requests and
+proposed follow-up, non-bug Issue branches, collapsed Details, old-template migration, and the
+native automatic reply path for an Issue needing information. The 1,432-test result above remains
+the separate template-v2 baseline; unchanged shared and Worker scopes were not rerun.
+
+The template-v4 compact Issue-triage revision passed **331 scoped tests** in the remote Windows
+environment: four Server automatic-reply files with 275 tests and two Dashboard files with
+56 tests. Both application type checks and builds, and Biome checks for the 10 changed TypeScript
+files, passed. The scope verifies the four-token Issue template, merged and deduplicated summaries,
+independent runtime reproduction states, default-collapsed Investigation details, unchanged PR
+structure, and explicit migration from versions 1, 2, and 3. These results are separate from the
+historical template-v3 320-test run; unchanged shared and Worker scopes were not rerun.
+
+No actual GitHub comment was sent during those verification runs. Repository activation, deployment
+credentials, and any separately approved live publication test remain operational steps. See
+[Server operations](../apps/server/README.md#automatically-reply-with-investigation-results), the
+[design](./design/2026-09-16-automatic-investigation-replies.md), and the default
+[PR](./templates/auto-reply-pr.md) and [Issue](./templates/auto-reply-issue.md) templates.
+
 ## Configurable assignment Webhook intake, 2026-09-16
 
 The native Task runtime now accepts signed `issues.assigned` and `pull_request.assigned`

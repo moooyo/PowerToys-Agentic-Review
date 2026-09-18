@@ -93,6 +93,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
     let cleanupConfirmed = true;
     let outcome: InvestigationOutcome = "interrupted";
     let terminalDiagnostics: InvestigationDiagnostic[] = [];
+    let pendingModelUsage: { round: number; tokens: number | null } | undefined;
     const budget = new AbortController();
     const remainingDuration = claim.task.budget.maxDurationMs - checkpoint.consumed.durationMs;
     const deadline = setTimeout(
@@ -136,6 +137,9 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
           );
           assertAcceptedCheckpoint(claim, response.checkpoint);
           checkpoint = response.checkpoint;
+          // The acknowledged analysis already charged this call, including its final budget unit.
+          if (request.kind === "analysis" && checkpoint.round === request.round.round)
+            pendingModelUsage = undefined;
           if (checkpoint.stopReason === "budget_exhausted") {
             throw new InvestigationExecutionStopped(
               "interrupted",
@@ -263,13 +267,29 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         while (checkpoint.stopReason === "continuing") {
           executionSignal.throwIfAborted();
           await workspace.assertIntegrity();
+          const modelRound = checkpoint.round + 1;
+          const observeUsage = (usage: { tokens: number | null }): void => {
+            if (pendingModelUsage !== undefined && pendingModelUsage.tokens !== null) {
+              if (usage.tokens === null) return;
+              if (pendingModelUsage.tokens !== usage.tokens)
+                throw new InvestigationExecutionStopped(
+                  "failed",
+                  "MODEL_USAGE_CONFLICT",
+                  "The model invocation reported conflicting token usage; its first complete receipt was retained.",
+                );
+            }
+            pendingModelUsage = { round: modelRound, tokens: usage.tokens };
+          };
           const turn = await this.options.modelTurnRunner.execute({
             task: claim.task,
             attempt: claim.attempt,
             checkpoint,
             signal: executionSignal,
             workspace,
+            onUsage: observeUsage,
           });
+          // Custom runners can return their complete usage without emitting intermediate observations.
+          observeUsage(turn.usage);
           executionSignal.throwIfAborted();
           await workspace.assertIntegrity();
           if (turn.usage.tokens === null) {
@@ -305,6 +325,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             recordedAt: new Date(this.#now()).toISOString(),
             usage,
             sourceUnitIds,
+            ...(turn.modelIdentity === undefined ? {} : { modelIdentity: turn.modelIdentity }),
           });
           await accepted({
             kind: "analysis",
@@ -312,7 +333,9 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             round: turn.round,
             usage,
             sourceUnitIds,
+            ...(turn.modelIdentity === undefined ? {} : { modelIdentity: turn.modelIdentity }),
           });
+          pendingModelUsage = undefined;
           lastAccountedAt = this.#now();
           lastAccountedDuration = checkpoint.consumed.durationMs;
           this.options.logger.info("Investigation checkpoint accepted.", {
@@ -373,6 +396,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
                 lease: claim.lease,
                 reason,
                 diagnostics: terminalDiagnostics,
+                ...(pendingModelUsage === undefined ? {} : { modelUsage: pendingModelUsage }),
               },
               reportSignal,
             ),
@@ -381,7 +405,8 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         );
         checkpoint = response.checkpoint;
         assertAcceptedCheckpoint(claim, checkpoint);
-        if (checkpoint.stopReason === "budget_exhausted") outcome = "interrupted";
+        if (checkpoint.stopReason === "complete") outcome = "completed";
+        else if (checkpoint.stopReason === "budget_exhausted") outcome = "interrupted";
       } else if (checkpoint.stopReason === "complete") {
         // Cancellation cannot retroactively rewrite an already accepted complete analysis.
         outcome = "completed";
@@ -578,6 +603,9 @@ function classifyStop(error: unknown): {
     "SOURCE_REPOSITORY_NOT_ALLOWED",
     "SOURCE_TREE_UNSUPPORTED",
     "SOURCE_DIFF_UNAVAILABLE",
+    "SOURCE_DEPENDENCY_UNAVAILABLE",
+    "SOURCE_DEPENDENCY_UNREADABLE",
+    "SOURCE_DEPENDENCY_LIMIT_EXCEEDED",
     "MODEL_SOURCE_UNAVAILABLE",
     "MODEL_POLICY_UNAVAILABLE",
   ].includes(code);

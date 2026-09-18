@@ -9,9 +9,12 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import type { ProcessHostClient } from "../execution/process-host-protocol.js";
 import {
+  assertInvestigationSourceContext,
   type InvestigationPrDiffChunk,
   type InvestigationPrDiffManifest,
   type InvestigationSourceBinding,
+  type InvestigationSourceContext,
+  type InvestigationSourceDependencies,
   type InvestigationSourceMaterializer,
   InvestigationWorkspaceError,
   type InvestigationWorkspaceFileSystem,
@@ -319,6 +322,7 @@ async function preparePrDiff(
     base: "old\n",
     head: "new\n",
   },
+  useBatch = false,
 ) {
   const value = withSource(input());
   const subject = value.task.subjects.find((candidate) => candidate.id === value.task.subjectRef);
@@ -357,19 +361,541 @@ async function preparePrDiff(
     if (chunk === undefined) throw new Error("The fixture has no unregistered chunks.");
     return chunk;
   });
+  const readPrDiffChunks = vi.fn(async (ids: readonly string[]) =>
+    ids.map((id) => {
+      const chunk = state.chunks.get(id);
+      if (chunk === undefined) throw new Error("The fixture has no unregistered chunks.");
+      return chunk;
+    }),
+  );
+  const assertBinding = vi.fn(async () => undefined);
   const fixture = setup({
     materialize: async () => ({
       binding: sourceBinding(value),
-      assertBinding: async () => undefined,
+      assertBinding,
       readPrDiffManifest,
       readPrDiffChunk,
+      ...(useBatch ? { readPrDiffChunks } : {}),
     }),
   });
   const workspace = await fixture.provider.prepare(value, fixture.context);
-  return { ...fixture, state, workspace, readPrDiffManifest, readPrDiffChunk };
+  return {
+    ...fixture,
+    state,
+    workspace,
+    readPrDiffManifest,
+    readPrDiffChunk,
+    readPrDiffChunks,
+    assertBinding,
+  };
 }
 
 describe("native investigation attempt workspaces", () => {
+  const focusedContext = (sourceSha: string): InvestigationSourceContext => {
+    const content = "class Owner : IDisposable { public void Dispose() {} }\n";
+    return {
+      sourceSha,
+      seedPaths: ["src/Owner.cs"],
+      requiredFiles: [{ path: "src/Owner.cs", content, digest: textDigest(content) }],
+      contextFiles: [],
+      queries: [
+        {
+          kind: "reference",
+          revisionSha: sourceSha,
+          symbols: ["Owner"],
+          paths: ["src/Owner.cs", "tests/OwnerTests.cs"],
+          matchedPathCount: 2,
+          omittedPathCount: 0,
+        },
+      ],
+      deferred: [{ path: "tests/OwnerTests.cs", reason: "candidate_scan_files_budget" }],
+      identityScanFiles: 1,
+      identityScanBytes: Buffer.byteLength(content, "utf8"),
+      catalogComplete: true,
+      omittedCandidateCount: 0,
+    };
+  };
+
+  it("retains complete required source when optional candidates are deferred and brackets the read", async () => {
+    const value = withSource(input());
+    const source = sourceBinding(value);
+    const events: string[] = [];
+    const context = { ...focusedContext(source.sourceSha), queryBudgetExhausted: true as const };
+    const readSourceContext = vi.fn(async () => {
+      events.push("context");
+      return context;
+    });
+    const f = setup({
+      materialize: async () => ({
+        binding: source,
+        assertBinding: async () => {
+          events.push("binding");
+        },
+        readSourceContext,
+      }),
+    });
+    const workspace = await f.provider.prepare(value, f.context);
+    events.length = 0;
+    const result = await workspace.readSourceContext!(["src/Owner.cs"]);
+    expect(events).toEqual(["binding", "context", "binding"]);
+    expect(readSourceContext).toHaveBeenCalledExactlyOnceWith(["src/Owner.cs"]);
+    expect(result).toEqual(context);
+    expect(result).not.toBe(context);
+    expect(result.requiredFiles[0]!.content).toBe(context.requiredFiles[0]!.content);
+    expect(result.contextFiles).toEqual([]);
+    expect(result.deferred).toEqual([
+      { path: "tests/OwnerTests.cs", reason: "candidate_scan_files_budget" },
+    ]);
+  });
+
+  it("rejects focused context with missing required files, false provenance, changed digests, or false completeness", () => {
+    const original = focusedContext("a".repeat(40));
+    const corruptions: unknown[] = [
+      { ...original, requiredFiles: [] },
+      { ...original, requiredFiles: [{ ...original.requiredFiles[0]!, digest: "0".repeat(64) }] },
+      { ...original, requiredFiles: [{ ...original.requiredFiles[0]!, path: "../outside.cs" }] },
+      { ...original, deferred: [] },
+      { ...original, deferred: [{ path: "src/Owner.cs", reason: "candidate_scan_files_budget" }] },
+      { ...original, queries: [{ ...original.queries[0]!, revisionSha: "b".repeat(40) }] },
+      { ...original, queries: [{ ...original.queries[0]!, omittedPathCount: 1 }] },
+      { ...original, omittedCandidateCount: 1 },
+      {
+        ...original,
+        catalogComplete: false,
+        omittedCandidateCount: 1,
+        queries: [{ ...original.queries[0]!, matchedPathCount: 102, omittedPathCount: 100 }],
+      },
+      { ...original, identityScanFiles: 65 },
+      { ...original, queryBudgetExhausted: "true" },
+      {
+        ...original,
+        contextFiles: [
+          {
+            ...original.requiredFiles[0]!,
+            path: "tests/OwnerTests.cs",
+            role: "related_context",
+            relation: "proven",
+          },
+        ],
+        deferred: [],
+        identityScanFiles: 2,
+        identityScanBytes: original.identityScanBytes * 2,
+      },
+    ];
+    for (const changed of corruptions)
+      expect(() =>
+        assertInvestigationSourceContext(changed, original.sourceSha, original.seedPaths),
+      ).toThrow();
+  });
+
+  it("rejects a frozen source replacement after a focused context read", async () => {
+    const value = withSource(input());
+    const source = sourceBinding(value);
+    let changed = false;
+    const f = setup({
+      materialize: async () => ({
+        binding: source,
+        assertBinding: async () => {
+          if (changed) throw new Error("Focused source changed.");
+        },
+        readSourceContext: async () => {
+          changed = true;
+          return focusedContext(source.sourceSha);
+        },
+      }),
+    });
+    const workspace = await f.provider.prepare(value, f.context);
+    await expect(workspace.readSourceContext!(["src/Owner.cs"])).rejects.toThrow(
+      "Focused source changed",
+    );
+  });
+
+  it("enforces optional related-context limits separately from the total source budget", () => {
+    const original = focusedContext("a".repeat(40));
+    for (const contents of [
+      Array<string>(9).fill("class Example {}\n"),
+      ["x".repeat(128 * 1024 + 1)],
+    ]) {
+      const contextFiles = contents.map((content, index) => ({
+        path: `src/Context${index}.cs`,
+        content,
+        digest: textDigest(content),
+        role: "related_context" as const,
+        relation: "unresolved_reference_identity" as const,
+      }));
+      const changed: InvestigationSourceContext = {
+        ...original,
+        contextFiles,
+        queries: [
+          {
+            ...original.queries[0]!,
+            paths: ["src/Owner.cs", ...contextFiles.map((file) => file.path)],
+            matchedPathCount: contextFiles.length + 1,
+          },
+        ],
+        deferred: [],
+        identityScanFiles: contextFiles.length + 1,
+        identityScanBytes:
+          original.identityScanBytes +
+          contents.reduce((total, content) => total + Buffer.byteLength(content), 0),
+      };
+      expect(() =>
+        assertInvestigationSourceContext(changed, original.sourceSha, original.seedPaths),
+      ).toThrow();
+    }
+  });
+
+  it("does not read focused source context under execution policy", async () => {
+    const value = editableInput();
+    const readSourceContext = vi.fn();
+    const f = setup({
+      materialize: async () => ({
+        binding: sourceBinding(value),
+        assertBinding: async () => undefined,
+        readSourceContext,
+      }),
+    });
+    const workspace = await f.provider.prepare(value, f.context);
+    await expect(workspace.readSourceContext!(["src/Owner.cs"])).rejects.toMatchObject({
+      code: "SOURCE_UNAVAILABLE",
+    });
+    expect(readSourceContext).not.toHaveBeenCalled();
+  });
+  it("retains exact search matches and validates explicit namespace exclusions with separate scan accounting", async () => {
+    for (const invalid of [false, true]) {
+      const value = withSource(input());
+      const source = sourceBinding(value);
+      const content = "class Owner { Listener value; }\n";
+      const dependencies: InvestigationSourceDependencies = {
+        sourceSha: source.sourceSha,
+        seedPaths: ["src/Listener.cpp"],
+        symbols: ["Listener"],
+        searchDepth: 1,
+        identityScanBytes: 200,
+        files: [{ path: "src/Owner.cs", content, digest: textDigest(content) }],
+        queries: [
+          {
+            revisionSha: source.sourceSha,
+            symbols: ["Listener"],
+            paths: ["src/OtherListener.cs", "src/Owner.cs"],
+            depth: 1,
+            anchorIdentities: [{ name: "Listener", namespace: "Example" }],
+            provenReferencePaths: [],
+            unpropagatedMatches: [
+              { path: "src/Owner.cs", reason: "unresolved_reference_identity" },
+            ],
+            excludedMatches: [
+              {
+                path: invalid ? "src/Unmatched.cs" : "src/OtherListener.cs",
+                reason: "different_type_identity",
+                matchedSymbols: ["Listener"],
+              },
+            ],
+          },
+        ],
+      };
+      const f = setup({
+        materialize: async () => ({
+          binding: source,
+          assertBinding: async () => undefined,
+          readSourceDependencies: async () => dependencies,
+        }),
+      });
+      const workspace = await f.provider.prepare(value, f.context);
+      if (invalid) {
+        await expect(workspace.readSourceDependencies!(["src/Listener.cpp"])).rejects.toMatchObject(
+          { code: "SOURCE_BINDING_MISMATCH" },
+        );
+      } else {
+        const result = await workspace.readSourceDependencies!(["src/Listener.cpp"]);
+        expect(result.queries[0]!.paths).toContain("src/OtherListener.cs");
+        expect(result.files.map((file) => file.path)).toEqual(["src/Owner.cs"]);
+        expect(result.identityScanBytes).toBe(200);
+        expect(result.queries[0]!.unpropagatedMatches).toEqual([
+          { path: "src/Owner.cs", reason: "unresolved_reference_identity" },
+        ]);
+      }
+    }
+  });
+  it("brackets complete frozen source dependency reads with binding checks and retains query provenance", async () => {
+    const value = withSource(input());
+    const events: string[] = [];
+    const source = sourceBinding(value);
+    const content = "class ListenerOwner { private Listener listener; }\n";
+    const dependencies: InvestigationSourceDependencies = {
+      sourceSha: source.sourceSha,
+      seedPaths: ["src/Listener.cpp"],
+      symbols: ["Listener"],
+      searchDepth: 1,
+      files: [{ path: "src/ListenerOwner.cs", content, digest: textDigest(content) }],
+      queries: [
+        {
+          revisionSha: source.sourceSha,
+          symbols: ["Listener"],
+          paths: ["src/Listener.cpp", "src/ListenerOwner.cs"],
+          depth: 1,
+        },
+      ],
+    };
+    const readSourceDependencies = vi.fn(async () => {
+      events.push("dependencies");
+      return dependencies;
+    });
+    const f = setup({
+      materialize: async () => ({
+        binding: source,
+        assertBinding: async () => {
+          events.push("binding");
+        },
+        readSourceDependencies,
+      }),
+    });
+    const workspace = await f.provider.prepare(value, f.context);
+    events.length = 0;
+    const result = await workspace.readSourceDependencies!(["src/Listener.cpp"]);
+    expect(events).toEqual(["binding", "dependencies", "binding"]);
+    expect(result).toEqual(dependencies);
+    expect(result).not.toBe(dependencies);
+    expect(readSourceDependencies).toHaveBeenCalledExactlyOnceWith(["src/Listener.cpp"]);
+  });
+
+  it.each(["documentation only", "mixed"] as const)(
+    "retains explicit unsupported dependency seeds for %s requests",
+    async (mode) => {
+      const value = withSource(input());
+      const source = sourceBinding(value);
+      const seedPaths =
+        mode === "mixed" ? ["doc/Review.md", "src/Listener.cpp"] : ["doc/Review.md"];
+      const content = "class Owner { Listener value; }\n";
+      const dependencies: InvestigationSourceDependencies = {
+        sourceSha: source.sourceSha,
+        seedPaths,
+        unsupportedSeedPaths: ["doc/Review.md"],
+        symbols: mode === "mixed" ? ["Listener"] : [],
+        searchDepth: mode === "mixed" ? 1 : 0,
+        files:
+          mode === "mixed" ? [{ path: "src/Owner.cs", content, digest: textDigest(content) }] : [],
+        queries:
+          mode === "mixed"
+            ? [
+                {
+                  revisionSha: source.sourceSha,
+                  symbols: ["Listener"],
+                  paths: ["src/Listener.cpp", "src/Owner.cs"],
+                  depth: 1,
+                },
+              ]
+            : [],
+      };
+      const readSourceDependencies = vi.fn(async () => dependencies);
+      const f = setup({
+        materialize: async () => ({
+          binding: source,
+          assertBinding: async () => undefined,
+          readSourceDependencies,
+        }),
+      });
+      const workspace = await f.provider.prepare(value, f.context);
+      const result = await workspace.readSourceDependencies!(seedPaths);
+      expect(result).toEqual(dependencies);
+      expect(result.unsupportedSeedPaths).toEqual(["doc/Review.md"]);
+      expect(result.unsupportedSeedPaths).not.toBe(dependencies.unsupportedSeedPaths);
+      expect(readSourceDependencies).toHaveBeenCalledExactlyOnceWith(seedPaths);
+      expect(f.start).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "extra",
+    "duplicate",
+    "case alias",
+    "noncanonical",
+    "query match",
+    "all unsupported searched",
+  ] as const)("rejects %s unsupported dependency seed metadata", async (corruption) => {
+    const value = withSource(input());
+    const source = sourceBinding(value);
+    const seedPaths = ["doc/Review.md", "src/Listener.cpp"];
+    const unsupportedSeedPaths =
+      corruption === "extra"
+        ? ["doc/Other.md"]
+        : corruption === "duplicate"
+          ? ["doc/Review.md", "doc/Review.md"]
+          : corruption === "case alias"
+            ? ["doc/Review.md", "DOC/REVIEW.MD"]
+            : corruption === "noncanonical"
+              ? ["doc\\Review.md"]
+              : corruption === "all unsupported searched"
+                ? seedPaths
+                : ["doc/Review.md"];
+    const dependencies: InvestigationSourceDependencies = {
+      sourceSha: source.sourceSha,
+      seedPaths,
+      unsupportedSeedPaths,
+      symbols: ["Listener"],
+      searchDepth: 1,
+      files:
+        corruption === "all unsupported searched"
+          ? [
+              {
+                path: "src/Other.cs",
+                content: "class Other {};",
+                digest: textDigest("class Other {};"),
+              },
+            ]
+          : [],
+      queries: [
+        {
+          revisionSha: source.sourceSha,
+          symbols: ["Listener"],
+          paths:
+            corruption === "query match"
+              ? ["doc/Review.md", "src/Listener.cpp"]
+              : corruption === "all unsupported searched"
+                ? ["src/Other.cs"]
+                : ["src/Listener.cpp"],
+          depth: 1,
+        },
+      ],
+    };
+    const f = setup({
+      materialize: async () => ({
+        binding: source,
+        assertBinding: async () => undefined,
+        readSourceDependencies: async () => dependencies,
+      }),
+    });
+    const workspace = await f.provider.prepare(value, f.context);
+    await expect(workspace.readSourceDependencies!(seedPaths)).rejects.toMatchObject({
+      code: corruption === "noncanonical" ? "WORKSPACE_PATH_UNSAFE" : "SOURCE_BINDING_MISMATCH",
+    });
+    expect(f.start).not.toHaveBeenCalled();
+  });
+
+  it("rejects changed dependency identities, omitted matches, unsafe paths, and inconsistent query revisions", async () => {
+    for (const corruption of [
+      "sha",
+      "seed",
+      "digest",
+      "missing",
+      "path",
+      "query",
+      "unproved",
+      "bytes",
+      "depth",
+    ] as const) {
+      const value = withSource(input());
+      const source = sourceBinding(value);
+      const content = "class Owner { Listener value; }\n";
+      const dependencies: InvestigationSourceDependencies = {
+        sourceSha: source.sourceSha,
+        seedPaths: ["src/Listener.cpp"],
+        symbols: ["Listener"],
+        searchDepth: 1,
+        files: [{ path: "src/Owner.cs", content, digest: textDigest(content) }],
+        queries: [
+          {
+            revisionSha: source.sourceSha,
+            symbols: ["Listener"],
+            paths: ["src/Owner.cs"],
+            depth: 1,
+          },
+        ],
+      };
+      const changed =
+        corruption === "sha"
+          ? { ...dependencies, sourceSha: "f".repeat(40) }
+          : corruption === "seed"
+            ? { ...dependencies, seedPaths: ["src/Other.cpp"] }
+            : corruption === "digest"
+              ? { ...dependencies, files: [{ ...dependencies.files[0]!, digest: "0".repeat(64) }] }
+              : corruption === "missing"
+                ? { ...dependencies, files: [] }
+                : corruption === "path"
+                  ? {
+                      ...dependencies,
+                      files: [{ ...dependencies.files[0]!, path: "../outside.cs" }],
+                    }
+                  : corruption === "unproved"
+                    ? {
+                        ...dependencies,
+                        queries: [{ ...dependencies.queries[0]!, paths: ["src/Listener.cpp"] }],
+                      }
+                    : corruption === "bytes"
+                      ? {
+                          ...dependencies,
+                          files: [
+                            {
+                              ...dependencies.files[0]!,
+                              content: "x".repeat(256 * 1024 + 1),
+                              digest: textDigest("x".repeat(256 * 1024 + 1)),
+                            },
+                          ],
+                        }
+                      : corruption === "depth"
+                        ? { ...dependencies, searchDepth: 3 }
+                        : {
+                            ...dependencies,
+                            queries: [{ ...dependencies.queries[0]!, revisionSha: "e".repeat(40) }],
+                          };
+      const f = setup({
+        materialize: async () => ({
+          binding: source,
+          assertBinding: async () => undefined,
+          readSourceDependencies: async () => changed,
+        }),
+      });
+      const workspace = await f.provider.prepare(value, f.context);
+      await expect(workspace.readSourceDependencies!(["src/Listener.cpp"])).rejects.toThrow();
+    }
+  });
+
+  it("rejects source replacement observed after dependency content was read", async () => {
+    const value = withSource(input());
+    const source = sourceBinding(value);
+    let altered = false;
+    const f = setup({
+      materialize: async () => ({
+        binding: source,
+        assertBinding: async () => {
+          if (altered) throw new Error("Frozen source changed.");
+        },
+        readSourceDependencies: async () => {
+          altered = true;
+          return {
+            sourceSha: source.sourceSha,
+            seedPaths: ["src/Listener.cpp"],
+            symbols: [],
+            searchDepth: 0,
+            files: [],
+            queries: [],
+          };
+        },
+      }),
+    });
+    const workspace = await f.provider.prepare(value, f.context);
+    await expect(workspace.readSourceDependencies!(["src/Listener.cpp"])).rejects.toThrow(
+      "Frozen source changed",
+    );
+  });
+
+  it("does not discover repository dependencies under execution policy", async () => {
+    const value = editableInput();
+    const readSourceDependencies = vi.fn();
+    const f = setup({
+      materialize: async () => ({
+        binding: sourceBinding(value),
+        assertBinding: async () => undefined,
+        readSourceDependencies,
+      }),
+    });
+    const workspace = await f.provider.prepare(value, f.context);
+    await expect(workspace.readSourceDependencies!(["src/Listener.cpp"])).rejects.toMatchObject({
+      code: "SOURCE_UNAVAILABLE",
+    });
+    expect(readSourceDependencies).not.toHaveBeenCalled();
+  });
+
   it("freezes snapshot bytes, isolates control files, and stores artifacts with actual digests", async () => {
     const { fs, provider, context, start } = setup();
     const value = input();
@@ -1532,6 +2058,90 @@ describe("native investigation PR diff manifests and chunks", () => {
       code: "SOURCE_UNAVAILABLE",
     });
     expect(state.chunks.get("pr-diff-diff")?.content).toHaveLength(33_000);
+  });
+
+  it("validates one complete source batch between two binding checks", async () => {
+    const { workspace, state, readPrDiffChunk, readPrDiffChunks, assertBinding } =
+      await preparePrDiff(undefined, true);
+    const events: string[] = [];
+    assertBinding.mockImplementation(async () => {
+      events.push("binding");
+    });
+    readPrDiffChunks.mockImplementation(async (ids) => {
+      events.push("batch");
+      return ids.map((id) => state.chunks.get(id)!);
+    });
+    const ids = ["pr-diff-diff", "pr-diff-base", "pr-diff-head"];
+    const chunks = await workspace.readPrDiffChunks!(ids);
+    expect(chunks.map((chunk) => chunk.id)).toEqual(ids);
+    expect(events).toEqual(["binding", "batch", "binding"]);
+    expect(readPrDiffChunks).toHaveBeenCalledExactlyOnceWith(ids);
+    expect(readPrDiffChunk).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing, reordered, duplicated, or altered batch chunks without returning partial data", async () => {
+    for (const corruption of ["missing", "reordered", "duplicated", "content"] as const) {
+      const { workspace, state, readPrDiffChunks } = await preparePrDiff(undefined, true);
+      const first = state.chunks.get("pr-diff-diff")!;
+      const second = state.chunks.get("pr-diff-head")!;
+      readPrDiffChunks.mockResolvedValueOnce(
+        corruption === "missing"
+          ? [first]
+          : corruption === "reordered"
+            ? [second, first]
+            : corruption === "duplicated"
+              ? [first, first]
+              : [first, { ...second, content: "Changed after the manifest was frozen" }],
+      );
+      await expect(workspace.readPrDiffChunks!([first.id, second.id])).rejects.toMatchObject({
+        code: "SOURCE_BINDING_MISMATCH",
+      });
+    }
+  });
+
+  it("rejects a reparse point introduced during a source batch at the final tree check", async () => {
+    const { fs, workspace, state, readPrDiffChunks } = await preparePrDiff(undefined, true);
+    readPrDiffChunks.mockImplementation(async (ids) => {
+      const path = win32.join(workspace.sourceDirectory!, "injected-link");
+      fs.add(path, "file", "Outside target");
+      fs.change(path, { reparsePoint: true });
+      return ids.map((id) => state.chunks.get(id)!);
+    });
+    await expect(workspace.readPrDiffChunks!(["pr-diff-diff"])).rejects.toMatchObject({
+      code: "WORKSPACE_PATH_UNSAFE",
+    });
+  });
+
+  it("freezes caller batch IDs before awaiting the first binding check", async () => {
+    const { workspace, readPrDiffChunks, assertBinding } = await preparePrDiff(undefined, true);
+    const ids = ["pr-diff-diff", "pr-diff-head"];
+    assertBinding.mockImplementationOnce(async () => {
+      ids.splice(0, ids.length, "pr-diff-base");
+    });
+    expect((await workspace.readPrDiffChunks!(ids)).map((chunk) => chunk.id)).toEqual([
+      "pr-diff-diff",
+      "pr-diff-head",
+    ]);
+    expect(readPrDiffChunks).toHaveBeenCalledExactlyOnceWith(["pr-diff-diff", "pr-diff-head"]);
+  });
+
+  it("rejects duplicate and unknown batch IDs before reading any source chunk", async () => {
+    for (const ids of [["pr-diff-diff", "pr-diff-diff"], ["unregistered-chunk"]]) {
+      const { workspace, readPrDiffChunk, readPrDiffChunks } = await preparePrDiff(undefined, true);
+      await expect(workspace.readPrDiffChunks!(ids)).rejects.toMatchObject({
+        code: "SOURCE_BINDING_MISMATCH",
+      });
+      expect(readPrDiffChunk).not.toHaveBeenCalled();
+      expect(readPrDiffChunks).not.toHaveBeenCalled();
+    }
+  });
+
+  it("preserves validated batch reads for a materializer that only provides single chunks", async () => {
+    const { workspace, readPrDiffChunk, readPrDiffChunks } = await preparePrDiff();
+    const ids = ["pr-diff-diff", "pr-diff-head"];
+    expect((await workspace.readPrDiffChunks!(ids)).map((chunk) => chunk.id)).toEqual(ids);
+    expect(readPrDiffChunk.mock.calls.map(([id]) => id)).toEqual(ids);
+    expect(readPrDiffChunks).not.toHaveBeenCalled();
   });
 
   it("blocks PR diff reads when the trusted materializer does not supply both required APIs", async () => {

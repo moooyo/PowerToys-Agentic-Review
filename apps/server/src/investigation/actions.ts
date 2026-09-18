@@ -323,6 +323,7 @@ export class InvestigationActions {
   async createIntent(
     actor: InvestigationOperatorPrincipal,
     body: InvestigationCreateActionIntentRequest,
+    assertAuthorized?: (intent: InvestigationActionIntentV1) => void,
   ): Promise<InvestigationActionIntentV1> {
     requireCondition(
       Value.Check(InvestigationCreateActionIntentRequestSchema, body),
@@ -386,6 +387,7 @@ export class InvestigationActions {
       }
       this.assertNoPendingWrite(intent);
       this.assertCurrentApprovalPolicy(actor, intent, context.target);
+      assertAuthorized?.(intent);
       this.dependencies.store.insert("actionIntents", intent.id, intent);
       this.dependencies.store.insert("idempotency", key, {
         intentId: intent.id,
@@ -416,10 +418,22 @@ export class InvestigationActions {
     return intent;
   }
 
+  findIntentByIdempotencyKey(
+    actor: InvestigationOperatorPrincipal,
+    key: string,
+  ): InvestigationActionIntentV1 | null {
+    const record = this.dependencies.store.get<IdempotencyRecord>(
+      "idempotency",
+      idempotencyId(actor.id, key),
+    );
+    return record === undefined ? null : this.getIntent(actor, record.intentId);
+  }
+
   async confirmIntent(
     actor: InvestigationOperatorPrincipal,
     id: string,
     body: InvestigationConfirmActionIntentRequest,
+    assertAuthorized?: (intent: InvestigationActionIntentV1) => void,
   ): Promise<InvestigationActionIntentV1> {
     requireCondition(
       Value.Check(InvestigationConfirmActionIntentRequestSchema, body),
@@ -475,6 +489,7 @@ export class InvestigationActions {
       );
       this.assertNoPendingWrite(current);
       this.assertCurrentApprovalPolicy(actor, current, context.target);
+      assertAuthorized?.(current);
       const executing: InvestigationActionIntentV1 = {
         ...current,
         version: current.version + 1,
@@ -488,7 +503,7 @@ export class InvestigationActions {
     intent = acquired.intent;
     if (!acquired.execute) return intent;
     // The caller that persisted this transition owns execution. A second confirmation never sends again.
-    return this.execute(actor, intent, data);
+    return this.execute(actor, intent, data, assertAuthorized);
   }
 
   async reconcileIntent(
@@ -1396,8 +1411,26 @@ export class InvestigationActions {
     actor: InvestigationOperatorPrincipal,
     intent: InvestigationActionIntentV1,
     data: ActionData,
+    assertAuthorized?: (intent: InvestigationActionIntentV1) => void,
   ): Promise<InvestigationActionIntentV1> {
     let dispatched = false;
+    const beforeDispatch =
+      assertAuthorized === undefined
+        ? undefined
+        : () => {
+            try {
+              assertAuthorized(intent);
+            } catch (error) {
+              // The transport invokes this only before issuing its mutation request.
+              dispatched = false;
+              if (error instanceof InvestigationRequestError) throw error;
+              throw new InvestigationRequestError(
+                403,
+                "action_authorization_revoked",
+                "The action is no longer authorized for dispatch.",
+              );
+            }
+          };
     try {
       if (taskActions.has(intent.action)) {
         requireCondition(
@@ -1428,13 +1461,18 @@ export class InvestigationActions {
         "external_writes_unavailable",
         "External writes are disabled or no supported transport is installed.",
       );
+      beforeDispatch?.();
       dispatched = true;
-      const result = await this.dependencies.transport.execute(
-        intent,
-        data.repository,
-        data.workItem,
-        actor,
-      );
+      const result =
+        beforeDispatch === undefined
+          ? await this.dependencies.transport.execute(intent, data.repository, data.workItem, actor)
+          : await this.dependencies.transport.execute(
+              intent,
+              data.repository,
+              data.workItem,
+              actor,
+              beforeDispatch,
+            );
       return this.finish(intent, result.state, {
         message: result.message,
         externalId: result.externalId,

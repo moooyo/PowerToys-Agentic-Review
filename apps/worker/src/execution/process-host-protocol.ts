@@ -717,12 +717,19 @@ export interface ManagedProcess {
   readonly stdin?: ManagedProcessStandardInput;
   readonly stdout: Readable;
   readonly stderr: Readable;
+  /** Matching native exit, independent of completion failures such as cancellation or timeout. */
+  readonly exited?: Promise<ProcessExitedEvent>;
   readonly completed: Promise<ProcessExitedEvent>;
   terminate(reason: ProcessTerminationReason): Promise<void>;
 }
 
 export interface ProcessHostClient {
-  start(spec: ProcessLaunchSpec, signal: AbortSignal): Promise<ManagedProcess>;
+  /** onDispatch runs only when a validated start request is about to be written to the native host. */
+  start(
+    spec: ProcessLaunchSpec,
+    signal: AbortSignal,
+    onDispatch?: () => void,
+  ): Promise<ManagedProcess>;
   terminateAll(reason: ProcessTerminationReason): Promise<void>;
   close(): Promise<void>;
 }

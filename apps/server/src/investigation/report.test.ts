@@ -833,6 +833,71 @@ describe("assembleInvestigationReport", () => {
     );
   });
 
+  it("accepts the exact trusted model history including unknown and adopted model identities", () => {
+    const { input, result } = fixture();
+    input.checkpoint.adoptedAttemptIds.unshift("synthetic-prior-model-attempt");
+    input.checkpoint.runtime.modelExecutions = [
+      {
+        attemptId: "synthetic-prior-model-attempt",
+        round: 1,
+        engine: "codex",
+        model: "gpt-6-astra",
+      },
+      { attemptId: input.attempt.id, round: 3, engine: "copilot", model: null },
+    ];
+    result.context.adoptedAttemptIds = structuredClone(input.checkpoint.adoptedAttemptIds);
+    result.context.modelExecutions = structuredClone(input.checkpoint.runtime.modelExecutions);
+    sealCheckpoint(input.checkpoint);
+    sealResult(result);
+    expect(
+      assembleInvestigationReport(submission(result, input.checkpoint, input.task, input.attempt)),
+    ).toEqual(result);
+  });
+
+  it.each(["model", "engine", "round", "attempt", "discard", "omit", "append"])(
+    "rejects a report header that changes trusted model history: %s",
+    (mutation) => {
+      const { input, result } = fixture();
+      input.checkpoint.runtime.modelExecutions = [
+        { attemptId: input.attempt.id, round: 1, engine: "codex", model: "gpt-6-astra" },
+      ];
+      result.context.modelExecutions = structuredClone(input.checkpoint.runtime.modelExecutions);
+      const execution = result.context.modelExecutions[0]!;
+      if (mutation === "model") execution.model = "forged-model";
+      if (mutation === "engine") execution.engine = "copilot";
+      if (mutation === "round") execution.round = 2;
+      if (mutation === "attempt") execution.attemptId = "forged-attempt";
+      if (mutation === "discard") result.context.modelExecutions = [];
+      if (mutation === "omit") delete result.context.modelExecutions;
+      if (mutation === "append") result.context.modelExecutions!.push({ ...execution, round: 2 });
+      sealCheckpoint(input.checkpoint);
+      sealResult(result);
+      expectCode(
+        () =>
+          assembleInvestigationReport(
+            submission(result, input.checkpoint, input.task, input.attempt),
+          ),
+        "report_context_mismatch",
+      );
+    },
+  );
+
+  it("rejects a claimed report model when the accepted checkpoint has no model history", () => {
+    const { input, result } = fixture();
+    expect(input.checkpoint.runtime.modelExecutions).toBeUndefined();
+    result.context.modelExecutions = [
+      { attemptId: input.attempt.id, round: 1, engine: "codex", model: "forged-model" },
+    ];
+    sealResult(result);
+    expectCode(
+      () =>
+        assembleInvestigationReport(
+          submission(result, input.checkpoint, input.task, input.attempt),
+        ),
+      "report_context_mismatch",
+    );
+  });
+
   it("rejects header identities, frozen versions, and false completeness claims", () => {
     const contextCase = fixture().input;
     contextCase.header.context.attempt.number += 1;

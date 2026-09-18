@@ -6,11 +6,16 @@ import type {
   InvestigationDiagnostic,
   InvestigationLoopCheckpointV1,
   InvestigationLoopRoundV1,
+  InvestigationModelIdentity,
   InvestigationPrDiffManifestV1,
   InvestigationRuntimeState,
   InvestigationTaskV1,
+  InvestigationUnacceptedModelUsage,
 } from "@agentic-review/contracts";
-import { validateInvestigationPrDiffManifest } from "@agentic-review/contracts";
+import {
+  validateInvestigationModelExecutions,
+  validateInvestigationPrDiffManifest,
+} from "@agentic-review/contracts";
 
 export class InvestigationLoopError extends Error {
   constructor(
@@ -124,6 +129,71 @@ export function assertInvestigationCheckpointIntegrity(
     "checkpoint_digest_mismatch",
     "The checkpoint content does not match its digest.",
   );
+  const modelExecutions = validateInvestigationModelExecutions(
+    checkpoint.runtime.modelExecutions ?? [],
+    checkpoint.adoptedAttemptIds,
+    checkpoint.round,
+  );
+  requireCondition(
+    modelExecutions.valid,
+    "invalid_model_execution_history",
+    modelExecutions.errors.map((issue) => issue.message).join(" "),
+  );
+  const usageKeys = new Set<string>();
+  let knownTokens = 0;
+  for (const usage of checkpoint.runtime.unacceptedModelUsage ?? []) {
+    const key = JSON.stringify([usage.attemptId, usage.round]);
+    requireCondition(
+      checkpoint.adoptedAttemptIds.includes(usage.attemptId) &&
+        Number.isSafeInteger(usage.round) &&
+        usage.round > 0 &&
+        usage.round <= checkpoint.round + 1 &&
+        (usage.tokens === null || (Number.isSafeInteger(usage.tokens) && usage.tokens >= 0)) &&
+        !usageKeys.has(key),
+      "invalid_unaccepted_model_usage",
+      "Unaccepted model usage must identify a unique invocation in an adopted attempt.",
+    );
+    usageKeys.add(key);
+    knownTokens += usage.tokens ?? 0;
+  }
+  requireCondition(
+    Number.isSafeInteger(knownTokens) && knownTokens <= checkpoint.consumed.tokens,
+    "invalid_unaccepted_model_usage",
+    "Known unaccepted model usage must remain included in the recorded token consumption.",
+  );
+}
+
+function unknownModelUsageDiagnostics(
+  runtime: InvestigationRuntimeState,
+): InvestigationDiagnostic[] {
+  return (runtime.unacceptedModelUsage ?? [])
+    .filter((usage) => usage.tokens === null)
+    .map((usage) => ({
+      id: `model-usage-unknown:${investigationContentDigest([usage.attemptId, usage.round])}`,
+      code: "MODEL_USAGE_UNAVAILABLE",
+      category: "limitation",
+      message:
+        `The model invocation for analysis round ${usage.round} in attempt ${usage.attemptId} did not report token usage. ` +
+        "The recorded token total includes only known usage and may understate actual consumption.",
+      retryable: false,
+      evidenceRefs: [],
+      prerequisiteRefs: [],
+    }));
+}
+
+function preserveUnknownModelUsageDiagnostics(
+  analysis: InvestigationAnalysisV1,
+  runtime: InvestigationRuntimeState,
+): void {
+  for (const diagnostic of unknownModelUsageDiagnostics(runtime)) {
+    const existing = analysis.diagnostics.filter((entry) => entry.id === diagnostic.id);
+    requireCondition(
+      existing.every((entry) => unchanged(entry, diagnostic)),
+      "diagnostic_identity_conflict",
+      "An unavailable model usage diagnostic cannot be replaced by conflicting content.",
+    );
+    if (existing.length === 0) analysis.diagnostics.push(diagnostic);
+  }
 }
 
 export interface CreateInvestigationCheckpointInput {
@@ -548,6 +618,8 @@ export interface ApplyInvestigationRoundOptions {
   };
   /** Exact source chunk IDs delivered to this CLI invocation by the trusted worker. */
   readonly sourceUnitIds?: readonly string[];
+  /** Explicit CLI selection observed by the trusted Worker, never model-provided text. */
+  readonly modelIdentity?: InvestigationModelIdentity;
 }
 
 /** Digests of newly proposed plan content are computed by trusted code, not requested from a model. */
@@ -622,6 +694,7 @@ export function applyInvestigationLoopRound(
       "Worker consumption must be a nonnegative safe integer.",
     );
   const normalizedAnalysis = normalizeInvestigationAnalysisPlanReferences(round.analysis);
+  preserveUnknownModelUsageDiagnostics(normalizedAnalysis, checkpoint.runtime);
   normalizedAnalysis.coverage = normalizeCoverage(
     checkpoint.analysis.coverage,
     normalizedAnalysis.coverage,
@@ -630,6 +703,25 @@ export function applyInvestigationLoopRound(
   assertAnalysisTransition(checkpoint.analysis, normalizedRound);
   assertRuntimeTransition(checkpoint, checkpoint.runtime);
   const runtime = structuredClone(checkpoint.runtime);
+  if (options.modelIdentity !== undefined) {
+    const execution = {
+      attemptId: checkpoint.attemptId,
+      round: round.round,
+      engine: options.modelIdentity.engine,
+      model: options.modelIdentity.model,
+    };
+    const validation = validateInvestigationModelExecutions(
+      [execution],
+      checkpoint.adoptedAttemptIds,
+      round.round,
+    );
+    requireCondition(
+      validation.valid,
+      "invalid_worker_model_identity",
+      "The Worker must provide a valid explicit CLI model selection or mark it unknown.",
+    );
+    runtime.modelExecutions = [...(runtime.modelExecutions ?? []), execution];
+  }
   const sourceUnitIds = options.sourceUnitIds ?? [];
   requireCondition(
     new Set(sourceUnitIds).size === sourceUnitIds.length,
@@ -759,6 +851,7 @@ export function interruptInvestigationLoop(
   recordedAt = checkpoint.recordedAt,
   diagnostics: readonly InvestigationDiagnostic[] = [],
   durationMs = 0,
+  modelUsage?: Pick<InvestigationUnacceptedModelUsage, "round" | "tokens">,
 ): InvestigationLoopCheckpointV1 {
   assertInvestigationCheckpointIntegrity(checkpoint);
   requireCondition(
@@ -771,6 +864,44 @@ export function interruptInvestigationLoop(
     "invalid_worker_consumption",
     "Trusted elapsed duration must be a nonnegative safe integer.",
   );
+  const runtime = structuredClone(checkpoint.runtime);
+  let tokens = checkpoint.consumed.tokens;
+  if (modelUsage !== undefined) {
+    requireCondition(
+      Number.isSafeInteger(modelUsage.round) &&
+        modelUsage.round > 0 &&
+        (modelUsage.tokens === null ||
+          (Number.isSafeInteger(modelUsage.tokens) && modelUsage.tokens >= 0)),
+      "invalid_worker_consumption",
+      "Unaccepted model usage must contain a positive round and a known nonnegative token count or null.",
+    );
+    const previous = runtime.unacceptedModelUsage?.find(
+      (usage) => usage.attemptId === checkpoint.attemptId && usage.round === modelUsage.round,
+    );
+    if (previous !== undefined)
+      requireCondition(
+        previous.tokens === modelUsage.tokens,
+        "model_usage_receipt_conflict",
+        "This model invocation already has a different token usage receipt.",
+      );
+    else {
+      requireCondition(
+        modelUsage.round === checkpoint.round + 1,
+        "model_usage_round_mismatch",
+        "Unaccepted model usage must identify the next unaccepted analysis round.",
+      );
+      runtime.unacceptedModelUsage = [
+        ...(runtime.unacceptedModelUsage ?? []),
+        { attemptId: checkpoint.attemptId, ...modelUsage },
+      ];
+      tokens += modelUsage.tokens ?? 0;
+      requireCondition(
+        Number.isSafeInteger(tokens),
+        "invalid_worker_consumption",
+        "The accumulated token consumption must remain a safe integer.",
+      );
+    }
+  }
   const acceptedDiagnostics = new Map(
     checkpoint.analysis.diagnostics.map((entry) => [entry.id, entry]),
   );
@@ -787,17 +918,20 @@ export function interruptInvestigationLoop(
     ...structuredClone(checkpoint.analysis),
     diagnostics: [...acceptedDiagnostics.values()],
   };
+  preserveUnknownModelUsageDiagnostics(analysis, runtime);
   const reportBytes = Math.max(
     checkpoint.consumed.reportBytes,
-    retainedReportBytes(analysis, checkpoint.runtime),
+    retainedReportBytes(analysis, runtime),
   );
   return sealCheckpoint({
     ...structuredClone(checkpoint),
     version: checkpoint.version + 1,
     analysis,
+    runtime,
     consumed: {
       ...checkpoint.consumed,
       durationMs: checkpoint.consumed.durationMs + durationMs,
+      tokens,
       reportBytes,
     },
     previousCheckpointRef: reference(checkpoint),
@@ -910,6 +1044,22 @@ function assertRuntimeTransition(
   checkpoint: InvestigationLoopCheckpointV1,
   runtime: InvestigationRuntimeState,
 ): void {
+  requireCondition(
+    checkpoint.runtime.unacceptedModelUsage === undefined
+      ? runtime.unacceptedModelUsage === undefined
+      : runtime.unacceptedModelUsage !== undefined &&
+          unchanged(checkpoint.runtime.unacceptedModelUsage, runtime.unacceptedModelUsage),
+    "model_usage_history_is_trusted",
+    "Execution receipts cannot add, replace, or remove unaccepted model usage receipts.",
+  );
+  requireCondition(
+    checkpoint.runtime.modelExecutions === undefined
+      ? runtime.modelExecutions === undefined
+      : runtime.modelExecutions !== undefined &&
+          unchanged(checkpoint.runtime.modelExecutions, runtime.modelExecutions),
+    "model_execution_history_is_trusted",
+    "Execution receipts cannot add, replace, or remove accepted analysis model identities.",
+  );
   const previousSource = checkpoint.runtime.sourceCoverage;
   requireCondition(
     previousSource === undefined

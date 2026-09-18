@@ -35,6 +35,46 @@ describe("strict model output schema projection", () => {
     expect(Value.Check(authoritative, { ids: ["one", "two"] })).toBe(true);
   });
 
+  it("retains status-specific candidate link constraints in the strict generation schema", () => {
+    const projected = createInvestigationModelOutputSchema(InvestigationModelTurnDeltaV1Schema);
+    const properties = projected.properties as Record<
+      string,
+      { properties: Record<string, unknown> }
+    >;
+    const candidates = properties.analysis!.properties.candidates as {
+      items: {
+        anyOf: Array<{
+          additionalProperties: boolean;
+          required: string[];
+          properties: Record<string, unknown>;
+        }>;
+      };
+    };
+    expect(candidates.items.anyOf).toHaveLength(3);
+    const [retained, pendingOrWithdrawn, merged] = candidates.items.anyOf;
+    expect(retained!.properties).toMatchObject({
+      status: { anyOf: [{ const: "confirmed" }, { const: "unresolved" }] },
+      findingId: { type: "string" },
+      findingVersion: { type: "integer", minimum: 1 },
+      mergedIntoCandidateId: { type: "null" },
+    });
+    expect(retained!.properties.findingId).not.toHaveProperty("anyOf");
+    expect(retained!.properties.findingVersion).not.toHaveProperty("anyOf");
+    expect(pendingOrWithdrawn!.properties).toMatchObject({
+      findingId: { anyOf: [{ type: "string" }, { type: "null" }] },
+      mergedIntoCandidateId: { type: "null" },
+    });
+    expect(merged!.properties).toMatchObject({
+      status: { const: "merged" },
+      findingId: { anyOf: [{ type: "string" }, { type: "null" }] },
+      mergedIntoCandidateId: { type: "string" },
+    });
+    for (const branch of candidates.items.anyOf) {
+      expect(branch.additionalProperties).toBe(false);
+      expect(branch.required.toSorted()).toEqual(Object.keys(branch.properties).toSorted());
+    }
+  });
+
   it("rejects optional or open objects rather than silently weakening the protocol", () => {
     expect(() =>
       createInvestigationModelOutputSchema(

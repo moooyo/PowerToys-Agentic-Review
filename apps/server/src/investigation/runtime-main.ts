@@ -4,6 +4,11 @@ import fastifyStatic from "@fastify/static";
 import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import { buildInvestigationApp } from "./app.js";
+import { InvestigationAutomaticReplies } from "./auto-reply.js";
+import {
+  type AutomaticReplySettingsUpdate,
+  InvestigationAutomaticReplySettings,
+} from "./auto-reply-settings.js";
 import { requireCondition } from "./errors.js";
 import { InvestigationGitHubTransport } from "./github-transport.js";
 import { InvestigationRuntimeAuth } from "./runtime-auth.js";
@@ -57,7 +62,9 @@ export async function createInvestigationRuntime(
   let app: FastifyInstance | undefined;
   let reaper: NodeJS.Timeout | undefined;
   let webhook: InvestigationWebhookIntake | undefined;
+  let automaticReplies: InvestigationAutomaticReplies | undefined;
   const webhookShutdown = new AbortController();
+  const actionShutdown = new AbortController();
   try {
     auth = new InvestigationRuntimeAuth(config);
     await auth.initialize();
@@ -77,11 +84,25 @@ export async function createInvestigationRuntime(
         ? undefined
         : new InvestigationGitHubTransport({
             ...config.github,
+            fetch: (input, init) =>
+              globalThis.fetch(input, {
+                ...init,
+                signal: AbortSignal.any([
+                  actionShutdown.signal,
+                  ...(init?.signal == null ? [] : [init.signal]),
+                ]),
+              }),
             resolveSubject: async (id, repositoryId, workItemId) =>
               resolveInvestigationSubject(store, repositoryId, workItemId, id) ?? null,
           }));
     const webhookConfig = config.webhook;
     const runtimeAuth = auth;
+    const automaticReplySettings = new InvestigationAutomaticReplySettings(
+      store,
+      config.enableExternalWrites &&
+        actionTransport?.supportedActions.includes("comment") === true &&
+        actionTransport.readPublisherIdentity !== undefined,
+    );
     const webhookSettings = new InvestigationWebhookSettings(
       store,
       webhookConfig?.bindings ?? [],
@@ -96,6 +117,9 @@ export async function createInvestigationRuntime(
       resolvePlanPrerequisites: sourceImporter.resolvePlanPrerequisites,
       enableExternalWrites: config.enableExternalWrites,
       evidencePolicy: config.evidencePolicy,
+      onReportSealed: (report, task) => automaticReplies?.enqueue(report, task),
+      onRepositoryChanged: (previous, next) =>
+        automaticReplySettings.invalidateRepository(previous, next),
       ...(config.https === undefined ? {} : { https: config.https }),
       logger: dependencies.logger ?? {
         level: "info",
@@ -113,6 +137,77 @@ export async function createInvestigationRuntime(
         const params = Type.Object(
           { id: Type.String({ minLength: 1, maxLength: 256 }) },
           { additionalProperties: false },
+        );
+        const publisher = new InvestigationAutomaticReplies({
+          store,
+          settings: automaticReplySettings,
+          actions: service.actions,
+          resolveOperator: runtimeAuth.resolveOperator,
+          ...(actionTransport?.readPublisherIdentity === undefined
+            ? {}
+            : { resolvePublisherIdentity: () => actionTransport.readPublisherIdentity!() }),
+          enableExternalWrites: config.enableExternalWrites,
+          onError: (code) =>
+            ingressApp.log.error({ code }, "Automatic investigation reply needs attention."),
+        });
+        automaticReplies = publisher;
+        ingressApp.get<{ Params: { id: string } }>(
+          "/api/repositories/:id/auto-reply-settings",
+          { schema: { params } },
+          async (request, reply) => {
+            const actor = runtimeAuth.authenticateOperator(request);
+            requireCondition(
+              actor !== null,
+              401,
+              "operator_authentication_required",
+              "Operator authentication is required.",
+            );
+            reply.header("cache-control", "no-store");
+            return automaticReplySettings.read(actor, request.params.id);
+          },
+        );
+        ingressApp.put<{ Params: { id: string }; Body: AutomaticReplySettingsUpdate }>(
+          "/api/repositories/:id/auto-reply-settings",
+          {
+            schema: {
+              params,
+              body: Type.Object(
+                {
+                  version: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+                  enabled: Type.Boolean(),
+                  pullRequestTemplate: Type.String({ minLength: 1, maxLength: 12_000 }),
+                  issueTemplate: Type.String({ minLength: 1, maxLength: 12_000 }),
+                },
+                { additionalProperties: false },
+              ),
+            },
+          },
+          async (request, reply) => {
+            const actor = runtimeAuth.authenticateOperator(request);
+            requireCondition(
+              actor !== null,
+              401,
+              "operator_authentication_required",
+              "Operator authentication is required.",
+            );
+            reply.header("cache-control", "no-store");
+            return automaticReplySettings.update(actor, request.params.id, request.body);
+          },
+        );
+        ingressApp.get<{ Params: { id: string } }>(
+          "/api/repositories/:id/auto-replies",
+          { schema: { params } },
+          async (request, reply) => {
+            const actor = runtimeAuth.authenticateOperator(request);
+            requireCondition(
+              actor !== null,
+              401,
+              "operator_authentication_required",
+              "Operator authentication is required.",
+            );
+            reply.header("cache-control", "no-store");
+            return publisher.list(actor, request.params.id);
+          },
         );
         ingressApp.get<{ Params: { id: string } }>(
           "/api/repositories/:id/webhook-settings",
@@ -224,6 +319,8 @@ export async function createInvestigationRuntime(
       if (reaper !== undefined) clearInterval(reaper);
       webhookShutdown.abort();
       await webhook?.stop();
+      await automaticReplies?.stop();
+      actionShutdown.abort();
       try {
         runtimeAuth.close();
       } finally {
@@ -259,6 +356,7 @@ export async function createInvestigationRuntime(
     });
     await app.ready();
     webhook?.start();
+    automaticReplies?.start();
     reaper = setInterval(() => {
       try {
         runtimeAuth.reapExpired();

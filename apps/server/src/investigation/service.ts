@@ -103,6 +103,11 @@ interface IdempotencyRecord {
   digest: string;
   entityId: string;
 }
+interface CheckpointAcceptanceRecord {
+  digest: string;
+  checkpoint: InvestigationLoopCheckpointV1;
+  usageTokens?: number;
+}
 export interface InvestigationServiceOptions {
   store: InvestigationStore;
   actionTransport?: InvestigationActionTransport;
@@ -113,6 +118,11 @@ export interface InvestigationServiceOptions {
   maxReportBytes?: number;
   evidencePolicy?: Partial<InvestigationEvidencePolicy>;
   resolvePlanPrerequisites?: InvestigationPrerequisiteResolver;
+  onReportSealed?: (report: InvestigationResultV1, task: InvestigationTaskV1) => void;
+  onRepositoryChanged?: (
+    previous: InvestigationRepositoryRecord,
+    next: InvestigationRepositoryRecord,
+  ) => void;
   resolveTaskSource?: (
     repository: InvestigationRepositoryRecord,
     workItem: InvestigationWorkItemRecord,
@@ -236,7 +246,14 @@ export class InvestigationService {
       "repository_identity_conflict",
       "A repository registration cannot change its upstream identity.",
     );
-    this.store.put("repositories", repository.id, repository);
+    this.store.transaction(() => {
+      if (
+        previous !== undefined &&
+        investigationContentDigest(previous) !== investigationContentDigest(repository)
+      )
+        this.options.onRepositoryChanged?.(previous, repository);
+      this.store.put("repositories", repository.id, repository);
+    });
     return repository;
   }
   listWorkItems(actor: InvestigationOperatorPrincipal, query: InvestigationDirectoryQuery) {
@@ -1296,10 +1313,7 @@ export class InvestigationService {
     const checkpoint = this.required<InvestigationLoopCheckpointV1>("checkpoints", taskId);
     const key = `checkpoint:${record.attempt.id}:${request.kind}:${request.kind === "analysis" ? request.round.round : investigationContentDigest(request)}`;
     const digest = investigationContentDigest(request);
-    const accepted = this.store.get<{ digest: string; checkpoint: InvestigationLoopCheckpointV1 }>(
-      "idempotency",
-      key,
-    );
+    const accepted = this.store.get<CheckpointAcceptanceRecord>("idempotency", key);
     if (accepted !== undefined) {
       requireCondition(
         accepted.digest === digest,
@@ -1332,6 +1346,7 @@ export class InvestigationService {
       next = applyInvestigationLoopRound(checkpoint, request.round, {
         recordedAt: this.time(),
         usage: { ...request.usage, durationMs },
+        ...(request.modelIdentity === undefined ? {} : { modelIdentity: request.modelIdentity }),
         ...(request.sourceUnitIds === undefined ? {} : { sourceUnitIds: request.sourceUnitIds }),
       });
     } else if (request.kind === "source") {
@@ -1358,13 +1373,44 @@ export class InvestigationService {
         durationMs,
       });
     } else if (request.kind === "interrupt") {
-      next = interruptInvestigationLoop(
-        checkpoint,
-        request.reason,
-        this.time(),
-        request.diagnostics,
-        durationMs,
-      );
+      const acceptedAnalysis =
+        request.modelUsage === undefined
+          ? undefined
+          : this.store.get<CheckpointAcceptanceRecord>(
+              "idempotency",
+              `checkpoint:${record.attempt.id}:analysis:${request.modelUsage.round}`,
+            );
+      if (acceptedAnalysis !== undefined) {
+        requireCondition(
+          acceptedAnalysis.checkpoint.taskId === taskId &&
+            acceptedAnalysis.checkpoint.attemptId === record.attempt.id &&
+            acceptedAnalysis.checkpoint.round === request.modelUsage!.round,
+          409,
+          "model_usage_receipt_conflict",
+          "Accepted model usage must identify this task, attempt, and analysis round.",
+        );
+        requireCondition(
+          request.modelUsage!.tokens === null ||
+            acceptedAnalysis.usageTokens === undefined ||
+            acceptedAnalysis.usageTokens === request.modelUsage!.tokens,
+          409,
+          "model_usage_receipt_conflict",
+          "This accepted analysis round already has a different token usage receipt.",
+        );
+      }
+      // An accepted analysis response may have been lost after its atomic write. Its usage
+      // is already charged, and a completed checkpoint remains available for delivery.
+      next =
+        acceptedAnalysis !== undefined && checkpoint.stopReason === "complete"
+          ? checkpoint
+          : interruptInvestigationLoop(
+              checkpoint,
+              request.reason,
+              this.time(),
+              request.diagnostics,
+              durationMs,
+              acceptedAnalysis === undefined ? request.modelUsage : undefined,
+            );
     } else {
       requireCondition(
         task.executionPolicy.allowRepositoryExecution,
@@ -1471,7 +1517,11 @@ export class InvestigationService {
       );
       this.store.put("checkpoints", taskId, next);
       this.evidence.retainCheckpoint(next.runtime.artifacts);
-      this.store.insert("idempotency", key, { digest, checkpoint: next });
+      this.store.insert("idempotency", key, {
+        digest,
+        checkpoint: next,
+        ...(request.kind === "analysis" ? { usageTokens: request.usage.tokens } : {}),
+      });
     });
     return { checkpoint: next };
   }
@@ -1665,6 +1715,7 @@ export class InvestigationService {
           terminationReason: result.report.loop.stopReason,
         },
       });
+      this.options.onReportSealed?.(result, task);
     });
     return { reportRef: ref };
   }

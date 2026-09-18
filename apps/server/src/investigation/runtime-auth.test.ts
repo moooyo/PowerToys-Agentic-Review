@@ -8,6 +8,7 @@ import { InvestigationRuntimeAuth } from "../../dist/investigation/runtime-auth.
 import { loadInvestigationRuntimeConfig } from "../../dist/investigation/runtime-config.js";
 
 const applications: FastifyInstance[] = [];
+const authenticators = new WeakMap<FastifyInstance, InvestigationRuntimeAuth>();
 const origin = "http://127.0.0.1:8000";
 const host = "127.0.0.1:8000";
 const adminPassword = "Synthetic administrator password";
@@ -48,6 +49,7 @@ async function application(environment: Record<string, string> = {}, logs?: stri
           },
   });
   const auth = new InvestigationRuntimeAuth(config);
+  authenticators.set(app, auth);
   await auth.initialize();
   auth.registerRoutes(app);
   app.addHook("onClose", async () => auth.close());
@@ -341,6 +343,124 @@ describe("password-only browser authentication", () => {
       ).statusCode,
     ).toBe(401);
     await login(app, "fixture-admin", newPassword);
+  }, 20000);
+});
+
+describe("internal operator resolution", () => {
+  it("resolves current account grants without a browser session or implicit administrator permissions", async () => {
+    const app = await application();
+    const auth = authenticators.get(app)!;
+    const admin = await login(app);
+    const created = await post(
+      app,
+      "/api/accounts",
+      accountInput({
+        permissions: ["repository:manage", "action:prepare", "action:execute"],
+      }),
+      admin,
+    );
+    expect(created.statusCode).toBe(201);
+    const account = created.json<InvestigationAccount>();
+    const principal = auth.resolveOperator(account.id);
+    expect(principal).toEqual({
+      id: account.id,
+      username: account.username,
+      displayName: account.displayName,
+      isAdmin: false,
+      repositoryIds: ["repo-1"],
+      permissions: ["repository:manage", "action:prepare", "action:execute"],
+      actionCapabilities: ["comment"],
+      allowRepositoryExecution: false,
+    });
+    expect(auth.resolveOperator("missing-account")).toBeNull();
+    const user = await login(app, "fixture-user", userPassword);
+    expect(
+      (
+        await app.inject({ method: "GET", url: "/protected", headers: { host, cookie: user } })
+      ).json(),
+    ).toEqual(principal);
+    expect((await post(app, "/api/auth/logout", undefined, user)).statusCode).toBe(204);
+    expect(auth.resolveOperator(account.id)).toEqual(principal);
+    const accounts = await app.inject({
+      method: "GET",
+      url: "/api/accounts",
+      headers: { host, cookie: admin },
+    });
+    const administrator = accounts
+      .json<{ items: InvestigationAccount[] }>()
+      .items.find((entry) => entry.username === "fixture-admin")!;
+    expect(auth.resolveOperator(administrator.id)).toMatchObject({
+      isAdmin: true,
+      repositoryIds: [],
+      permissions: [],
+      actionCapabilities: [],
+    });
+  }, 20000);
+
+  it("immediately reflects revocation and disablement without retaining a cached principal", async () => {
+    const app = await application();
+    const auth = authenticators.get(app)!;
+    const admin = await login(app);
+    const created = await post(
+      app,
+      "/api/accounts",
+      accountInput({
+        permissions: ["repository:manage", "action:prepare", "action:execute"],
+      }),
+      admin,
+    );
+    expect(created.statusCode).toBe(201);
+    const account = created.json<InvestigationAccount>();
+    const first = auth.resolveOperator(account.id)!;
+    (first.repositoryIds as string[]).push("untrusted-repo");
+    (first.actionCapabilities as string[]).push("merge");
+    expect(auth.resolveOperator(account.id)).toMatchObject({
+      repositoryIds: ["repo-1"],
+      actionCapabilities: ["comment"],
+    });
+    const revoked = await post(
+      app,
+      `/api/accounts/${account.id}/update`,
+      updateInput(account, {
+        displayName: "Updated operator",
+        repositoryIds: ["repo-2"],
+        permissions: ["repository:manage"],
+        actionCapabilities: [],
+      }),
+      admin,
+    );
+    expect(revoked.statusCode).toBe(200);
+    const current = revoked.json<InvestigationAccount>();
+    expect(auth.resolveOperator(account.id)).toMatchObject({
+      displayName: "Updated operator",
+      repositoryIds: ["repo-2"],
+      permissions: ["repository:manage"],
+      actionCapabilities: [],
+    });
+    const disabled = await post(
+      app,
+      `/api/accounts/${account.id}/update`,
+      updateInput(current, {
+        enabled: false,
+      }),
+      admin,
+    );
+    expect(disabled.statusCode).toBe(200);
+    expect(auth.resolveOperator(account.id)).toBeNull();
+    const restored = await post(
+      app,
+      `/api/accounts/${account.id}/update`,
+      updateInput(disabled.json<InvestigationAccount>(), {
+        enabled: true,
+      }),
+      admin,
+    );
+    expect(restored.statusCode).toBe(200);
+    expect(auth.resolveOperator(account.id)).toMatchObject({
+      repositoryIds: ["repo-2"],
+      permissions: ["repository:manage"],
+      actionCapabilities: [],
+    });
   }, 20000);
 });
 

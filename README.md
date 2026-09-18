@@ -69,6 +69,19 @@ GitHub writes require a prepared and confirmed action intent. Unknown delivery i
 with read-only requests, not automatically resent. The default Server configuration disables
 external writes. Automated tests must not write to real PRs or issues; see [AGENTS.md](./AGENTS.md).
 
+Repositories can authorize automatic English conclusion comments for future completed PR and Issue
+investigations. Report sealing atomically queues the saved template and report reference. The
+Server verifies the publishing GitHub account, freezes the comment, and prepares and confirms it
+under that standing authorization, without per-report human review. Replies disclose the selected
+model and represented GitHub user. PR replies show Conclusion, Summary, Findings, and collapsed
+Details. Issue replies instead show Triage result and Next steps before collapsed Investigation
+details. Their short summary is part of the conclusion, and bug reports show an independent
+Runtime reproduction status. Information or verification requests remain visible. Current
+permissions, publisher identity, and target versions
+are rechecked before sending. See the
+[automatic reply setup](./apps/server/README.md#automatically-reply-with-investigation-results)
+and the [PR](./docs/templates/auto-reply-pr.md) and [Issue](./docs/templates/auto-reply-issue.md) templates.
+
 ## Configuration and development
 
 Use Node.js 24.20.x and pnpm 11.24.x. The Server uses `INVESTIGATION_*` configuration; the Worker

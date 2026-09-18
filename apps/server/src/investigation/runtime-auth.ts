@@ -66,6 +66,19 @@ function sessionResponse(session: AccountSession | null): InvestigationSession {
   };
 }
 
+function operatorPrincipal(account: InvestigationAccount): InvestigationOperatorPrincipal {
+  return {
+    id: account.id,
+    username: account.username,
+    displayName: account.displayName,
+    isAdmin: account.isAdmin,
+    repositoryIds: [...account.repositoryIds],
+    permissions: [...account.permissions],
+    actionCapabilities: [...account.actionCapabilities],
+    allowRepositoryExecution: account.allowRepositoryExecution,
+  };
+}
+
 function isLoopbackAddress(address: string): boolean {
   return address === "127.0.0.1" || address === "::ffff:127.0.0.1";
 }
@@ -152,17 +165,13 @@ export class InvestigationRuntimeAuth {
       return null;
     const session = this.#readSession(request);
     if (session === null) return null;
-    const account = session.account;
-    return {
-      id: account.id,
-      username: account.username,
-      displayName: account.displayName,
-      isAdmin: account.isAdmin,
-      repositoryIds: [...account.repositoryIds],
-      permissions: [...account.permissions],
-      actionCapabilities: [...account.actionCapabilities],
-      allowRepositoryExecution: account.allowRepositoryExecution,
-    };
+    return operatorPrincipal(session.account);
+  };
+
+  /** Resolves current account grants for authorized server work without creating a session. */
+  readonly resolveOperator = (id: string): InvestigationOperatorPrincipal | null => {
+    const account = this.#store.getAccount(id);
+    return account === null || !account.enabled ? null : operatorPrincipal(account);
   };
 
   readonly authenticateWorker = (request: FastifyRequest): InvestigationWorkerPrincipal | null => {

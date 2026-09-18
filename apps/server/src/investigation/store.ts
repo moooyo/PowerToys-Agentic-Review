@@ -206,12 +206,17 @@ export class InvestigationStore {
   }
 
   /** Reads a bounded namespace without deserializing unrelated idempotency records. */
-  pagePrefix<T>(collection: InvestigationCollection, prefix: string, limit: number): T[] {
+  pagePrefix<T>(
+    collection: InvestigationCollection,
+    prefix: string,
+    limit: number,
+    descending = false,
+  ): T[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
       throw new InvestigationStoreError("invalid_value", "Page size must be between 1 and 1,000.");
     return this.database
       .prepare(
-        `SELECT "value" FROM ${collectionName(collection)} WHERE "id" >= ? AND "id" < ? ORDER BY "id" LIMIT ?`,
+        `SELECT "value" FROM ${collectionName(collection)} WHERE "id" >= ? AND "id" < ? ORDER BY "id" ${descending ? "DESC" : "ASC"} LIMIT ?`,
       )
       .all(prefix, `${prefix}\uffff`, limit)
       .map((row) => JSON.parse(row.value as string) as T);
