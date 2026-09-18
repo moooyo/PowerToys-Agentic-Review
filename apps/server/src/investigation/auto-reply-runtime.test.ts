@@ -25,6 +25,7 @@ import {
   automaticReplyTemplateVersion,
   defaultAutomaticReplyTemplates,
 } from "../../dist/investigation/auto-reply-template.js";
+import { InvestigationCommentDeliveries } from "../../dist/investigation/comment-deliveries.js";
 import { InvestigationPasswordStore } from "../../dist/investigation/password-store.js";
 import type { ProgressReplyReceipt } from "../../dist/investigation/progress-reply.js";
 import {
@@ -733,6 +734,140 @@ async function assignmentTask(app: FastifyInstance, cookie: string): Promise<str
 }
 
 describe("automatic reply production runtime", () => {
+  it("parses HTTP numeric comment filters and paginates global and comment-scoped histories", async () => {
+    const context = await fixture({ assignment: true, pauseSource: true });
+    const { app, cookie, config } = context;
+    await enableAssignmentProgress(app, cookie);
+    expect((await app.inject(context.assignmentDelivery("issue"))).statusCode).toBe(202);
+    await context.sourceEntered;
+    let first!: InvestigationCommentDelivery;
+    await vi.waitFor(
+      async () => {
+        const history = await commentHistory(app, cookie);
+        expect(history.items).toHaveLength(1);
+        expect(history.items[0]?.state).toBe("succeeded");
+        first = history.items[0]!;
+      },
+      { timeout: 5_000, interval: 10 },
+    );
+    stored(config, (store) =>
+      store.transaction(() => {
+        const deliveries = new InvestigationCommentDeliveries({ store });
+        for (const number of [7, 5]) {
+          const delivery = deliveries.begin({
+            id: `numeric-query-delivery-${number}`,
+            commentId: number === 7 ? first.commentId : "numeric-query-second-comment",
+            mode: "progress",
+            repositoryId: repository.id,
+            repositoryFullName: repository.fullName,
+            workItemKind: "issue",
+            workItemNumber: number,
+            operation: number === 7 ? "update" : "create",
+            body: `Synthetic query fixture for target ${number}.`,
+            externalId: number === 7 ? first.externalId : null,
+            settingsVersion: first.settingsVersion,
+            templateVersion: first.templateVersion,
+            startedAt: new Date(Date.parse(first.startedAt) + (number === 7 ? 1 : 2)).toISOString(),
+          });
+          deliveries.finish(delivery.id, {
+            state: "succeeded",
+            externalId: number === 7 ? first.externalId : "1902",
+          });
+        }
+      }),
+    );
+    const onlyFive = await commentHistory(
+      app,
+      cookie,
+      `?repositoryId=${repository.id}&workItemNumber=5&limit=50`,
+    );
+    expect(onlyFive.items.map((entry) => entry.id)).toEqual(["numeric-query-delivery-5"]);
+    expect(onlyFive.items[0]?.workItemNumber).toBe(5);
+    const onlySeven = await commentHistory(
+      app,
+      cookie,
+      `?repositoryId=${repository.id}&workItemNumber=7&limit=50`,
+    );
+    expect(onlySeven.items).toHaveLength(2);
+    expect(onlySeven.items.every((entry) => entry.workItemNumber === 7)).toBe(true);
+    const globalFirst = await commentHistory(app, cookie, "?workItemNumber=7&limit=1");
+    expect(globalFirst.items).toHaveLength(1);
+    expect(globalFirst.nextCursor).not.toBeNull();
+    const globalSecond = await commentHistory(
+      app,
+      cookie,
+      `?workItemNumber=7&limit=1&cursor=${encodeURIComponent(globalFirst.nextCursor!)}`,
+    );
+    expect(globalSecond.items.map((entry) => entry.id)).toEqual([first.id]);
+    expect(globalSecond.nextCursor).toBeNull();
+    const attemptsPath = `/api/comments/${encodeURIComponent(first.commentId)}/attempts`;
+    const page = await get(app, `${attemptsPath}?limit=1`, cookie);
+    expect(page.statusCode, page.body).toBe(200);
+    const pageBody = page.json<{
+      items: InvestigationCommentDelivery[];
+      nextCursor: string | null;
+    }>();
+    expect(pageBody.items.map((entry) => entry.id)).toEqual(["numeric-query-delivery-7"]);
+    expect(pageBody.nextCursor).not.toBeNull();
+    const next = await get(
+      app,
+      `${attemptsPath}?limit=1&cursor=${encodeURIComponent(pageBody.nextCursor!)}`,
+      cookie,
+    );
+    expect(next.statusCode, next.body).toBe(200);
+    expect(next.json()).toMatchObject({ items: [{ id: first.id }], nextCursor: null });
+    const full = await get(app, `${attemptsPath}?limit=50`, cookie);
+    expect(full.statusCode, full.body).toBe(200);
+    expect(full.json().items).toHaveLength(2);
+  }, 20_000);
+
+  it("rejects invalid and repeated HTTP numeric comment query parameters without coercion", async () => {
+    const { app, cookie } = await fixture({ publisher: false });
+    const invalid = [
+      "0",
+      "-1",
+      "1.5",
+      "1e1",
+      "",
+      "%20",
+      "%205",
+      "5%20",
+      "5%0A",
+      "+5",
+      "01",
+      "9007199254740992",
+      "999999999999999999999",
+    ];
+    for (const value of invalid) {
+      const response = await get(app, `/api/comment-deliveries?workItemNumber=${value}`, cookie);
+      expect(response.statusCode, `workItemNumber=${value}: ${response.body}`).toBe(400);
+    }
+    for (const path of ["/api/comment-deliveries", "/api/comments/nonexistent-comment/attempts"]) {
+      for (const value of [...invalid, "51", "100"]) {
+        const response = await get(app, `${path}?limit=${value}`, cookie);
+        expect(response.statusCode, `${path}?limit=${value}: ${response.body}`).toBe(400);
+      }
+      for (const query of ["limit=1&limit=2", "limit=1&limit=1"]) {
+        const response = await get(app, `${path}?${query}`, cookie);
+        expect(response.statusCode, response.body).toBe(400);
+      }
+    }
+    for (const query of [
+      "workItemNumber=5&workItemNumber=7",
+      "workItemNumber=5&workItemNumber=5",
+    ]) {
+      const response = await get(app, `/api/comment-deliveries?${query}`, cookie);
+      expect(response.statusCode, response.body).toBe(400);
+    }
+    const maximum = await get(
+      app,
+      `/api/comment-deliveries?workItemNumber=${Number.MAX_SAFE_INTEGER}&limit=50`,
+      cookie,
+    );
+    expect(maximum.statusCode, maximum.body).toBe(200);
+    expect(maximum.json()).toEqual({ items: [], nextCursor: null });
+  });
+
   it.each([
     { kind: "issue", outcome: "completed" },
     { kind: "pull_request", outcome: "completed" },

@@ -26,13 +26,54 @@ export interface InvestigationCommentRoutesOptions {
 }
 
 const params = Type.Object({ id: EntityIdSchema }, { additionalProperties: false });
-const pageQuery = Type.Object(
+const positiveIntegerQuery = Type.String({
+  minLength: 1,
+  maxLength: 16,
+  pattern: "^[1-9][0-9]*(?![\\s\\S])",
+});
+const deliveryQuery = Type.Object(
   {
-    cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+    ...Type.Omit(InvestigationCommentDeliveryQuerySchema, ["workItemNumber", "limit"]).properties,
+    workItemNumber: Type.Optional(positiveIntegerQuery),
+    limit: Type.Optional(positiveIntegerQuery),
   },
   { additionalProperties: false },
 );
+const pageQuery = Type.Pick(deliveryQuery, ["cursor", "limit"]);
+type CommentDeliveryHttpQuery = Omit<
+  InvestigationCommentDeliveryQuery,
+  "workItemNumber" | "limit"
+> & {
+  workItemNumber?: string;
+  limit?: string;
+};
+
+/** Query parameters are strings; keep strict numeric validation local to these HTTP routes. */
+function deliveryQueryInput(query: CommentDeliveryHttpQuery): InvestigationCommentDeliveryQuery {
+  const integer = (value: string, maximum: number): number => {
+    const parsed = Number(value);
+    requireCondition(
+      typeof value === "string" &&
+        /^[1-9][0-9]*$/u.test(value) &&
+        String(parsed) === value &&
+        Number.isSafeInteger(parsed) &&
+        parsed > 0 &&
+        parsed <= maximum,
+      400,
+      "comment_delivery_query_invalid",
+      "Numeric comment query parameters must be canonical positive safe integers within their limits.",
+    );
+    return parsed;
+  };
+  const { workItemNumber, limit, ...filters } = query;
+  return {
+    ...filters,
+    ...(workItemNumber === undefined
+      ? {}
+      : { workItemNumber: integer(workItemNumber, Number.MAX_SAFE_INTEGER) }),
+    ...(limit === undefined ? {} : { limit: integer(limit, 50) }),
+  };
+}
 
 /** History reads never queue a network operation. Commands have independent capability guards. */
 export function registerInvestigationCommentRoutes(
@@ -55,15 +96,16 @@ export function registerInvestigationCommentRoutes(
       ? options.automaticReplies.getComment(principal, id)
       : options.progress.getComment(principal, id);
 
-  app.get<{ Querystring: InvestigationCommentDeliveryQuery }>(
+  app.get<{ Querystring: CommentDeliveryHttpQuery }>(
     "/api/comment-deliveries",
     {
       schema: {
-        querystring: InvestigationCommentDeliveryQuerySchema,
+        querystring: deliveryQuery,
         response: { 200: InvestigationCommentDeliveryListSchema },
       },
     },
-    async (request, reply) => options.deliveries.list(actor(request, reply), request.query),
+    async (request, reply) =>
+      options.deliveries.list(actor(request, reply), deliveryQueryInput(request.query)),
   );
 
   app.get<{ Querystring: { taskIds?: string; commentIds?: string; repositoryId?: string } }>(
@@ -139,7 +181,10 @@ export function registerInvestigationCommentRoutes(
     async (request, reply) => comment(actor(request, reply), request.params.id),
   );
 
-  app.get<{ Params: { id: string }; Querystring: { cursor?: string; limit?: number } }>(
+  app.get<{
+    Params: { id: string };
+    Querystring: Pick<CommentDeliveryHttpQuery, "cursor" | "limit">;
+  }>(
     "/api/comments/:id/attempts",
     {
       schema: {
@@ -150,8 +195,12 @@ export function registerInvestigationCommentRoutes(
     },
     async (request, reply) => {
       const principal = actor(request, reply);
+      const query = deliveryQueryInput(request.query);
       comment(principal, request.params.id);
-      return options.deliveries.list(principal, { ...request.query, commentId: request.params.id });
+      return options.deliveries.list(principal, {
+        ...query,
+        commentId: request.params.id,
+      });
     },
   );
 

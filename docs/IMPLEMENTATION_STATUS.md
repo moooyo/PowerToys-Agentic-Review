@@ -1,5 +1,17 @@
 # Implementation Status
 
+## Comment history HTTP query parsing, 2026-09-19
+
+A native-runtime rehearsal exposed that numeric URL query values were rejected by the server's
+strict request validation. Comment history routes now validate canonical decimal strings and
+explicitly convert bounded safe integers before passing them to the shared query contract.
+Both the global history and per-comment attempts endpoints accept numeric filters and page limits.
+Invalid, repeated, noncanonical, and out-of-range values remain rejected; global coercion stays off.
+The regression exercises real HTTP queries, filtering across two targets and both cursor paths.
+Remote Windows verification passed the 21-case automatic-reply runtime suite, including two new
+HTTP query regressions, plus Server build, type checking, and formatting checks. The failing
+rehearsal made no real GitHub requests and did not consume the approved live publication run.
+
 ## Comment delivery history and lifecycle integration, 2026-09-19
 
 The approved lifecycle design is implemented. Authorized assignments register their progress
