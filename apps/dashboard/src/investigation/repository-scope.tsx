@@ -56,6 +56,7 @@ export function InvestigationRepositorySelector({ fullWidth = false }: { fullWid
           parameters.delete("workItemId");
           parameters.delete("taskId");
           parameters.delete("reportId");
+          parameters.delete("commentId");
           navigate({ pathname: location.pathname, search: parameters.toString() });
         }}
         renderInput={(parameters) => (

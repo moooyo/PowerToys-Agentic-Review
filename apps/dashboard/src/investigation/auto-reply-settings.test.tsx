@@ -3,7 +3,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Repository, RepositoryAutoReply, RepositoryAutoReplySettings } from "./api";
+import type {
+  Repository,
+  RepositoryAutoReply,
+  RepositoryAutoReplySettings,
+  RepositoryProgressReply,
+} from "./api";
 import {
   AutoReplyDeliveryList,
   AutoReplySettingsConflictNotice,
@@ -11,18 +16,24 @@ import {
   autoRepliesQueryKey,
   autoReplyCommentUrl,
   autoReplySettingsQueryKey,
+  ProgressReplyDeliveryList,
+  progressRepliesQueryKey,
   RepositoryAutoReplySettingsPanel,
 } from "./auto-reply-settings";
 import {
+  autoReplyProgressStages,
+  autoReplyProgressTemplateTokens,
   autoReplySettingsFormValues,
   autoReplySettingsInput,
   autoReplySettingsPermissions,
   autoReplyTemplateTokens,
   issueAutoReplyTemplateTokens,
   submitAutoReplySettings,
+  validateAutoReplyProgressTemplate,
   validateAutoReplyTemplate,
 } from "./auto-reply-settings-form";
 import {
+  sampleAutoReplyProgressTemplates,
   sampleIssueAutoReplyTemplate,
   samplePullRequestAutoReplyTemplate,
 } from "./sample-auto-reply-templates";
@@ -45,9 +56,13 @@ const settings: RepositoryAutoReplySettings = {
   enabled: false,
   pullRequestTemplate: template,
   issueTemplate,
+  progressEnabled: false,
+  progressTemplates: { ...sampleAutoReplyProgressTemplates },
   version: 3,
   publisherConfigured: false,
   authorizedById: null,
+  authorizationEpoch: 0,
+  updatedById: null,
   updatedAt: null,
   templateVersion: 4,
 };
@@ -100,6 +115,29 @@ function delivery(overrides: Partial<RepositoryAutoReply> = {}): RepositoryAutoR
   };
 }
 
+function progressDelivery(
+  overrides: Partial<RepositoryProgressReply> = {},
+): RepositoryProgressReply {
+  return {
+    id: "progress-1",
+    reportId: null,
+    taskId: "task-1",
+    workItemId: "work-item-1",
+    workItemKind: "pull_request",
+    workItemNumber: 12,
+    stage: "received",
+    state: "pending",
+    body: null,
+    externalId: null,
+    reason: null,
+    settingsVersion: 3,
+    templateVersion: 4,
+    createdAt: "2026-09-16T09:00:00.000Z",
+    updatedAt: "2026-09-16T09:00:00.000Z",
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   context.session = {
     authenticated: true,
@@ -120,15 +158,20 @@ describe("repository automatic reply configuration", () => {
     expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
   });
 
-  it("shows English templates, future automatic comment authorization, and publisher status", () => {
+  it("shows English templates, update policy, and a separate comment history entry", () => {
     const queryClient = client();
     queryClient.setQueryData(autoReplySettingsQueryKey(repository.id), settings);
     queryClient.setQueryData(autoRepliesQueryKey(repository.id), { items: [] });
+    queryClient.setQueryData(progressRepliesQueryKey(repository.id), { items: [] });
     const html = renderPanel(queryClient);
     expect(html).toContain(repository.fullName);
     expect(html).toContain("No per-report");
     expect(html).toContain("confirmation");
-    expect(html).toContain("future completed PR and Issue investigations");
+    expect(html).toContain("completed PR and Issue investigations");
+    expect(html).toContain(
+      "Template changes apply to the next update, including active investigations",
+    );
+    expect(html).toContain("does not rewrite existing comments");
     expect(html).toContain("English reply templates");
     expect(html).toContain("AI identity");
     expect(html).toContain("verified GitHub publishing user");
@@ -142,10 +185,22 @@ describe("repository automatic reply configuration", () => {
     expect(html).toContain("Bug triage shows Runtime reproduction separately");
     expect(html).toContain("Next steps appear before collapsed Investigation details");
     expect(html).toContain("{{next_steps}}");
+    expect(html).toContain("Publish assignment task progress");
+    expect(html).toContain("updates that same comment when work starts, stops, or completes");
+    expect(html).toContain("also authorizes these comment updates");
+    expect(html).toContain("inserts the full PR or Issue reply");
+    expect(html).toContain("Received progress template");
+    expect(html).toContain("Started progress template");
+    expect(html).toContain("Stopped progress template");
+    expect(html).toContain("Completed progress template");
+    expect(html).toContain("{{trigger}}");
+    expect(html).toContain("{{result}}");
     expect(html).toContain("publisher is not configured yet");
     expect(html).toContain("Save automatic reply settings");
-    expect(html).toContain("Refresh deliveries");
-    expect(html).toContain("No automatic reply deliveries recorded");
+    expect(html).toContain("View comment deliveries");
+    expect(html).toContain("/comments?repositoryId=repo-selected");
+    expect(html).not.toContain("Recent automatic replies");
+    expect(html).not.toContain("Recent assignment progress");
     expect(html).not.toContain("Confirm publication");
     expect(html).not.toContain("Approve");
     expect(html).not.toContain("Merge");
@@ -168,7 +223,8 @@ describe("repository automatic reply configuration", () => {
           />
         </QueryClientProvider>,
       );
-    expect(renderForm(true, true)).toContain("Save and authorize automatic comments");
+    expect(renderForm(true, true)).toContain("Save automatic reply settings");
+    expect(renderForm(true, true)).toContain("Save and renew publishing authorization");
     expect(renderForm(true, true)).not.toContain("publisher is not configured yet");
     const reader = renderForm(false, false);
     expect(reader).toContain("Repository management permission is required");
@@ -179,7 +235,7 @@ describe("repository automatic reply configuration", () => {
     expect(manager).toContain("action preparation, action execution, and comment");
   });
 
-  it("shows independent loading and failed reads with a refresh operation", async () => {
+  it("shows loading and failed settings reads without loading historical snapshot lists", async () => {
     expect(renderPanel(client())).toContain("Loading automatic reply settings");
     const failed = client();
     await failed.prefetchQuery({
@@ -187,14 +243,157 @@ describe("repository automatic reply configuration", () => {
       queryFn: () => Promise.reject(new Error("Settings unavailable.")),
     });
     failed.setQueryData(autoRepliesQueryKey(repository.id), { items: [] });
+    await failed.prefetchQuery({
+      queryKey: progressRepliesQueryKey(repository.id),
+      queryFn: () => Promise.reject(new Error("Progress deliveries unavailable.")),
+    });
     const html = renderPanel(failed);
     expect(html).toContain("Settings unavailable.");
     expect(html).toContain("Retry automatic reply settings");
-    expect(html).toContain("No automatic reply deliveries recorded");
+    expect(html).not.toContain("Progress deliveries unavailable.");
+    expect(html).toContain("View comment deliveries");
+  });
+
+  it("requires enabled automatic replies and current authorization to toggle assignment progress", () => {
+    for (const [enabled, canManage, canAuthorize, expectedDisabled] of [
+      [false, true, true, true],
+      [true, false, true, true],
+      [true, true, false, true],
+      [true, true, true, false],
+    ] as const) {
+      const html = renderToStaticMarkup(
+        <QueryClientProvider client={client()}>
+          <AutoReplySettingsForm
+            repository={repository}
+            settings={{ ...settings, enabled, progressEnabled: enabled }}
+            canManage={canManage}
+            canAuthorize={canAuthorize}
+          />
+        </QueryClientProvider>,
+      );
+      const switches = [...html.matchAll(/<input\b[^>]*>/gu)]
+        .map((match) => match[0])
+        .filter((input) => input.includes('type="checkbox"'));
+      expect(switches).toHaveLength(2);
+      expect(switches[1]?.includes('disabled=""')).toBe(expectedDisabled);
+      if (enabled && canManage && canAuthorize) {
+        expect(html).toContain("Save automatic reply settings");
+      }
+    }
   });
 });
 
 describe("automatic reply input and authorization", () => {
+  it("renews publication authorization only through an explicit request", async () => {
+    const update = vi.fn().mockResolvedValue(settings);
+    await submitAutoReplySettings(
+      repository.id,
+      autoReplySettingsFormValues(settings),
+      settings,
+      false,
+      { canManage: true, canAuthorize: true },
+      update,
+      true,
+    );
+    expect(update).toHaveBeenCalledExactlyOnceWith(repository.id, {
+      ...autoReplySettingsInput(autoReplySettingsFormValues(settings), settings.version),
+      reauthorize: true,
+    });
+  });
+  it("requires the exact ordered progress placeholders without weakening the full-result template", () => {
+    for (const stage of autoReplyProgressStages) {
+      const progressTemplate = sampleAutoReplyProgressTemplates[stage];
+      const tokens = autoReplyProgressTemplateTokens[stage];
+      expect(() => validateAutoReplyProgressTemplate(progressTemplate, stage)).not.toThrow();
+      for (const token of tokens) {
+        expect(() =>
+          validateAutoReplyProgressTemplate(progressTemplate.replace(`{{${token}}}`, ""), stage),
+        ).toThrow("exactly once");
+        expect(() =>
+          validateAutoReplyProgressTemplate(`${progressTemplate}\n{{${token}}}`, stage),
+        ).toThrow("exactly once");
+      }
+      for (const invalid of ["{{other}}", "{{ trigger }}", "{{TRIGGER}}", "{{}}"])
+        expect(() =>
+          validateAutoReplyProgressTemplate(`${progressTemplate}\n${invalid}`, stage),
+        ).toThrow("unknown placeholder");
+      for (const invalid of ["{{broken", "broken}}"])
+        expect(() =>
+          validateAutoReplyProgressTemplate(`${progressTemplate}\n${invalid}`, stage),
+        ).toThrow("incomplete placeholder");
+      expect(() =>
+        validateAutoReplyProgressTemplate(
+          progressTemplate.replace("{{trigger}}", "{{{trigger}}}"),
+          stage,
+        ),
+      ).toThrow("exact {{token}}");
+      expect(() =>
+        validateAutoReplyProgressTemplate(
+          [...tokens]
+            .reverse()
+            .map((token) => `{{${token}}}`)
+            .join("\n"),
+          stage,
+        ),
+      ).toThrow("must order placeholders");
+      expect(() =>
+        validateAutoReplyProgressTemplate(progressTemplate.padEnd(12_000, " "), stage),
+      ).not.toThrow();
+      expect(() =>
+        validateAutoReplyProgressTemplate(progressTemplate.padEnd(12_001, " "), stage),
+      ).toThrow("12,000 UTF-8 bytes");
+      expect(() =>
+        validateAutoReplyProgressTemplate(`${progressTemplate}${"é".repeat(6_000)}`, stage),
+      ).toThrow("12,000 UTF-8 bytes");
+    }
+    expect(sampleAutoReplyProgressTemplates.completed).toContain("{{result}}");
+  });
+
+  it("accepts one leading status token only in progress templates", () => {
+    for (const stage of autoReplyProgressStages) {
+      const value = sampleAutoReplyProgressTemplates[stage];
+      expect(() =>
+        validateAutoReplyProgressTemplate(value.replace("{{status}}", "Current status"), stage),
+      ).not.toThrow();
+      expect(() => validateAutoReplyProgressTemplate(`${value}\n{{status}}`, stage)).toThrow(
+        "only once",
+      );
+      expect(() =>
+        validateAutoReplyProgressTemplate(
+          value.replace("{{status}}", "Status").replace("{{trigger}}", "{{trigger}}\n{{status}}"),
+          stage,
+        ),
+      ).toThrow("before {{trigger}}");
+    }
+    expect(() => validateAutoReplyTemplate(`${template}\n{{status}}`)).toThrow(
+      "unknown placeholder",
+    );
+  });
+
+  it("validates disabled progress settings and keeps nested form and submission snapshots isolated", () => {
+    const form = autoReplySettingsFormValues(settings);
+    expect(form.progressTemplates).not.toBe(settings.progressTemplates);
+    form.progressTemplates.received = form.progressTemplates.received.replace(
+      "## {{status}}",
+      "## Assignment acknowledged: {{status}}",
+    );
+    const input = autoReplySettingsInput(form, settings.version);
+    expect(input.progressTemplates).toEqual(form.progressTemplates);
+    expect(input.progressTemplates).not.toBe(form.progressTemplates);
+    expect(settings.progressTemplates.received).toContain("## {{status}}");
+    form.progressTemplates.received = "Changed after submission";
+    expect(input.progressTemplates?.received).toContain("## Assignment acknowledged");
+    expect(() => autoReplySettingsInput(form, settings.version)).toThrow(
+      "Received progress template",
+    );
+    expect(() =>
+      autoReplySettingsInput(
+        { ...autoReplySettingsFormValues(settings), progressEnabled: true },
+        3,
+      ),
+    ).toThrow("require automatic replies to be enabled");
+  });
+
   it("validates each placeholder exactly once, including the sample defaults", () => {
     expect(() => validateAutoReplyTemplate(template)).not.toThrow();
     expect(() => validateAutoReplyTemplate(samplePullRequestAutoReplyTemplate)).not.toThrow();
@@ -360,7 +559,9 @@ describe("automatic reply input and authorization", () => {
 
   it("saves both edited templates and preserves a conflict draft until explicit reload", async () => {
     const form = {
+      ...autoReplySettingsFormValues(settings),
       enabled: true,
+      progressEnabled: true,
       pullRequestTemplate: template.replace(
         "{{conclusion}}",
         "## Edited PR template\n{{conclusion}}",
@@ -369,6 +570,13 @@ describe("automatic reply input and authorization", () => {
         "{{conclusion}}",
         "## Edited Issue template\n{{conclusion}}",
       ),
+      progressTemplates: {
+        ...sampleAutoReplyProgressTemplates,
+        started: sampleAutoReplyProgressTemplates.started.replace(
+          "## {{status}}",
+          "## Work in progress: {{status}}",
+        ),
+      },
     };
     const permissions = { canManage: true, canAuthorize: true };
     const conflict = new InvestigationHttpError(409, "Settings changed.");
@@ -386,6 +594,7 @@ describe("automatic reply input and authorization", () => {
     expect(update).toHaveBeenCalledOnce();
     expect(form.pullRequestTemplate).toContain("Edited PR template");
     expect(form.issueTemplate).toContain("Edited Issue template");
+    expect(form.progressTemplates.started).toContain("## Work in progress");
     expect(settings.pullRequestTemplate).toBe(template);
     const latest = {
       ...settings,
@@ -412,6 +621,84 @@ describe("automatic reply input and authorization", () => {
 });
 
 describe("automatic reply delivery visibility", () => {
+  it("shows progress failures and uncertain edits before a report exists", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <ProgressReplyDeliveryList
+          repository={repository}
+          items={[
+            progressDelivery({
+              id: "progress-failed",
+              stage: "failed",
+              state: "failed",
+              reason: "The worker stopped before a conclusion was available.",
+            }),
+            progressDelivery({
+              stage: "started",
+              state: "unknown",
+              body: "## Saved progress\n<script>alert(1)</script>",
+              reason: "Update response lost.",
+            }),
+          ]}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("failed");
+    expect(html).toContain("started");
+    expect(html).toContain("The worker stopped before a conclusion was available.");
+    expect(html).toContain("Update response lost.");
+    expect(html).toContain("does not automatically resend an uncertain comment update");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("Open report");
+    expect(html).not.toContain("View GitHub comment");
+    expect(html).not.toContain("Retry delivery");
+  });
+
+  it("keeps the existing comment reachable when a progress update fails or becomes uncertain", () => {
+    for (const state of ["failed", "unknown"] as const) {
+      const reply = progressDelivery({ stage: "started", state, externalId: "987654321" });
+      expect(autoReplyCommentUrl(repository, reply)).toBe(
+        "https://github.com/owner/selected-repository/pull/12#issuecomment-987654321",
+      );
+      const html = renderToStaticMarkup(
+        <MemoryRouter>
+          <ProgressReplyDeliveryList repository={repository} items={[reply]} />
+        </MemoryRouter>,
+      );
+      expect(html).toContain("View GitHub comment");
+      expect(html).toContain("pull/12#issuecomment-987654321");
+      expect(html).not.toContain("Open report");
+    }
+  });
+
+  it("links completed progress reports and comments and orders progress by the latest update", () => {
+    const items = Array.from({ length: 21 }, (_, index) =>
+      progressDelivery({
+        id: `progress-${index}`,
+        body: `Unique progress body ${index}`,
+        updatedAt: `2026-09-16T09:${String(20 - index).padStart(2, "0")}:00.000Z`,
+      }),
+    );
+    items[0] = progressDelivery({
+      ...items[0],
+      stage: "completed",
+      state: "sent",
+      reportId: "report:progress",
+      externalId: "99999999999999999999",
+    });
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <ProgressReplyDeliveryList repository={repository} items={items} />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("Showing the 20 most recent deliveries");
+    expect(html).toContain("Unique progress body 0");
+    expect(html).not.toContain("Unique progress body 20");
+    expect(html).toContain("completed");
+    expect(html).toContain("/reports?reportId=report%3Aprogress&amp;repositoryId=repo-selected");
+    expect(html).toContain("pull/12#issuecomment-99999999999999999999");
+  });
+
   it("shows frozen content and uncertain delivery without a resend or confirmation control", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>

@@ -6,6 +6,11 @@ import {
   InvestigationArtifactMetadataV1Schema,
   InvestigationAttemptV1Schema,
   type InvestigationBudget,
+  type InvestigationCommentCommand,
+  InvestigationCommentDeliveryListSchema,
+  type InvestigationCommentDeliveryQuery,
+  InvestigationCommentPublicationListSchema,
+  InvestigationCommentPublicationSummarySchema,
   type InvestigationCreateActionIntentRequest,
   type InvestigationCreateTaskRequestV1,
   InvestigationFindingsPageV1Schema,
@@ -60,14 +65,28 @@ export type UpdateRepositoryWebhookSettingsInput = Pick<
   "version" | "enabled" | "reviewerUserId" | "allowedActorUserIds"
 >;
 
+export const RepositoryAutoReplyProgressTemplatesSchema = object({
+  received: Type.String({ minLength: 1 }),
+  started: Type.String({ minLength: 1 }),
+  failed: Type.String({ minLength: 1 }),
+  completed: Type.String({ minLength: 1 }),
+});
+export type RepositoryAutoReplyProgressTemplates = Static<
+  typeof RepositoryAutoReplyProgressTemplatesSchema
+>;
+
 export const RepositoryAutoReplySettingsSchema = object({
   repositoryId: EntityIdSchema,
   enabled: Type.Boolean(),
+  progressEnabled: Type.Boolean(),
+  progressTemplates: RepositoryAutoReplyProgressTemplatesSchema,
   version: Type.Integer({ minimum: 0 }),
   pullRequestTemplate: Type.String({ minLength: 1 }),
   issueTemplate: Type.String({ minLength: 1 }),
   publisherConfigured: Type.Boolean(),
   authorizedById: Type.Union([EntityIdSchema, Type.Null()]),
+  authorizationEpoch: Type.Integer({ minimum: 0 }),
+  updatedById: Type.Union([EntityIdSchema, Type.Null()]),
   updatedAt: Type.Union([DateTimeSchema, Type.Null()]),
   templateVersion: Type.Integer({ minimum: 1 }),
 });
@@ -75,7 +94,10 @@ export type RepositoryAutoReplySettings = Static<typeof RepositoryAutoReplySetti
 export type UpdateRepositoryAutoReplySettingsInput = Pick<
   RepositoryAutoReplySettings,
   "version" | "enabled" | "pullRequestTemplate" | "issueTemplate"
->;
+> &
+  Partial<Pick<RepositoryAutoReplySettings, "progressEnabled" | "progressTemplates">> & {
+    reauthorize?: boolean;
+  };
 
 export const RepositoryAutoReplySchema = object({
   id: EntityIdSchema,
@@ -104,6 +126,37 @@ export const RepositoryAutoReplySchema = object({
 });
 export type RepositoryAutoReply = Static<typeof RepositoryAutoReplySchema>;
 
+export const RepositoryProgressReplySchema = object({
+  id: EntityIdSchema,
+  reportId: Type.Union([EntityIdSchema, Type.Null()]),
+  taskId: EntityIdSchema,
+  workItemId: EntityIdSchema,
+  workItemKind: Type.Union([Type.Literal("pull_request"), Type.Literal("issue")]),
+  workItemNumber: Type.Integer({ minimum: 1 }),
+  stage: Type.Union([
+    Type.Literal("received"),
+    Type.Literal("started"),
+    Type.Literal("failed"),
+    Type.Literal("completed"),
+  ]),
+  state: Type.Union([
+    Type.Literal("pending"),
+    Type.Literal("sending"),
+    Type.Literal("sent"),
+    Type.Literal("blocked"),
+    Type.Literal("failed"),
+    Type.Literal("unknown"),
+  ]),
+  body: Type.Union([Type.String(), Type.Null()]),
+  externalId: Type.Union([Type.String(), Type.Null()]),
+  reason: Type.Union([Type.String(), Type.Null()]),
+  settingsVersion: Type.Integer({ minimum: 1 }),
+  templateVersion: Type.Integer({ minimum: 1 }),
+  createdAt: DateTimeSchema,
+  updatedAt: DateTimeSchema,
+});
+export type RepositoryProgressReply = Static<typeof RepositoryProgressReplySchema>;
+
 export const TaskDetailSchema = object({
   task: InvestigationTaskV1Schema,
   attempts: Type.Array(InvestigationAttemptV1Schema),
@@ -115,9 +168,59 @@ export type TaskDetail = Static<typeof TaskDetailSchema>;
 
 export type CreateTaskInput = InvestigationCreateTaskRequestV1;
 export type PrepareActionInput = InvestigationCreateActionIntentRequest;
+export interface CommentSummaryQuery {
+  repositoryId?: string;
+  taskIds?: string[];
+  commentIds?: string[];
+}
 
 export function createInvestigationApi(transport: InvestigationTransport) {
   return {
+    commentDeliveries: (query: InvestigationCommentDeliveryQuery = {}) =>
+      transport(
+        `/api/comment-deliveries${queryString(query)}`,
+        InvestigationCommentDeliveryListSchema,
+      ),
+    comments: (query: CommentSummaryQuery = {}) =>
+      transport(
+        `/api/comments${queryString({
+          repositoryId: query.repositoryId,
+          taskIds: query.taskIds?.join(","),
+          commentIds: query.commentIds?.join(","),
+        })}`,
+        InvestigationCommentPublicationListSchema,
+      ),
+    comment: (id: string) =>
+      transport(
+        `/api/comments/${encodeURIComponent(id)}`,
+        InvestigationCommentPublicationSummarySchema,
+      ),
+    commentAttempts: (
+      id: string,
+      query: Pick<InvestigationCommentDeliveryQuery, "cursor" | "limit"> = {},
+    ) =>
+      transport(
+        `/api/comments/${encodeURIComponent(id)}/attempts${queryString(query)}`,
+        InvestigationCommentDeliveryListSchema,
+      ),
+    syncComment: (id: string, input: InvestigationCommentCommand) =>
+      transport(
+        `/api/comments/${encodeURIComponent(id)}/sync`,
+        InvestigationCommentPublicationSummarySchema,
+        {
+          method: "POST",
+          body: input,
+        },
+      ),
+    reconcileComment: (id: string, input: InvestigationCommentCommand) =>
+      transport(
+        `/api/comments/${encodeURIComponent(id)}/reconcile`,
+        InvestigationCommentPublicationSummarySchema,
+        {
+          method: "POST",
+          body: input,
+        },
+      ),
     repositories: () =>
       transport("/api/repositories", object({ items: Type.Array(RepositorySchema) })),
     repositoryWebhookSettings: (repositoryId: string) =>
@@ -152,6 +255,11 @@ export function createInvestigationApi(transport: InvestigationTransport) {
       transport(
         `/api/repositories/${encodeURIComponent(repositoryId)}/auto-replies`,
         object({ items: Type.Array(RepositoryAutoReplySchema) }),
+      ),
+    repositoryProgressReplies: (repositoryId: string) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/progress-replies`,
+        object({ items: Type.Array(RepositoryProgressReplySchema) }),
       ),
     workItems: (repositoryId?: string, kind?: "pull_request" | "issue") =>
       transport(

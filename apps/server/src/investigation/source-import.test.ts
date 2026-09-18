@@ -5,11 +5,13 @@ import { join } from "node:path";
 import { createCanonicalResult } from "@agentic-review/codex";
 import {
   createInvestigationPreview as createInvestigationFixture,
+  type InvestigationInputSnapshotV1,
   type InvestigationTaskV1,
 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   bindInvestigationPlanExecution,
+  type InvestigationProgressCommentClassifier,
   InvestigationSourceImporter,
   type InvestigationTrustedExecutionBinding,
   loadInvestigationExecutionBindings,
@@ -42,6 +44,7 @@ function harness(
     comments?: number;
     maximumBytes?: number;
     maximumPages?: number;
+    classifyProgressComment?: InvestigationProgressCommentClassifier;
     override?: (
       path: string,
       ordinal: number,
@@ -124,6 +127,9 @@ function harness(
     fetch,
     ...(options.maximumBytes === undefined ? {} : { maximumBytes: options.maximumBytes }),
     ...(options.maximumPages === undefined ? {} : { maximumPages: options.maximumPages }),
+    ...(options.classifyProgressComment === undefined
+      ? {}
+      : { classifyProgressComment: options.classifyProgressComment }),
   });
   return { store, importer, calls, upstream };
 }
@@ -186,6 +192,171 @@ describe("read-only GitHub source import", () => {
         .update(`${"b".repeat(40)}\0${sha}`)
         .digest("hex"),
     });
+  });
+
+  it.each(["issue", "pull_request"] as const)(
+    "annotates trusted progress publications without changing the complete %s conversation",
+    async (kind) => {
+      const body = "Complete progress body\n<!-- agentic-review-progress:publication-1 -->";
+      const provenance = {
+        kind: "agentic_review_progress" as const,
+        publicationId: "publication-1",
+      };
+      const issueUrl = "https://api.github.com/repos/fixture/repository/issues/7";
+      const commentIdentity = { user: { id: 55 }, issue_url: issueUrl };
+      const sourceComments = [
+        { id: 1, body, ...commentIdentity },
+        { id: 2, body, ...commentIdentity, provenance },
+        {
+          id: 3,
+          body: "Complete independent reporter comment\nwith more details.",
+          user: { id: 99 },
+          issue_url: issueUrl,
+        },
+        { id: 4, body: null, ...commentIdentity },
+      ];
+      const classified: Parameters<InvestigationProgressCommentClassifier>[] = [];
+      const { store, importer, calls } = harness({
+        kind,
+        comments: sourceComments.length,
+        classifyProgressComment: (...args) => {
+          classified.push(args);
+          return args[2].externalId === "1" ? provenance : undefined;
+        },
+        override: (path) => {
+          if (path === "/repos/fixture/repository/issues/7/comments?per_page=100&page=1")
+            return Response.json(sourceComments);
+          if (path === "/repos/fixture/repository/pulls/7/comments?per_page=100&page=1")
+            return Response.json([{ id: 301, body, ...commentIdentity, provenance }]);
+          if (path === "/repos/fixture/repository/pulls/7/reviews?per_page=100&page=1")
+            return Response.json([{ id: 401, body, ...commentIdentity, provenance }]);
+          return undefined;
+        },
+      });
+      const imported = await importer.importWorkItem(operator, repository.id, { kind, number: 7 });
+      const comments = [
+        { id: "issue-comment:1", body, provenance },
+        { id: "issue-comment:2", body },
+        { id: "issue-comment:3", body: sourceComments[2]!.body },
+        { id: "issue-comment:4", body: "" },
+        ...(kind === "pull_request"
+          ? [
+              { id: "review-comment:301", body },
+              { id: "review:401", body },
+            ]
+          : []),
+      ];
+      expect(imported.commentsCount).toBe(comments.length);
+      expect(classified).toEqual(
+        sourceComments.map((comment) => [
+          repository,
+          { kind, number: 7, githubWorkItemId: 77 },
+          {
+            externalId: String(comment.id),
+            authorUserId: comment.user.id,
+            body: comment.body ?? "",
+            issueUrl,
+          },
+        ]),
+      );
+      expect(
+        store.get<{ inputSnapshot: InvestigationInputSnapshotV1 }>(
+          "sourceSnapshots",
+          imported.snapshotRef.id,
+        )?.inputSnapshot.comments,
+      ).toEqual(comments);
+      const { task: baseTask } = createInvestigationFixture("bug");
+      const prepared = await importer.prepareTaskInput(
+        {
+          ...baseTask,
+          repository,
+          workItem: imported.workItem,
+          subjectRef: imported.workItem.subject.id,
+          subjects: [imported.workItem.subject],
+        },
+        imported.workItem,
+        null,
+        operator,
+      );
+      expect(prepared.inputSnapshot.comments).toEqual(comments);
+      expect(calls.every((call) => call.method === "GET")).toBe(true);
+    },
+  );
+
+  it("does not infer trusted provenance from an imported marker or metadata", async () => {
+    const body = "Copied progress body\n<!-- agentic-review-progress:publication-1 -->";
+    const { importer, store } = harness({
+      comments: 1,
+      override: (path) =>
+        path === "/repos/fixture/repository/issues/7/comments?per_page=100&page=1"
+          ? Response.json([
+              {
+                id: 1,
+                body,
+                user: { id: 55 },
+                issue_url: "https://api.github.com/repos/fixture/repository/issues/7",
+                provenance: { kind: "agentic_review_progress", publicationId: "publication-1" },
+              },
+            ])
+          : undefined,
+    });
+    const imported = await importer.importWorkItem(operator, repository.id, {
+      kind: "issue",
+      number: 7,
+    });
+    expect(
+      store.get<{ inputSnapshot: InvestigationInputSnapshotV1 }>(
+        "sourceSnapshots",
+        imported.snapshotRef.id,
+      )?.inputSnapshot.comments,
+    ).toEqual([{ id: "issue-comment:1", body }]);
+  });
+
+  it("preserves comments with missing or invalid optional classification identities", async () => {
+    const issueUrl = "https://api.github.com/repos/fixture/repository/issues/7";
+    const identities = [
+      { issue_url: issueUrl },
+      { user: null, issue_url: issueUrl },
+      { user: [], issue_url: issueUrl },
+      { user: {}, issue_url: issueUrl },
+      { user: { id: 0 }, issue_url: issueUrl },
+      { user: { id: "55" }, issue_url: issueUrl },
+      { user: { id: Number.MAX_SAFE_INTEGER + 1 }, issue_url: issueUrl },
+      { user: { id: 55 } },
+      { user: { id: 55 }, issue_url: "" },
+      { user: { id: 55 }, issue_url: 7 },
+    ];
+    const sourceComments = identities.map((identity, index) => ({
+      id: index + 1,
+      body: `Complete unclassified comment ${index + 1}`,
+      ...identity,
+    }));
+    const { importer, store } = harness({
+      comments: sourceComments.length,
+      classifyProgressComment: () => {
+        throw new Error("Incomplete identities must not be classified.");
+      },
+      override: (path) =>
+        path === "/repos/fixture/repository/issues/7/comments?per_page=100&page=1"
+          ? Response.json(sourceComments)
+          : undefined,
+    });
+    const imported = await importer.importWorkItem(operator, repository.id, {
+      kind: "issue",
+      number: 7,
+    });
+    expect(imported.commentsCount).toBe(sourceComments.length);
+    expect(
+      store.get<{ inputSnapshot: InvestigationInputSnapshotV1 }>(
+        "sourceSnapshots",
+        imported.snapshotRef.id,
+      )?.inputSnapshot.comments,
+    ).toEqual(
+      sourceComments.map((comment) => ({
+        id: `issue-comment:${comment.id}`,
+        body: comment.body,
+      })),
+    );
   });
 
   it("checks repository identity and operator scope before saving source", async () => {

@@ -22,8 +22,11 @@ import {
   type Repository,
   type RepositoryAutoReply,
   type RepositoryAutoReplySettings,
+  type RepositoryProgressReply,
 } from "./api";
 import {
+  autoReplyProgressStages,
+  autoReplyProgressTemplateTokens,
   autoReplySettingsFormValues,
   autoReplySettingsPermissions,
   autoReplyTemplateTokens,
@@ -41,6 +44,17 @@ export const autoRepliesQueryKey = (repositoryId: string) => [
   "investigation-auto-replies",
   repositoryId,
 ];
+export const progressRepliesQueryKey = (repositoryId: string) => [
+  "investigation-progress-replies",
+  repositoryId,
+];
+
+const progressTemplateLabels = {
+  received: "Received progress template",
+  started: "Started progress template",
+  failed: "Stopped progress template",
+  completed: "Completed progress template",
+} as const;
 
 export function AutoReplySettingsConflictNotice() {
   return (
@@ -75,8 +89,8 @@ export function AutoReplySettingsForm({
     setConflict(false);
     queryClient.setQueryData(autoReplySettingsQueryKey(repository.id), value);
   };
-  const save = async (event: FormEvent) => {
-    event.preventDefault();
+  const save = async (event?: FormEvent, reauthorize = false) => {
+    event?.preventDefault();
     if (!canManage || busy || conflict || (form.enabled && !canAuthorize)) return;
     setBusy(true);
     setError(undefined);
@@ -89,14 +103,18 @@ export function AutoReplySettingsForm({
         conflict,
         { canManage, canAuthorize },
         investigationApi.updateRepositoryAutoReplySettings,
+        reauthorize,
       );
       acceptSettings(updated);
       setMessage(
         updated.enabled
-          ? "Automatic comments are authorized for future completed PR and Issue investigations."
+          ? updated.progressEnabled
+            ? "Settings saved. New progress updates use the latest templates, including updates to active investigations."
+            : "Settings saved. New conclusion comments use the latest templates."
           : "Automatic replies are disabled. Settings saved.",
       );
-      void queryClient.invalidateQueries({ queryKey: autoRepliesQueryKey(repository.id) });
+      void queryClient.invalidateQueries({ queryKey: ["investigation-comments"] });
+      void queryClient.invalidateQueries({ queryKey: ["investigation-comment"] });
     } catch (cause) {
       if (cause instanceof InvestigationHttpError && cause.status === 409) setConflict(true);
       setError(
@@ -138,9 +156,19 @@ export function AutoReplySettingsForm({
           />
         </Stack>
         <Typography variant="body2" color="text.secondary">
-          Automatically comment on future completed PR and Issue investigations. No per-report
-          confirmation. Saving with automatic replies enabled authorizes English conclusion comments
-          in {repository.fullName} using these templates.
+          Automatically comment on completed PR and Issue investigations. No per-report
+          confirmation. Enabling automatic replies authorizes English conclusion comments in{" "}
+          {repository.fullName} using these templates.
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          Assignment progress creates one comment when an assignment is accepted, explains the
+          trigger, and updates that same comment when work starts, stops, or completes. Enabling
+          assignment progress also authorizes these comment updates in {repository.fullName}.
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          Template changes apply to the next update, including active investigations. Saving does
+          not rewrite existing comments or add comments to earlier tasks. Retries keep the original
+          prepared body. Disabling replies pauses publication.
         </Typography>
         {!saved.publisherConfigured && (
           <Alert severity="info">
@@ -160,12 +188,25 @@ export function AutoReplySettingsForm({
               checked={form.enabled}
               disabled={!canManage || busy || (!canAuthorize && !form.enabled)}
               onChange={(_, enabled) => {
-                setForm({ ...form, enabled });
+                setForm({ ...form, enabled, progressEnabled: enabled && form.progressEnabled });
                 setMessage(undefined);
               }}
             />
           }
           label="Automatically publish investigation conclusions"
+        />
+        <FormControlLabel
+          control={
+            <Switch
+              checked={form.progressEnabled}
+              disabled={!form.enabled || !canManage || !canAuthorize || busy}
+              onChange={(_, progressEnabled) => {
+                setForm({ ...form, progressEnabled });
+                setMessage(undefined);
+              }}
+            />
+          }
+          label="Publish assignment task progress"
         />
         <Accordion variant="outlined" disableGutters>
           <AccordionSummary expandIcon={<span aria-hidden="true">+</span>}>
@@ -221,13 +262,54 @@ export function AutoReplySettingsForm({
                 maxRows={18}
                 helperText="Used for Issue triage. The summary is included in Triage result, without a separate Summary section. Bug triage shows Runtime reproduction separately. Next steps appear before collapsed Investigation details and cover missing information, validation, or relevant duplicate and fix references."
               />
+              <Divider />
+              <Typography variant="subtitle2">Assignment progress templates</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Keep each listed placeholder exactly once and in order. The optional {"{{status}}"}{" "}
+                may appear once before {"{{trigger}}"}; it distinguishes waiting, interruption,
+                cancellation, and failure. The trigger explains the assignment, updated_at shows the
+                update time, and failure describes why work stopped. The completed template inserts
+                the full PR or Issue reply into result. The server adds the AI identity statement
+                and verified publishing account to every progress comment; do not add an identity
+                placeholder here. Each template may contain up to 12,000 UTF-8 bytes.
+              </Typography>
+              {autoReplyProgressStages.map((stage) => (
+                <Box key={stage}>
+                  <Box component="code" sx={{ typography: "body2", overflowWrap: "anywhere" }}>
+                    {autoReplyProgressTemplateTokens[stage]
+                      .map((token) => `{{${token}}}`)
+                      .join(" · ")}
+                  </Box>
+                  <TextField
+                    label={progressTemplateLabels[stage]}
+                    value={form.progressTemplates[stage]}
+                    onChange={(event) => {
+                      setForm({
+                        ...form,
+                        progressTemplates: {
+                          ...form.progressTemplates,
+                          [stage]: event.target.value,
+                        },
+                      });
+                      setMessage(undefined);
+                    }}
+                    disabled={!canManage || busy}
+                    fullWidth
+                    multiline
+                    minRows={5}
+                    maxRows={14}
+                    sx={{ mt: 1 }}
+                  />
+                </Box>
+              ))}
             </Stack>
           </AccordionDetails>
         </Accordion>
         {saved.authorizedById && (
           <Typography variant="caption" color="text.secondary">
             Authorized by account {saved.authorizedById}. Settings version {saved.version}; template
-            format version {saved.templateVersion}.
+            format version {saved.templateVersion}. Last edited by{" "}
+            {saved.updatedById ?? "an unavailable account"}.
           </Typography>
         )}
         {!canManage && (
@@ -253,9 +335,19 @@ export function AutoReplySettingsForm({
             >
               {busy
                 ? "Working…"
-                : form.enabled
-                  ? "Save and authorize automatic comments"
+                : form.enabled && (!saved.enabled || form.progressEnabled !== saved.progressEnabled)
+                  ? form.progressEnabled
+                    ? "Save and authorize comments and progress updates"
+                    : "Save and authorize automatic comments"
                   : "Save automatic reply settings"}
+            </Button>
+          )}
+          {saved.enabled && canAuthorize && (
+            <Button
+              disabled={busy || conflict || !form.enabled}
+              onClick={() => void save(undefined, true)}
+            >
+              Save and renew publishing authorization
             </Button>
           )}
           <Button disabled={busy} onClick={() => void reload()}>
@@ -279,9 +371,13 @@ const stateColors = {
 
 export function autoReplyCommentUrl(
   repository: Repository,
-  reply: RepositoryAutoReply,
+  reply: RepositoryAutoReply | RepositoryProgressReply,
 ): string | null {
-  if (reply.state !== "sent" || !reply.externalId || !/^[1-9][0-9]*$/u.test(reply.externalId))
+  if (
+    (!("stage" in reply) && reply.state !== "sent") ||
+    !reply.externalId ||
+    !/^[1-9][0-9]*$/u.test(reply.externalId)
+  )
     return null;
   if (
     !/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/u.test(repository.fullName) ||
@@ -299,16 +395,42 @@ export function AutoReplyDeliveryList({
   repository: Repository;
   items: RepositoryAutoReply[];
 }) {
+  return <ReplyDeliveryList repository={repository} items={items} progress={false} />;
+}
+
+export function ProgressReplyDeliveryList({
+  repository,
+  items,
+}: {
+  repository: Repository;
+  items: RepositoryProgressReply[];
+}) {
+  return <ReplyDeliveryList repository={repository} items={items} progress />;
+}
+
+function ReplyDeliveryList({
+  repository,
+  items,
+  progress,
+}: {
+  repository: Repository;
+  items: (RepositoryAutoReply | RepositoryProgressReply)[];
+  progress: boolean;
+}) {
   const latest = [...items]
     .sort(
       (left, right) =>
-        right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+        (progress
+          ? right.updatedAt.localeCompare(left.updatedAt)
+          : right.createdAt.localeCompare(left.createdAt)) || right.id.localeCompare(left.id),
     )
     .slice(0, 20);
   if (latest.length === 0) {
     return (
       <Typography variant="body2" color="text.secondary">
-        No automatic reply deliveries recorded.
+        {progress
+          ? "No assignment progress deliveries recorded."
+          : "No automatic reply deliveries recorded."}
       </Typography>
     );
   }
@@ -328,14 +450,17 @@ export function AutoReplyDeliveryList({
                 <Typography variant="subtitle2">
                   {reply.workItemKind === "pull_request" ? "PR" : "Issue"} #{reply.workItemNumber}
                 </Typography>
+                {"stage" in reply && <Chip size="small" variant="outlined" label={reply.stage} />}
                 <Chip size="small" label={reply.state} color={stateColors[reply.state]} />
-                <Button
-                  size="small"
-                  component={Link}
-                  to={`/reports?reportId=${encodeURIComponent(reply.reportId)}&repositoryId=${encodeURIComponent(repository.id)}`}
-                >
-                  Open report
-                </Button>
+                {reply.reportId !== null && (
+                  <Button
+                    size="small"
+                    component={Link}
+                    to={`/reports?reportId=${encodeURIComponent(reply.reportId)}&repositoryId=${encodeURIComponent(repository.id)}`}
+                  >
+                    Open report
+                  </Button>
+                )}
                 {commentUrl && (
                   <Button
                     size="small"
@@ -355,8 +480,9 @@ export function AutoReplyDeliveryList({
               {reply.reason && <Typography variant="body2">{reply.reason}</Typography>}
               {reply.state === "unknown" && (
                 <Alert severity="warning">
-                  Delivery is uncertain and needs reconciliation. The server does not automatically
-                  send the comment again.
+                  {progress
+                    ? "Progress delivery is uncertain and needs reconciliation. The server does not automatically resend an uncertain comment update."
+                    : "Delivery is uncertain and needs reconciliation. The server does not automatically send the comment again."}
                 </Alert>
               )}
               {reply.body !== null && (
@@ -366,8 +492,9 @@ export function AutoReplyDeliveryList({
                   </AccordionSummary>
                   <AccordionDetails>
                     <Typography variant="caption" color="text.secondary">
-                      This is the saved delivery body. Publication does not require per-report
-                      confirmation.
+                      {progress
+                        ? "This is the saved progress comment body for the recorded stage."
+                        : "This is the saved delivery body. Publication does not require per-report confirmation."}
                     </Typography>
                     <Box
                       component="pre"
@@ -419,12 +546,6 @@ function ScopedAutoReplySettingsPanel({
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
-  const deliveries = useQuery({
-    queryKey: autoRepliesQueryKey(repository.id),
-    queryFn: () => investigationApi.repositoryAutoReplies(repository.id),
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-  });
   return (
     <Accordion variant="outlined" disableGutters sx={{ mt: 2 }}>
       <AccordionSummary expandIcon={<span aria-hidden="true">+</span>}>
@@ -463,23 +584,17 @@ function ScopedAutoReplySettingsPanel({
             />
           )}
           <Divider />
-          <Stack
-            direction="row"
-            spacing={1}
-            sx={{ alignItems: "center", justifyContent: "space-between" }}
-          >
-            <Typography variant="subtitle1">Recent automatic replies</Typography>
-            <Button disabled={deliveries.isFetching} onClick={() => void deliveries.refetch()}>
-              Refresh deliveries
+          <Typography variant="body2" color="text.secondary">
+            Review saved comment bodies, delivery outcomes, and recovery actions in Comments.
+          </Typography>
+          <Box>
+            <Button
+              component={Link}
+              to={`/comments?repositoryId=${encodeURIComponent(repository.id)}`}
+            >
+              View comment deliveries
             </Button>
-          </Stack>
-          {deliveries.isPending && (
-            <CircularProgress size={20} aria-label="Loading automatic reply deliveries" />
-          )}
-          {deliveries.isError && <Alert severity="error">{deliveries.error.message}</Alert>}
-          {deliveries.data && (
-            <AutoReplyDeliveryList repository={repository} items={deliveries.data.items} />
-          )}
+          </Box>
         </Stack>
       </AccordionDetails>
     </Accordion>

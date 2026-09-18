@@ -1,5 +1,82 @@
 # Implementation Status
 
+## Comment delivery history and lifecycle integration, 2026-09-19
+
+The approved lifecycle design is implemented. Authorized assignments register their progress
+publication before source import; canonical admission prevents duplicate active cycles, and Task
+creation attaches to the same comment. Accepted phases, explicit resumes, terminal outcomes, and
+timer-driven Worker lease expiration update that publication. Every newly rendered comment begins
+with a fixed AI identity and verified publishing account; model attribution requires trusted
+execution records. Stopped states distinguish failure, missing prerequisites, interruption, and
+cancellation. Oversized completed results publish an explicitly labeled safe summary while retaining
+the complete report in the Dashboard.
+
+Template edits affect subsequent new updates, including running Tasks. They neither rewrite old
+comments nor change the frozen body of an existing attempt. Publication authority has its own epoch
+and authorizer. Revocation still prevents writes, and explicit scoped recovery uses version checks
+and idempotency keys. Proven-unsent transient failures can retry; uncertain writes reconcile using
+reads only. Original receipts and failed attempts remain available after recovery.
+
+The Dashboard now has a Comments workspace and shared ordinary delivery history in Task details.
+Each create/update attempt has a time, status, expandable exact body, and failure reason. Task lists
+use batched comment summaries, and comment polling continues independently after Task completion.
+No target/confirmed-body comparison is required in the interface. Historical snapshots are labeled
+instead of inventing unavailable prior attempts. The exact v2 database schema receives an additive
+v3 migration for the delivery collection and indexes; existing entities are preserved.
+
+Remote Windows verification passed Shared, Server, Worker, and Dashboard builds, plus Server,
+Worker, and Dashboard type checks. The unique passing test scopes total 1,739: Server investigation
+1,225, Worker model-turn-runner 126, Dashboard investigation 258, and Contracts 130. Ten real
+Dashboard browser scenarios passed using production assets and synthetic API fixtures, including
+pagination, failed/unknown body inspection, batch summaries, continued polling for a completed
+Task, and narrow-screen layout. The browser made no external requests or API writes. Biome checks
+completed without errors; warning counts were observed without a baseline comparison.
+
+No local software verification, real model execution, or actual PR/Issue mutation was performed.
+Deployment, live publication acceptance, and Git publication are separate from this implementation.
+See the [design and operating rules](./design/2026-09-18-comment-publication-lifecycle.md).
+
+Publication preparation also hardened two boundaries: delivery attempt numbers use the maximum
+retained number for that comment instead of timestamp ordering, and a stale source detected before
+Task creation triggers a bounded complete reimport with the original canonical idempotency key.
+Previously committed Tasks are recovered before any retry, and previous source snapshots remain
+immutable. The existing freshness checks still apply to resumes of already-created Tasks: an Issue
+revision change, including a GitHub update timestamp advanced by a progress comment, can require a
+new full import and investigation. Progress publication does not silently replace a frozen snapshot.
+Remote follow-up verification passed 31 delivery-ledger/store tests and 62 assignment-intake tests,
+including four new regressions, together with Server builds, type checks, and formatting checks.
+These targeted reruns overlap the earlier test scopes and are not additional full-suite totals.
+
+## Assignment task progress comments, 2026-09-18
+
+Repositories can enable four editable English lifecycle templates for assignment-created Tasks:
+received, started, failed or stopped, and completed. Task creation atomically registers one
+acknowledgement explaining the assigning and assigned GitHub identities. Worker claims, terminal
+outcomes, and explicit resumes update that same conversation comment. Completed investigations
+embed the existing full PR or Issue conclusion instead of publishing a second comment.
+
+The task-scoped durable outbox freezes its policy, templates, publisher identity, and each
+operation. It preserves the initial acknowledgement, combines superseded intermediate states,
+and reconciles ambiguous POST/PATCH delivery using reads only. Comment updates verify the exact
+author, target, stable marker, and previously published body. Repository settings, account grants,
+lease ownership, and report bindings are checked before dispatch. Existing conclusion-only
+policies retain their behavior; enabling progress does not backfill previously committed Tasks.
+
+The repository settings screen includes all four templates and a separate progress delivery list.
+Failed or uncertain updates keep the link to the previously created comment. Public failure
+messages exclude private execution diagnostics, and oversized results are blocked without
+truncating the report. Default templates and setup are documented in
+[Server operations](../apps/server/README.md#track-assignment-tasks-in-one-progress-comment).
+
+Remote Windows verification passed shared and Server builds, Server and Dashboard type checks,
+751 tests across 16 Server files, and 151 tests across six Dashboard files. Biome completed with
+no errors and 88 warnings on the 27 changed TypeScript/TSX files; no baseline warning comparison
+was performed. The 902 tests include mocked assignment intake
+through acknowledgement, Worker claim, and same-comment completion or failure, plus concurrent
+updates, shutdown, unknown delivery recovery, authorization changes, and historical-task exclusion.
+No actual GitHub PR or Issue was mutated during this verification. Deployment and live comment
+acceptance remain separate from these synthetic results.
+
 ## Unsupported lexical dependency seeds, 2026-09-18
 
 Full-diff review now records ordinary files with unsupported extensions as unsearched

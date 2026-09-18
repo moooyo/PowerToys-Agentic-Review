@@ -9,8 +9,11 @@ import {
   type AutomaticReplySettingsUpdate,
   InvestigationAutomaticReplySettings,
 } from "./auto-reply-settings.js";
+import { InvestigationCommentDeliveries } from "./comment-deliveries.js";
+import { registerInvestigationCommentRoutes } from "./comment-http.js";
 import { requireCondition } from "./errors.js";
 import { InvestigationGitHubTransport } from "./github-transport.js";
+import { InvestigationProgressReplies } from "./progress-reply.js";
 import { InvestigationRuntimeAuth } from "./runtime-auth.js";
 import {
   type InvestigationRuntimeConfig,
@@ -61,8 +64,11 @@ export async function createInvestigationRuntime(
   let auth: InvestigationRuntimeAuth | undefined;
   let app: FastifyInstance | undefined;
   let reaper: NodeJS.Timeout | undefined;
+  let taskReaper: NodeJS.Timeout | undefined;
+  let reapTaskLeases: (() => void) | undefined;
   let webhook: InvestigationWebhookIntake | undefined;
   let automaticReplies: InvestigationAutomaticReplies | undefined;
+  let progressReplies: InvestigationProgressReplies | undefined;
   const webhookShutdown = new AbortController();
   const actionShutdown = new AbortController();
   try {
@@ -77,6 +83,8 @@ export async function createInvestigationRuntime(
       maximumBytes: config.sourceImportMaximumBytes,
       maximumPages: config.sourceImportMaximumPages,
       executionBindings: loadInvestigationExecutionBindings(config.executionBindingsPath),
+      classifyProgressComment: (repository, target, comment) =>
+        progressReplies?.classifyProgressComment(repository, target, comment),
     });
     const actionTransport =
       dependencies.actionTransport ??
@@ -117,7 +125,12 @@ export async function createInvestigationRuntime(
       resolvePlanPrerequisites: sourceImporter.resolvePlanPrerequisites,
       enableExternalWrites: config.enableExternalWrites,
       evidencePolicy: config.evidencePolicy,
-      onReportSealed: (report, task) => automaticReplies?.enqueue(report, task),
+      onReportSealed: (report, task) => {
+        if (!progressReplies?.hasTask(task.id)) automaticReplies?.enqueue(report, task);
+      },
+      onTaskStateChanged: (task, report) => progressReplies?.update(task, report),
+      onTaskProgress: (task, checkpoint, attempt) =>
+        progressReplies?.updateProgress(task, checkpoint, attempt),
       onRepositoryChanged: (previous, next) =>
         automaticReplySettings.invalidateRepository(previous, next),
       ...(config.https === undefined ? {} : { https: config.https }),
@@ -134,12 +147,15 @@ export async function createInvestigationRuntime(
       },
       ...(actionTransport === undefined ? {} : { actionTransport }),
       registerIngressRoutes: (ingressApp, service) => {
+        reapTaskLeases = () => service.reapExpiredLeases();
         const params = Type.Object(
           { id: Type.String({ minLength: 1, maxLength: 256 }) },
           { additionalProperties: false },
         );
+        const deliveries = new InvestigationCommentDeliveries({ store });
         const publisher = new InvestigationAutomaticReplies({
           store,
+          deliveries,
           settings: automaticReplySettings,
           actions: service.actions,
           resolveOperator: runtimeAuth.resolveOperator,
@@ -151,6 +167,32 @@ export async function createInvestigationRuntime(
             ingressApp.log.error({ code }, "Automatic investigation reply needs attention."),
         });
         automaticReplies = publisher;
+        const progress = new InvestigationProgressReplies({
+          store,
+          deliveries,
+          settings: automaticReplySettings,
+          transport: actionTransport,
+          resolveOperator: runtimeAuth.resolveOperator,
+          enableExternalWrites: config.enableExternalWrites,
+          isAssignmentAuthorized: (admission) =>
+            webhookSettings
+              .bindings()
+              .some(
+                (binding) =>
+                  binding.repositoryId === admission.repository.id &&
+                  binding.reviewerUserId === admission.expectedAssigneeUserId &&
+                  binding.allowedActorUserIds.includes(admission.trigger.actorUserId),
+              ),
+          onError: (code) =>
+            ingressApp.log.error({ code }, "Investigation progress comment needs attention."),
+        });
+        progressReplies = progress;
+        registerInvestigationCommentRoutes(ingressApp, {
+          authenticateOperator: runtimeAuth.authenticateOperator,
+          deliveries,
+          progress,
+          automaticReplies: publisher,
+        });
         ingressApp.get<{ Params: { id: string } }>(
           "/api/repositories/:id/auto-reply-settings",
           { schema: { params } },
@@ -177,6 +219,19 @@ export async function createInvestigationRuntime(
                   enabled: Type.Boolean(),
                   pullRequestTemplate: Type.String({ minLength: 1, maxLength: 12_000 }),
                   issueTemplate: Type.String({ minLength: 1, maxLength: 12_000 }),
+                  progressEnabled: Type.Optional(Type.Boolean()),
+                  reauthorize: Type.Optional(Type.Boolean()),
+                  progressTemplates: Type.Optional(
+                    Type.Object(
+                      {
+                        received: Type.String({ minLength: 1, maxLength: 12_000 }),
+                        started: Type.String({ minLength: 1, maxLength: 12_000 }),
+                        failed: Type.String({ minLength: 1, maxLength: 12_000 }),
+                        completed: Type.String({ minLength: 1, maxLength: 12_000 }),
+                      },
+                      { additionalProperties: false },
+                    ),
+                  ),
                 },
                 { additionalProperties: false },
               ),
@@ -207,6 +262,21 @@ export async function createInvestigationRuntime(
             );
             reply.header("cache-control", "no-store");
             return publisher.list(actor, request.params.id);
+          },
+        );
+        ingressApp.get<{ Params: { id: string } }>(
+          "/api/repositories/:id/progress-replies",
+          { schema: { params } },
+          async (request, reply) => {
+            const actor = runtimeAuth.authenticateOperator(request);
+            requireCondition(
+              actor !== null,
+              401,
+              "operator_authentication_required",
+              "Operator authentication is required.",
+            );
+            reply.header("cache-control", "no-store");
+            return progress.list(actor, request.params.id);
           },
         );
         ingressApp.get<{ Params: { id: string } }>(
@@ -264,6 +334,8 @@ export async function createInvestigationRuntime(
         if (webhookConfig === undefined) return;
         const webhookImporter = new InvestigationSourceImporter({
           store,
+          classifyProgressComment: (repository, target, comment) =>
+            progress.classifyProgressComment(repository, target, comment),
           ...(config.github === undefined ? {} : { github: config.github }),
           maximumBytes: config.sourceImportMaximumBytes,
           maximumPages: config.sourceImportMaximumPages,
@@ -282,6 +354,12 @@ export async function createInvestigationRuntime(
           service,
           importer: webhookImporter,
           settings: webhookSettings,
+          onAssignmentAccepted: (admission) => progress.enqueueAssignment(admission),
+          onAssignmentChanged: (admission, state, reasonCode) =>
+            progress.updateAssignment(admission.id, state, reasonCode),
+          onTaskCreated: (task, _trigger, _created, admission) => {
+            if (admission !== undefined) progress.attachTask(admission.id, task);
+          },
           onError: (code) => ingressApp.log.error({ code }, "Webhook task intake needs attention."),
         });
         webhook = intake;
@@ -317,9 +395,11 @@ export async function createInvestigationRuntime(
     const runtimeApp = app;
     app.addHook("onClose", async () => {
       if (reaper !== undefined) clearInterval(reaper);
+      if (taskReaper !== undefined) clearInterval(taskReaper);
       webhookShutdown.abort();
       await webhook?.stop();
       await automaticReplies?.stop();
+      await progressReplies?.stop();
       actionShutdown.abort();
       try {
         runtimeAuth.close();
@@ -355,8 +435,10 @@ export async function createInvestigationRuntime(
         .send({ code: "not_found", message: "The requested resource does not exist." });
     });
     await app.ready();
+    reapTaskLeases?.();
     webhook?.start();
     automaticReplies?.start();
+    progressReplies?.start();
     reaper = setInterval(() => {
       try {
         runtimeAuth.reapExpired();
@@ -365,9 +447,18 @@ export async function createInvestigationRuntime(
       }
     }, 60_000);
     reaper.unref();
+    taskReaper = setInterval(() => {
+      try {
+        reapTaskLeases?.();
+      } catch {
+        runtimeApp.log.error("Expired investigation Worker lease cleanup failed.");
+      }
+    }, 30_000);
+    taskReaper.unref();
     return app;
   } catch (error) {
     if (reaper !== undefined) clearInterval(reaper);
+    if (taskReaper !== undefined) clearInterval(taskReaper);
     if (app !== undefined) await app.close().catch(() => undefined);
     auth?.close();
     store.close();

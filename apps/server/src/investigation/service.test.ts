@@ -24,7 +24,10 @@ import {
   type InvestigationEvidencePolicy,
   InvestigationEvidenceStore,
 } from "../../dist/investigation/evidence-store.js";
-import type { InvestigationPreparedTaskInput } from "../../dist/investigation/service.js";
+import type {
+  InvestigationPreparedTaskInput,
+  InvestigationServiceOptions,
+} from "../../dist/investigation/service.js";
 import { InvestigationStore } from "../../dist/investigation/store.js";
 import type {
   InvestigationActionTransport,
@@ -79,6 +82,8 @@ async function harness(
     actionTransport?: InvestigationActionTransport;
     allowRepositoryExecution?: boolean;
     evidencePolicy?: Partial<InvestigationEvidencePolicy>;
+    onTaskStateChanged?: InvestigationServiceOptions["onTaskStateChanged"];
+    onTaskProgress?: InvestigationServiceOptions["onTaskProgress"];
   } = {},
 ) {
   const item = workItem();
@@ -132,6 +137,10 @@ async function harness(
     leaseDurationMs: 1_000,
     ...(options.evidencePolicy === undefined ? {} : { evidencePolicy: options.evidencePolicy }),
     ...(options.actionTransport === undefined ? {} : { actionTransport: options.actionTransport }),
+    ...(options.onTaskStateChanged === undefined
+      ? {}
+      : { onTaskStateChanged: options.onTaskStateChanged }),
+    ...(options.onTaskProgress === undefined ? {} : { onTaskProgress: options.onTaskProgress }),
     authenticateOperator: (request) =>
       request.headers.authorization === "operator"
         ? operator
@@ -262,6 +271,80 @@ const unacceptedUsageDiagnostic = {
 };
 
 describe("investigation service API", () => {
+  it("records progress only for newly accepted checkpoints in the same transaction", async () => {
+    const changes = vi.fn<NonNullable<InvestigationServiceOptions["onTaskProgress"]>>();
+    const { app, item, store } = await harness({ onTaskProgress: changes });
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const original = checkpointFor(claimed);
+    changes.mockImplementation((currentTask, checkpoint, attempt) => {
+      expect(currentTask.id).toBe(task.id);
+      expect(store.get("checkpoints", task.id)).toEqual(checkpoint);
+      expect(attempt.id).toBe(claimed.attempt.id);
+    });
+    const accepted = await acceptAnalysis(app, claimed, original, 0);
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(changes.mock.calls[0]?.[1]).toEqual(accepted);
+    expect(await acceptAnalysis(app, claimed, original, 0)).toEqual(accepted);
+    expect(changes).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies persisted task transitions once across cancellation, lease expiry, and resume", async () => {
+    const changes = vi.fn<NonNullable<InvestigationServiceOptions["onTaskStateChanged"]>>();
+    const { app, item, store, advance } = await harness({ onTaskStateChanged: changes });
+    changes.mockImplementation((task) => {
+      expect(store.get("tasks", task.id)).toEqual(task);
+    });
+    const cancelled = await createTask(app, item, "cancel-before-claim");
+    expect(changes).not.toHaveBeenCalled();
+    expect((await post(app, `/api/tasks/${cancelled.id}/cancel`, {})).statusCode).toBe(200);
+    expect((await post(app, `/api/tasks/${cancelled.id}/cancel`, {})).statusCode).toBe(200);
+    expect(changes.mock.calls.map(([task]) => task.state)).toEqual(["cancelled"]);
+
+    const task = await createTask(app, item, "recover-after-expiry");
+    await claim(app);
+    advance(1_001);
+    expect(
+      (await post(app, "/api/worker/claims", { supportedKinds: ["pr-review"] }, "worker")).json(),
+    ).toEqual({ claim: null });
+    const resume = { idempotencyKey: "resume-progress-task" };
+    expect((await post(app, `/api/tasks/${task.id}/resume`, resume)).statusCode).toBe(200);
+    expect((await post(app, `/api/tasks/${task.id}/resume`, resume)).statusCode).toBe(200);
+    await claim(app);
+    expect((await post(app, `/api/tasks/${task.id}/cancel`, {})).statusCode).toBe(200);
+    expect(changes.mock.calls.map(([entry]) => entry.state)).toEqual([
+      "cancelled",
+      "running",
+      "interrupted",
+      "queued",
+      "running",
+    ]);
+    advance(1_001);
+    await post(app, "/api/worker/claims", { supportedKinds: ["pr-review"] }, "worker");
+    expect(changes.mock.calls.at(-1)?.[0]).toMatchObject({ id: task.id, state: "cancelled" });
+  });
+
+  it("rolls back a task transition and its outbox writes when the synchronous hook fails", async () => {
+    const changes = vi.fn<NonNullable<InvestigationServiceOptions["onTaskStateChanged"]>>();
+    const { app, item, store } = await harness({ onTaskStateChanged: changes });
+    const task = await createTask(app, item);
+    changes.mockImplementation((running) => {
+      store.insert("idempotency", "synthetic-progress-transition", { taskId: running.id });
+      throw new Error("Synthetic outbox failure inside the task transaction.");
+    });
+    const rejected = await post(
+      app,
+      "/api/worker/claims",
+      { supportedKinds: ["pr-review"] },
+      "worker",
+    );
+    expect(rejected.statusCode).toBe(500);
+    expect(store.get("tasks", task.id)).toEqual(task);
+    expect(store.list("attempts")).toEqual([]);
+    expect(store.list("checkpoints")).toEqual([]);
+    expect(store.has("idempotency", "synthetic-progress-transition")).toBe(false);
+  });
+
   it("fails closed without authenticators while keeping liveness public", async () => {
     const store = new InvestigationStore();
     const app = buildInvestigationApp({ store });

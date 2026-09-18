@@ -119,6 +119,12 @@ export interface InvestigationServiceOptions {
   evidencePolicy?: Partial<InvestigationEvidencePolicy>;
   resolvePlanPrerequisites?: InvestigationPrerequisiteResolver;
   onReportSealed?: (report: InvestigationResultV1, task: InvestigationTaskV1) => void;
+  onTaskStateChanged?: (task: InvestigationTaskV1, report?: InvestigationResultV1) => void;
+  onTaskProgress?: (
+    task: InvestigationTaskV1,
+    checkpoint: InvestigationLoopCheckpointV1,
+    attempt: InvestigationAttemptV1,
+  ) => void;
   onRepositoryChanged?: (
     previous: InvestigationRepositoryRecord,
     next: InvestigationRepositoryRecord,
@@ -334,6 +340,7 @@ export class InvestigationService {
     request: InvestigationCreateTaskRequestV1,
     source: InvestigationImportedTaskSource,
     beforePersist?: () => void,
+    onPersisted?: (task: InvestigationTaskV1) => void,
   ): Promise<InvestigationTaskV1> {
     if (!FormatRegistry.Has("date-time"))
       FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
@@ -359,6 +366,7 @@ export class InvestigationService {
       true,
       structuredClone(source),
       beforePersist,
+      onPersisted,
     );
   }
 
@@ -368,6 +376,7 @@ export class InvestigationService {
     persist: boolean,
     importedSource?: InvestigationImportedTaskSource,
     beforePersist?: () => void,
+    onPersisted?: (task: InvestigationTaskV1) => void,
   ): Promise<InvestigationTaskV1> {
     this.permit(actor, "task:create");
     const registeredItem = this.getWorkItem(actor, request.workItemId);
@@ -773,6 +782,7 @@ export class InvestigationService {
       this.evidence.pinParent(task);
       this.store.insert("idempotency", `input:${task.id}`, input);
       this.store.insert("idempotency", key, { digest, entityId: task.id });
+      onPersisted?.(task);
       return task;
     });
   }
@@ -1063,6 +1073,7 @@ export class InvestigationService {
         );
       }
       this.store.insert("idempotency", key, { digest: requestDigest, entityId: id });
+      this.options.onTaskStateChanged?.(resumed);
       return resumed;
     });
   }
@@ -1085,7 +1096,10 @@ export class InvestigationService {
       return task;
     }
     const cancelled: InvestigationTaskV1 = { ...task, state: "cancelled", updatedAt: this.time() };
-    this.store.put("tasks", id, cancelled);
+    this.store.transaction(() => {
+      this.store.put("tasks", id, cancelled);
+      this.options.onTaskStateChanged?.(cancelled);
+    });
     return cancelled;
   }
 
@@ -1206,11 +1220,13 @@ export class InvestigationService {
             terminationReason: "lease_expired",
           },
         });
-        this.store.put("tasks", task.id, {
+        const interrupted: InvestigationTaskV1 = {
           ...task,
           state: record.cancelRequested ? "cancelled" : "interrupted",
           updatedAt: this.time(),
-        });
+        };
+        this.store.put("tasks", task.id, interrupted);
+        this.options.onTaskStateChanged?.(interrupted);
       });
   }
   workerClaim(
@@ -1274,6 +1290,7 @@ export class InvestigationService {
       this.store.put("tasks", task.id, running);
       this.store.put("checkpoints", task.id, checkpoint);
       const input = this.required<FrozenTaskInput>("idempotency", `input:${task.id}`);
+      this.options.onTaskStateChanged?.(running);
       return {
         claim: {
           task: running,
@@ -1522,6 +1539,8 @@ export class InvestigationService {
         checkpoint: next,
         ...(request.kind === "analysis" ? { usageTokens: request.usage.tokens } : {}),
       });
+      if (request.kind === "analysis" || request.kind === "source")
+        this.options.onTaskProgress?.(task, next, record.attempt);
     });
     return { checkpoint: next };
   }
@@ -1699,12 +1718,13 @@ export class InvestigationService {
         this.store.insert("findings", `${result.report.id}:${finding.id}`, finding);
       for (const plan of result.plans)
         this.store.insert("plans", `${result.report.id}:${plan.id}`, plan);
-      this.store.put("tasks", taskId, {
+      const finalized: InvestigationTaskV1 = {
         ...task,
         state: result.outcome,
         latestReportRef: ref,
         updatedAt: this.time(),
-      });
+      };
+      this.store.put("tasks", taskId, finalized);
       if (result.outcome === "completed") this.evidence.releaseParent(task);
       this.store.put("attempts", record.attempt.id, {
         ...record,
@@ -1715,6 +1735,7 @@ export class InvestigationService {
           terminationReason: result.report.loop.stopReason,
         },
       });
+      this.options.onTaskStateChanged?.(finalized, result);
       this.options.onReportSealed?.(result, task);
     });
     return { reportRef: ref };

@@ -6,6 +6,11 @@ import {
   validateAutomaticReplyTemplate,
 } from "./auto-reply-template.js";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
+import {
+  defaultProgressReplyTemplates,
+  type ProgressReplyTemplates,
+  validateProgressReplyTemplate,
+} from "./progress-reply-template.js";
 import type { InvestigationStore } from "./store.js";
 import type { InvestigationOperatorPrincipal, InvestigationRepositoryRecord } from "./types.js";
 
@@ -14,31 +19,50 @@ export interface AutomaticReplySettingsUpdate {
   readonly enabled: boolean;
   readonly pullRequestTemplate: string;
   readonly issueTemplate: string;
+  readonly progressEnabled?: boolean;
+  readonly progressTemplates?: ProgressReplyTemplates;
+  readonly reauthorize?: boolean;
 }
 
-export interface AutomaticReplySettingsView extends AutomaticReplySettingsUpdate {
+interface NormalizedAutomaticReplySettingsUpdate
+  extends Omit<AutomaticReplySettingsUpdate, "reauthorize"> {
+  readonly progressEnabled: boolean;
+  readonly progressTemplates: ProgressReplyTemplates;
+}
+
+export interface AutomaticReplySettingsView extends NormalizedAutomaticReplySettingsUpdate {
   readonly repositoryId: string;
   readonly publisherConfigured: boolean;
   readonly authorizedById: string | null;
+  readonly authorizationEpoch: number;
+  readonly updatedById: string | null;
   readonly updatedAt: string | null;
   readonly templateVersion: number;
 }
 
-export interface AutomaticReplyPolicy extends AutomaticReplySettingsUpdate {
+export interface AutomaticReplyPolicy extends NormalizedAutomaticReplySettingsUpdate {
   readonly repository: InvestigationRepositoryRecord;
   readonly authorizedById: string;
+  readonly authorizationEpoch: number;
+  readonly updatedById: string | null;
   readonly updatedAt: string;
   readonly templateVersion: number;
 }
 
-interface StoredAutomaticReplySettings extends AutomaticReplySettingsUpdate {
+interface StoredAutomaticReplySettings extends NormalizedAutomaticReplySettingsUpdate {
   readonly repository: InvestigationRepositoryRecord;
   readonly authorizedById: string | null;
+  readonly authorizationEpoch: number;
+  readonly updatedById: string | null;
   readonly updatedAt: string;
   readonly templateVersion: number;
 }
 
 const requestKeys = new Set(["version", "enabled", "pullRequestTemplate", "issueTemplate"]);
+const optionalProgressKeys = new Set(["progressEnabled", "progressTemplates"]);
+const optionalRequestKeys = new Set([...optionalProgressKeys, "reauthorize"]);
+const optionalStoredKeys = new Set([...optionalProgressKeys, "authorizationEpoch", "updatedById"]);
+const progressTemplateKeys = new Set(["received", "started", "failed", "completed"]);
 const storedKeys = new Set([
   ...requestKeys,
   "repository",
@@ -48,13 +72,17 @@ const storedKeys = new Set([
 ]);
 const repositoryKeys = new Set(["id", "fullName", "githubRepositoryId"]);
 
-function exactObject(input: unknown, keys: ReadonlySet<string>): input is Record<string, unknown> {
+function exactObject(
+  input: unknown,
+  keys: ReadonlySet<string>,
+  optionalKeys: ReadonlySet<string> = new Set(),
+): input is Record<string, unknown> {
   return (
     input !== null &&
     typeof input === "object" &&
     !Array.isArray(input) &&
-    Object.keys(input).length === keys.size &&
-    Object.keys(input).every((key) => keys.has(key))
+    [...keys].every((key) => Object.hasOwn(input, key)) &&
+    Object.keys(input).every((key) => keys.has(key) || optionalKeys.has(key))
   );
 }
 
@@ -62,25 +90,57 @@ function validateRequest(
   input: unknown,
   statusCode = 400,
   validateCurrentTemplate = true,
-): AutomaticReplySettingsUpdate {
+): NormalizedAutomaticReplySettingsUpdate {
   const code =
     statusCode === 400 ? "invalid_auto_reply_settings" : "invalid_saved_auto_reply_settings";
   const message =
     statusCode === 400
       ? "Automatic reply settings require an exact version, enabled flag, and valid PR and issue templates."
       : "The saved automatic reply settings are invalid.";
-  requireCondition(exactObject(input, requestKeys), statusCode, code, message);
+  requireCondition(exactObject(input, requestKeys, optionalRequestKeys), statusCode, code, message);
   requireCondition(
     typeof input.version === "number" &&
       Number.isSafeInteger(input.version) &&
       input.version >= 0 &&
       typeof input.enabled === "boolean" &&
       typeof input.pullRequestTemplate === "string" &&
-      typeof input.issueTemplate === "string",
+      typeof input.issueTemplate === "string" &&
+      (!Object.hasOwn(input, "reauthorize") || typeof input.reauthorize === "boolean") &&
+      (!Object.hasOwn(input, "progressEnabled") || typeof input.progressEnabled === "boolean") &&
+      (!Object.hasOwn(input, "progressTemplates") ||
+        exactObject(input.progressTemplates, progressTemplateKeys)),
     statusCode,
     code,
     message,
   );
+  requireCondition(
+    input.reauthorize !== true || input.enabled,
+    statusCode,
+    code,
+    "Renewing automatic reply authorization requires automatic replies to be enabled.",
+  );
+  const progressEnabled = input.progressEnabled === true;
+  requireCondition(
+    !progressEnabled || input.enabled,
+    statusCode,
+    code,
+    "Assignment progress comments require automatic replies to be enabled.",
+  );
+  const progressTemplates = input.progressTemplates ?? defaultProgressReplyTemplates;
+  let parsedProgressTemplates: ProgressReplyTemplates;
+  try {
+    const values = progressTemplates as Record<string, unknown>;
+    parsedProgressTemplates = {
+      received: validateProgressReplyTemplate(values.received, "received"),
+      started: validateProgressReplyTemplate(values.started, "started"),
+      failed: validateProgressReplyTemplate(values.failed, "failed"),
+      completed: validateProgressReplyTemplate(values.completed, "completed"),
+    };
+  } catch (error) {
+    if (statusCode !== 400 && error instanceof InvestigationRequestError)
+      throw new InvestigationRequestError(statusCode, code, message);
+    throw error;
+  }
   if (!validateCurrentTemplate) {
     requireCondition(
       input.pullRequestTemplate.trim().length > 0 &&
@@ -96,6 +156,8 @@ function validateRequest(
       enabled: input.enabled,
       pullRequestTemplate: input.pullRequestTemplate,
       issueTemplate: input.issueTemplate,
+      progressEnabled,
+      progressTemplates: parsedProgressTemplates,
     };
   }
   try {
@@ -104,6 +166,8 @@ function validateRequest(
       enabled: input.enabled,
       pullRequestTemplate: validateAutomaticReplyTemplate(input.pullRequestTemplate),
       issueTemplate: validateAutomaticReplyTemplate(input.issueTemplate, "issue"),
+      progressEnabled,
+      progressTemplates: parsedProgressTemplates,
     };
   } catch (error) {
     if (statusCode !== 400 && error instanceof InvestigationRequestError)
@@ -139,6 +203,16 @@ function matchesRepository(
   );
 }
 
+function nextAuthorizationEpoch(previous: number): number {
+  requireCondition(
+    previous < Number.MAX_SAFE_INTEGER,
+    409,
+    "auto_reply_authorization_epoch_exhausted",
+    "Automatic reply authorization cannot advance beyond the maximum safe epoch.",
+  );
+  return previous + 1;
+}
+
 /** Stores repository-scoped authorization without credentials or retroactive publication. */
 export class InvestigationAutomaticReplySettings {
   readonly #store: InvestigationStore;
@@ -171,6 +245,7 @@ export class InvestigationAutomaticReplySettings {
     );
     this.#registered(repositoryId);
     const parsed = validateRequest(request);
+    const reauthorize = request.reauthorize === true;
     if (parsed.enabled) {
       requireCondition(
         actor.permissions.includes("action:prepare") &&
@@ -209,11 +284,27 @@ export class InvestigationAutomaticReplySettings {
         "auto_reply_settings_version_exhausted",
         "Automatic reply settings cannot advance beyond the maximum safe version.",
       );
+      const authorizationChanged =
+        previous === null ||
+        previous.enabled !== parsed.enabled ||
+        previous.progressEnabled !== parsed.progressEnabled ||
+        !matchesRepository(previous.repository, repository) ||
+        (parsed.enabled && previous.templateVersion !== automaticReplyTemplateVersion) ||
+        reauthorize;
+      const authorizationEpoch = authorizationChanged
+        ? nextAuthorizationEpoch(previous?.authorizationEpoch ?? 0)
+        : previous.authorizationEpoch;
       const saved: StoredAutomaticReplySettings = {
         ...parsed,
         version: version + 1,
         repository: { ...repository },
-        authorizedById: parsed.enabled ? actor.id : null,
+        authorizedById: parsed.enabled
+          ? authorizationChanged
+            ? actor.id
+            : previous.authorizedById
+          : null,
+        authorizationEpoch,
+        updatedById: actor.id,
         updatedAt: this.#now().toISOString(),
         templateVersion: automaticReplyTemplateVersion,
       };
@@ -247,6 +338,8 @@ export class InvestigationAutomaticReplySettings {
     const invalidated: StoredAutomaticReplySettings = {
       version: version + 1,
       enabled: false,
+      progressEnabled: false,
+      progressTemplates: { ...(saved?.progressTemplates ?? defaultProgressReplyTemplates) },
       repository: { ...next },
       pullRequestTemplate:
         saved?.templateVersion === automaticReplyTemplateVersion
@@ -257,6 +350,8 @@ export class InvestigationAutomaticReplySettings {
           ? saved.issueTemplate
           : defaultAutomaticReplyTemplates.issue,
       authorizedById: null,
+      authorizationEpoch: nextAuthorizationEpoch(saved?.authorizationEpoch ?? 0),
+      updatedById: saved?.updatedById ?? null,
       updatedAt: this.#now().toISOString(),
       templateVersion: automaticReplyTemplateVersion,
     };
@@ -320,7 +415,7 @@ export class InvestigationAutomaticReplySettings {
     const saved = this.#store.get<unknown>("idempotency", `auto-reply:settings:${repositoryId}`);
     if (saved === undefined) return null;
     requireCondition(
-      exactObject(saved, storedKeys) &&
+      exactObject(saved, storedKeys, optionalStoredKeys) &&
         validRepository(saved.repository, repositoryId) &&
         (saved.enabled === true
           ? Value.Check(EntityIdSchema, saved.authorizedById)
@@ -331,7 +426,14 @@ export class InvestigationAutomaticReplySettings {
         Number.isSafeInteger(saved.templateVersion) &&
         saved.templateVersion > 0 &&
         typeof saved.version === "number" &&
-        saved.version > 0,
+        saved.version > 0 &&
+        (!Object.hasOwn(saved, "authorizationEpoch") ||
+          (typeof saved.authorizationEpoch === "number" &&
+            Number.isSafeInteger(saved.authorizationEpoch) &&
+            saved.authorizationEpoch > 0)) &&
+        (!Object.hasOwn(saved, "updatedById") ||
+          saved.updatedById === null ||
+          Value.Check(EntityIdSchema, saved.updatedById)),
       500,
       "invalid_saved_auto_reply_settings",
       "The saved automatic reply settings are invalid.",
@@ -342,6 +444,12 @@ export class InvestigationAutomaticReplySettings {
         enabled: saved.enabled,
         pullRequestTemplate: saved.pullRequestTemplate,
         issueTemplate: saved.issueTemplate,
+        ...(Object.hasOwn(saved, "progressEnabled")
+          ? { progressEnabled: saved.progressEnabled }
+          : {}),
+        ...(Object.hasOwn(saved, "progressTemplates")
+          ? { progressTemplates: saved.progressTemplates }
+          : {}),
       },
       500,
       saved.templateVersion === automaticReplyTemplateVersion,
@@ -350,6 +458,9 @@ export class InvestigationAutomaticReplySettings {
       ...parsed,
       repository: { ...saved.repository },
       authorizedById: saved.authorizedById as string | null,
+      // Preserve the historical grant binding without migrating records during reads.
+      authorizationEpoch: (saved.authorizationEpoch ?? saved.version) as number,
+      updatedById: (saved.updatedById ?? null) as string | null,
       updatedAt: saved.updatedAt,
       templateVersion: saved.templateVersion,
     };
@@ -369,6 +480,8 @@ export class InvestigationAutomaticReplySettings {
       publisherConfigured: this.#publisherConfigured,
       version: saved?.version ?? 0,
       enabled,
+      progressEnabled: enabled && saved?.progressEnabled === true,
+      progressTemplates: { ...(saved?.progressTemplates ?? defaultProgressReplyTemplates) },
       pullRequestTemplate:
         saved?.templateVersion === automaticReplyTemplateVersion
           ? saved.pullRequestTemplate
@@ -378,6 +491,8 @@ export class InvestigationAutomaticReplySettings {
           ? saved.issueTemplate
           : defaultAutomaticReplyTemplates.issue,
       authorizedById: enabled ? (saved?.authorizedById ?? null) : null,
+      authorizationEpoch: saved?.authorizationEpoch ?? 0,
+      updatedById: saved?.updatedById ?? null,
       updatedAt: saved?.updatedAt ?? null,
       templateVersion: automaticReplyTemplateVersion,
     };

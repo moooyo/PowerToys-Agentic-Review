@@ -2,6 +2,7 @@ import {
   type ActionContextV1,
   createInvestigationPreview,
   type InvestigationActionIntentV1,
+  type InvestigationCommentDelivery,
   type InvestigationCreateActionIntentRequest,
   type InvestigationReportRef,
   type InvestigationResultV1,
@@ -12,6 +13,7 @@ import { InvestigationActions } from "./actions.js";
 import { type AutomaticReplyReceipt, InvestigationAutomaticReplies } from "./auto-reply.js";
 import { InvestigationAutomaticReplySettings } from "./auto-reply-settings.js";
 import { defaultAutomaticReplyTemplates, renderAutomaticReply } from "./auto-reply-template.js";
+import { InvestigationCommentDeliveries } from "./comment-deliveries.js";
 import { InvestigationStore } from "./store.js";
 import type {
   InvestigationActionTransport,
@@ -28,6 +30,7 @@ interface SavedReply extends AutomaticReplyReceipt {
   reportRef: InvestigationReportRef;
   template?: string;
   githubIdentity?: InvestigationGitHubIdentity;
+  authorizationEpoch?: number;
   request: InvestigationCreateActionIntentRequest | null;
   pendingId: string;
   attempts: number;
@@ -51,6 +54,7 @@ function harness(
     persistReport?: boolean;
     maximumAttempts?: number;
     publisherIdentity?: boolean;
+    history?: boolean;
   } = {},
 ) {
   const fixture = createInvestigationPreview(options.kind ?? "pr", { findingCount: 0 });
@@ -115,6 +119,7 @@ function harness(
     },
   };
   const settings = new InvestigationAutomaticReplySettings(store, true, now);
+  const deliveries = new InvestigationCommentDeliveries({ store, now });
   if (options.enabled ?? true) {
     settings.update(actor, fixture.task.repository.id, {
       version: 0,
@@ -184,7 +189,7 @@ function harness(
       throw new Error("An automatic reply must never create another Task.");
     },
   });
-  function createPublisher(): InvestigationAutomaticReplies {
+  function createPublisher(history = options.history !== false): InvestigationAutomaticReplies {
     const publisher = new InvestigationAutomaticReplies({
       store,
       settings,
@@ -197,6 +202,7 @@ function harness(
       now,
       retryDelayMs: 60_000,
       maximumAttempts: options.maximumAttempts ?? 3,
+      ...(history ? { deliveries } : {}),
     });
     publishers.push(publisher);
     return publisher;
@@ -264,6 +270,7 @@ function harness(
     actor,
     control,
     settings,
+    deliveries,
     actions,
     transport,
     readTarget,
@@ -536,12 +543,12 @@ describe("automatic investigation reply publication", () => {
     });
     await h.run();
     expect(h.saved()).toMatchObject({
-      state: "blocked",
+      state: "sent",
       body: frozen.body,
       settingsVersion: frozen.settingsVersion,
     });
     expect(h.saved().request).toEqual(frozen.request);
-    expect(h.posts).not.toHaveBeenCalled();
+    expect(h.posts).toHaveBeenCalledTimes(1);
   });
 
   it("uses the frozen stored body and verified identity after a dispatcher restart", async () => {
@@ -563,6 +570,31 @@ describe("automatic investigation reply publication", () => {
     expect(h.saved().githubIdentity).toEqual(frozen.githubIdentity);
     expect(h.readPublisherIdentity).toHaveBeenCalledTimes(1);
   });
+
+  it("retains the captured publication grant across an ordinary settings save", async () => {
+    const h = harness();
+    h.enqueue();
+    const epoch = h.saved().authorizationEpoch;
+    h.updateSettings(true);
+    await h.run();
+    expect(h.saved()).toMatchObject({ state: "sent", authorizationEpoch: epoch });
+    expect(h.posts).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    "keeps a legacy record without an epoch conservative after settings changed=%s",
+    async (changed) => {
+      const h = harness();
+      h.enqueue();
+      const { authorizationEpoch: _epoch, ...legacy } = h.saved();
+      h.store.put("idempotency", legacy.id, legacy);
+      if (changed) h.updateSettings(true);
+      await h.run();
+      expect(h.saved().state).toBe(changed ? "blocked" : "sent");
+      expect(h.saved()).not.toHaveProperty("authorizationEpoch");
+      expect(h.posts).toHaveBeenCalledTimes(changed ? 0 : 1);
+    },
+  );
 });
 
 describe("automatic reply durable recovery", () => {
@@ -709,6 +741,308 @@ describe("automatic reply durable recovery", () => {
   });
 });
 
+describe("automatic reply unified comment history", () => {
+  it("records one actual native submission with its complete action-marked body", async () => {
+    const h = harness();
+    const markDispatched = vi.spyOn(h.deliveries, "markDispatched");
+    h.enqueue();
+    expect(h.store.list("commentDeliveries")).toEqual([]);
+    await h.run();
+    const intent = h.store.list<InvestigationActionIntentV1>("actionIntents")[0]!;
+    const rows = h.deliveries.list(h.actor, { commentId: h.saved().id }).items;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: `auto-reply-delivery:${intent.id}`,
+      commentId: h.saved().id,
+      mode: "result",
+      operation: "create",
+      state: "succeeded",
+      effect: "applied",
+      body: `${h.saved().body}\n\n<!-- agentic-review-action:${intent.id}:${intent.payloadDigest} -->`,
+      attemptNumber: 1,
+      legacy: false,
+      externalId: "synthetic-comment",
+    });
+    expect(markDispatched).toHaveBeenCalledTimes(1);
+    await h.publisher.stop();
+    await h.run(h.createPublisher());
+    expect(h.store.list("commentDeliveries")).toHaveLength(1);
+    expect(h.posts).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mark dispatch until the final transport boundary", async () => {
+    const h = harness();
+    const markDispatched = vi.spyOn(h.deliveries, "markDispatched");
+    h.control.boundary = (name) => {
+      if (name !== "dispatch") return;
+      expect(markDispatched).not.toHaveBeenCalled();
+      h.updateSettings(false);
+    };
+    h.enqueue();
+    await h.run();
+    expect(markDispatched).not.toHaveBeenCalled();
+    expect(h.posts).not.toHaveBeenCalled();
+    expect(h.deliveries.list(h.actor).items).toMatchObject([
+      { state: "failed", effect: "not_sent", operation: "create" },
+    ]);
+  });
+
+  it("marks one dispatch even if a transport repeats its final synchronous callback", async () => {
+    const h = harness();
+    const markDispatched = vi.spyOn(h.deliveries, "markDispatched");
+    h.execute.mockImplementationOnce(
+      async (intent, _repository, _workItem, _actor, beforeDispatch) => {
+        beforeDispatch?.();
+        beforeDispatch?.();
+        h.posts(intent);
+        return h.control.delivery;
+      },
+    );
+    h.enqueue();
+    await h.run();
+    expect(markDispatched).toHaveBeenCalledTimes(1);
+    expect(h.posts).toHaveBeenCalledTimes(1);
+    expect(h.deliveries.list(h.actor).items[0]).toMatchObject({
+      state: "succeeded",
+      effect: "applied",
+    });
+  });
+
+  it("records a native rejection without changing the existing native receipt", async () => {
+    const h = harness();
+    h.control.delivery = {
+      state: "failed",
+      message: "Synthetic explicit rejection",
+      externalId: null,
+    };
+    h.enqueue();
+    await h.run();
+    expect(h.deliveries.list(h.actor).items[0]).toMatchObject({
+      state: "failed",
+      effect: "rejected",
+    });
+    expect(h.store.list<InvestigationActionIntentV1>("actionIntents")[0]!.result?.message).toBe(
+      "Synthetic explicit rejection",
+    );
+  });
+
+  it("adds receipt observations to the same uncertain attempt without replacing its original receipt", async () => {
+    const h = harness();
+    h.control.delivery = { state: "unknown", message: "Synthetic lost response", externalId: null };
+    h.enqueue();
+    await h.run();
+    await h.publisher.stop();
+    const before = h.store.list<InvestigationCommentDelivery & { originalReceipt: unknown }>(
+      "commentDeliveries",
+    )[0]!;
+    expect(before).toMatchObject({ state: "unknown", effect: "unknown", observations: [] });
+    h.control.reconciliation = {
+      state: "succeeded",
+      message: "Exact synthetic receipt",
+      externalId: "synthetic-comment",
+    };
+    h.clock.value += 600_000;
+    await h.run(h.createPublisher());
+    const after = h.store.list<InvestigationCommentDelivery & { originalReceipt: unknown }>(
+      "commentDeliveries",
+    );
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({
+      id: before.id,
+      state: "succeeded",
+      effect: "applied",
+      externalId: "synthetic-comment",
+    });
+    expect(after[0]!.originalReceipt).toEqual(before.originalReceipt);
+    expect(after[0]!.observations).toHaveLength(1);
+    expect(h.posts).toHaveBeenCalledTimes(1);
+    expect(h.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("records a real preparation failure without inventing a published body or a native intent", async () => {
+    const h = harness({ maximumAttempts: 1 });
+    h.readPublisherIdentity.mockRejectedValue(new Error("Synthetic unavailable identity service"));
+    h.enqueue();
+    expect(h.store.list("commentDeliveries")).toHaveLength(0);
+    await h.run();
+    expect(h.deliveries.list(h.actor).items).toMatchObject([
+      { operation: "create", state: "failed", effect: "not_sent", body: null, legacy: false },
+    ]);
+    expect(h.store.list("actionIntents")).toHaveLength(0);
+    expect(h.posts).not.toHaveBeenCalled();
+  });
+
+  it("imports a retained legacy success once without inventing its completion time", async () => {
+    const h = harness({ history: false });
+    h.enqueue();
+    await h.run();
+    await h.publisher.stop();
+    expect(h.store.list("commentDeliveries")).toHaveLength(0);
+    const original = h.saved();
+    const restarted = h.createPublisher(true);
+    await h.run(restarted);
+    await restarted.stop();
+    await h.run(h.createPublisher(true));
+    expect(h.saved()).toEqual(original);
+    expect(h.deliveries.list(h.actor).items).toMatchObject([
+      {
+        state: "succeeded",
+        effect: "applied",
+        legacy: true,
+        attemptNumber: 0,
+        startedAt: original.updatedAt,
+        finishedAt: null,
+      },
+    ]);
+    expect(h.posts).toHaveBeenCalledTimes(1);
+  });
+
+  it("imports an executing legacy snapshot and reconciles its original row without a fake retry", async () => {
+    const h = harness({ history: false });
+    h.control.delivery = { state: "unknown", message: "Synthetic lost response", externalId: null };
+    h.enqueue();
+    await h.run();
+    await h.publisher.stop();
+    h.store.put("idempotency", h.saved().id, { ...h.saved(), state: "sending" });
+    h.clock.value += 600_000;
+    h.control.reconciliation = {
+      state: "succeeded",
+      message: "Exact synthetic receipt",
+      externalId: "synthetic-comment",
+    };
+    await h.run(h.createPublisher(true));
+    const rows = h.store.list<
+      InvestigationCommentDelivery & { originalReceipt: { state: string; at: string | null } }
+    >("commentDeliveries");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      legacy: true,
+      attemptNumber: 0,
+      state: "succeeded",
+      finishedAt: null,
+      originalReceipt: { state: "unknown", at: null },
+    });
+    expect(rows[0]!.observations).toHaveLength(1);
+    expect(h.posts).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not import a fake uncertain write for a legacy sending record whose intent is still prepared", async () => {
+    const h = harness({ history: false });
+    h.enqueue();
+    await h.freeze();
+    const intent = await h.actions.createIntent(h.automaticActor(), h.saved().request!);
+    h.store.put("idempotency", h.saved().id, {
+      ...h.saved(),
+      state: "sending",
+      intentId: intent.id,
+    });
+    await h.run(h.createPublisher(true));
+    expect(h.saved()).toMatchObject({ state: "sent", intentId: intent.id });
+    expect(h.deliveries.list(h.actor).items).toMatchObject([
+      {
+        id: `auto-reply-delivery:${intent.id}`,
+        legacy: false,
+        state: "succeeded",
+        effect: "applied",
+        attemptNumber: 1,
+      },
+    ]);
+    expect(h.posts).toHaveBeenCalledTimes(1);
+  });
+
+  it("never marks an already dispatched attempt as not sent after confirmation bookkeeping fails", async () => {
+    const h = harness({ maximumAttempts: 1 });
+    const confirm = h.actions.confirmIntent.bind(h.actions);
+    vi.spyOn(h.actions, "confirmIntent").mockImplementationOnce(async (...args) => {
+      await confirm(...args);
+      throw new Error("Synthetic interruption after native confirmation completed");
+    });
+    h.enqueue();
+    await h.run();
+    const row = h.store.list<InvestigationCommentDelivery & { dispatchedAt: string | null }>(
+      "commentDeliveries",
+    )[0]!;
+    expect(row.dispatchedAt).not.toBeNull();
+    expect(row).toMatchObject({ state: "succeeded", effect: "applied" });
+    expect(h.saved().state).toBe("sent");
+    expect(h.posts).toHaveBeenCalledTimes(1);
+    expect(h.store.list<InvestigationActionIntentV1>("actionIntents")[0]!.state).toBe("succeeded");
+  });
+
+  it("imports all retained snapshots through bounded pages", async () => {
+    const h = harness({ history: false });
+    h.enqueue();
+    await h.run();
+    await h.publisher.stop();
+    const source = h.saved();
+    for (let index = 0; index < 101; index += 1) {
+      const reportId = `legacy-report-${index}`;
+      h.store.insert("idempotency", `auto-reply:report:${reportId}`, {
+        ...source,
+        id: `auto-reply:report:${reportId}`,
+        reportId,
+        intentId: null,
+      });
+    }
+    await h.run(h.createPublisher(true));
+    expect(h.store.list("commentDeliveries")).toHaveLength(102);
+    expect(h.posts).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns scoped public summaries with stable versions and no implicit native retry action", async () => {
+    const h = harness();
+    h.enqueue();
+    const before = h.publisher.getComment(h.actor, h.saved().id);
+    expect(before).toMatchObject({
+      mode: "result",
+      state: "pending",
+      taskId: h.task.id,
+      lastAttemptAt: null,
+      availableActions: [],
+    });
+    expect(h.publisher.getComment(h.actor, h.saved().id).version).toBe(before.version);
+    expect(h.publisher.taskSummaries(h.actor, [h.task.id]).items).toEqual([before]);
+    await h.run();
+    const after = h.publisher.getComment(h.actor, h.saved().id);
+    expect(after).toMatchObject({
+      state: "synced",
+      requiresAttention: false,
+      externalId: "synthetic-comment",
+      availableActions: [],
+    });
+    expect(after.version).not.toBe(before.version);
+    expect(after.lastConfirmedAt).not.toBeNull();
+    expect(after.commentUrl).toContain("#issuecomment-synthetic-comment");
+    expect(() => h.publisher.getComment({ ...h.actor, repositoryIds: [] }, h.saved().id)).toThrow(
+      "cannot read",
+    );
+    expect(() => h.publisher.taskSummaries({ ...h.actor, repositoryIds: [] }, [h.task.id])).toThrow(
+      "cannot read",
+    );
+    expect(after).not.toHaveProperty("authorizationEpoch");
+    expect(after).not.toHaveProperty("githubIdentity");
+    expect(after).not.toHaveProperty("request");
+  });
+
+  it("does not expose internal failure messages through the public summary", async () => {
+    const h = harness({ maximumAttempts: 1 });
+    h.enqueue();
+    h.store.put("idempotency", h.saved().id, {
+      ...h.saved(),
+      state: "blocked",
+      reason: "Sensitive synthetic diagnostic",
+    });
+    h.store.delete("idempotency", h.saved().pendingId);
+    const summary = h.publisher.getComment(h.actor, h.saved().id);
+    expect(summary).toMatchObject({
+      state: "needs_attention",
+      requiresAttention: true,
+      availableActions: [],
+    });
+    expect(JSON.stringify(summary)).not.toContain("Sensitive synthetic diagnostic");
+  });
+});
+
 const awaitedBoundaries = [
   "publisher-identity",
   "read-target:1",
@@ -719,7 +1053,7 @@ const awaitedBoundaries = [
 ] as const;
 const revocations = [
   "disabled",
-  "settings-version",
+  "reauthorized",
   "account-permission",
   "repository-binding",
 ] as const;
@@ -738,7 +1072,16 @@ describe("automatic reply authorization at awaited boundaries", () => {
         if (name !== boundary) return;
         revoked = true;
         if (revocation === "disabled") h.updateSettings(false);
-        if (revocation === "settings-version") h.updateSettings(true);
+        if (revocation === "reauthorized") {
+          const settings = h.settings.read(h.actor, h.task.repository.id);
+          h.settings.update(h.actor, h.task.repository.id, {
+            version: settings.version,
+            enabled: true,
+            pullRequestTemplate: settings.pullRequestTemplate,
+            issueTemplate: settings.issueTemplate,
+            reauthorize: true,
+          });
+        }
         if (revocation === "account-permission")
           h.control.operator = { ...h.actor, permissions: ["repository:manage", "action:prepare"] };
         if (revocation === "repository-binding")

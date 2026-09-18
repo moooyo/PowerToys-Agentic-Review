@@ -2,6 +2,10 @@ import {
   ActionContextV1Schema,
   InvestigationActionIntentV1Schema,
   InvestigationArtifactMetadataV1Schema,
+  type InvestigationCommentDelivery,
+  InvestigationCommentDeliveryListSchema,
+  InvestigationCommentPublicationListSchema,
+  InvestigationCommentPublicationSummarySchema,
   InvestigationFindingsPageV1Schema,
   type InvestigationFindingV1,
   InvestigationReportHeaderV1Schema,
@@ -16,14 +20,17 @@ import {
   type PrepareActionInput,
   RepositoryAutoReplySchema,
   RepositoryAutoReplySettingsSchema,
+  RepositoryProgressReplySchema,
   RepositorySchema,
   RepositoryWebhookSettingsSchema,
   TaskDetailSchema,
+  type UpdateRepositoryAutoReplySettingsInput,
   type UpdateRepositoryWebhookSettingsInput,
   WorkItemSchema,
 } from "./api";
-import { createSampleInvestigationApi } from "./sample-adapter";
+import { createSampleInvestigationApi, sampleCommentDeliveryView } from "./sample-adapter";
 import {
+  sampleAutoReplyProgressTemplates,
   sampleIssueAutoReplyTemplate,
   samplePullRequestAutoReplyTemplate,
 } from "./sample-auto-reply-templates";
@@ -333,7 +340,270 @@ describe("sample investigation read contracts", () => {
   });
 });
 
+describe("sample comment publications", () => {
+  it("exposes independent publication states, batch summaries, and a pre-task receipt", async () => {
+    const api = createSampleInvestigationApi();
+    const all = await api.comments();
+    expectSchema(InvestigationCommentPublicationListSchema, all);
+    expect(all.items).toHaveLength(7);
+    expect(new Set(all.items.map((comment) => comment.state))).toEqual(
+      new Set(["synced", "retrying", "unconfirmed", "needs_attention", "paused", "pending"]),
+    );
+    const pending = required(all.items.find((comment) => comment.taskId === null));
+    expect(pending).toMatchObject({ workItemId: null, mode: "progress", state: "pending" });
+    expect(await api.commentAttempts(pending.id)).toEqual({ items: [], nextCursor: null });
+    const preparing = await api.comment("sample-assignment-preparing-comment");
+    expect(preparing).toMatchObject({ state: "synced", taskId: null, workItemId: null });
+    expect((await api.commentAttempts(preparing.id)).items).toEqual([
+      expect.objectContaining({
+        operation: "create",
+        taskId: null,
+        body: expect.stringContaining("Source import is preparing"),
+      }),
+    ]);
+    expect(await api.comments({ repositoryId: "missing-repository" })).toEqual({ items: [] });
+    expect((await api.comments({ taskIds: ["sample-pr-p0-task"] })).items).toEqual([
+      await api.comment("sample-pr-p0-comment"),
+    ]);
+    expect((await api.comments({ commentIds: [pending.id] })).items).toEqual([pending]);
+    await expect(api.comments({ taskIds: [], commentIds: [] })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(
+      api.comments({ commentIds: Array.from({ length: 101 }, (_, index) => `comment-${index}`) }),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(api.comment("missing-comment")).rejects.toMatchObject({ status: 404 });
+    await expect(api.commentAttempts("missing-comment")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("paginates immutable create and update bodies with filter-bound cursors", async () => {
+    const api = createSampleInvestigationApi();
+    const id = "sample-pr-p1-comment";
+    const first = await api.commentAttempts(id, { limit: 1 });
+    expectSchema(InvestigationCommentDeliveryListSchema, first);
+    expect(first.items).toHaveLength(1);
+    expect(first.items[0]).toMatchObject({
+      operation: "update",
+      attemptNumber: 2,
+      state: "succeeded",
+    });
+    const second = await api.commentAttempts(id, { limit: 1, cursor: required(first.nextCursor) });
+    expectSchema(InvestigationCommentDeliveryListSchema, second);
+    expect(second.items[0]).toMatchObject({
+      operation: "create",
+      attemptNumber: 1,
+      state: "succeeded",
+    });
+    expect(second.items[0]?.body).toContain("Assignment of #2101");
+    expect(first.items[0]?.body).toContain("completed");
+    expect(first.items[0]?.body).not.toBe(second.items[0]?.body);
+    expect(second.nextCursor).toBeNull();
+    await expect(
+      api.commentAttempts("sample-pr-p0-comment", { cursor: required(first.nextCursor) }),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(api.commentAttempts(id, { limit: 51 })).rejects.toMatchObject({ status: 400 });
+    const filtered = await api.commentDeliveries({
+      repositoryId,
+      mode: "progress",
+      state: "unknown",
+    });
+    expectSchema(InvestigationCommentDeliveryListSchema, filtered);
+    expect(filtered.items).toHaveLength(1);
+    expect(filtered.items[0]?.commentId).toBe("sample-pr-partial-comment");
+    expect((await api.commentDeliveries({ workItemNumber: 2101 })).items).toHaveLength(2);
+    required(first.items[0]).body = "Changed by the reader.";
+    expect((await api.commentAttempts(id)).items[0]?.body).toContain("completed");
+  });
+
+  it("appends an update once per command and retains every previous body", async () => {
+    const api = createSampleInvestigationApi();
+    const before = await api.comment("sample-pr-p0-comment");
+    const previousAttempts = await api.commentAttempts(before.id);
+    const taskBefore = await api.task(required(before.taskId));
+    const command = { version: before.version, idempotencyKey: "retry-publication" };
+    const synced = await api.syncComment(before.id, command);
+    expectSchema(InvestigationCommentPublicationSummarySchema, synced);
+    expect(synced).toMatchObject({ state: "synced", availableActions: [], nextAttemptAt: null });
+    expect(synced.version).not.toBe(before.version);
+    const attempts = await api.commentAttempts(before.id);
+    expect(attempts.items).toHaveLength(previousAttempts.items.length + 1);
+    expect(attempts.items).toEqual(expect.arrayContaining(previousAttempts.items));
+    expect(attempts.items.find((attempt) => attempt.attemptNumber === 3)).toMatchObject({
+      operation: "update",
+      state: "succeeded",
+      externalId: before.externalId,
+      body: previousAttempts.items[0]?.body,
+    });
+    expect(await api.syncComment(before.id, command)).toEqual(synced);
+    expect(await api.commentAttempts(before.id)).toEqual(attempts);
+    expect(await api.task(required(before.taskId))).toEqual(taskBefore);
+    await expect(
+      api.syncComment(before.id, { ...command, version: synced.version }),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(
+      api.syncComment(before.id, { ...command, idempotencyKey: "stale-command" }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("projects a reconciled attempt without fabricating a write or changing its saved body", async () => {
+    const api = createSampleInvestigationApi();
+    const before = await api.comment("sample-pr-partial-comment");
+    const oldAttempts = await api.commentAttempts(before.id);
+    const oldUnknown = required(oldAttempts.items.find((attempt) => attempt.state === "unknown"));
+    await expect(
+      api.syncComment(before.id, { version: before.version, idempotencyKey: "unsafe-sync" }),
+    ).rejects.toMatchObject({ status: 409 });
+    const command = { version: before.version, idempotencyKey: "read-back" };
+    const reconciled = await api.reconcileComment(before.id, command);
+    expect(reconciled.state).toBe("synced");
+    const attempts = await api.commentAttempts(before.id);
+    expect(attempts.items).toHaveLength(oldAttempts.items.length);
+    const observed = required(attempts.items.find((attempt) => attempt.id === oldUnknown.id));
+    expect(observed).toEqual({
+      ...oldUnknown,
+      state: "succeeded",
+      effect: "applied",
+      reason: observed.observations[0]?.reason,
+      observations: observed.observations,
+    });
+    expect(observed.observations).toEqual([expect.objectContaining({ state: "succeeded" })]);
+    expect(attempts.items.find((attempt) => attempt.operation === "create")).toEqual(
+      oldAttempts.items.find((attempt) => attempt.operation === "create"),
+    );
+    expect(await api.reconcileComment(before.id, command)).toEqual(reconciled);
+    expect(await api.commentAttempts(before.id)).toEqual(attempts);
+    expect((await api.commentDeliveries({ commentId: before.id, state: "unknown" })).items).toEqual(
+      [],
+    );
+    expect(
+      (await api.commentDeliveries({ commentId: before.id, state: "succeeded" })).items,
+    ).toHaveLength(2);
+  });
+
+  it.each([
+    {
+      original: "unknown",
+      observations: ["failed", "unknown"],
+      expected: "unknown",
+      effect: "unknown",
+    },
+    {
+      original: "unknown",
+      observations: ["failed", "succeeded", "unknown", "failed"],
+      expected: "succeeded",
+      effect: "applied",
+    },
+    {
+      original: "succeeded",
+      observations: ["failed", "unknown"],
+      expected: "succeeded",
+      effect: "applied",
+    },
+    { original: "failed", observations: ["succeeded"], expected: "failed", effect: "rejected" },
+  ] as const)(
+    "preserves authoritative $original write evidence across $observations observations",
+    async ({ original, observations, expected, effect }) => {
+      const api = createSampleInvestigationApi();
+      const saved = required((await api.commentAttempts("sample-pr-partial-comment")).items[0]);
+      const receipt: InvestigationCommentDelivery = {
+        ...saved,
+        state: original,
+        effect:
+          original === "succeeded" ? "applied" : original === "failed" ? "rejected" : "unknown",
+        reason: "The original write receipt.",
+        observations: observations.map((state, index) => ({
+          at: `2026-09-15T03:0${index}:00.000Z`,
+          state,
+          reason: `Readback ${index}: ${state}.`,
+        })),
+      };
+      const originalReceipt = structuredClone(receipt);
+      const view = sampleCommentDeliveryView(receipt);
+      expect(view).toMatchObject({ state: expected, effect, body: saved.body });
+      expect(view.observations).toEqual(receipt.observations);
+      expect(view.reason).toBe(
+        original !== "unknown"
+          ? originalReceipt.reason
+          : observations.some((state) => state === "succeeded")
+            ? receipt.observations.find((observation) => observation.state === "succeeded")?.reason
+            : receipt.observations.at(-1)?.reason,
+      );
+      view.observations.length = 0;
+      expect(receipt).toEqual(originalReceipt);
+    },
+  );
+
+  it("creates a synthetic intake receipt and isolates independently created adapters", async () => {
+    const first = createSampleInvestigationApi();
+    const second = createSampleInvestigationApi();
+    const before = await first.comment("sample-assignment-intake-comment");
+    await first.syncComment(before.id, {
+      version: before.version,
+      idempotencyKey: "intake-receipt",
+    });
+    const delivery = required((await first.commentAttempts(before.id)).items[0]);
+    expect(delivery).toMatchObject({
+      operation: "create",
+      taskId: null,
+      workItemId: null,
+      attemptNumber: 1,
+    });
+    expect(delivery.body).toContain("Preparing the source");
+    expect(await second.comment(before.id)).toEqual(before);
+    expect(await second.commentAttempts(before.id)).toEqual({ items: [], nextCursor: null });
+  });
+});
+
 describe("sample repository automatic replies", () => {
+  it("separates ordinary template revisions from publishing authorization epochs", async () => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    const enabled = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...initial,
+      enabled: true,
+    });
+    const edited = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...enabled,
+      pullRequestTemplate: enabled.pullRequestTemplate.replace("## Summary", "## Review summary"),
+    });
+    expect(edited).toMatchObject({
+      version: 2,
+      authorizationEpoch: 1,
+      authorizedById: enabled.authorizedById,
+      updatedById: "sample-operator",
+    });
+    const renewed = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...edited,
+      reauthorize: true,
+    });
+    expect(renewed).toMatchObject({ version: 3, authorizationEpoch: 2 });
+    expect(renewed).not.toHaveProperty("reauthorize");
+    const progress = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...renewed,
+      progressEnabled: true,
+    });
+    expect(progress.authorizationEpoch).toBe(3);
+    const disabled = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...progress,
+      enabled: false,
+      progressEnabled: false,
+    });
+    expect(disabled).toMatchObject({ authorizationEpoch: 4, authorizedById: null });
+    const reenabled = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...disabled,
+      enabled: true,
+    });
+    expect(reenabled).toMatchObject({ authorizationEpoch: 5, authorizedById: "sample-operator" });
+    await expect(
+      api.updateRepositoryAutoReplySettings(repositoryId, {
+        ...reenabled,
+        enabled: false,
+        reauthorize: true,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(reenabled);
+  });
+
   it("saves versioned templates without fabricating deliveries or enabling a publisher", async () => {
     const api = createSampleInvestigationApi();
     const initial = await api.repositoryAutoReplySettings(repositoryId);
@@ -341,9 +611,13 @@ describe("sample repository automatic replies", () => {
     expect(initial).toEqual({
       repositoryId,
       enabled: false,
+      progressEnabled: false,
+      progressTemplates: sampleAutoReplyProgressTemplates,
       version: 0,
       publisherConfigured: false,
       authorizedById: null,
+      authorizationEpoch: 0,
+      updatedById: null,
       updatedAt: null,
       templateVersion: 4,
       pullRequestTemplate: samplePullRequestAutoReplyTemplate,
@@ -365,6 +639,8 @@ describe("sample repository automatic replies", () => {
       ...input,
       version: 1,
       authorizedById: "sample-operator",
+      authorizationEpoch: 1,
+      updatedById: "sample-operator",
       updatedAt: "2026-09-15T03:00:00.000Z",
     });
     expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(updated);
@@ -382,6 +658,12 @@ describe("sample repository automatic replies", () => {
     });
     expect(disabled).toMatchObject({ enabled: false, version: 2, authorizedById: null });
     expect(await api.repositoryAutoReplies(repositoryId)).toEqual({ items: [] });
+    const progressReplies = await api.repositoryProgressReplies(repositoryId);
+    expectSchema(
+      Type.Object({ items: Type.Array(RepositoryProgressReplySchema) }),
+      progressReplies,
+    );
+    expect(progressReplies).toEqual({ items: [] });
   });
 
   it("rejects settings and delivery requests for an unknown repository", async () => {
@@ -390,11 +672,154 @@ describe("sample repository automatic replies", () => {
     for (const operation of [
       () => api.repositoryAutoReplySettings("missing-repository"),
       () => api.repositoryAutoReplies("missing-repository"),
+      () => api.repositoryProgressReplies("missing-repository"),
       () => api.updateRepositoryAutoReplySettings("missing-repository", initial),
     ]) {
       await expect(operation()).rejects.toMatchObject({ status: 404 });
     }
     expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(initial);
+  });
+
+  it("resets omitted progress settings to safe defaults and disables progress with automatic replies", async () => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    const progressTemplates = {
+      ...initial.progressTemplates,
+      received: initial.progressTemplates.received.replace("## {{status}}", "## Sample {{status}}"),
+    };
+    const enabled = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...initial,
+      enabled: true,
+      progressEnabled: true,
+      progressTemplates,
+    });
+    const legacyInput = {
+      version: enabled.version,
+      enabled: true,
+      pullRequestTemplate: enabled.pullRequestTemplate,
+      issueTemplate: enabled.issueTemplate,
+    };
+    const legacy = await api.updateRepositoryAutoReplySettings(repositoryId, legacyInput);
+    expect(legacy).toMatchObject({
+      progressEnabled: false,
+      progressTemplates: sampleAutoReplyProgressTemplates,
+    });
+    const enabledAgain = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...legacyInput,
+      version: legacy.version,
+      progressEnabled: true,
+      progressTemplates,
+    });
+    const disabled = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...legacyInput,
+      version: enabledAgain.version,
+      enabled: false,
+      progressTemplates,
+    });
+    expect(disabled).toMatchObject({ enabled: false, progressEnabled: false, progressTemplates });
+    const reenabled = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...legacyInput,
+      version: disabled.version,
+    });
+    expect(reenabled).toMatchObject({
+      enabled: true,
+      progressEnabled: false,
+      progressTemplates: sampleAutoReplyProgressTemplates,
+    });
+    expect(await api.repositoryProgressReplies(repositoryId)).toEqual({ items: [] });
+  });
+
+  it("rejects invalid progress settings without changing the saved version", async () => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    for (const overrides of [
+      { enabled: false, progressEnabled: true },
+      { progressEnabled: "true" },
+      { progressEnabled: null },
+      { progressTemplates: null },
+      { progressTemplates: [] },
+      { progressTemplates: "invalid" },
+      { progressTemplates: { ...initial.progressTemplates, completed: undefined } },
+      { progressTemplates: { ...initial.progressTemplates, failed: 42 } },
+      { progressTemplates: { ...initial.progressTemplates, unexpected: "template" } },
+    ]) {
+      await expect(
+        api.updateRepositoryAutoReplySettings(repositoryId, {
+          ...initial,
+          enabled: true,
+          ...overrides,
+        } as unknown as UpdateRepositoryAutoReplySettingsInput),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(initial);
+    }
+  });
+
+  it.each([
+    {
+      name: "a missing trigger",
+      transform: (template: string) => template.replace("{{trigger}}", ""),
+    },
+    {
+      name: "a duplicate timestamp",
+      transform: (template: string) => `${template}{{updated_at}}`,
+    },
+    {
+      name: "an unknown placeholder",
+      transform: (template: string) => `${template}{{secret}}`,
+    },
+    {
+      name: "an incomplete placeholder",
+      transform: (template: string) => `${template}{{trigger`,
+    },
+    {
+      name: "nested braces",
+      transform: (template: string) => template.replace("{{trigger}}", "{{{trigger}}}"),
+    },
+    {
+      name: "a timestamp before the trigger",
+      transform: (template: string) =>
+        template.replace(/\{\{(trigger|updated_at)\}\}/gu, (_, token) =>
+          token === "trigger" ? "{{updated_at}}" : "{{trigger}}",
+        ),
+    },
+    {
+      name: "more than 12,000 UTF-8 bytes",
+      transform: (template: string) => `${template}${"é".repeat(6_000)}`,
+    },
+  ])("rejects $name in every progress stage without saving", async ({ transform }) => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    for (const stage of ["received", "started", "failed", "completed"] as const) {
+      await expect(
+        api.updateRepositoryAutoReplySettings(repositoryId, {
+          ...initial,
+          progressTemplates: {
+            ...initial.progressTemplates,
+            [stage]: transform(initial.progressTemplates[stage]),
+          },
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(initial);
+    }
+  });
+
+  it("rejects result and failure tokens in the wrong progress stage", async () => {
+    const api = createSampleInvestigationApi();
+    const initial = await api.repositoryAutoReplySettings(repositoryId);
+    for (const [stage, template] of [
+      ["received", initial.progressTemplates.completed],
+      ["started", initial.progressTemplates.failed],
+      ["failed", initial.progressTemplates.completed],
+      ["completed", initial.progressTemplates.failed],
+    ] as const) {
+      await expect(
+        api.updateRepositoryAutoReplySettings(repositoryId, {
+          ...initial,
+          progressTemplates: { ...initial.progressTemplates, [stage]: template },
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(initial);
+    }
   });
 
   it.each([
@@ -475,6 +900,8 @@ describe("sample repository automatic replies", () => {
     const original = await second.repositoryAutoReplySettings(repositoryId);
     const input = {
       enabled: true,
+      progressEnabled: true,
+      progressTemplates: structuredClone(original.progressTemplates),
       version: original.version,
       pullRequestTemplate: original.pullRequestTemplate,
       issueTemplate: original.issueTemplate,
@@ -482,13 +909,19 @@ describe("sample repository automatic replies", () => {
     const saved = await first.updateRepositoryAutoReplySettings(repositoryId, input);
     const expected = structuredClone(saved);
     input.pullRequestTemplate = "Changed after saving.";
+    input.progressTemplates.received = "Changed after saving.";
     saved.issueTemplate = "Changed after reading.";
+    saved.progressTemplates.completed = "Changed after reading.";
     expect(await first.repositoryAutoReplySettings(repositoryId)).toEqual(expected);
     expect(await second.repositoryAutoReplySettings(repositoryId)).toEqual(original);
     const replies = await first.repositoryAutoReplies(repositoryId);
     replies.items.length = 10;
     expect(await first.repositoryAutoReplies(repositoryId)).toEqual({ items: [] });
     expect(await second.repositoryAutoReplies(repositoryId)).toEqual({ items: [] });
+    const progressReplies = await first.repositoryProgressReplies(repositoryId);
+    progressReplies.items.length = 10;
+    expect(await first.repositoryProgressReplies(repositoryId)).toEqual({ items: [] });
+    expect(await second.repositoryProgressReplies(repositoryId)).toEqual({ items: [] });
   });
 });
 

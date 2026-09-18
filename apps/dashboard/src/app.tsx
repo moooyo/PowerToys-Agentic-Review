@@ -1,6 +1,7 @@
 import {
   AccountTreeRounded,
   CloseRounded,
+  CommentOutlined,
   DarkModeOutlined,
   FactCheckOutlined,
   FolderOutlined,
@@ -37,6 +38,7 @@ import { type ComponentType, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import routeDefinitions from "../config/routes";
 import AccountsPage from "./investigation/accounts-page";
+import CommentsPage from "./investigation/comments-page";
 import MyAccountPage from "./investigation/my-account";
 import ReportPage from "./investigation/report-workspace";
 import RepositoriesPage from "./investigation/repositories-page";
@@ -55,6 +57,7 @@ const pages: Record<string, ComponentType> = {
   "./PullRequests": PullRequestsPage,
   "./Issues": IssuesPage,
   "./InvestigationTasks": TasksPage,
+  "./InvestigationComments": CommentsPage,
   "./InvestigationReport": ReportPage,
   "./InvestigationRepositories": RepositoriesPage,
   "./MyAccount": MyAccountPage,
@@ -64,6 +67,7 @@ const icons: Record<string, ComponentType> = {
   "/pull-requests": AccountTreeRounded,
   "/issues": FactCheckOutlined,
   "/tasks": PlayCircleOutlineRounded,
+  "/comments": CommentOutlined,
   "/repositories": FolderOutlined,
   "/account": PersonOutlineRounded,
   "/accounts": ManageAccountsOutlined,

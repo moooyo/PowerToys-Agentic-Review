@@ -609,6 +609,36 @@ function selectFullDiff(p: ReturnType<typeof prChunkFixture>): void {
 }
 
 describe("investigation model turn runner", () => {
+  it("retains complete owned progress comments and their provenance in the model input", async () => {
+    const f = fixture();
+    const original = JSON.parse(f.files.get(f.input.workspace.modelInputPath)!.toString("utf8"));
+    const comments = [
+      {
+        id: "reporter-comment",
+        body: "Keep this complete human report, including its original wording.",
+      },
+      {
+        id: "owned-progress-comment",
+        body: "I'm an AI assistant. Preparing the investigation.\n<!-- agentic-review-progress:fixture -->",
+        provenance: { kind: "agentic_review_progress", publicationId: "publication-fixture" },
+      },
+    ];
+    const encoded = JSON.stringify({ ...original, comments });
+    f.files.set(f.input.workspace.modelInputPath, Buffer.from(encoded));
+    await f.runner.execute({
+      ...f.input,
+      workspace: { ...f.input.workspace, modelInputDigest: hash(encoded) },
+    });
+    const prompt = f.start.mock.calls[0]![0].standardInput!;
+    const context = JSON.parse(
+      prompt
+        .split("<frozen_investigation_context>\n")[1]!
+        .split("\n</frozen_investigation_context>")[0]!,
+    );
+    expect(context.snapshot.comments).toEqual(comments);
+    expect(prompt).toContain("not new human requests or independent evidence");
+  });
+
   function focusedSourceFixture(
     optionalContent = "class Delegate {}\n",
     requiredContent = "class Core { Delegate owner; }\n",
@@ -1424,6 +1454,8 @@ describe("investigation model turn runner", () => {
       for (const instruction of [
         "Write narrative report content in English",
         "Preserve source identifiers and necessary verbatim quotations in their original language",
+        "provenance.kind=agentic_review_progress",
+        "not new human requests or independent evidence",
         "evidenceRefs identifies evidence, not subjects",
         "evidenceRefs: []",
         "Only status and evidenceRefs may change",

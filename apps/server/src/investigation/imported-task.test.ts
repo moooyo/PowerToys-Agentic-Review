@@ -3,6 +3,7 @@ import type {
   ActionContextV1,
   InvestigationCreateTaskRequestV1,
   InvestigationInputSnapshotV1,
+  InvestigationTaskV1,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -194,6 +195,52 @@ function deferTarget(fixture: Harness) {
 }
 
 describe("frozen imported task creation", () => {
+  it("commits its creation callback with the task and does not replay it for an existing task", async () => {
+    const fixture = harness();
+    const onPersisted = vi.fn((task: InvestigationTaskV1) => {
+      expect(fixture.store.get("tasks", task.id)).toEqual(task);
+      expect(fixture.store.has("idempotency", `input:${task.id}`)).toBe(true);
+      fixture.store.insert("idempotency", "synthetic-progress-created", { taskId: task.id });
+    });
+    const task = await fixture.service.createImportedTask(
+      actor,
+      fixture.request,
+      fixture.source,
+      undefined,
+      onPersisted,
+    );
+    expect(fixture.store.get("idempotency", "synthetic-progress-created")).toEqual({
+      taskId: task.id,
+    });
+    expect(
+      await fixture.service.createImportedTask(
+        actor,
+        fixture.request,
+        fixture.source,
+        undefined,
+        onPersisted,
+      ),
+    ).toEqual(task);
+    expect(onPersisted).toHaveBeenCalledExactlyOnceWith(task);
+  });
+
+  it("rolls back the imported task and all callback writes when creation notification fails", async () => {
+    const fixture = harness();
+    await expect(
+      fixture.service.createImportedTask(
+        actor,
+        fixture.request,
+        fixture.source,
+        undefined,
+        (task) => {
+          fixture.store.insert("idempotency", "synthetic-progress-created", { taskId: task.id });
+          throw new Error("Synthetic acknowledgement persistence failed.");
+        },
+      ),
+    ).rejects.toThrow("Synthetic acknowledgement persistence failed.");
+    expectNoTaskWrites(fixture);
+  });
+
   it.each(["pull_request", "issue"] as const)(
     "persists the complete imported %s input without consulting the moving source pointer",
     async (kind) => {

@@ -5,6 +5,7 @@ import type {
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
+import type { InvestigationProgressTrigger } from "./progress-reply-template.js";
 import type { InvestigationService } from "./service.js";
 import type { InvestigationSourceImporter } from "./source-import.js";
 import type { InvestigationStore } from "./store.js";
@@ -20,6 +21,7 @@ import type { InvestigationWebhookSettings } from "./webhook-settings.js";
 const deliveryPrefix = "webhook:delivery:";
 const pendingPrefix = "webhook:pending:";
 const assignmentPrefix = "webhook:assignment:";
+const activeCyclePrefix = "webhook:active-cycle:";
 const maximumPending = 1_000;
 
 interface Assignment {
@@ -29,6 +31,8 @@ interface Assignment {
   readonly githubWorkItemId: number;
   readonly actorUserId: number;
   readonly assigneeUserId: number;
+  readonly actorLogin?: string;
+  readonly assigneeLogin?: string;
   readonly updatedAt: string;
   readonly baseSha?: string;
   readonly headSha?: string;
@@ -38,6 +42,26 @@ interface ImportedSource {
   readonly workItem: InvestigationWorkItemRecord;
   readonly snapshotRef: { id: string; digest: string };
 }
+
+/** A signed, authorized assignment scope; it is not a placeholder Task or work item. */
+export interface TrustedAssignmentAdmission {
+  readonly id: string;
+  readonly repository: InvestigationRepositoryRecord;
+  readonly target: {
+    readonly id: string;
+    readonly repositoryId: string;
+    readonly kind: "pull_request" | "issue";
+    readonly number: number;
+    readonly githubWorkItemId: number;
+  };
+  readonly trigger: InvestigationProgressTrigger;
+  readonly receivedAt: string;
+  readonly expectedAssigneeUserId: number;
+  readonly baseSha?: string;
+  readonly headSha?: string;
+}
+
+export type AssignmentProgressState = "preparing" | "failed" | "cancelled" | "queued";
 
 export interface InvestigationWebhookReceipt {
   readonly id: string;
@@ -56,6 +80,8 @@ export interface InvestigationWebhookReceipt {
   readonly taskId: string | null;
   readonly reason: string | null;
   readonly claim?: { readonly ownerId: string; readonly expiresAt: number };
+  readonly canonicalReceiptId?: string;
+  readonly admission?: TrustedAssignmentAdmission;
 }
 
 interface PendingRecord {
@@ -73,6 +99,47 @@ export interface InvestigationWebhookIntakeOptions {
   readonly onError?: (code: string) => void;
   readonly settings?: Pick<InvestigationWebhookSettings, "bindings">;
   readonly claimDurationMs?: number;
+  readonly onAssignmentAccepted?: (admission: TrustedAssignmentAdmission) => void;
+  readonly onAssignmentChanged?: (
+    admission: TrustedAssignmentAdmission,
+    state: AssignmentProgressState,
+    reasonCode?: string,
+  ) => void;
+  readonly onTaskCreated?: (
+    task: InvestigationTaskV1,
+    trigger: InvestigationProgressTrigger,
+    created: boolean,
+    admission?: TrustedAssignmentAdmission,
+  ) => void;
+}
+
+function optionalLogin(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(value)
+    ? value
+    : undefined;
+}
+
+function progressTrigger(assignment: Assignment): InvestigationProgressTrigger {
+  return {
+    eventName: assignment.kind === "issue" ? "issues" : "pull_request",
+    actorUserId: assignment.actorUserId,
+    assigneeUserId: assignment.assigneeUserId,
+    ...(assignment.actorLogin === undefined ? {} : { actorLogin: assignment.actorLogin }),
+    ...(assignment.assigneeLogin === undefined ? {} : { assigneeLogin: assignment.assigneeLogin }),
+  };
+}
+
+function activeCycleKey(assignment: Assignment): string {
+  return `${activeCyclePrefix}${investigationContentDigest({
+    repository: assignment.repository,
+    githubWorkItemId: assignment.githubWorkItemId,
+    kind: assignment.kind,
+    number: assignment.number,
+    assigneeUserId: assignment.assigneeUserId,
+    ...(assignment.baseSha === undefined
+      ? {}
+      : { baseSha: assignment.baseSha, headSha: assignment.headSha }),
+  })}`;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -130,6 +197,106 @@ export class InvestigationWebhookIntake {
   constructor(private readonly options: InvestigationWebhookIntakeOptions) {
     this.#now = options.now ?? Date.now;
     this.#config = structuredClone(options.config);
+  }
+
+  #canonical(receipt: InvestigationWebhookReceipt): InvestigationWebhookReceipt {
+    if (receipt.canonicalReceiptId === undefined || receipt.canonicalReceiptId === receipt.id)
+      return receipt;
+    const canonical = this.options.store.get<InvestigationWebhookReceipt>(
+      "idempotency",
+      receipt.canonicalReceiptId,
+    );
+    requireCondition(
+      canonical !== undefined,
+      409,
+      "webhook_canonical_missing",
+      "The canonical assignment receipt is unavailable.",
+    );
+    return canonical;
+  }
+
+  #admission(receipt: InvestigationWebhookReceipt): TrustedAssignmentAdmission {
+    const canonical = this.#canonical(receipt);
+    if (canonical.admission !== undefined) return canonical.admission;
+    const assignment = canonical.assignment;
+    const existing = this.options.store.list<InvestigationWorkItemRecord>(
+      "workItems",
+      (item) =>
+        item.repositoryId === assignment.repository.id &&
+        item.kind === assignment.kind &&
+        item.number === assignment.number,
+    );
+    requireCondition(
+      existing.length <= 1,
+      409,
+      "work_item_identity_conflict",
+      "Multiple local records identify this upstream work item.",
+    );
+    const target = {
+      repositoryId: assignment.repository.id,
+      kind: assignment.kind,
+      number: assignment.number,
+    };
+    return {
+      id: canonical.id,
+      repository: structuredClone(assignment.repository),
+      target: {
+        id:
+          canonical.source?.workItem.id ??
+          existing[0]?.id ??
+          `work-item:${investigationContentDigest(target).slice(0, 48)}`,
+        ...target,
+        githubWorkItemId: assignment.githubWorkItemId,
+      },
+      trigger: progressTrigger(assignment),
+      receivedAt: canonical.receivedAt,
+      expectedAssigneeUserId: assignment.assigneeUserId,
+      ...(assignment.baseSha === undefined
+        ? {}
+        : { baseSha: assignment.baseSha, headSha: assignment.headSha! }),
+    };
+  }
+
+  #isActive(receipt: InvestigationWebhookReceipt): boolean {
+    if (receipt.state === "accepted" || receipt.state === "source_ready") return true;
+    if (receipt.state !== "completed" || receipt.taskId === null) return false;
+    const task = this.options.store.get<InvestigationTaskV1>("tasks", receipt.taskId);
+    return task !== undefined && (task.state === "queued" || task.state === "running");
+  }
+
+  #activeReceipt(assignment: Assignment): InvestigationWebhookReceipt | undefined {
+    const key = activeCycleKey(assignment);
+    const indexed = this.options.store.get<PendingRecord>("idempotency", key);
+    if (indexed !== undefined) {
+      const receipt = this.options.store.get<InvestigationWebhookReceipt>(
+        "idempotency",
+        indexed.receiptId,
+      );
+      return receipt !== undefined && this.#isActive(receipt) ? receipt : undefined;
+    }
+    // Existing active receipts can join a cycle without retroactive publication enrollment.
+    let latest: InvestigationWebhookReceipt | undefined;
+    let afterId: string | undefined;
+    for (;;) {
+      const page = this.options.store.pagePrefix<InvestigationWebhookReceipt>(
+        "idempotency",
+        deliveryPrefix,
+        500,
+        false,
+        afterId,
+      );
+      for (const receipt of page) {
+        if (
+          (receipt.canonicalReceiptId === undefined || receipt.canonicalReceiptId === receipt.id) &&
+          activeCycleKey(receipt.assignment) === key &&
+          this.#isActive(receipt) &&
+          (latest === undefined || receipt.receivedAt > latest.receivedAt)
+        )
+          latest = receipt;
+      }
+      if (page.length < 500) return latest;
+      afterId = page[page.length - 1]!.id;
+    }
   }
 
   accept(input: InvestigationWebhookDeliveryInput): {
@@ -218,7 +385,7 @@ export class InvestigationWebhookIntake {
         "invalid_assignment",
         "The PR base repository must match the configured target.",
       );
-    const assignment: Assignment = {
+    const assignmentIdentity: Assignment = {
       repository,
       kind: input.eventName === "issues" ? "issue" : "pull_request",
       number: positiveId(item.number),
@@ -228,8 +395,15 @@ export class InvestigationWebhookIntake {
       updatedAt: item.updated_at,
       ...(base === null || head === null ? {} : { baseSha: sha(base.sha), headSha: sha(head.sha) }),
     };
+    const actorLogin = optionalLogin(sender.login);
+    const assigneeLogin = optionalLogin(assignee.login);
+    const assignment: Assignment = {
+      ...assignmentIdentity,
+      ...(actorLogin === undefined ? {} : { actorLogin }),
+      ...(assigneeLogin === undefined ? {} : { assigneeLogin }),
+    };
     const receiptId = `${deliveryPrefix}${input.deliveryId}`;
-    const semanticKey = `${assignmentPrefix}${investigationContentDigest(assignment)}`;
+    const semanticKey = `${assignmentPrefix}${investigationContentDigest(assignmentIdentity)}`;
     const result = this.options.store.transaction(() => {
       const previous = this.options.store.get<InvestigationWebhookReceipt>(
         "idempotency",
@@ -242,46 +416,79 @@ export class InvestigationWebhookIntake {
           "webhook_delivery_conflict",
           "This delivery ID already identifies another payload.",
         );
-        if (previous.state === "failed") {
+        const canonical = this.#canonical(previous);
+        const active = this.#activeReceipt(canonical.assignment);
+        if (
+          previous.id === canonical.id &&
+          canonical.state === "failed" &&
+          (active === undefined || active.id === canonical.id)
+        ) {
           requireCondition(
             this.options.store.countPrefix("idempotency", pendingPrefix) < maximumPending,
             503,
             "webhook_queue_full",
             "The received-event queue is full; redeliver this event later.",
           );
-          this.options.store.put("idempotency", previous.id, {
-            ...previous,
-            state: previous.source === null ? "accepted" : "source_ready",
+          const retried: InvestigationWebhookReceipt = {
+            ...canonical,
+            state: canonical.source === null ? "accepted" : "source_ready",
             attempts: 0,
             nextAttemptAt: this.#now(),
             reason: null,
+          };
+          this.options.store.put("idempotency", canonical.id, retried);
+          this.options.store.put("idempotency", canonical.pendingId, { receiptId: canonical.id });
+          this.options.store.put("idempotency", activeCycleKey(canonical.assignment), {
+            receiptId: canonical.id,
           });
-          this.options.store.put("idempotency", previous.pendingId, { receiptId: previous.id });
+          this.options.onAssignmentChanged?.(this.#admission(retried), "preparing");
           return { status: "accepted" as const };
         }
         return {
           status: "duplicate" as const,
-          ...(previous.taskId === null ? {} : { taskId: previous.taskId }),
+          ...(canonical.taskId === null ? {} : { taskId: canonical.taskId }),
         };
       }
       const duplicate = this.options.store.get<{ receiptId: string }>("idempotency", semanticKey);
       if (duplicate !== undefined) {
-        const original = this.options.store.get<InvestigationWebhookReceipt>(
-          "idempotency",
-          duplicate.receiptId,
-        )!;
+        const original = this.#canonical(
+          this.options.store.get<InvestigationWebhookReceipt>("idempotency", duplicate.receiptId)!,
+        );
         this.options.store.insert("idempotency", receiptId, {
           ...original,
           id: receiptId,
           deliveryId: input.deliveryId,
           payloadSha256: input.payloadSha256,
           receivedAt: input.receivedAt,
+          canonicalReceiptId: original.id,
+          assignment,
           state: "ignored",
           reason: "duplicate_assignment",
         } satisfies InvestigationWebhookReceipt);
         return {
           status: "duplicate" as const,
           ...(original.taskId === null ? {} : { taskId: original.taskId }),
+        };
+      }
+      const active = this.#activeReceipt(assignment);
+      if (active !== undefined) {
+        this.options.store.insert("idempotency", receiptId, {
+          ...active,
+          id: receiptId,
+          canonicalReceiptId: active.id,
+          deliveryId: input.deliveryId,
+          eventName: input.eventName,
+          payloadSha256: input.payloadSha256,
+          receivedAt: input.receivedAt,
+          assignment,
+          state: "ignored",
+          reason: "active_assignment_cycle",
+        } satisfies InvestigationWebhookReceipt);
+        this.options.store.insert("idempotency", semanticKey, { receiptId: active.id });
+        this.options.store.put("idempotency", activeCycleKey(assignment), { receiptId: active.id });
+        return {
+          status: "duplicate" as const,
+          ...(active.taskId === null ? {} : { taskId: active.taskId }),
         };
       }
       requireCondition(
@@ -293,6 +500,7 @@ export class InvestigationWebhookIntake {
       const pendingId = `${pendingPrefix}${input.receivedAt}:${input.deliveryId}`;
       const receipt: InvestigationWebhookReceipt = {
         id: receiptId,
+        canonicalReceiptId: receiptId,
         deliveryId: input.deliveryId,
         eventName: input.eventName,
         payloadSha256: input.payloadSha256,
@@ -308,9 +516,12 @@ export class InvestigationWebhookIntake {
         taskId: null,
         reason: null,
       };
-      this.options.store.insert("idempotency", receiptId, receipt);
+      const admitted = { ...receipt, admission: this.#admission(receipt) };
+      this.options.store.insert("idempotency", receiptId, admitted);
       this.options.store.insert("idempotency", semanticKey, { receiptId });
       this.options.store.insert("idempotency", pendingId, { receiptId } satisfies PendingRecord);
+      this.options.store.put("idempotency", activeCycleKey(assignment), { receiptId });
+      this.options.onAssignmentAccepted?.(admitted.admission);
       return { status: "accepted" as const };
     });
     this.#wake();
@@ -339,6 +550,7 @@ export class InvestigationWebhookIntake {
       "repository_access_denied",
       "This identity cannot read the delivery's repository.",
     );
+    const canonical = this.#canonical(receipt);
     return {
       deliveryId: receipt.deliveryId,
       repositoryId: receipt.assignment.repository.id,
@@ -350,8 +562,9 @@ export class InvestigationWebhookIntake {
       state: receipt.state,
       attempts: receipt.attempts,
       reason: receipt.reason,
-      taskId: receipt.taskId,
-      snapshotRef: receipt.source?.snapshotRef ?? null,
+      canonicalReceiptId: canonical.id,
+      taskId: canonical.taskId,
+      snapshotRef: canonical.source?.snapshotRef ?? null,
     };
   }
 
@@ -418,6 +631,10 @@ export class InvestigationWebhookIntake {
         "webhook_claim_lost",
         "The event processing lease was superseded.",
       );
+      const previous = this.options.store.get<InvestigationWebhookReceipt>(
+        "idempotency",
+        receipt.id,
+      )!;
       this.options.store.put("idempotency", receipt.id, {
         ...receipt,
         claim: {
@@ -426,6 +643,39 @@ export class InvestigationWebhookIntake {
         },
       });
       if (terminal) this.options.store.delete("idempotency", receipt.pendingId);
+      if (
+        previous.state !== receipt.state ||
+        previous.reason !== receipt.reason ||
+        previous.taskId !== receipt.taskId
+      ) {
+        if (receipt.state === "failed" || receipt.state === "ignored") {
+          const cancelled =
+            receipt.state === "ignored" ||
+            [
+              "webhook_authorization_revoked",
+              "source_assignment_missing",
+              "source_assignment_stale",
+              "source_assignment_revision_changed",
+              "source_assignment_target_changed",
+            ].includes(receipt.reason ?? "");
+          this.options.onAssignmentChanged?.(
+            this.#admission(receipt),
+            cancelled ? "cancelled" : "failed",
+            receipt.reason ?? undefined,
+          );
+        } else if (receipt.state === "accepted" || receipt.state === "source_ready") {
+          this.options.onAssignmentChanged?.(
+            this.#admission(receipt),
+            "preparing",
+            receipt.reason ?? undefined,
+          );
+        } else if (
+          receipt.taskId !== null &&
+          this.options.store.get<InvestigationTaskV1>("tasks", receipt.taskId)?.state === "queued"
+        ) {
+          this.options.onAssignmentChanged?.(this.#admission(receipt), "queued");
+        }
+      }
     });
   }
 
@@ -480,6 +730,14 @@ export class InvestigationWebhookIntake {
       "webhook_task_missing",
       "The saved task is unavailable.",
     );
+    this.options.store.transaction(() => {
+      this.options.onTaskCreated?.(
+        task,
+        progressTrigger(receipt.assignment),
+        false,
+        this.#admission(receipt),
+      );
+    });
     this.#finish({ ...receipt, state: "completed", taskId: task.id, reason: null });
     return true;
   }
@@ -501,6 +759,7 @@ export class InvestigationWebhookIntake {
         },
       };
       this.options.store.put("idempotency", next.id, next);
+      this.options.onAssignmentChanged?.(this.#admission(next), "preparing");
       return next;
     });
     if (claimed === null) return;
@@ -553,13 +812,7 @@ export class InvestigationWebhookIntake {
           workItemId: source.workItem.id,
           kind: request.kind === "pull_request" ? "pr-review" : "issue-investigate",
           executionMode: request.kind === "pull_request" ? "source_read" : "snapshot_only",
-          idempotencyKey: `webhook:${investigationContentDigest({
-            repository: receipt.assignment.repository,
-            workItemId: source.workItem.id,
-            actorUserId: receipt.assignment.actorUserId,
-            assigneeUserId: receipt.assignment.assigneeUserId,
-            snapshotRef: source.snapshotRef,
-          })}`,
+          idempotencyKey: `webhook-admission:${investigationContentDigest(receipt.canonicalReceiptId ?? receipt.id)}`,
         };
         receipt = { ...receipt, source, taskRequest, state: "source_ready" };
         this.#save(receipt);
@@ -591,6 +844,7 @@ export class InvestigationWebhookIntake {
         "webhook_claim_lost",
         "The event processing lease was superseded.",
       );
+      let notified = false;
       const task = await this.options.service.createImportedTask(
         actor,
         receipt.taskRequest!,
@@ -609,20 +863,49 @@ export class InvestigationWebhookIntake {
             "The assignment grant was revoked before the Task transaction committed.",
           );
         },
+        (created) => {
+          this.options.onTaskCreated?.(
+            created,
+            progressTrigger(receipt.assignment),
+            true,
+            this.#admission(receipt),
+          );
+          notified = true;
+        },
       );
+      if (!notified)
+        this.options.store.transaction(() => {
+          this.options.onTaskCreated?.(
+            task,
+            progressTrigger(receipt.assignment),
+            false,
+            this.#admission(receipt),
+          );
+        });
       this.#finish({ ...receipt, state: "completed", taskId: task.id, reason: null });
     } catch (error) {
       if (!this.#started || !this.#owns(receipt)) return;
       const reason =
         error instanceof InvestigationRequestError ? error.code : "webhook_preparation_failed";
+      const stalePreparedSource =
+        reason === "stale_subject" &&
+        receipt.state === "source_ready" &&
+        receipt.source !== null &&
+        receipt.taskId === null;
+      if (stalePreparedSource && this.#recoverCommittedTask(receipt)) return;
       const retryable =
         !(error instanceof InvestigationRequestError) ||
         error.statusCode >= 500 ||
         error.statusCode === 429 ||
-        error.code === "source_changed_during_import";
+        error.code === "source_changed_during_import" ||
+        stalePreparedSource;
       if (retryable && receipt.attempts < (this.options.maximumAttempts ?? 3)) {
         this.#save({
           ...receipt,
+          // No Task was committed. Retain the old immutable snapshot and import a complete new one.
+          ...(stalePreparedSource
+            ? { state: "accepted" as const, source: null, taskRequest: null }
+            : {}),
           reason,
           nextAttemptAt:
             this.#now() + (this.options.retryDelayMs ?? 1_000) * 2 ** (receipt.attempts - 1),

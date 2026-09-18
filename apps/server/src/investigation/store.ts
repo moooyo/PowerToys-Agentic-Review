@@ -1,8 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 
-export const investigationSchemaVersion = "investigation-v2";
+export const investigationSchemaVersion = "investigation-v3";
 
-export const investigationCollections = [
+const investigationV2Collections = [
   "repositories",
   "workItems",
   "tasks",
@@ -20,6 +20,11 @@ export const investigationCollections = [
   "evidenceUsage",
   "findingEvents",
   "sourceSnapshots",
+] as const;
+
+export const investigationCollections = [
+  ...investigationV2Collections,
+  "commentDeliveries",
 ] as const;
 
 export type InvestigationCollection = (typeof investigationCollections)[number];
@@ -48,6 +53,28 @@ const metadataDefinition = `CREATE TABLE "${metadataTable}" (
   "key" TEXT PRIMARY KEY NOT NULL,
   "value" TEXT NOT NULL
 ) STRICT`;
+
+const deliveryIndexes = new Map([
+  [
+    "comment_deliveries_time",
+    `CREATE INDEX "comment_deliveries_time" ON "commentDeliveries" (json_extract("value", '$.startedAt') DESC, "id" DESC)`,
+  ],
+  ...["repositoryId", "taskId", "commentId"].map((field): [string, string] => [
+    `comment_deliveries_${field}`,
+    `CREATE INDEX "comment_deliveries_${field}" ON "commentDeliveries" (json_extract("value", '$.${field}'), json_extract("value", '$.startedAt') DESC, "id" DESC)`,
+  ]),
+]);
+
+export interface InvestigationCommentDeliveryPage {
+  readonly repositoryIds?: readonly string[];
+  readonly taskId?: string;
+  readonly commentId?: string;
+  readonly workItemNumber?: number;
+  readonly state?: string;
+  readonly mode?: string;
+  readonly before?: { readonly startedAt: string; readonly id: string };
+  readonly limit: number;
+}
 
 function collectionName(collection: InvestigationCollection): string {
   if (!collections.has(collection)) {
@@ -134,6 +161,10 @@ export class InvestigationStore {
     this.closed = true;
   }
 
+  get inTransaction(): boolean {
+    return this.database.isTransaction;
+  }
+
   /** The callback must finish synchronously; nested transactions are rejected. */
   transaction<T>(fn: () => T): T {
     if (this.database.isTransaction) {
@@ -211,14 +242,20 @@ export class InvestigationStore {
     prefix: string,
     limit: number,
     descending = false,
+    afterId?: string,
   ): T[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
       throw new InvestigationStoreError("invalid_value", "Page size must be between 1 and 1,000.");
+    if (afterId !== undefined && (afterId < prefix || afterId >= `${prefix}\uffff`))
+      throw new InvestigationStoreError(
+        "invalid_value",
+        "The page cursor must stay inside its key prefix.",
+      );
     return this.database
       .prepare(
-        `SELECT "value" FROM ${collectionName(collection)} WHERE "id" >= ? AND "id" < ? ORDER BY "id" ${descending ? "DESC" : "ASC"} LIMIT ?`,
+        `SELECT "value" FROM ${collectionName(collection)} WHERE "id" >= ? AND "id" < ?${afterId === undefined ? "" : ` AND "id" ${descending ? "<" : ">"} ?`} ORDER BY "id" ${descending ? "DESC" : "ASC"} LIMIT ?`,
       )
-      .all(prefix, `${prefix}\uffff`, limit)
+      .all(prefix, `${prefix}\uffff`, ...(afterId === undefined ? [] : [afterId]), limit)
       .map((row) => JSON.parse(row.value as string) as T);
   }
 
@@ -230,6 +267,57 @@ export class InvestigationStore {
         )
         .get(prefix, `${prefix}\uffff`)!.total,
     );
+  }
+
+  /** Filters inside SQLite and keyset-pages actual delivery attempts without loading other rows. */
+  pageCommentDeliveries<T>(query: InvestigationCommentDeliveryPage): T[] {
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 1_000)
+      throw new InvestigationStoreError("invalid_value", "Page size must be between 1 and 1,000.");
+    if (query.repositoryIds?.length === 0) return [];
+    const predicates: string[] = [];
+    const values: (string | number)[] = [];
+    if (query.repositoryIds !== undefined) {
+      predicates.push(
+        `json_extract("value", '$.repositoryId') IN (${query.repositoryIds.map(() => "?").join(", ")})`,
+      );
+      values.push(...query.repositoryIds);
+    }
+    for (const field of ["taskId", "commentId", "workItemNumber", "state", "mode"] as const) {
+      const value = query[field];
+      if (value !== undefined) {
+        predicates.push(`json_extract("value", '$.${field}') = ?`);
+        values.push(value);
+      }
+    }
+    if (query.before !== undefined) {
+      predicates.push(
+        `(json_extract("value", '$.startedAt') < ? OR (json_extract("value", '$.startedAt') = ? AND "id" < ?))`,
+      );
+      values.push(query.before.startedAt, query.before.startedAt, query.before.id);
+    }
+    values.push(query.limit);
+    return this.database
+      .prepare(
+        `SELECT "value" FROM "commentDeliveries"${predicates.length === 0 ? "" : ` WHERE ${predicates.join(" AND ")}`} ORDER BY json_extract("value", '$.startedAt') DESC, "id" DESC LIMIT ?`,
+      )
+      .all(...values)
+      .map((row) => JSON.parse(row.value as string) as T);
+  }
+
+  /** Uses the comment-scoped index; timestamps and random delivery IDs do not allocate attempts. */
+  maximumCommentDeliveryAttemptNumber(commentId: string): number {
+    const row = this.database
+      .prepare(
+        `SELECT coalesce(max(json_extract("value", '$.attemptNumber')), 0) AS "maximum" FROM "commentDeliveries" INDEXED BY "comment_deliveries_commentId" WHERE json_extract("value", '$.commentId') = ?`,
+      )
+      .get(commentId);
+    const maximum = Number(row?.maximum ?? 0);
+    if (!Number.isSafeInteger(maximum) || maximum < 0)
+      throw new InvestigationStoreError(
+        "invalid_value",
+        "The retained delivery attempt number is invalid.",
+      );
+    return maximum;
   }
 
   insert<T>(collection: InvestigationCollection, id: string, value: T): void {
@@ -275,37 +363,58 @@ export class InvestigationStore {
       for (const collection of investigationCollections) {
         this.database.exec(collectionDefinition(collection));
       }
+      for (const definition of deliveryIndexes.values()) this.database.exec(definition);
       return;
     }
 
-    const expectedDefinitions = new Map<string, string>([
-      [metadataTable, metadataDefinition],
-      ...investigationCollections.map((collection): [string, string] => [
-        collection,
-        collectionDefinition(collection),
-      ]),
-    ]);
-    const compatible =
-      objects.length === expectedDefinitions.size &&
+    const definitions = (names: readonly InvestigationCollection[], indexes = false) =>
+      new Map<string, { type: string; sql: string }>([
+        [metadataTable, { type: "table", sql: metadataDefinition }],
+        ...names.map((collection): [string, { type: string; sql: string }] => [
+          collection,
+          { type: "table", sql: collectionDefinition(collection) },
+        ]),
+        ...(indexes
+          ? [...deliveryIndexes].map(([name, sql]): [string, { type: string; sql: string }] => [
+              name,
+              { type: "index", sql },
+            ])
+          : []),
+      ]);
+    const matches = (expected: ReturnType<typeof definitions>) =>
+      objects.length === expected.size &&
       objects.every((object) => {
-        const definition = expectedDefinitions.get(object.name as string);
+        const definition = expected.get(object.name as string);
         return (
-          object.type === "table" &&
-          typeof object.sql === "string" &&
           definition !== undefined &&
-          normalizeDefinition(object.sql) === normalizeDefinition(definition)
+          object.type === definition.type &&
+          typeof object.sql === "string" &&
+          (definition.type === "index"
+            ? object.sql.replace(/\s+/gu, " ").trim() ===
+              definition.sql.replace(/\s+/gu, " ").trim()
+            : normalizeDefinition(object.sql) === normalizeDefinition(definition.sql))
         );
       });
-    if (!compatible) {
+    const current = matches(definitions(investigationCollections, true));
+    const previous = matches(definitions(investigationV2Collections));
+    if (!current && !previous) {
       throw new InvestigationStoreError(
         "incompatible_schema",
-        `This database does not use the ${investigationSchemaVersion} schema. Configure a new database; existing databases are not migrated.`,
+        "The investigation database has an unrecognized schema; no migration was applied.",
       );
     }
     const version = this.database
       .prepare(`SELECT "value" FROM "${metadataTable}" WHERE "key" = ?`)
       .get("schema_version");
-    if (version?.value !== investigationSchemaVersion) {
+    if (previous && version?.value === "investigation-v2") {
+      this.database.exec(collectionDefinition("commentDeliveries"));
+      for (const definition of deliveryIndexes.values()) this.database.exec(definition);
+      this.database
+        .prepare(`UPDATE "${metadataTable}" SET "value" = ? WHERE "key" = ?`)
+        .run(investigationSchemaVersion, "schema_version");
+      return;
+    }
+    if (!current || version?.value !== investigationSchemaVersion) {
       throw new InvestigationStoreError(
         "incompatible_schema",
         "The investigation database schema version is unsupported.",

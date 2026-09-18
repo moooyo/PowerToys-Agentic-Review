@@ -1,10 +1,14 @@
-import type {
-  InvestigationAssessment,
-  InvestigationFindingV1,
-  InvestigationLocation,
-  InvestigationResultV1,
-  InvestigationSubjectV1,
+import {
+  EntityIdSchema,
+  type InvestigationAssessment,
+  type InvestigationFindingV1,
+  type InvestigationLocation,
+  type InvestigationModelExecution,
+  InvestigationModelExecutionSchema,
+  type InvestigationResultV1,
+  type InvestigationSubjectV1,
 } from "@agentic-review/contracts";
+import { Value } from "@sinclair/typebox/value";
 import { InvestigationRequestError } from "./errors.js";
 
 export const automaticReplyTemplateVersion = 4;
@@ -142,7 +146,7 @@ function redactPrivateText(value: string, identifiers: readonly string[]): strin
       /\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]+|sk-(?:proj-)?[A-Za-z0-9_-]{8,}|arw1_[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/gu,
       "[credential omitted]",
     )
-    .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/giu, "[credential omitted]")
+    .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/giu, "[credential omitted]")
     .replace(
       /((?:["']?)\b(?:(?:(?:access|refresh|id|auth|github|api|client|publisher|worker)[_-]?)?(?:password|passwd|secret|token|api[_-]?key|authorization|credential))(?:["']?)\s*[:=]\s*)(?:"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/giu,
       "$1[credential omitted]",
@@ -188,9 +192,9 @@ function publicText(
     .replace(/\b([A-Za-z][A-Za-z0-9+.-]*):(?=\/\/|[^\s]*@)/gu, "$1\u200b:")
     .replace(/\b(javascript|data|mailto):/giu, "$1\u200b:")
     .replace(/\bwww\./giu, "www\u200b.");
-  if (templateLiteral) return text.replace(/\\/gu, "\\\\").replace(/[\[\]`~]/gu, "\\$&");
+  if (templateLiteral) return text.replace(/\\/gu, "\\\\").replace(/[[\]`~]/gu, "\\$&");
   return text
-    .replace(/[\\`~*_{}\[\]#!|]/gu, "\\$&")
+    .replace(/[\\`~*_{}[\]#!|]/gu, "\\$&")
     .replace(/^(\s*)([-+]|\d+[.)])(?=\s)/gmu, "$1\\$2")
     .trim();
 }
@@ -209,7 +213,7 @@ function repositoryPath(path: string): boolean {
   });
   return (
     path.length > 0 &&
-    !/^[\/]/u.test(path) &&
+    !/^[/]/u.test(path) &&
     !/[\\:]/u.test(path) &&
     !hasAsciiControl &&
     path.split("/").every((part) => part !== "" && part !== "." && part !== "..")
@@ -279,10 +283,31 @@ export interface AutomaticReplyIdentity {
   readonly githubLogin: string;
 }
 
-function recordedModels(report: InvestigationResultV1): string[] | null {
-  const executions = report.context.modelExecutions;
-  const rounds = report.report.loop.completedRounds;
-  if (executions === undefined || rounds < 1 || executions.length !== rounds) return null;
+export interface AutomaticReplyModelContext {
+  readonly modelExecutions: readonly InvestigationModelExecution[];
+  readonly completedRounds: number;
+  readonly adoptedAttemptIds: readonly string[];
+}
+
+function recordedModels(context: AutomaticReplyModelContext | undefined): string[] | null {
+  if (
+    context === null ||
+    typeof context !== "object" ||
+    !Array.isArray(context.modelExecutions) ||
+    !Array.isArray(context.adoptedAttemptIds) ||
+    !Number.isSafeInteger(context.completedRounds) ||
+    context.completedRounds < 1 ||
+    context.modelExecutions.length !== context.completedRounds ||
+    context.adoptedAttemptIds.length === 0 ||
+    new Set(context.adoptedAttemptIds).size !== context.adoptedAttemptIds.length ||
+    context.adoptedAttemptIds.some((id) => !Value.Check(EntityIdSchema, id)) ||
+    context.modelExecutions.some(
+      (execution) => !Value.Check(InvestigationModelExecutionSchema, execution),
+    )
+  )
+    return null;
+  const executions = context.modelExecutions;
+  const rounds = context.completedRounds;
   const coveredRounds = new Set<number>();
   const models = new Set<string>();
   for (const execution of [...executions].sort((left, right) => left.round - right.round)) {
@@ -291,7 +316,7 @@ function recordedModels(report: InvestigationResultV1): string[] | null {
       execution.round < 1 ||
       execution.round > rounds ||
       coveredRounds.has(execution.round) ||
-      !report.context.adoptedAttemptIds.includes(execution.attemptId) ||
+      !context.adoptedAttemptIds.includes(execution.attemptId) ||
       typeof execution.model !== "string" ||
       execution.model.length === 0 ||
       execution.model.length > 256 ||
@@ -307,9 +332,11 @@ function recordedModels(report: InvestigationResultV1): string[] | null {
   return [...models];
 }
 
-function identityStatement(
-  report: InvestigationResultV1,
+/** The caller supplies a verified publishing account and trusted execution records only. */
+export function renderAutomaticReplyIdentity(
+  report: InvestigationResultV1 | undefined,
   identity: AutomaticReplyIdentity,
+  trustedModels?: AutomaticReplyModelContext,
 ): string {
   if (
     identity === null ||
@@ -326,17 +353,29 @@ function identityStatement(
       "Automatic replies require the verified GitHub user ID and a valid GitHub login.",
     );
   }
-  const models = recordedModels(report)?.map((model) => publicText(model, []));
+  const context =
+    report === undefined
+      ? trustedModels
+      : {
+          modelExecutions: report.context.modelExecutions ?? [],
+          completedRounds: report.report.loop.completedRounds,
+          adoptedAttemptIds: report.context.adoptedAttemptIds,
+        };
+  const models = recordedModels(context)?.map((model) => publicText(model, []));
   const modelIdentity =
     models === undefined
-      ? "an AI assistant (model identity was not fully recorded)"
+      ? "an AI assistant"
       : models.length === 1
-        ? models[0]
+        ? `${models[0]}, an AI assistant`
         : `an AI assistant using ${models.slice(0, -1).join(", ")} and ${models.at(-1)}`;
+  const introduction = `I'm ${modelIdentity} running through Agentic Review on behalf of GitHub user \`@${identity.githubLogin}\`.`;
+  if (report === undefined)
+    return `${introduction} This update was generated by AI and may contain errors.`;
+  const modelDisclosure = models === undefined ? " The model identity was not fully recorded." : "";
   if (report.context.task.kind === "pr-review")
-    return `I'm ${modelIdentity}, performing this automated review on behalf of GitHub user \`@${identity.githubLogin}\`. This review was generated by AI and may contain errors.`;
+    return `${introduction}${modelDisclosure} I'm performing this automated review. This review was generated by AI and may contain errors.`;
   const activity = report.assessment.kind === "bug" ? "bug triage" : "issue triage";
-  return `I'm ${modelIdentity}, conducting this automated ${activity} on behalf of GitHub user \`@${identity.githubLogin}\`. This triage was generated by AI and may contain errors.`;
+  return `${introduction}${modelDisclosure} I'm conducting this automated ${activity}. This triage was generated by AI and may contain errors.`;
 }
 
 class ReplySections {
@@ -923,15 +962,7 @@ function rootAssessmentMatches(
         assessment.kind !== "pr";
 }
 
-export function renderAutomaticReply(
-  report: InvestigationResultV1,
-  template: string,
-  identity: AutomaticReplyIdentity,
-): string {
-  const validated = validateAutomaticReplyTemplate(
-    template,
-    report.context.workItem.kind === "pull_request" ? "pullRequest" : "issue",
-  );
+function requireCompletedRootReport(report: InvestigationResultV1): void {
   if (
     report.outcome !== "completed" ||
     report.report.delivery !== "final" ||
@@ -947,16 +978,36 @@ export function renderAutomaticReply(
       "Automatic replies require a completed, final, complete root PR review or issue investigation report.",
     );
   }
+}
+
+export interface RenderedAutomaticReply {
+  readonly identity: string;
+  readonly content: string;
+  readonly body: string;
+}
+
+/** Complete, untruncated parts for an enclosing progress comment that owns its final size limit. */
+export function renderAutomaticReplyParts(
+  report: InvestigationResultV1,
+  template: string,
+  identity: AutomaticReplyIdentity,
+): RenderedAutomaticReply {
+  const validated = validateAutomaticReplyTemplate(
+    template,
+    report.context.workItem.kind === "pull_request" ? "pullRequest" : "issue",
+  );
+  requireCompletedRootReport(report);
   const renderer = new ReplySections(report);
+  const disclosure = renderAutomaticReplyIdentity(report, identity);
   const sections: Record<Token, string> = {
-    identity: identityStatement(report, identity),
+    identity: disclosure,
     conclusion: renderer.conclusion(),
     summary: renderer.summary(),
     findings: renderer.findings(),
     next_steps: renderer.issueNextSteps(),
     details: `\n\n${renderer.details()}`,
   };
-  const body = validated
+  const rendered = validated
     .split(/(\{\{[a-z_]+\}\})/gu)
     .map((part) => {
       const match = /^\{\{([a-z_]+)\}\}$/u.exec(part);
@@ -964,6 +1015,33 @@ export function renderAutomaticReply(
     })
     .join("")
     .trim();
+  const content = rendered.slice(disclosure.length).trimStart();
+  return { identity: disclosure, content, body: `${disclosure}\n\n${content}` };
+}
+
+/** Removes only the exact server-generated disclosure from a matching report and publisher. */
+export function automaticReplyResultWithoutIdentity(
+  body: string,
+  report: InvestigationResultV1,
+  identity: AutomaticReplyIdentity,
+): string {
+  const disclosure = renderAutomaticReplyIdentity(report, identity);
+  if (!body.startsWith(`${disclosure}\n`)) {
+    throw new InvestigationRequestError(
+      400,
+      "automatic_reply_identity_mismatch",
+      "The completed reply does not begin with the exact verified report identity.",
+    );
+  }
+  return body.slice(disclosure.length).trimStart();
+}
+
+export function renderAutomaticReply(
+  report: InvestigationResultV1,
+  template: string,
+  identity: AutomaticReplyIdentity,
+): string {
+  const { body } = renderAutomaticReplyParts(report, template, identity);
   if (Buffer.byteLength(body, "utf8") > 59_000) {
     throw new InvestigationRequestError(
       400,
@@ -972,4 +1050,67 @@ export function renderAutomaticReply(
     );
   }
   return body;
+}
+
+/** A separately labeled overview, never a truncated full report or a public report export. */
+export function renderAutomaticReplySummaryParts(
+  report: InvestigationResultV1,
+  identity: AutomaticReplyIdentity,
+): RenderedAutomaticReply {
+  requireCompletedRootReport(report);
+  const renderer = new ReplySections(report);
+  const assessment = report.assessment;
+  let conclusion: string;
+  switch (assessment.kind) {
+    case "pr":
+      conclusion = `${status(assessment.reviewConclusion.status)}. End-to-end validation: ${human(assessment.e2eAssessment.level)}.`;
+      break;
+    case "bug":
+      conclusion = `Bug triage: ${human(assessment.bugAssessment.status)}. Runtime reproduction: ${human(assessment.reproduction.status)}.`;
+      break;
+    case "feature":
+      conclusion = `Feature request: ${human(assessment.featureAssessment.status)}.`;
+      break;
+    case "other_issue":
+      conclusion =
+        "Issue triage completed. Consult the complete assessment for its classification.";
+      break;
+  }
+  const subject = report.context.subjects.find(
+    (item) => item.id === report.context.task.subjectRef,
+  );
+  const sha = subject === undefined ? null : subjectSha(subject);
+  const scope =
+    report.context.workItem.kind === "pull_request"
+      ? sha === null
+        ? "The frozen pull request input recorded in this report. The reviewed commit is unavailable."
+        : `Pull request reviewed at commit ${sha}. Later pushes are outside this report.`
+      : "The frozen issue text and discussion snapshot recorded in this report. Later edits are outside this report.";
+  const nextStep =
+    assessment.kind === "bug" && assessment.bugAssessment.status === "needs_information"
+      ? "For the issue author: review and provide the missing information listed in the complete report."
+      : assessment.kind === "bug" && assessment.bugAssessment.status === "needs_verification"
+        ? "For repository maintainers: review the proposed validation steps in the complete report."
+        : "For repository maintainers: review the complete report and its recommended next steps before taking action.";
+  const disclosure = renderAutomaticReplyIdentity(report, identity);
+  const content = [
+    "## Investigation completed — summary only",
+    renderer.text(conclusion),
+    `**Summary:** ${renderer.summary()}`,
+    `**Source scope:** ${scope}`,
+    `**Recorded validation:** ${report.validation.checks.length} checks; ${report.validation.checks.filter((check) => check.status === "passed").length} passed.`,
+    `**Next action:** ${nextStep}`,
+    "The full report is not embedded because it exceeds the supported comment size. The complete report is available to authorized repository operators in the Dashboard. No findings have been presented as a complete list here.",
+    report.context.workItem.kind === "pull_request"
+      ? "Completion records the investigation outcome; it does not authorize approval or merging."
+      : "Completion records the investigation outcome; any requested information or validation remains a follow-up action.",
+  ].join("\n\n");
+  return { identity: disclosure, content, body: `${disclosure}\n\n${content}` };
+}
+
+export function renderAutomaticReplySummary(
+  report: InvestigationResultV1,
+  identity: AutomaticReplyIdentity,
+): string {
+  return renderAutomaticReplySummaryParts(report, identity).body;
 }

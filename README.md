@@ -65,7 +65,7 @@ Linked verification preserves the parent report and selected scenarios instead o
 full review. Implementation produces separately identified edits and patches. Creating a PR
 requires an existing, verified remote branch and never implicitly commits or pushes.
 
-GitHub writes require a prepared and confirmed action intent. Unknown delivery is reconciled
+Operator-initiated GitHub writes require a prepared and confirmed action intent. Unknown delivery is reconciled
 with read-only requests, not automatically resent. The default Server configuration disables
 external writes. Automated tests must not write to real PRs or issues; see [AGENTS.md](./AGENTS.md).
 
@@ -82,13 +82,21 @@ are rechecked before sending. See the
 [automatic reply setup](./apps/server/README.md#automatically-reply-with-investigation-results)
 and the [PR](./docs/templates/auto-reply-pr.md) and [Issue](./docs/templates/auto-reply-issue.md) templates.
 
+Repositories can also enable assignment progress comments. An accepted trusted assignment queues
+an acknowledgement before the investigation input is imported. The same comment is updated when
+work starts, stops, or produces a complete conclusion. Every update identifies the AI assistant
+and verified publishing account. Template edits apply to subsequent new updates; prior attempts
+retain their exact bodies. The Dashboard shows ordinary create/update delivery history with status,
+time, expandable body, and failure details alongside the investigation's independent state.
+See [assignment progress setup](./apps/server/README.md#track-assignment-tasks-in-one-progress-comment).
+
 ## Configuration and development
 
 Use Node.js 24.20.x and pnpm 11.24.x. The Server uses `INVESTIGATION_*` configuration; the Worker
 uses `INVESTIGATION_WORKER_*`. Read the [Server instructions](./apps/server/README.md) and
 [Worker instructions](./apps/worker/README.md) before starting a deployment. New investigation databases are
-initialized directly with the `investigation-v2` schema; an incompatible existing database is
-rejected without conversion or deletion.
+initialized directly with the `investigation-v3` schema. Exact `investigation-v2` databases receive
+an additive comment-history migration; unrelated or incomplete schemas are rejected without deletion.
 
 The Dashboard development server uses clearly labeled synthetic data, including PowerToys PR,
 Bug, Feature, incomplete-report, and page-two P0 examples:

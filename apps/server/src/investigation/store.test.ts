@@ -35,6 +35,28 @@ async function databasePath(): Promise<string> {
   return join(directory, "investigation.sqlite");
 }
 
+function createV2(path: string): void {
+  const database = new DatabaseSync(path);
+  try {
+    database.exec(`CREATE TABLE "investigation_metadata" (
+      "key" TEXT PRIMARY KEY NOT NULL,
+      "value" TEXT NOT NULL
+    ) STRICT`);
+    database
+      .prepare('INSERT INTO "investigation_metadata" ("key", "value") VALUES (?, ?)')
+      .run("schema_version", "investigation-v2");
+    for (const collection of investigationCollections.filter(
+      (name) => name !== "commentDeliveries",
+    ))
+      database.exec(`CREATE TABLE "${collection}" (
+        "id" TEXT PRIMARY KEY NOT NULL,
+        "value" TEXT NOT NULL CHECK (json_valid("value"))
+      ) STRICT`);
+  } finally {
+    database.close();
+  }
+}
+
 describe("InvestigationStore", () => {
   it("persists every entity collection and the schema identity across restarts", async () => {
     const path = await databasePath();
@@ -123,6 +145,33 @@ describe("InvestigationStore", () => {
     }
     finding.priority = 3;
     expect(store.get("findings", "finding-000")).toEqual({ id: "finding-000", priority: 0 });
+  });
+
+  it("keyset-pages within a prefix in either direction and rejects a foreign cursor", () => {
+    const store = open();
+    for (const id of ["older:1", "reply:1", "reply:2", "reply:3", "reply:4", "task:1"])
+      store.insert("idempotency", id, { id });
+    expect(store.pagePrefix("idempotency", "reply:", 2)).toEqual([
+      { id: "reply:1" },
+      { id: "reply:2" },
+    ]);
+    expect(store.pagePrefix("idempotency", "reply:", 2, false, "reply:2")).toEqual([
+      { id: "reply:3" },
+      { id: "reply:4" },
+    ]);
+    expect(store.pagePrefix("idempotency", "reply:", 2, true)).toEqual([
+      { id: "reply:4" },
+      { id: "reply:3" },
+    ]);
+    expect(store.pagePrefix("idempotency", "reply:", 2, true, "reply:3")).toEqual([
+      { id: "reply:2" },
+      { id: "reply:1" },
+    ]);
+    expect(store.pagePrefix("idempotency", "reply:", 2, false, "reply:4")).toEqual([]);
+    for (const cursor of ["older:1", "task:1", "reply:\uffff"])
+      expect(() => store.pagePrefix("idempotency", "reply:", 2, false, cursor)).toThrow(
+        expect.objectContaining({ code: "invalid_value" }),
+      );
   });
 
   it("parameterizes entity IDs and JSON content and rejects unknown collections", () => {
@@ -214,4 +263,115 @@ describe("InvestigationStore", () => {
     incomplete.close();
     expect(() => open(path)).toThrow(expect.objectContaining({ code: "incompatible_schema" }));
   });
+
+  it("additively migrates the exact v2 schema without rewriting existing JSON or definitions", async () => {
+    const path = await databasePath();
+    createV2(path);
+    const raw = ' { "body" : "Retained publication bytes", "unknown" : true } ';
+    const writer = new DatabaseSync(path);
+    let before: { name: string; sql: string }[];
+    try {
+      writer
+        .prepare('INSERT INTO "idempotency" ("id", "value") VALUES (?, ?)')
+        .run("progress-reply:task:retained", raw);
+      writer.prepare('INSERT INTO "tasks" ("id", "value") VALUES (?, ?)').run("retained-task", raw);
+      before = writer
+        .prepare(
+          "SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name NOT GLOB 'sqlite_*' ORDER BY name",
+        )
+        .all() as { name: string; sql: string }[];
+    } finally {
+      writer.close();
+    }
+    open(path).close();
+    const reader = new DatabaseSync(path, { readOnly: true });
+    try {
+      for (const table of before!) {
+        expect(
+          reader.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(table.name)?.sql,
+        ).toBe(table.sql);
+      }
+      expect(
+        reader
+          .prepare('SELECT "value" FROM "idempotency" WHERE "id" = ?')
+          .get("progress-reply:task:retained")?.value,
+      ).toBe(raw);
+      expect(
+        reader.prepare('SELECT "value" FROM "tasks" WHERE "id" = ?').get("retained-task")?.value,
+      ).toBe(raw);
+      expect(
+        reader
+          .prepare('SELECT "value" FROM "investigation_metadata" WHERE "key" = ?')
+          .get("schema_version")?.value,
+      ).toBe(investigationSchemaVersion);
+      expect(reader.prepare('SELECT count(*) AS count FROM "commentDeliveries"').get()?.count).toBe(
+        0,
+      );
+      expect(
+        reader
+          .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND name GLOB 'comment_deliveries_*'",
+          )
+          .all(),
+      ).toHaveLength(4);
+    } finally {
+      reader.close();
+    }
+    expect(open(path).get("idempotency", "progress-reply:task:retained")).toEqual({
+      body: "Retained publication bytes",
+      unknown: true,
+    });
+  });
+
+  it.each(["extra-index", "partial-new-table", "wrong-version", "changed-definition"])(
+    "refuses an unrecognized v2 migration candidate without modifications: %s",
+    async (variant) => {
+      const path = await databasePath();
+      createV2(path);
+      const writer = new DatabaseSync(path);
+      let before: unknown[];
+      try {
+        if (variant === "extra-index") writer.exec('CREATE INDEX "unexpected" ON "tasks" ("id")');
+        if (variant === "partial-new-table")
+          writer.exec('CREATE TABLE "commentDeliveries" ("id" TEXT PRIMARY KEY, "value" TEXT)');
+        if (variant === "wrong-version")
+          writer
+            .prepare('UPDATE "investigation_metadata" SET "value" = ? WHERE "key" = ?')
+            .run("investigation-v1", "schema_version");
+        if (variant === "changed-definition") {
+          writer.exec('DROP TABLE "plans"');
+          writer.exec(
+            'CREATE TABLE "plans" ("id" TEXT PRIMARY KEY NOT NULL, "value" TEXT NOT NULL) STRICT',
+          );
+        }
+        writer
+          .prepare('INSERT INTO "idempotency" ("id", "value") VALUES (?, ?)')
+          .run("retained", '{ "unmodified" : true }');
+        before = writer
+          .prepare(
+            "SELECT name, type, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name",
+          )
+          .all();
+      } finally {
+        writer.close();
+      }
+      expect(() => open(path)).toThrow(expect.objectContaining({ code: "incompatible_schema" }));
+      const reader = new DatabaseSync(path, { readOnly: true });
+      try {
+        expect(
+          reader
+            .prepare(
+              "SELECT name, type, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name",
+            )
+            .all(),
+        ).toEqual(before!);
+        expect(
+          reader.prepare('SELECT "value" FROM "idempotency" WHERE "id" = ?').get("retained")?.value,
+        ).toBe('{ "unmodified" : true }');
+        expect(reader.prepare("PRAGMA journal_mode").get()?.journal_mode).toBe("delete");
+      } finally {
+        reader.close();
+      }
+    },
+  );
 });

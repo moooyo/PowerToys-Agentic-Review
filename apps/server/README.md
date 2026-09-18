@@ -18,9 +18,10 @@ load a dotenv file. `.env.example` lists the supported settings. Keep both datab
 restricted to the service account and administrators, outside the dashboard static directory.
 Relative database paths resolve against the process working directory.
 
-Investigation data uses schema identity `investigation-v2`. Use a new investigation database path
-when an existing file has an earlier or unrelated schema. Startup rejects incompatible databases;
-it does not convert, delete, or reset them. The separate password-account database retains its own
+Investigation data uses schema identity `investigation-v3`. Startup accepts an exact, complete
+`investigation-v2` database and adds only the comment delivery table and its indexes in one
+transaction. Existing entities are preserved. Unrelated, partial, or otherwise incompatible schemas
+are rejected without deletion or reset. The separate password-account database retains its own
 schema identity and initialization rules.
 
 ## Initialize the first administrator
@@ -159,15 +160,17 @@ Enabling the policy requires the exact repository scope, `repository:manage`, `a
 `action:execute`, and the `comment` action capability. A scoped repository manager can disable
 the policy. The Server re-reads the authorizing account, repository identity, and policy version
 before preparation, confirmation, and the final outbound request. Disabled accounts, revoked
-grants, changed settings, or a stale upstream target prevent new publication. Repository identity
+grants, or a stale upstream target prevent new publication. Repository identity
 changes atomically disable the policy and advance its version, including when a previous name
 is later restored.
 
 Configure the ordinary GitHub transport credential and `INVESTIGATION_ENABLE_EXTERNAL_WRITES=true`
 in the deployment before publication. The application can save repository settings while the
 publisher is unavailable; its UI shows that state. The default is disabled. Enabling does not
-backfill old reports, and changing templates does not rewrite a queued comment. A policy-version
-change blocks unsent replies authorized by the previous version.
+backfill old reports, and changing templates does not rewrite an already prepared comment.
+The settings edit version is separate from the authorization epoch: ordinary wording changes do
+not revoke publication authority. Disabling, changing the publication grant, or explicitly
+reauthorizing it changes that epoch.
 
 Version 4 English templates contain exactly one of each supported placeholder, in this order:
 
@@ -250,6 +253,83 @@ Software verification must use isolated state and mocked transports. Enabling pr
 does not authorize an acceptance harness to write arbitrary real repository comments; the exact
 live-test scope still follows [AGENTS.md](../../AGENTS.md).
 
+### Track assignment tasks in one progress comment
+
+Enable **Publish assignment task progress** in the repository's automatic reply settings
+to queue an acknowledgement when an authorized assignment is durably accepted, before source import
+and Task creation. The acknowledgement
+identifies who assigned the PR or Issue and who received the assignment. When a Worker claims the
+Task, the Server edits that comment to show that work has started. Failed, blocked, interrupted,
+and cancelled Tasks update it with a public status explanation. A complete result replaces the
+same comment with the configured PR or Issue conclusion, including its full collapsed details.
+Assignment Tasks enrolled in this workflow do not create an additional conclusion comment.
+Manually created Tasks continue to use the existing conclusion-only workflow.
+
+Four English narrative templates are editable independently. Each listed placeholder is required
+once, in order. An optional `{{status}}` may appear once before `{{trigger}}`:
+
+| Stage | Placeholders | Default template |
+| --- | --- | --- |
+| Received | `{{trigger}}`, `{{updated_at}}` | [Received](../../docs/templates/progress-reply-received.md) |
+| Started | `{{trigger}}`, `{{updated_at}}` | [Started](../../docs/templates/progress-reply-started.md) |
+| Failed or stopped | `{{trigger}}`, `{{updated_at}}`, `{{failure}}` | [Failed](../../docs/templates/progress-reply-failed.md) |
+| Completed | `{{trigger}}`, `{{updated_at}}`, `{{result}}` | [Completed](../../docs/templates/progress-reply-completed.md) |
+
+Every stage starts with a server-owned AI identity statement naming the verified publishing GitHub
+account. Recorded model names appear only when trusted execution records establish them. Editable
+templates cannot remove this identity, status, scope, or next-action information. Completed replies
+reuse the report identity once. `{{result}}` embeds the existing PR or Issue result. `{{failure}}`
+uses a fixed public explanation instead of exposing Worker diagnostics, paths, or credentials.
+`{{updated_at}}` is the UTC time of the state transition. Every template is limited to 12,000 UTF-8
+bytes. If the full result cannot fit within the comment budget, the Server publishes an explicitly
+labeled safe conclusion summary and retains the complete report in the Dashboard. It does not
+silently truncate findings or include a private Dashboard address.
+
+The settings API additionally accepts optional `progressEnabled` and `progressTemplates` fields.
+`progressTemplates` contains `received`, `started`, `failed`, and `completed` strings. Existing
+saved policies and clients that omit these fields retain conclusion-only behavior. Progress
+requires the main automatic reply policy to be enabled and uses the same publishing permissions.
+Saving or enabling it does not enroll historical Tasks. Each new logical update, including one
+for a running Task, takes the latest saved template. Saving alone sends nothing. Prepared attempts,
+retries, and prior history keep their original body. The authorizing account and authorization
+epoch are independent of template editing; revocation still stops subsequent writes. An optional
+`reauthorize: true` explicitly creates a fresh authorization epoch when an authorized account saves
+enabled settings. The settings response includes `authorizationEpoch` and `updatedById`.
+
+Assignment admission and its publication record share one transaction. The Task attaches to that
+same publication when preparation completes. Repeated active assignments reuse the canonical
+admission; their Task idempotency does not depend on our own comment changing the source snapshot.
+Original discussion text remains complete, with verified application-owned comments annotated as
+progress metadata. Later Task and meaningful checkpoint transitions durably update the publication.
+Delayed first delivery uses the latest actual state, rather than replaying obsolete preparation
+text. Resuming the same Task keeps its comment identity. A server timer reaps expired Worker leases
+even when nobody is viewing the Dashboard. Before an edit, the transport verifies the comment ID,
+author, target conversation, stable marker, and previously published body. An externally edited
+or deleted comment is not silently overwritten or replaced. An uncertain write is reconciled with
+read-only requests; it is never blindly sent again.
+
+Each actual create/update attempt records its timestamp, exact body, status, and safe failure
+reason. Reconciliation adds observations to that attempt instead of inventing another write.
+Definitely unsent or rejected transient requests can retry within a bounded policy; ambiguous writes
+only use readback. Exhaustion remains visible and does not discard the latest investigation outcome.
+
+The Task list displays comment status and the latest attempt time. Task details and the Comments
+workspace show ordinary delivery history with expandable bodies; they do not require a target versus
+confirmed-body comparison. Comment refresh continues independently after a Task completes.
+
+- `GET /api/comment-deliveries` filters by repository, Task, comment, target number, mode, or state,
+  with `limit` and an opaque `cursor` for pagination.
+- `GET /api/comments?taskIds=...` or `?commentIds=...` returns up to 100 scoped summaries in one request.
+- `GET /api/comments/:id` returns status and available recovery actions;
+  `GET /api/comments/:id/attempts` returns that comment's delivery history.
+- `POST /api/comments/:id/reconcile` schedules read-only progress-comment recovery.
+- `POST /api/comments/:id/sync` schedules a permitted progress-comment retry or latest update. Both
+  commands require the returned `version`, an `idempotencyKey`, and current action permissions.
+
+Historical conclusion-only comments retain their native ActionIntent recovery path. Existing
+repository reply endpoints remain compatibility views. Old delivery snapshots are labeled as
+historical; migration does not fabricate lost attempts, precise transmission times, or new comments.
+
 ## Listen for trusted assignments
 
 The native runtime accepts GitHub Webhooks at `POST /api/github/webhook`. Configure
@@ -301,8 +381,9 @@ Authenticated repository readers can inspect
 `GET /api/github/webhook-deliveries/:deliveryId` for preparation state, failure reason, source
 reference, and Task identity. HTTP `202` acknowledges durable intake, not completed investigation.
 Receiver subscriptions and public hosting are deployment configuration; starting the application
-does not create or edit GitHub Webhooks. Comments, reviews, closure, and merging retain the separate
-confirmed ActionIntent path and external-write switch.
+does not create or edit GitHub Webhooks. Comments require a separately authorized publication policy
+or confirmed ActionIntent. Reviews, closure, and merging retain the confirmed ActionIntent path.
+All publication remains behind the external-write switch.
 
 ## Import complete upstream inputs
 

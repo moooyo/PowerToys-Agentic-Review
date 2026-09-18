@@ -51,6 +51,8 @@ export interface InvestigationAppOptions
     | "maxReportBytes"
     | "evidencePolicy"
     | "onReportSealed"
+    | "onTaskStateChanged"
+    | "onTaskProgress"
     | "onRepositoryChanged"
   > {
   readonly databasePath?: string;

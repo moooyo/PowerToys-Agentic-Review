@@ -52,11 +52,15 @@ export interface InvestigationRepositoryRecord {
   readonly githubRepositoryId: number;
 }
 
-export interface InvestigationWorkItemRecord {
+export interface InvestigationCommentTarget {
   readonly id: string;
   readonly repositoryId: string;
   readonly kind: "pull_request" | "issue";
   readonly number: number;
+  readonly githubWorkItemId?: number;
+}
+
+export interface InvestigationWorkItemRecord extends InvestigationCommentTarget {
   readonly title: string;
   readonly body: string;
   readonly state: "open" | "closed" | "merged";
@@ -64,9 +68,49 @@ export interface InvestigationWorkItemRecord {
   readonly updatedAt: string;
 }
 
+export interface InvestigationProgressCommentRequest {
+  readonly marker: string;
+  readonly body: string;
+  readonly externalId: string | null;
+  readonly previousBody: string | null;
+  /** Revalidate this assignment only when publishing the first conversation comment. */
+  readonly expectedAssigneeUserId?: number;
+}
+
+export interface InvestigationProgressCommentDelivery {
+  readonly state: "succeeded" | "failed" | "unknown";
+  readonly message: string;
+  readonly externalId: string | null;
+  /** Optional only for compatibility with existing custom transports. */
+  readonly effect?: "not_sent" | "rejected" | "applied" | "unknown";
+  /** Retry the same operation only: an unknown effect never permits resending a mutation. */
+  readonly retryable?: boolean;
+  readonly reasonCode?: string;
+  readonly retryAfterMs?: number;
+}
+
+export interface InvestigationProgressCommentTransport {
+  publishProgressComment(
+    request: InvestigationProgressCommentRequest,
+    repository: InvestigationRepositoryRecord,
+    workItem: InvestigationCommentTarget,
+    actor: InvestigationOperatorPrincipal,
+    /** Must run synchronously after the final awaited preflight and before any mutation. */
+    beforeDispatch?: () => void,
+  ): Promise<InvestigationProgressCommentDelivery>;
+  reconcileProgressComment(
+    request: InvestigationProgressCommentRequest,
+    repository: InvestigationRepositoryRecord,
+    workItem: InvestigationCommentTarget,
+    actor: InvestigationOperatorPrincipal,
+  ): Promise<InvestigationProgressCommentDelivery>;
+}
+
 export interface InvestigationActionTransport {
   readonly supportedActions: readonly InvestigationActionKind[];
   readPublisherIdentity?(): Promise<InvestigationGitHubIdentity>;
+  publishProgressComment?: InvestigationProgressCommentTransport["publishProgressComment"];
+  reconcileProgressComment?: InvestigationProgressCommentTransport["reconcileProgressComment"];
   readTarget(
     repository: InvestigationRepositoryRecord,
     workItem: InvestigationWorkItemRecord,

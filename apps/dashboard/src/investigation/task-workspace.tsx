@@ -20,6 +20,13 @@ import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { DataTable } from "@/components/ui";
 import { investigationApi, type WorkItem } from "./api";
+import {
+  CommentStatus,
+  commentDetailsUrl,
+  commentPollingInterval,
+  commentSummariesQueryKey,
+  TaskComments,
+} from "./comment-deliveries";
 import { Section, SubjectPanel, TextList } from "./report-sections";
 import { ReportWorkspace } from "./report-workspace";
 import { useInvestigationRepositoryScope } from "./repository-scope";
@@ -146,12 +153,33 @@ export function StartInvestigationButton({ workItem }: { workItem: WorkItem }) {
 }
 
 export function TaskList({ tasks }: { tasks: InvestigationTaskV1[] }) {
+  const [page, setPage] = useState(1);
+  const pageSize = 25;
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(tasks.length / pageSize)));
+  const visibleTasks = tasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const summaryInput = { taskIds: visibleTasks.map((task) => task.id).sort() };
+  const comments = useQuery({
+    queryKey: commentSummariesQueryKey(summaryInput),
+    queryFn: () => investigationApi.comments(summaryInput),
+    enabled: visibleTasks.length > 0,
+    refetchInterval: (current) =>
+      commentPollingInterval(current.state.data?.items ?? []) ||
+      (visibleTasks.some((task) => ["queued", "running"].includes(task.state)) ? 5_000 : false),
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
   return (
     <DataTable
-      rows={tasks}
+      rows={visibleTasks}
       getRowId={(task) => task.id}
       ariaLabel="Investigation tasks"
       emptyTitle="No investigation tasks yet"
+      pagination={{
+        page: currentPage,
+        pageSize,
+        total: tasks.length,
+        onChange: (next) => setPage(next),
+      }}
       columns={[
         {
           id: "task",
@@ -203,6 +231,41 @@ export function TaskList({ tasks }: { tasks: InvestigationTaskV1[] }) {
                 Not sealed yet
               </Typography>
             ),
+        },
+        {
+          id: "comment",
+          label: "GitHub comment",
+          render: (task) => {
+            const comment = comments.data?.items
+              .filter((item) => item.taskId === task.id)
+              .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+            if (!comment)
+              return (
+                <Typography variant="caption" color="text.secondary">
+                  {comments.isPending
+                    ? "Loading…"
+                    : comments.isError
+                      ? "Status unavailable"
+                      : "No comment enrolled"}
+                </Typography>
+              );
+            return (
+              <Box>
+                <Button
+                  component={Link}
+                  to={commentDetailsUrl(comment.id, comment.repositoryId)}
+                  sx={{ p: 0, minWidth: 0 }}
+                >
+                  <CommentStatus comment={comment} />
+                </Button>
+                {comment.lastAttemptAt && (
+                  <Typography variant="caption" component="div" color="text.secondary">
+                    Last delivery {new Date(comment.lastAttemptAt).toLocaleString()}
+                  </Typography>
+                )}
+              </Box>
+            );
+          },
         },
         {
           id: "updated",
@@ -333,6 +396,7 @@ export function TaskDetails({ taskId }: { taskId: string }) {
           )}
         </Stack>
       </Section>
+      <TaskComments taskId={task.id} active={["queued", "running"].includes(task.state)} />
       {!latestReport && (
         <>
           <Alert
@@ -365,6 +429,12 @@ export default function TasksPage() {
     queryKey: ["investigation-tasks"],
     queryFn: () => investigationApi.tasks(),
     enabled: !taskId,
+    refetchInterval: (current) =>
+      current.state.data?.items.some((task) => ["queued", "running"].includes(task.state))
+        ? 5_000
+        : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
   if (taskId) return <TaskDetails key={taskId} taskId={taskId} />;
   return (

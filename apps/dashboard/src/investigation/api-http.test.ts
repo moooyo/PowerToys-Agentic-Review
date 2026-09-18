@@ -4,6 +4,92 @@ import { createSampleInvestigationApi } from "./sample-adapter";
 import { createHttpTransport } from "./transport";
 
 describe("typed investigation HTTP operations", () => {
+  it("reads paginated delivery attempts and batch comment summaries through shared contracts", async () => {
+    const sample = createSampleInvestigationApi();
+    const history = await sample.commentDeliveries({ limit: 1 });
+    const comments = await sample.comments({});
+    const comment = comments.items[0];
+    if (!comment || !history.items[0]) throw new Error("Comment fixtures are required.");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(history));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    expect(
+      await api.commentDeliveries({
+        repositoryId: "repo:selected",
+        workItemNumber: 7,
+        taskId: "task:selected",
+        state: "unknown",
+        cursor: "cursor/1",
+        limit: 25,
+      }),
+    ).toEqual(history);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/comment-deliveries?repositoryId=repo%3Aselected&workItemNumber=7&taskId=task%3Aselected&state=unknown&cursor=cursor%2F1&limit=25",
+      expect.objectContaining({ method: "GET", cache: "no-store" }),
+    );
+    fetcher.mockResolvedValueOnce(Response.json(comments));
+    expect(
+      await api.comments({ repositoryId: "repo:selected", taskIds: ["task:one", "task:two"] }),
+    ).toEqual(comments);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/comments?repositoryId=repo%3Aselected&taskIds=task%3Aone%2Ctask%3Atwo",
+      expect.anything(),
+    );
+    fetcher.mockResolvedValueOnce(Response.json(comments));
+    await api.comments({ commentIds: ["comment:one", "comment:two"] });
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/comments?commentIds=comment%3Aone%2Ccomment%3Atwo",
+      expect.anything(),
+    );
+    fetcher.mockResolvedValueOnce(Response.json(comment));
+    expect(await api.comment("comment:selected")).toEqual(comment);
+    expect(fetcher).toHaveBeenLastCalledWith("/api/comments/comment%3Aselected", expect.anything());
+    fetcher.mockResolvedValueOnce(Response.json(history));
+    expect(await api.commentAttempts("comment:selected", { cursor: "page/2", limit: 25 })).toEqual(
+      history,
+    );
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/comments/comment%3Aselected/attempts?cursor=page%2F2&limit=25",
+      expect.anything(),
+    );
+    for (const invalid of [
+      { ...history.items[0], operation: "reconcile" },
+      { ...history.items[0], state: "synced" },
+      { ...history.items[0], body: undefined },
+      { ...history.items[0], taskId: 42 },
+    ]) {
+      fetcher.mockResolvedValueOnce(Response.json({ items: [invalid], nextCursor: null }));
+      await expect(api.commentDeliveries()).rejects.toThrow("invalid structured response");
+    }
+  });
+
+  it("schedules only the selected versioned comment command and validates its returned summary", async () => {
+    const comments = await createSampleInvestigationApi().comments({});
+    const comment = comments.items[0];
+    if (!comment) throw new Error("A comment fixture is required.");
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json(comment));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    const input = { version: "frozen-publication-version", idempotencyKey: "reviewed-command" };
+    expect(await api.syncComment("comment:selected", input)).toEqual(comment);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/comments/comment%3Aselected/sync",
+      expect.objectContaining({ method: "POST", body: JSON.stringify(input) }),
+    );
+    expect(await api.reconcileComment("comment:selected", input)).toEqual(comment);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/comments/comment%3Aselected/reconcile",
+      expect.objectContaining({ method: "POST", body: JSON.stringify(input) }),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    for (const invalid of [
+      { ...comment, version: 1 },
+      { ...comment, availableActions: ["recreate"] },
+      { ...comment, state: "succeeded" },
+    ]) {
+      fetcher.mockResolvedValueOnce(Response.json(invalid));
+      await expect(api.comment(comment.id)).rejects.toThrow("invalid structured response");
+    }
+  });
+
   it("reads and updates automatic reply settings and lists deliveries through scoped routes", async () => {
     const sample = createSampleInvestigationApi();
     const settings = {
@@ -20,6 +106,8 @@ describe("typed investigation HTTP operations", () => {
     const input = {
       version: 0,
       enabled: true,
+      progressEnabled: true,
+      progressTemplates: settings.progressTemplates,
       pullRequestTemplate: settings.pullRequestTemplate,
       issueTemplate: settings.issueTemplate,
     };
@@ -38,7 +126,15 @@ describe("typed investigation HTTP operations", () => {
       { ...settings, version: -1 },
       { ...settings, templateVersion: 0 },
       { ...settings, authorizedById: 42 },
+      { ...settings, authorizationEpoch: -1 },
+      { ...settings, updatedById: 42 },
       { ...settings, updatedAt: "invalid date" },
+      { ...settings, progressEnabled: "true" },
+      { ...settings, progressEnabled: undefined },
+      { ...settings, progressTemplates: undefined },
+      { ...settings, progressTemplates: { ...settings.progressTemplates, completed: undefined } },
+      { ...settings, progressTemplates: { ...settings.progressTemplates, received: 42 } },
+      { ...settings, progressTemplates: { ...settings.progressTemplates, extra: "template" } },
     ]) {
       fetcher.mockResolvedValueOnce(Response.json(invalid));
       await expect(api.repositoryAutoReplySettings("repo:selected")).rejects.toThrow(
@@ -49,6 +145,66 @@ describe("typed investigation HTTP operations", () => {
     await expect(api.repositoryAutoReplies("repo:selected")).rejects.toThrow(
       "invalid structured response",
     );
+  });
+
+  it("retains compatibility with settings updates that omit progress fields", async () => {
+    const sample = createSampleInvestigationApi();
+    const settings = await sample.repositoryAutoReplySettings("repo-powertoys-fork");
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(settings));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    const input = {
+      version: settings.version,
+      enabled: settings.enabled,
+      pullRequestTemplate: settings.pullRequestTemplate,
+      issueTemplate: settings.issueTemplate,
+    };
+    await api.updateRepositoryAutoReplySettings(settings.repositoryId, input);
+    expect(fetcher).toHaveBeenCalledWith(
+      `/api/repositories/${settings.repositoryId}/auto-reply-settings`,
+      expect.objectContaining({ method: "PUT", body: JSON.stringify(input) }),
+    );
+  });
+
+  it("reads scoped progress deliveries with nullable reports and validates their stages", async () => {
+    const reply = {
+      id: "progress-reply",
+      reportId: null,
+      taskId: "task-id",
+      workItemId: "work-item-id",
+      workItemKind: "pull_request",
+      workItemNumber: 7,
+      stage: "received",
+      state: "sent",
+      body: "Investigation received.",
+      externalId: "comment-id",
+      reason: null,
+      settingsVersion: 1,
+      templateVersion: 1,
+      createdAt: "2026-09-18T03:00:00.000Z",
+      updatedAt: "2026-09-18T03:00:00.000Z",
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ items: [reply] }));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    expect(await api.repositoryProgressReplies("repo:selected")).toEqual({ items: [reply] });
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/repositories/repo%3Aselected/progress-replies",
+      expect.objectContaining({ method: "GET", credentials: "include", cache: "no-store" }),
+    );
+    const completed = { ...reply, stage: "completed", reportId: "report-id" };
+    fetcher.mockResolvedValueOnce(Response.json({ items: [completed] }));
+    expect(await api.repositoryProgressReplies("repo:selected")).toEqual({ items: [completed] });
+    for (const invalid of [
+      { ...reply, stage: "queued" },
+      { ...reply, state: "prepared" },
+      { ...reply, reportId: 42 },
+      { ...reply, settingsVersion: 0 },
+      { ...reply, updatedAt: "invalid date" },
+    ]) {
+      fetcher.mockResolvedValueOnce(Response.json({ items: [invalid] }));
+      await expect(api.repositoryProgressReplies("repo:selected")).rejects.toThrow(
+        "invalid structured response",
+      );
+    }
   });
 
   it("reads and updates webhook settings for the selected repository with a versioned PUT", async () => {

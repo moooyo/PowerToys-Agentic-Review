@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InvestigationInputSnapshotV1, InvestigationTaskV1 } from "@agentic-review/contracts";
+import { investigationContentDigest } from "@agentic-review/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationRequestError } from "../../dist/investigation/errors.js";
 import { InvestigationService } from "../../dist/investigation/service.js";
@@ -16,6 +17,7 @@ import type {
 import type { InvestigationWebhookDeliveryInput } from "../../dist/investigation/webhook-http.js";
 import {
   InvestigationWebhookIntake,
+  type InvestigationWebhookIntakeOptions,
   type InvestigationWebhookReceipt,
 } from "../../dist/investigation/webhook-intake.js";
 
@@ -101,6 +103,9 @@ function harness(
     maximumAttempts?: number;
     settings?: { bindings: () => readonly InvestigationWebhookBinding[] };
     beforeTargetRead?: () => Promise<void>;
+    onTaskCreated?: InvestigationWebhookIntakeOptions["onTaskCreated"];
+    onAssignmentAccepted?: InvestigationWebhookIntakeOptions["onAssignmentAccepted"];
+    onAssignmentChanged?: InvestigationWebhookIntakeOptions["onAssignmentChanged"];
   } = {},
 ) {
   const kind = options.kind ?? "issue";
@@ -194,6 +199,13 @@ function harness(
     retryDelayMs,
     ...(options.maximumAttempts === undefined ? {} : { maximumAttempts: options.maximumAttempts }),
     ...(options.settings === undefined ? {} : { settings: options.settings }),
+    ...(options.onTaskCreated === undefined ? {} : { onTaskCreated: options.onTaskCreated }),
+    ...(options.onAssignmentAccepted === undefined
+      ? {}
+      : { onAssignmentAccepted: options.onAssignmentAccepted }),
+    ...(options.onAssignmentChanged === undefined
+      ? {}
+      : { onAssignmentChanged: options.onAssignmentChanged }),
     onError: (code) => errors.push(code),
   });
   intakes.push(intake);
@@ -247,6 +259,354 @@ async function run(intake: InvestigationWebhookIntake): Promise<void> {
 }
 
 describe("durable assignment-only Webhook intake", () => {
+  it("enrolls an authorized admission atomically before any source import or Task exists", () => {
+    const accepted =
+      vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
+    const test = harness({ onAssignmentAccepted: accepted });
+    accepted.mockImplementation((admission) => {
+      expect(test.store.get("idempotency", admission.id)).toMatchObject({
+        state: "accepted",
+        admission,
+      });
+      expect(test.tasks()).toEqual([]);
+      expect(test.store.list("workItems")).toEqual([]);
+      test.store.insert("idempotency", "synthetic-publication-admission", {
+        receiptId: admission.id,
+      });
+    });
+    expect(test.intake.accept(test.delivery())).toEqual({ status: "accepted" });
+    expect(accepted).toHaveBeenCalledOnce();
+    expect(accepted.mock.calls[0]?.[0]).toMatchObject({
+      id: "webhook:delivery:delivery-1",
+      repository,
+      target: { repositoryId: repository.id, kind: "issue", number: 7, githubWorkItemId: 77 },
+      expectedAssigneeUserId: 55,
+      trigger: { actorUserId: 44, assigneeUserId: 55 },
+      receivedAt: new Date(startedAt).toISOString(),
+    });
+    expect(test.calls).toEqual([]);
+    expect(test.store.has("idempotency", "synthetic-publication-admission")).toBe(true);
+    test.intake.accept(test.delivery());
+    test.intake.accept(test.delivery({ id: "duplicate-admission" }));
+    expect(accepted).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back both admission and publication when the acceptance callback fails", () => {
+    const accepted =
+      vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
+    const test = harness({ onAssignmentAccepted: accepted });
+    accepted.mockImplementation((admission) => {
+      test.store.insert("idempotency", "synthetic-publication-admission", {
+        receiptId: admission.id,
+      });
+      throw new Error("Synthetic publication enrollment failed.");
+    });
+    expect(() => test.intake.accept(test.delivery())).toThrow(
+      "Synthetic publication enrollment failed.",
+    );
+    expect(test.store.list("idempotency")).toEqual([]);
+    expect(test.tasks()).toEqual([]);
+  });
+
+  it("does not enroll historical accepted admissions when callbacks become available after restart", async () => {
+    const path = await databasePath();
+    const first = harness({ path });
+    first.intake.accept(first.delivery());
+    await first.intake.stop();
+    first.store.close();
+    const accepted =
+      vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
+    const attached = vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onTaskCreated"]>>();
+    const second = harness({ path, onAssignmentAccepted: accepted, onTaskCreated: attached });
+    second.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+    expect(second.intake.accept(second.delivery({ id: "historical-cycle-reassignment" }))).toEqual({
+      status: "duplicate",
+    });
+    await run(second.intake);
+    expect(accepted).not.toHaveBeenCalled();
+    expect(attached).toHaveBeenCalledOnce();
+    expect(attached.mock.calls[0]?.[3]?.id).toBe("webhook:delivery:delivery-1");
+    expect(second.tasks()).toHaveLength(1);
+  });
+
+  it("finds a legacy active admission through bounded receipt pages without loading Task input records", () => {
+    const test = harness();
+    test.intake.accept(test.delivery());
+    const original = test.receipt();
+    const cycleKey = `webhook:active-cycle:${investigationContentDigest({
+      repository,
+      githubWorkItemId: 77,
+      kind: "issue",
+      number: 7,
+      assigneeUserId: 55,
+    })}`;
+    test.store.delete("idempotency", cycleKey);
+    for (let index = 0; index < 500; index += 1) {
+      const id = `webhook:delivery:aaa-${String(index).padStart(3, "0")}`;
+      test.store.insert("idempotency", id, {
+        ...original,
+        id,
+        canonicalReceiptId: id,
+        assignment: {
+          ...original.assignment,
+          number: index + 100,
+          githubWorkItemId: index + 1_000,
+        },
+      });
+    }
+    test.store.insert("idempotency", "input:unrelated-task", {
+      inputSnapshot: { body: "Unrelated retained source" },
+    });
+    const listed = vi.spyOn(test.store, "list");
+    const paged = vi.spyOn(test.store, "pagePrefix");
+    test.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+    expect(test.intake.accept(test.delivery({ id: "legacy-reassignment" }))).toEqual({
+      status: "duplicate",
+    });
+    expect(test.receipt("legacy-reassignment").canonicalReceiptId).toBe(original.id);
+    expect(listed.mock.calls.some(([collection]) => collection === "idempotency")).toBe(false);
+    expect(paged.mock.calls.filter(([, prefix]) => prefix === "webhook:delivery:").length).toBe(2);
+  });
+
+  it("preserves a legacy prepared Task request key when the admission resumes", async () => {
+    const test = harness({ maximumAttempts: 1 });
+    vi.spyOn(test.service, "createImportedTask").mockRejectedValueOnce(
+      new InvestigationRequestError(409, "synthetic_task_blocked", "Synthetic legacy pause"),
+    );
+    const delivery = test.delivery();
+    test.intake.accept(delivery);
+    await run(test.intake);
+    const saved = test.receipt();
+    if (saved.taskRequest === null)
+      throw new Error("Expected a prepared synthetic legacy request.");
+    const legacyRequest = { ...saved.taskRequest, idempotencyKey: "webhook:legacy-frozen-request" };
+    const {
+      admission: _admission,
+      canonicalReceiptId: _canonicalReceiptId,
+      ...legacyReceipt
+    } = saved;
+    test.store.put("idempotency", saved.id, { ...legacyReceipt, taskRequest: legacyRequest });
+    expect(test.intake.accept(delivery)).toEqual({ status: "accepted" });
+    await test.intake.drain();
+    expect(test.receipt().taskRequest).toEqual(legacyRequest);
+    expect(test.tasks()).toHaveLength(1);
+    expect(
+      test.store.has("idempotency", "task:github-webhook:44:webhook:legacy-frozen-request"),
+    ).toBe(true);
+  });
+
+  it.each(["issue", "pull_request"] as const)(
+    "joins repeated %s assignments to the canonical active admission despite source comment changes",
+    async (kind) => {
+      const accepted =
+        vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
+      const test = harness({
+        kind,
+        onAssignmentAccepted: accepted,
+        config: configuration([44, 45]),
+      });
+      test.intake.accept(test.delivery());
+      test.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+      expect(test.intake.accept(test.delivery({ id: "during-preparation" }))).toEqual({
+        status: "duplicate",
+      });
+      await run(test.intake);
+      const task = test.tasks()[0]!;
+      const calls = test.calls.length;
+      test.comments[0]!.body = "The earlier progress comment changed the complete source snapshot.";
+      test.upstream.updated_at = new Date(startedAt + 2_000).toISOString();
+      expect(
+        test.intake.accept(
+          test.delivery({
+            id: "active-reassignment",
+            mutate: (payload) => {
+              payload.sender.id = 45;
+              payload.sender.login = "second-maintainer";
+            },
+          }),
+        ),
+      ).toEqual({ status: "duplicate", taskId: task.id });
+      await test.intake.drain();
+      expect(accepted).toHaveBeenCalledOnce();
+      expect(test.tasks()).toEqual([task]);
+      expect(test.calls).toHaveLength(calls);
+      expect(test.receipt("active-reassignment")).toMatchObject({
+        canonicalReceiptId: test.receipt().id,
+        state: "ignored",
+      });
+      expect(test.receipt().taskRequest?.idempotencyKey).toBe(
+        `webhook-admission:${investigationContentDigest(test.receipt().id)}`,
+      );
+    },
+  );
+
+  it("keeps a maximum-length webhook delivery ID within the Task idempotency key limit", async () => {
+    const test = harness();
+    const deliveryId = "d".repeat(128);
+    test.intake.accept(test.delivery({ id: deliveryId }));
+    await run(test.intake);
+    expect(test.tasks()).toHaveLength(1);
+    expect(test.receipt(deliveryId)).toMatchObject({ state: "completed" });
+    expect(test.receipt(deliveryId).taskRequest!.idempotencyKey.length).toBeLessThanOrEqual(128);
+  });
+
+  it("starts a new cycle for a new assignment after Task completion but preserves old delivery replay", async () => {
+    const accepted =
+      vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
+    const test = harness({ onAssignmentAccepted: accepted });
+    const original = test.delivery();
+    test.intake.accept(original);
+    await run(test.intake);
+    const task = test.tasks()[0]!;
+    test.store.put("tasks", task.id, { ...task, state: "completed" });
+    test.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+    expect(test.intake.accept(test.delivery({ id: "next-cycle" }))).toEqual({ status: "accepted" });
+    expect(test.intake.accept(original)).toEqual({ status: "duplicate", taskId: task.id });
+    await test.intake.drain();
+    expect(test.tasks()).toHaveLength(2);
+    expect(accepted).toHaveBeenCalledTimes(2);
+    expect(test.receipt("next-cycle").canonicalReceiptId).toBe("webhook:delivery:next-cycle");
+    expect(test.receipt("next-cycle").taskId).not.toBe(task.id);
+  });
+
+  it("creates a separate active PR cycle only for a new explicitly assigned revision", async () => {
+    const accepted =
+      vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
+    const test = harness({ kind: "pull_request", onAssignmentAccepted: accepted });
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    test.upstream.head!.sha = "c".repeat(40);
+    test.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+    expect(test.intake.accept(test.delivery({ id: "new-pr-revision" }))).toEqual({
+      status: "accepted",
+    });
+    await test.intake.drain();
+    expect(test.tasks()).toHaveLength(2);
+    expect(accepted).toHaveBeenCalledTimes(2);
+    expect(test.receipt("new-pr-revision").admission?.headSha).toBe("c".repeat(40));
+  });
+
+  it.each([
+    { code: "webhook_preparation_failed", state: "failed" },
+    { code: "source_assignment_missing", state: "cancelled" },
+  ] as const)("updates the same pre-Task admission after $code", async ({ code, state }) => {
+    const changed = vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentChanged"]>>();
+    const test = harness({ onAssignmentChanged: changed, maximumAttempts: 1 });
+    vi.spyOn(test.importer, "importWorkItem").mockRejectedValueOnce(
+      code === "webhook_preparation_failed"
+        ? new Error("Synthetic read failure")
+        : new InvestigationRequestError(409, code, "Synthetic removed assignment"),
+    );
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    expect(test.tasks()).toEqual([]);
+    expect(changed.mock.calls[0]?.[1]).toBe("preparing");
+    expect(changed).toHaveBeenLastCalledWith(test.receipt().admission, state, code);
+  });
+
+  it.each(["issue", "pull_request"] as const)(
+    "persists a %s assignment acknowledgement with trusted trigger identities",
+    async (kind) => {
+      const created = vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onTaskCreated"]>>();
+      const test = harness({ kind, onTaskCreated: created });
+      created.mockImplementation((task, trigger) => {
+        expect(test.store.get("tasks", task.id)).toEqual(task);
+        test.store.insert("idempotency", "synthetic-progress-created", {
+          taskId: task.id,
+          trigger,
+        });
+      });
+      test.intake.accept(test.delivery());
+      await run(test.intake);
+      const task = test.tasks()[0]!;
+      expect(created).toHaveBeenCalledExactlyOnceWith(
+        task,
+        {
+          eventName: kind === "issue" ? "issues" : "pull_request",
+          actorUserId: 44,
+          assigneeUserId: 55,
+          actorLogin: "trusted-maintainer",
+          assigneeLogin: "configured-reviewer",
+        },
+        true,
+        test.receipt().admission,
+      );
+      expect(test.store.get("idempotency", "synthetic-progress-created")).toMatchObject({
+        taskId: task.id,
+      });
+    },
+  );
+
+  it("retains numeric trigger identities when signed login fields are unsafe", async () => {
+    const created = vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onTaskCreated"]>>();
+    const test = harness({ onTaskCreated: created });
+    test.intake.accept(
+      test.delivery({
+        mutate: (payload) => {
+          payload.sender.login = "@unexpected-mention";
+          payload.assignee.login = "invalid\nmarkdown";
+        },
+      }),
+    );
+    await run(test.intake);
+    expect(created.mock.calls[0]?.[1]).toEqual({
+      eventName: "issues",
+      actorUserId: 44,
+      assigneeUserId: 55,
+    });
+  });
+
+  it("does not create another task when the same assignment is redelivered with changed logins", async () => {
+    const test = harness();
+    test.intake.accept(test.delivery());
+    expect(
+      test.intake.accept(
+        test.delivery({
+          id: "renamed-identities-delivery",
+          mutate: (payload) => {
+            payload.sender.login = "renamed-maintainer";
+            payload.assignee.login = "renamed-reviewer";
+          },
+        }),
+      ),
+    ).toEqual({ status: "duplicate" });
+    await run(test.intake);
+    expect(test.tasks()).toHaveLength(1);
+  });
+
+  it("keeps task creation and acknowledgement persistence atomic on callback failure", async () => {
+    const created = vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onTaskCreated"]>>();
+    const test = harness({ onTaskCreated: created, maximumAttempts: 1 });
+    created.mockImplementation((task) => {
+      test.store.insert("idempotency", "synthetic-progress-created", { taskId: task.id });
+      throw new Error("Synthetic acknowledgement persistence failed.");
+    });
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    expect(test.tasks()).toEqual([]);
+    expect(test.store.has("idempotency", "synthetic-progress-created")).toBe(false);
+    expect(test.receipt().state).toBe("failed");
+  });
+
+  it("does not treat a concurrent idempotent task return as new enrollment", async () => {
+    const created = vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onTaskCreated"]>>();
+    const test = harness({ onTaskCreated: created });
+    const verifyAssignment = test.importer.verifyAssignment.bind(test.importer);
+    vi.spyOn(test.importer, "verifyAssignment").mockImplementationOnce(async (...args) => {
+      await verifyAssignment(...args);
+      const receipt = test.receipt();
+      if (receipt.taskRequest === null || receipt.source === null)
+        throw new Error("The synthetic concurrent creator requires prepared input.");
+      await test.service.createImportedTask(args[0], receipt.taskRequest, receipt.source);
+    });
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    expect(test.tasks()).toHaveLength(1);
+    expect(test.receipt().state).toBe("completed");
+    expect(created).toHaveBeenCalledOnce();
+    expect(created.mock.calls[0]?.[2]).toBe(false);
+  });
+
   it.each(["issue", "pull_request"] as const)(
     "creates the correct frozen root Task for an authorized %s assignment",
     async (kind) => {
@@ -527,7 +887,8 @@ describe("durable assignment-only Webhook intake", () => {
     await first.intake.stop();
     first.store.close();
 
-    const second = harness({ path, now: startedAt + retryDelayMs });
+    const recovered = vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onTaskCreated"]>>();
+    const second = harness({ path, now: startedAt + retryDelayMs, onTaskCreated: recovered });
     second.upstream.assignees = [];
     const creating = vi.spyOn(second.service, "createImportedTask");
     await run(second.intake);
@@ -535,6 +896,18 @@ describe("durable assignment-only Webhook intake", () => {
     expect(second.calls).toEqual([]);
     expect(second.tasks().map((task) => task.id)).toEqual([taskId]);
     expect(second.receipt()).toMatchObject({ state: "completed", taskId, attempts: 2 });
+    expect(recovered).toHaveBeenCalledExactlyOnceWith(
+      second.tasks()[0],
+      {
+        eventName: "issues",
+        actorUserId: 44,
+        assigneeUserId: 55,
+        actorLogin: "trusted-maintainer",
+        assigneeLogin: "configured-reviewer",
+      },
+      false,
+      second.receipt().admission,
+    );
   });
 
   it("completes an already committed Task receipt after the effective grant is revoked", async () => {
@@ -851,6 +1224,81 @@ describe("durable assignment-only Webhook intake", () => {
     expect(test.tasks()).toHaveLength(1);
     expect(test.receipt()).toMatchObject({ state: "completed", attempts: 2, reason: null });
     expect(test.errors).toEqual([]);
+  });
+
+  it("fully reimports a stale prepared source before creating the canonical Task", async () => {
+    const test = harness({ maximumAttempts: 2 });
+    const importing = vi.spyOn(test.importer, "importWorkItem");
+    const creating = vi
+      .spyOn(test.service, "createImportedTask")
+      .mockRejectedValueOnce(
+        new InvestigationRequestError(409, "stale_subject", "The Issue changed after import."),
+      );
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    const firstSource = creating.mock.calls[0]![2];
+    const originalSnapshot = test.store.get("sourceSnapshots", firstSource.snapshotRef.id);
+    const originalKey = creating.mock.calls[0]![1].idempotencyKey;
+    expect(test.receipt()).toMatchObject({
+      state: "accepted",
+      source: null,
+      taskRequest: null,
+      attempts: 1,
+      reason: "stale_subject",
+      nextAttemptAt: startedAt + retryDelayMs,
+    });
+    expect(test.tasks()).toEqual([]);
+    test.upstream.title = "A new human clarification after the prepared snapshot";
+    test.upstream.body = "The complete changed issue body must be imported again.";
+    test.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+    test.comments[0]!.body = "A changed human comment must not be ignored as progress metadata.";
+    await test.intake.drain();
+    expect(importing).toHaveBeenCalledTimes(1);
+    test.advance(retryDelayMs);
+    await test.intake.drain();
+    expect(importing).toHaveBeenCalledTimes(2);
+    expect(test.tasks()).toHaveLength(1);
+    expect(creating.mock.calls[1]![1].idempotencyKey).toBe(originalKey);
+    expect(test.receipt()).toMatchObject({ state: "completed", attempts: 2, reason: null });
+    expect(test.store.get("sourceSnapshots", firstSource.snapshotRef.id)).toEqual(originalSnapshot);
+    const task = test.tasks()[0]!;
+    expect(test.store.get("idempotency", `input:${task.id}`)).toMatchObject({
+      inputSnapshot: {
+        title: test.upstream.title,
+        body: test.upstream.body,
+        comments: [{ id: "issue-comment:201", body: test.comments[0]!.body }],
+      },
+    });
+  });
+
+  it("recovers a committed Task before retrying a stale-source response", async () => {
+    const test = harness();
+    const importing = vi.spyOn(test.importer, "importWorkItem");
+    const create = test.service.createImportedTask.bind(test.service);
+    const creating = vi
+      .spyOn(test.service, "createImportedTask")
+      .mockImplementationOnce(async (...args) => {
+        await create(...args);
+        throw new InvestigationRequestError(
+          409,
+          "stale_subject",
+          "Synthetic lost committed Task response.",
+        );
+      });
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    expect(test.tasks()).toHaveLength(1);
+    expect(test.receipt()).toMatchObject({
+      state: "completed",
+      taskId: test.tasks()[0]!.id,
+      attempts: 1,
+      reason: null,
+    });
+    test.advance(retryDelayMs);
+    await test.intake.drain();
+    expect(importing).toHaveBeenCalledTimes(1);
+    expect(creating).toHaveBeenCalledTimes(1);
+    expect(test.store.countPrefix("idempotency", "webhook:pending:")).toBe(0);
   });
 
   it("terminates repeated transient failure without scanning or creating Tasks", async () => {

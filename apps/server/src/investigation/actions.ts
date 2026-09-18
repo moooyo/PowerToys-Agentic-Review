@@ -434,6 +434,7 @@ export class InvestigationActions {
     id: string,
     body: InvestigationConfirmActionIntentRequest,
     assertAuthorized?: (intent: InvestigationActionIntentV1) => void,
+    beforeTransportDispatch?: (intent: InvestigationActionIntentV1) => void,
   ): Promise<InvestigationActionIntentV1> {
     requireCondition(
       Value.Check(InvestigationConfirmActionIntentRequestSchema, body),
@@ -503,7 +504,7 @@ export class InvestigationActions {
     intent = acquired.intent;
     if (!acquired.execute) return intent;
     // The caller that persisted this transition owns execution. A second confirmation never sends again.
-    return this.execute(actor, intent, data, assertAuthorized);
+    return this.execute(actor, intent, data, assertAuthorized, beforeTransportDispatch);
   }
 
   async reconcileIntent(
@@ -1412,25 +1413,28 @@ export class InvestigationActions {
     intent: InvestigationActionIntentV1,
     data: ActionData,
     assertAuthorized?: (intent: InvestigationActionIntentV1) => void,
+    beforeTransportDispatch?: (intent: InvestigationActionIntentV1) => void,
   ): Promise<InvestigationActionIntentV1> {
     let dispatched = false;
+    const checkDispatch = (recordDispatch: boolean) => {
+      try {
+        assertAuthorized?.(intent);
+        if (recordDispatch) beforeTransportDispatch?.(intent);
+      } catch (error) {
+        // The transport invokes this only before issuing its mutation request.
+        dispatched = false;
+        if (error instanceof InvestigationRequestError) throw error;
+        throw new InvestigationRequestError(
+          403,
+          "action_authorization_revoked",
+          "The action is no longer authorized for dispatch.",
+        );
+      }
+    };
     const beforeDispatch =
-      assertAuthorized === undefined
+      assertAuthorized === undefined && beforeTransportDispatch === undefined
         ? undefined
-        : () => {
-            try {
-              assertAuthorized(intent);
-            } catch (error) {
-              // The transport invokes this only before issuing its mutation request.
-              dispatched = false;
-              if (error instanceof InvestigationRequestError) throw error;
-              throw new InvestigationRequestError(
-                403,
-                "action_authorization_revoked",
-                "The action is no longer authorized for dispatch.",
-              );
-            }
-          };
+        : () => checkDispatch(true);
     try {
       if (taskActions.has(intent.action)) {
         requireCondition(
@@ -1461,7 +1465,8 @@ export class InvestigationActions {
         "external_writes_unavailable",
         "External writes are disabled or no supported transport is installed.",
       );
-      beforeDispatch?.();
+      // The transport owns the final dispatch boundary; this earlier check grants no receipt.
+      checkDispatch(false);
       dispatched = true;
       const result =
         beforeDispatch === undefined

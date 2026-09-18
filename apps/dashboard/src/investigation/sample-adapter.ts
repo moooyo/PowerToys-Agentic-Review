@@ -5,6 +5,10 @@ import {
   type InvestigationActionIntentV1,
   type InvestigationActionKind,
   type InvestigationArtifactMetadataV1,
+  type InvestigationCommentCommand,
+  type InvestigationCommentDelivery,
+  type InvestigationCommentDeliveryQuery,
+  type InvestigationCommentPublicationSummary,
   type InvestigationFindingsPageV1,
   type InvestigationLoopCheckpointV1,
   type InvestigationReportHeaderV1,
@@ -21,8 +25,13 @@ import type {
   TaskDetail,
   WorkItem,
 } from "./api";
-import { validateAutoReplyTemplate } from "./auto-reply-settings-form";
 import {
+  autoReplyProgressStages,
+  validateAutoReplyProgressTemplate,
+  validateAutoReplyTemplate,
+} from "./auto-reply-settings-form";
+import {
+  sampleAutoReplyProgressTemplates,
   sampleIssueAutoReplyTemplate,
   samplePullRequestAutoReplyTemplate,
 } from "./sample-auto-reply-templates";
@@ -36,6 +45,61 @@ const repository = {
 const sampleTime = "2026-09-15T03:00:00.000Z";
 const noDispatchMessage = "Sample mode: no GitHub action was dispatched.";
 type Fixture = ReturnType<typeof createInvestigationPreview>;
+
+export function sampleCommentDeliveryView(
+  receipt: InvestigationCommentDelivery,
+): InvestigationCommentDelivery {
+  const view = structuredClone(receipt);
+  for (const observation of view.observations) {
+    if (view.state !== "unknown") continue;
+    view.reason = observation.reason;
+    if (observation.state === "succeeded") {
+      view.state = "succeeded";
+      view.effect = "applied";
+    }
+  }
+  return view;
+}
+
+function sampleCommentPage(
+  values: InvestigationCommentDelivery[],
+  query: InvestigationCommentDeliveryQuery,
+) {
+  const { cursor, limit = 25, ...filters } = query;
+  const prefix = `sample-deliveries:${encodeURIComponent(canonicalJson(filters))}:`;
+  if (
+    (cursor !== undefined &&
+      (!cursor.startsWith(prefix) || !/^\d+$/u.test(cursor.slice(prefix.length)))) ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 50
+  ) {
+    throw new InvestigationHttpError(400, "Use a valid sample delivery cursor and page size.");
+  }
+  const filtered = values
+    .map(sampleCommentDeliveryView)
+    .filter(
+      (value) =>
+        (query.repositoryId === undefined || value.repositoryId === query.repositoryId) &&
+        (query.taskId === undefined || value.taskId === query.taskId) &&
+        (query.commentId === undefined || value.commentId === query.commentId) &&
+        (query.workItemNumber === undefined || value.workItemNumber === query.workItemNumber) &&
+        (query.state === undefined || value.state === query.state) &&
+        (query.mode === undefined || value.mode === query.mode),
+    )
+    .sort(
+      (left, right) =>
+        right.startedAt.localeCompare(left.startedAt) || right.id.localeCompare(left.id),
+    );
+  const offset = cursor === undefined ? 0 : Number(cursor.slice(prefix.length));
+  if (!Number.isSafeInteger(offset) || offset > filtered.length)
+    throw new InvestigationHttpError(400, "The sample delivery cursor is outside this result.");
+  const end = Math.min(offset + limit, filtered.length);
+  return structuredClone({
+    items: filtered.slice(offset, end),
+    nextCursor: end < filtered.length ? `${prefix}${end}` : null,
+  });
+}
 
 function renameFixture(value: unknown, sourcePrefix: string, targetPrefix: string): unknown {
   if (typeof value === "string") {
@@ -291,9 +355,13 @@ export function createSampleInvestigationApi(): InvestigationApi {
   let autoReplySettings: RepositoryAutoReplySettings = {
     repositoryId: repository.id,
     enabled: false,
+    progressEnabled: false,
+    progressTemplates: structuredClone(sampleAutoReplyProgressTemplates),
     version: 0,
     publisherConfigured: false,
     authorizedById: null,
+    authorizationEpoch: 0,
+    updatedById: null,
     updatedAt: null,
     templateVersion: 4,
     pullRequestTemplate: samplePullRequestAutoReplyTemplate,
@@ -316,6 +384,13 @@ export function createSampleInvestigationApi(): InvestigationApi {
   const actionRequests = new Map<string, { input: string; intentId: string }>();
   const resumeRequests = new Map<string, string>();
   const confirmedVersions = new Map<string, number>();
+  const comments = new Map<string, InvestigationCommentPublicationSummary>();
+  const commentDeliveries = new Map<string, InvestigationCommentDelivery>();
+  const commentBodies = new Map<string, string>();
+  const commentRequests = new Map<
+    string,
+    { input: string; result: InvestigationCommentPublicationSummary }
+  >();
   let sequence = 0;
 
   for (const fixture of sampleFixtures()) {
@@ -345,6 +420,289 @@ export function createSampleInvestigationApi(): InvestigationApi {
       latestReport: reportHeader(fixture.result),
       children: [],
     });
+  }
+
+  const commentCases = [
+    { seed: "sample-pr-p1", state: "synced", reasonCode: null, reason: null },
+    {
+      seed: "sample-pr-p0",
+      state: "retrying",
+      reasonCode: "upstream_rate_limited",
+      reason: "The synthetic publisher is waiting to retry an update after a rate limit.",
+    },
+    {
+      seed: "sample-pr-partial",
+      state: "unconfirmed",
+      reasonCode: "upstream_outcome_unknown",
+      reason: "The synthetic update timed out. Reconcile its outcome before another write.",
+    },
+    {
+      seed: "sample-bug",
+      state: "needs_attention",
+      reasonCode: "body_too_large",
+      reason: "The synthetic conclusion requires a shorter comment before publication.",
+    },
+    {
+      seed: "sample-feature",
+      state: "paused",
+      reasonCode: "authorization_revoked",
+      reason: "The synthetic publishing authorization was withdrawn.",
+    },
+  ] as const;
+  for (const [index, example] of commentCases.entries()) {
+    const task = required(tasks, `${example.seed}-task`, "task").task;
+    const id = `${example.seed}-comment`;
+    const createdAt = "2026-09-15T02:00:00.000Z";
+    const desiredBody = `## Sample investigation ${example.state === "synced" ? "completed" : "status"}\n\n${task.workItem.title}\n\nThis is isolated sample content. No GitHub request was sent.`;
+    const receivedBody = `## Sample investigation received\n\nAssignment of #${task.workItem.number} to the synthetic reviewer triggered this task.\n\nThis is isolated sample content.`;
+    const mode = example.seed === "sample-feature" ? "result" : "progress";
+    const externalId = index < 3 ? `sample-external-${task.workItem.number}` : null;
+    const summary: InvestigationCommentPublicationSummary = {
+      id,
+      version: `${id}:2`,
+      mode,
+      repositoryId: repository.id,
+      repositoryFullName: repository.fullName,
+      workItemId: task.workItem.id,
+      workItemKind: task.workItem.kind,
+      workItemNumber: task.workItem.number,
+      taskId: task.id,
+      reportId: task.latestReportRef?.id ?? null,
+      state: example.state,
+      reasonCode: example.reasonCode,
+      reason: example.reason,
+      requiresAttention: ["unconfirmed", "needs_attention"].includes(example.state),
+      nextAttemptAt: example.state === "retrying" ? "2026-09-15T03:05:00.000Z" : null,
+      lastAttemptAt: sampleTime,
+      lastConfirmedAt: index < 3 ? createdAt : null,
+      externalId,
+      commentUrl: null,
+      availableActions:
+        example.state === "retrying"
+          ? ["sync"]
+          : example.state === "unconfirmed"
+            ? ["reconcile"]
+            : [],
+      createdAt,
+      updatedAt: sampleTime,
+    };
+    if (summary.state === "synced") summary.lastConfirmedAt = sampleTime;
+    comments.set(id, summary);
+    commentBodies.set(id, desiredBody);
+    const base: InvestigationCommentDelivery = {
+      id: `${id}-attempt-1`,
+      commentId: id,
+      mode,
+      repositoryId: repository.id,
+      repositoryFullName: repository.fullName,
+      workItemId: task.workItem.id,
+      workItemKind: task.workItem.kind,
+      workItemNumber: task.workItem.number,
+      taskId: task.id,
+      reportId: null,
+      operation: "create",
+      state: index < 3 ? "succeeded" : "failed",
+      body: mode === "progress" ? receivedBody : desiredBody,
+      externalId,
+      startedAt: createdAt,
+      finishedAt: createdAt,
+      reason: index < 3 ? null : example.reason,
+      effect: index < 3 ? "applied" : "not_sent",
+      attemptNumber: 1,
+      settingsVersion: 1,
+      templateVersion: 4,
+      legacy: mode === "result",
+      observations: [],
+    };
+    commentDeliveries.set(base.id, base);
+    if (index < 3) {
+      const update: InvestigationCommentDelivery = {
+        ...base,
+        id: `${id}-attempt-2`,
+        reportId: summary.reportId,
+        operation: "update",
+        state:
+          example.state === "synced"
+            ? "succeeded"
+            : example.state === "retrying"
+              ? "failed"
+              : "unknown",
+        body: desiredBody,
+        startedAt: sampleTime,
+        finishedAt: sampleTime,
+        reason: example.reason,
+        effect:
+          example.state === "synced"
+            ? "applied"
+            : example.state === "retrying"
+              ? "rejected"
+              : "unknown",
+        attemptNumber: 2,
+        observations: [],
+      };
+      commentDeliveries.set(update.id, update);
+    }
+  }
+  const intakeCommentId = "sample-assignment-intake-comment";
+  comments.set(intakeCommentId, {
+    id: intakeCommentId,
+    version: `${intakeCommentId}:1`,
+    mode: "progress",
+    repositoryId: repository.id,
+    repositoryFullName: repository.fullName,
+    workItemId: null,
+    workItemKind: "issue",
+    workItemNumber: 2199,
+    taskId: null,
+    reportId: null,
+    state: "pending",
+    reasonCode: "assignment_received",
+    reason: "Assignment was received; the synthetic source import is still preparing the task.",
+    requiresAttention: false,
+    nextAttemptAt: null,
+    lastAttemptAt: null,
+    lastConfirmedAt: null,
+    externalId: null,
+    commentUrl: null,
+    availableActions: ["sync"],
+    createdAt: sampleTime,
+    updatedAt: sampleTime,
+  });
+  commentBodies.set(
+    intakeCommentId,
+    "## Sample investigation received\n\nAssignment to the synthetic reviewer was accepted. Preparing the source before creating a task.\n\nNo GitHub request was sent.",
+  );
+  const preparingCommentId = "sample-assignment-preparing-comment";
+  const preparingComment: InvestigationCommentPublicationSummary = {
+    ...required(comments, intakeCommentId, "comment"),
+    id: preparingCommentId,
+    version: `${preparingCommentId}:1`,
+    workItemNumber: 2198,
+    state: "synced",
+    lastAttemptAt: sampleTime,
+    lastConfirmedAt: sampleTime,
+    externalId: "sample-external-2198",
+    availableActions: [],
+  };
+  const preparingBody =
+    "## Sample assignment preparation\n\nThe assignment receipt was confirmed. Source import is preparing the investigation task.\n\nNo GitHub request was sent.";
+  comments.set(preparingCommentId, preparingComment);
+  commentBodies.set(preparingCommentId, preparingBody);
+  commentDeliveries.set(`${preparingCommentId}-attempt-1`, {
+    id: `${preparingCommentId}-attempt-1`,
+    commentId: preparingCommentId,
+    mode: "progress",
+    repositoryId: repository.id,
+    repositoryFullName: repository.fullName,
+    workItemId: null,
+    workItemKind: "issue",
+    workItemNumber: preparingComment.workItemNumber,
+    taskId: null,
+    reportId: null,
+    operation: "create",
+    state: "succeeded",
+    body: preparingBody,
+    externalId: preparingComment.externalId,
+    startedAt: sampleTime,
+    finishedAt: sampleTime,
+    reason: noDispatchMessage,
+    effect: "applied",
+    attemptNumber: 1,
+    settingsVersion: 1,
+    templateVersion: 4,
+    legacy: false,
+    observations: [],
+  });
+
+  function commentCommand(
+    id: string,
+    input: InvestigationCommentCommand,
+    operation: "sync" | "reconcile",
+  ): InvestigationCommentPublicationSummary {
+    const requestKey = `${id}:${operation}:${input.idempotencyKey}`;
+    const serialized = canonicalJson(input);
+    const previous = commentRequests.get(requestKey);
+    if (previous) {
+      if (previous.input !== serialized)
+        throw new InvestigationHttpError(
+          409,
+          "The sample comment command key was reused with different content.",
+        );
+      return structuredClone(previous.result);
+    }
+    const comment = required(comments, id, "comment");
+    if (input.version !== comment.version)
+      throw new InvestigationHttpError(
+        409,
+        "The sample comment changed. Reload it before retrying.",
+      );
+    if (!comment.availableActions.includes(operation))
+      throw new InvestigationHttpError(
+        409,
+        "This sample comment does not allow that recovery action.",
+      );
+    const savedAttempts = [...commentDeliveries.values()].filter(
+      (attempt) => attempt.commentId === id,
+    );
+    const externalId = comment.externalId ?? `sample-external-${comment.workItemNumber}`;
+    if (operation === "sync") {
+      const attempt: InvestigationCommentDelivery = {
+        id: `${id}-attempt-${savedAttempts.length + 1}`,
+        commentId: id,
+        mode: comment.mode,
+        repositoryId: comment.repositoryId,
+        repositoryFullName: comment.repositoryFullName,
+        workItemId: comment.workItemId,
+        workItemKind: comment.workItemKind,
+        workItemNumber: comment.workItemNumber,
+        taskId: comment.taskId,
+        reportId: comment.reportId,
+        operation: comment.externalId === null ? "create" : "update",
+        state: "succeeded",
+        body: required(commentBodies, id, "comment body"),
+        externalId,
+        startedAt: sampleTime,
+        finishedAt: sampleTime,
+        reason: noDispatchMessage,
+        effect: "applied",
+        attemptNumber: savedAttempts.length + 1,
+        settingsVersion: 1,
+        templateVersion: 4,
+        legacy: false,
+        observations: [],
+      };
+      commentDeliveries.set(attempt.id, attempt);
+    } else {
+      const attempt = savedAttempts.reverse().find((entry) => entry.state === "unknown");
+      if (!attempt)
+        throw new InvestigationHttpError(
+          409,
+          "There is no uncertain sample delivery to reconcile.",
+        );
+      attempt.observations.push({
+        at: sampleTime,
+        state: "succeeded",
+        reason:
+          "The isolated synthetic upstream snapshot matched this saved attempt. No GitHub request was sent.",
+      });
+    }
+    const updated: InvestigationCommentPublicationSummary = {
+      ...comment,
+      version: `${id}:command-${++sequence}`,
+      state: "synced",
+      reasonCode: null,
+      reason: noDispatchMessage,
+      requiresAttention: false,
+      nextAttemptAt: null,
+      lastAttemptAt: operation === "sync" ? sampleTime : comment.lastAttemptAt,
+      lastConfirmedAt: sampleTime,
+      externalId,
+      availableActions: [],
+      updatedAt: sampleTime,
+    };
+    comments.set(id, updated);
+    commentRequests.set(requestKey, { input: serialized, result: structuredClone(updated) });
+    return structuredClone(updated);
   }
 
   function itemReport(workItemId: string, id?: string): InvestigationResultV1 | undefined {
@@ -618,6 +976,42 @@ export function createSampleInvestigationApi(): InvestigationApi {
   }
 
   const api: InvestigationApi = {
+    commentDeliveries: async (query = {}) =>
+      sampleCommentPage([...commentDeliveries.values()], structuredClone(query)),
+    comments: async (query = {}) => {
+      if (
+        (query.taskIds !== undefined && query.commentIds !== undefined) ||
+        (query.taskIds !== undefined &&
+          (query.taskIds.length === 0 || query.taskIds.length > 100)) ||
+        (query.commentIds !== undefined &&
+          (query.commentIds.length === 0 || query.commentIds.length > 100))
+      )
+        throw new InvestigationHttpError(
+          400,
+          "Choose at most 100 task IDs or comment IDs for sample comments.",
+        );
+      return structuredClone({
+        items: [...comments.values()]
+          .filter(
+            (comment) =>
+              (query.repositoryId === undefined || comment.repositoryId === query.repositoryId) &&
+              (query.taskIds === undefined ||
+                (comment.taskId !== null && query.taskIds.includes(comment.taskId))) &&
+              (query.commentIds === undefined || query.commentIds.includes(comment.id)),
+          )
+          .slice(0, 100),
+      });
+    },
+    comment: async (id) => structuredClone(required(comments, id, "comment")),
+    commentAttempts: async (id, query = {}) => {
+      required(comments, id, "comment");
+      return sampleCommentPage([...commentDeliveries.values()], {
+        ...structuredClone(query),
+        commentId: id,
+      });
+    },
+    syncComment: async (id, input) => commentCommand(id, structuredClone(input), "sync"),
+    reconcileComment: async (id, input) => commentCommand(id, structuredClone(input), "reconcile"),
     repositories: async () => ({ items: [structuredClone(repository)] }),
     repositoryWebhookSettings: async (repositoryId) => {
       if (repositoryId !== repository.id)
@@ -659,12 +1053,17 @@ export function createSampleInvestigationApi(): InvestigationApi {
       if (
         !Number.isSafeInteger(input.version) ||
         input.version < 0 ||
-        typeof input.enabled !== "boolean"
+        typeof input.enabled !== "boolean" ||
+        (input.progressEnabled !== undefined && typeof input.progressEnabled !== "boolean") ||
+        (input.progressEnabled === true && !input.enabled) ||
+        (Object.hasOwn(input, "reauthorize") && typeof input.reauthorize !== "boolean") ||
+        (input.reauthorize === true && !input.enabled)
       ) {
         throw new InvestigationHttpError(400, "The sample automatic reply settings are invalid.");
       }
       if (input.version !== autoReplySettings.version)
         throw new InvestigationHttpError(409, "The sample automatic reply settings changed.");
+      const progressTemplates = input.progressTemplates ?? sampleAutoReplyProgressTemplates;
       try {
         validateAutoReplyTemplate(
           input.pullRequestTemplate,
@@ -672,6 +1071,23 @@ export function createSampleInvestigationApi(): InvestigationApi {
           "pullRequest",
         );
         validateAutoReplyTemplate(input.issueTemplate, "Issue template", "issue");
+        if (
+          (input.progressTemplates !== undefined &&
+            (input.progressTemplates === null ||
+              typeof input.progressTemplates !== "object" ||
+              Array.isArray(input.progressTemplates))) ||
+          Object.keys(progressTemplates).length !== autoReplyProgressStages.length ||
+          autoReplyProgressStages.some(
+            (stage) =>
+              !Object.hasOwn(progressTemplates, stage) ||
+              typeof progressTemplates[stage] !== "string",
+          )
+        ) {
+          throw new Error("The sample progress templates must contain all four stages only.");
+        }
+        for (const stage of autoReplyProgressStages) {
+          validateAutoReplyProgressTemplate(progressTemplates[stage], stage);
+        }
       } catch (error) {
         throw new InvestigationHttpError(
           400,
@@ -680,11 +1096,25 @@ export function createSampleInvestigationApi(): InvestigationApi {
             : "The sample automatic reply template is invalid.",
         );
       }
+      const progressEnabled = input.enabled && (input.progressEnabled ?? false);
+      const authorizationChanged =
+        autoReplySettings.version === 0 ||
+        autoReplySettings.enabled !== input.enabled ||
+        autoReplySettings.progressEnabled !== progressEnabled ||
+        input.reauthorize === true;
       autoReplySettings = {
         ...autoReplySettings,
         enabled: input.enabled,
+        progressEnabled,
+        progressTemplates: structuredClone(progressTemplates),
         version: autoReplySettings.version + 1,
-        authorizedById: input.enabled ? "sample-operator" : null,
+        authorizedById: input.enabled
+          ? authorizationChanged
+            ? "sample-operator"
+            : autoReplySettings.authorizedById
+          : null,
+        authorizationEpoch: autoReplySettings.authorizationEpoch + (authorizationChanged ? 1 : 0),
+        updatedById: "sample-operator",
         updatedAt: sampleTime,
         pullRequestTemplate: input.pullRequestTemplate,
         issueTemplate: input.issueTemplate,
@@ -692,6 +1122,11 @@ export function createSampleInvestigationApi(): InvestigationApi {
       return structuredClone(autoReplySettings);
     },
     repositoryAutoReplies: async (repositoryId) => {
+      if (repositoryId !== repository.id)
+        throw new InvestigationHttpError(404, "The sample repository was not found.");
+      return { items: [] };
+    },
+    repositoryProgressReplies: async (repositoryId) => {
       if (repositoryId !== repository.id)
         throw new InvestigationHttpError(404, "The sample repository was not found.");
       return { items: [] };

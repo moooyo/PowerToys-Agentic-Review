@@ -3,6 +3,8 @@ import type {
   InvestigationAccountPermission,
   InvestigationActionIntentV1,
   InvestigationActionKind,
+  InvestigationCommentCommand,
+  InvestigationCommentPublicationSummary,
   InvestigationSession,
 } from "@agentic-review/contracts";
 import type { InvestigationApi, RepositoryAutoReplySettings } from "./api";
@@ -94,7 +96,10 @@ export function createSessionScopedSampleApi(
   onExpired?: () => void,
 ): InvestigationApi {
   let intentOwners: Map<string, { actorId: string; idempotencyKey: string }> | undefined;
-  const autoReplyOwners = new Map<string, { version: number; authorizedById: string | null }>();
+  const autoReplyOwners = new Map<
+    string,
+    { version: number; authorizedById: string | null; updatedById: string | null }
+  >();
 
   function expired(): never {
     onExpired?.();
@@ -142,7 +147,7 @@ export function createSessionScopedSampleApi(
   ): RepositoryAutoReplySettings {
     const owner = autoReplyOwners.get(settings.repositoryId);
     return owner?.version === settings.version
-      ? { ...settings, authorizedById: owner.authorizedById }
+      ? { ...settings, authorizedById: owner.authorizedById, updatedById: owner.updatedById }
       : settings;
   }
 
@@ -182,7 +187,118 @@ export function createSessionScopedSampleApi(
     return ownedIntent(current, value);
   }
 
+  function scopeComment(
+    value: InvestigationCommentPublicationSummary,
+    user: User,
+  ): InvestigationCommentPublicationSummary {
+    const prepare = canPerform(user, { permission: "action:prepare", action: "comment" });
+    const execute = canPerform(user, { permission: "action:execute", action: "comment" });
+    return {
+      ...value,
+      availableActions: value.availableActions.filter(
+        (action) => prepare && (action === "reconcile" || execute),
+      ),
+    };
+  }
+
+  async function readComment(user: User, id: string) {
+    const value = await api.comment(id);
+    const current = await currentAccess(user, value.repositoryId);
+    return scopeComment(value, current);
+  }
+
+  function authorizeCommentCommand(
+    user: User,
+    repositoryId: string,
+    operation: "sync" | "reconcile",
+  ) {
+    authorize(user, repositoryId, { permission: "action:prepare", action: "comment" });
+    if (operation === "sync")
+      requireGrant(user, { permission: "action:execute", action: "comment" });
+  }
+
+  async function commentCommand(
+    id: string,
+    input: InvestigationCommentCommand,
+    operation: "sync" | "reconcile",
+  ) {
+    const user = await currentUser();
+    requireGrant(user, { permission: "action:prepare", action: "comment" });
+    if (operation === "sync")
+      requireGrant(user, { permission: "action:execute", action: "comment" });
+    const comment = await readComment(user, id);
+    const current = await currentUser(user.id);
+    authorizeCommentCommand(current, comment.repositoryId, operation);
+    const updated = await (operation === "sync" ? api.syncComment : api.reconcileComment)(id, {
+      ...input,
+      idempotencyKey: scopedKey(user, input.idempotencyKey),
+    });
+    const latest = await currentUser(user.id);
+    authorizeCommentCommand(latest, updated.repositoryId, operation);
+    return structuredClone(scopeComment(updated, latest));
+  }
+
   return {
+    async commentDeliveries(query = {}) {
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      if (
+        snapshot.repositoryId !== undefined &&
+        !user.repositoryIds.includes(snapshot.repositoryId)
+      )
+        return { items: [], nextCursor: null };
+      if (snapshot.commentId !== undefined) await readComment(user, snapshot.commentId);
+      if (snapshot.taskId !== undefined) {
+        const detail = await api.task(snapshot.taskId);
+        await currentAccess(user, detail.task.repository.id);
+      }
+      const values = await api.commentDeliveries(snapshot);
+      const current = await currentUser(user.id);
+      return structuredClone({
+        ...values,
+        items: values.items.filter((item) => current.repositoryIds.includes(item.repositoryId)),
+      });
+    },
+
+    async comments(query = {}) {
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      if (
+        snapshot.repositoryId !== undefined &&
+        !user.repositoryIds.includes(snapshot.repositoryId)
+      )
+        return { items: [] };
+      const values = await api.comments(snapshot);
+      const current = await currentUser(user.id);
+      return structuredClone({
+        items: values.items
+          .filter((item) => current.repositoryIds.includes(item.repositoryId))
+          .map((item) => scopeComment(item, current)),
+      });
+    },
+
+    async comment(id) {
+      const user = await currentUser();
+      return structuredClone(await readComment(user, id));
+    },
+
+    async commentAttempts(id, query = {}) {
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      const comment = await readComment(user, id);
+      await currentAccess(user, comment.repositoryId);
+      const values = await api.commentAttempts(id, snapshot);
+      return result(user, values, comment.repositoryId);
+    },
+
+    syncComment(id, input) {
+      return commentCommand(id, structuredClone(input), "sync");
+    },
+
+    reconcileComment(id, input) {
+      return commentCommand(id, structuredClone(input), "reconcile");
+    },
+
     async repositories() {
       const user = await currentUser();
       const values = await api.repositories();
@@ -224,10 +340,20 @@ export function createSessionScopedSampleApi(
         authorizeAutoReply(user, repositoryId, snapshot.enabled);
         const current = await currentUser(user.id);
         authorizeAutoReply(current, repositoryId, snapshot.enabled);
+        const previous = scopedAutoReplySettings(
+          await api.repositoryAutoReplySettings(repositoryId),
+        );
+        const beforeSave = await currentUser(user.id);
+        authorizeAutoReply(beforeSave, repositoryId, snapshot.enabled);
         const settings = await api.updateRepositoryAutoReplySettings(repositoryId, snapshot);
         autoReplyOwners.set(repositoryId, {
           version: settings.version,
-          authorizedById: settings.enabled ? current.id : null,
+          authorizedById: settings.enabled
+            ? previous.authorizationEpoch === settings.authorizationEpoch
+              ? previous.authorizedById
+              : beforeSave.id
+            : null,
+          updatedById: beforeSave.id,
         });
         const latest = await currentUser(user.id);
         authorizeAutoReply(latest, repositoryId, snapshot.enabled);
@@ -239,6 +365,13 @@ export function createSessionScopedSampleApi(
       const user = await currentUser();
       authorize(user, repositoryId);
       const replies = await api.repositoryAutoReplies(repositoryId);
+      return result(user, replies, repositoryId);
+    },
+
+    async repositoryProgressReplies(repositoryId) {
+      const user = await currentUser();
+      authorize(user, repositoryId);
+      const replies = await api.repositoryProgressReplies(repositoryId);
       return result(user, replies, repositoryId);
     },
 

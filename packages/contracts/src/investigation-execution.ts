@@ -84,7 +84,18 @@ export const InvestigationInputSnapshotV1Schema = object({
   subjectRevisionKey: Sha256Schema,
   title: text,
   body: Type.String(),
-  comments: Type.Array(object({ id: EntityIdSchema, body: Type.String() })),
+  comments: Type.Array(
+    object({
+      id: EntityIdSchema,
+      body: Type.String(),
+      provenance: Type.Optional(
+        object({
+          kind: Type.Literal("agentic_review_progress"),
+          publicationId: EntityIdSchema,
+        }),
+      ),
+    }),
+  ),
   source: Type.Union([
     object({
       artifactRef: EntityIdSchema,

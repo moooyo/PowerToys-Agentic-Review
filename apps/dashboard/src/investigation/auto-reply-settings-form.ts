@@ -20,7 +20,19 @@ export const issueAutoReplyTemplateTokens = [
   "details",
 ] as const;
 
-export type AutoReplySettingsFormValues = Omit<UpdateRepositoryAutoReplySettingsInput, "version">;
+export const autoReplyProgressStages = ["received", "started", "failed", "completed"] as const;
+export type AutoReplyProgressStage = (typeof autoReplyProgressStages)[number];
+export const autoReplyProgressTemplateTokens = {
+  received: ["trigger", "updated_at"],
+  started: ["trigger", "updated_at"],
+  failed: ["trigger", "updated_at", "failure"],
+  completed: ["trigger", "updated_at", "result"],
+} as const;
+
+export type AutoReplySettingsFormValues = Pick<
+  RepositoryAutoReplySettings,
+  "enabled" | "pullRequestTemplate" | "issueTemplate" | "progressEnabled" | "progressTemplates"
+>;
 
 export function autoReplySettingsFormValues(
   settings: RepositoryAutoReplySettings,
@@ -29,6 +41,8 @@ export function autoReplySettingsFormValues(
     enabled: settings.enabled,
     pullRequestTemplate: settings.pullRequestTemplate,
     issueTemplate: settings.issueTemplate,
+    progressEnabled: settings.progressEnabled,
+    progressTemplates: { ...settings.progressTemplates },
   };
 }
 
@@ -90,12 +104,60 @@ export function autoReplySettingsInput(
 ): UpdateRepositoryAutoReplySettingsInput {
   validateAutoReplyTemplate(form.pullRequestTemplate, "PR reply template", "pullRequest");
   validateAutoReplyTemplate(form.issueTemplate, "Issue reply template", "issue");
+  if (form.progressEnabled && !form.enabled) {
+    throw new Error("Assignment progress comments require automatic replies to be enabled.");
+  }
+  for (const stage of autoReplyProgressStages) {
+    validateAutoReplyProgressTemplate(form.progressTemplates[stage], stage);
+  }
   return {
     version,
     enabled: form.enabled,
     pullRequestTemplate: form.pullRequestTemplate,
     issueTemplate: form.issueTemplate,
+    progressEnabled: form.progressEnabled,
+    progressTemplates: { ...form.progressTemplates },
   };
+}
+
+export function validateAutoReplyProgressTemplate(
+  template: string,
+  stage: AutoReplyProgressStage,
+  label = `${stage.charAt(0).toUpperCase()}${stage.slice(1)} progress template`,
+): void {
+  const tokens = autoReplyProgressTemplateTokens[stage];
+  if (new TextEncoder().encode(template).byteLength > 12_000) {
+    throw new Error(`${label} must be no larger than 12,000 UTF-8 bytes.`);
+  }
+  if (/\{\{\{|\}\}\}/u.test(template)) {
+    throw new Error(`${label} must use the exact {{token}} placeholder syntax.`);
+  }
+  const matches = [...template.matchAll(/\{\{([^{}]*)\}\}/gu)];
+  const allowed = new Set<string>([...tokens, "status"]);
+  if (matches.some((match) => !allowed.has(match[1] ?? ""))) {
+    throw new Error(`${label} contains an unknown placeholder. Use only the listed placeholders.`);
+  }
+  for (const token of tokens) {
+    if (matches.filter((match) => match[1] === token).length !== 1) {
+      throw new Error(`${label} must include {{${token}}} exactly once.`);
+    }
+  }
+  if (template.replace(/\{\{[^{}]*\}\}/gu, "").match(/\{\{|\}\}/u)) {
+    throw new Error(`${label} contains an incomplete placeholder.`);
+  }
+  if (matches.filter((match) => match[1] === "status").length > 1) {
+    throw new Error(`${label} may include the optional {{status}} placeholder only once.`);
+  }
+  if (matches.some((match) => match[1] === "status") && matches[0]?.[1] !== "status") {
+    throw new Error(`${label} must place the optional {{status}} before {{trigger}}.`);
+  }
+  if (
+    matches
+      .filter((match) => match[1] !== "status")
+      .some((match, index) => match[1] !== tokens[index])
+  ) {
+    throw new Error(`${label} must order placeholders as ${tokens.join(", ")}.`);
+  }
 }
 
 export async function submitAutoReplySettings(
@@ -105,8 +167,9 @@ export async function submitAutoReplySettings(
   conflict: boolean,
   permissions: { canManage: boolean; canAuthorize: boolean },
   update: InvestigationApi["updateRepositoryAutoReplySettings"],
+  reauthorize = false,
 ): Promise<RepositoryAutoReplySettings> {
-  if (!permissions.canManage || (form.enabled && !permissions.canAuthorize)) {
+  if (!permissions.canManage || ((form.enabled || reauthorize) && !permissions.canAuthorize)) {
     throw new Error(
       "Your account does not have permission to save these automatic reply settings.",
     );
@@ -117,5 +180,8 @@ export async function submitAutoReplySettings(
   if (conflict) {
     throw new Error("Reload the latest saved settings before trying again.");
   }
-  return update(repositoryId, autoReplySettingsInput(form, saved.version));
+  return update(repositoryId, {
+    ...autoReplySettingsInput(form, saved.version),
+    ...(reauthorize ? { reauthorize: true } : {}),
+  });
 }

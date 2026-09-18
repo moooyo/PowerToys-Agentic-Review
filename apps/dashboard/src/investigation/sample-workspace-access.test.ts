@@ -19,6 +19,7 @@ import type {
 import { createSampleInvestigationApi } from "./sample-adapter";
 import { createSampleAuthApi } from "./sample-auth";
 import {
+  sampleAutoReplyProgressTemplates,
   sampleIssueAutoReplyTemplate,
   samplePullRequestAutoReplyTemplate,
 } from "./sample-auto-reply-templates";
@@ -185,10 +186,25 @@ describe("sample workspace session and repository access", () => {
     const api = createSessionScopedSampleApi(raw, session, expired);
     const operations: Array<() => Promise<unknown>> = [
       () => api.repositories(),
+      () => api.comments(),
+      () => api.commentDeliveries(),
+      () => api.comment("sample-pr-p0-comment"),
+      () => api.commentAttempts("sample-pr-p0-comment"),
+      () =>
+        api.syncComment("sample-pr-p0-comment", {
+          version: "sample-version",
+          idempotencyKey: "signed-out-sync",
+        }),
+      () =>
+        api.reconcileComment("sample-pr-partial-comment", {
+          version: "sample-version",
+          idempotencyKey: "signed-out-reconcile",
+        }),
       () => api.repositoryWebhookSettings(repositoryId),
       () => api.updateRepositoryWebhookSettings(repositoryId, webhookInput()),
       () => api.repositoryAutoReplySettings(repositoryId),
       () => api.repositoryAutoReplies(repositoryId),
+      () => api.repositoryProgressReplies(repositoryId),
       () => api.updateRepositoryAutoReplySettings(repositoryId, autoReplyInput()),
       () => api.workItems(),
       () => api.workItem(workItemId),
@@ -352,27 +368,207 @@ describe("sample workspace session and repository access", () => {
   });
 });
 
+describe("sample comment publication access", () => {
+  it("allows repository members to inspect history while hiding unavailable recovery actions", async () => {
+    const raw = createSampleInvestigationApi();
+    let current = signedIn({ permissions: [], actionCapabilities: [] });
+    const api = createSessionScopedSampleApi(raw, async () => current);
+    expect((await api.comments()).items).toHaveLength(7);
+    expect(
+      (await api.comments()).items.every((comment) => comment.availableActions.length === 0),
+    ).toBe(true);
+    expect((await api.comment("sample-pr-p0-comment")).availableActions).toEqual([]);
+    expect((await api.commentAttempts("sample-pr-p0-comment")).items).toHaveLength(2);
+    expect((await api.commentDeliveries({ repositoryId })).items.length).toBeGreaterThan(0);
+    current = signedIn({ repositoryIds: [foreignRepositoryId] });
+    expect(await api.comments()).toEqual({ items: [] });
+    expect(await api.comments({ repositoryId })).toEqual({ items: [] });
+    expect(await api.commentDeliveries({ repositoryId })).toEqual({ items: [], nextCursor: null });
+    expect((await api.commentDeliveries()).items).toEqual([]);
+    await expectDenied(api.comment("sample-pr-p0-comment"));
+    await expectDenied(api.commentAttempts("sample-pr-p0-comment"));
+    await expectDenied(api.commentDeliveries({ commentId: "sample-pr-p0-comment" }));
+  });
+
+  it.each([
+    { name: "read only", grants: [], caps: ["comment"], sync: false, reconcile: false },
+    {
+      name: "prepare only",
+      grants: ["action:prepare"],
+      caps: ["comment"],
+      sync: false,
+      reconcile: true,
+    },
+    {
+      name: "execute only",
+      grants: ["action:execute"],
+      caps: ["comment"],
+      sync: false,
+      reconcile: false,
+    },
+    {
+      name: "prepare and execute",
+      grants: ["action:prepare", "action:execute"],
+      caps: ["comment"],
+      sync: true,
+      reconcile: true,
+    },
+    {
+      name: "a different capability",
+      grants: ["action:prepare", "action:execute"],
+      caps: ["approve"],
+      sync: false,
+      reconcile: false,
+    },
+  ] as const)("requires the proper grants for $name", async ({ grants, caps, sync, reconcile }) => {
+    const raw = createSampleInvestigationApi();
+    const syncSummary = await raw.comment("sample-pr-p0-comment");
+    const reconcileSummary = await raw.comment("sample-pr-partial-comment");
+    const syncing = vi.spyOn(raw, "syncComment");
+    const reconciling = vi.spyOn(raw, "reconcileComment");
+    const api = createSessionScopedSampleApi(raw, async () =>
+      signedIn({ permissions: [...grants], actionCapabilities: [...caps] }),
+    );
+    expect((await api.comment(syncSummary.id)).availableActions).toEqual(sync ? ["sync"] : []);
+    expect((await api.comment(reconcileSummary.id)).availableActions).toEqual(
+      reconcile ? ["reconcile"] : [],
+    );
+    const syncingResult = api.syncComment(syncSummary.id, {
+      version: syncSummary.version,
+      idempotencyKey: "scoped-sync",
+    });
+    const reconcilingResult = api.reconcileComment(reconcileSummary.id, {
+      version: reconcileSummary.version,
+      idempotencyKey: "scoped-reconcile",
+    });
+    if (sync) expect((await syncingResult).state).toBe("synced");
+    else await expectDenied(syncingResult);
+    if (reconcile) expect((await reconcilingResult).state).toBe("synced");
+    else await expectDenied(reconcilingResult);
+    expect(syncing).toHaveBeenCalledTimes(sync ? 1 : 0);
+    expect(reconciling).toHaveBeenCalledTimes(reconcile ? 1 : 0);
+  });
+
+  it.each([
+    "sign out",
+    "switch account",
+    "revoke repository",
+    "revoke preparation",
+    "revoke execution",
+    "revoke comment",
+  ] as const)(
+    "rechecks command access after a delayed comment lookup when the session changes to %s",
+    async (change) => {
+      const raw = createSampleInvestigationApi();
+      const summary = await raw.comment("sample-pr-p0-comment");
+      const syncing = vi.spyOn(raw, "syncComment");
+      let current: InvestigationSession = signedIn();
+      vi.spyOn(raw, "comment").mockImplementation(async () => {
+        current =
+          change === "sign out"
+            ? signedOut()
+            : change === "switch account"
+              ? signedIn({ id: "different-operator" })
+              : change === "revoke repository"
+                ? signedIn({ repositoryIds: [] })
+                : change === "revoke comment"
+                  ? signedIn({ actionCapabilities: [] })
+                  : signedIn({
+                      permissions: permissions.filter(
+                        (permission) =>
+                          permission !==
+                          (change === "revoke preparation" ? "action:prepare" : "action:execute"),
+                      ),
+                    });
+        return summary;
+      });
+      const api = createSessionScopedSampleApi(raw, async () => current);
+      await expectDenied(
+        api.syncComment(summary.id, { version: summary.version, idempotencyKey: "changed-access" }),
+        change === "sign out" || change === "switch account" ? 401 : 403,
+      );
+      expect(syncing).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps command inputs and idempotency keys bound to the initiating actor", async () => {
+    const raw = createSampleInvestigationApi();
+    const summary = await raw.comment("sample-pr-p0-comment");
+    const command = { version: summary.version, idempotencyKey: "same-command" };
+    const expected = structuredClone(command);
+    const syncing = vi.spyOn(raw, "syncComment");
+    let release!: (value: InvestigationSession) => void;
+    const pendingSession = new Promise<InvestigationSession>((resolve) => {
+      release = resolve;
+    });
+    const api = createSessionScopedSampleApi(raw, () => pendingSession);
+    const pending = api.syncComment(summary.id, command);
+    command.version = "changed-version";
+    command.idempotencyKey = "changed-key";
+    release(signedIn({ id: "current-operator" }));
+    await pending;
+    expect(syncing).toHaveBeenCalledWith(summary.id, {
+      ...expected,
+      idempotencyKey: "sample-account:current-operator:same-command",
+    });
+    expect((await api.syncComment(summary.id, expected)).state).toBe("synced");
+    expect((await raw.commentAttempts(summary.id)).items).toHaveLength(3);
+  });
+});
+
 describe("sample automatic reply access", () => {
+  it("changes the authorizing account only when the current account explicitly renews authorization", async () => {
+    const raw = createSampleInvestigationApi();
+    let current = signedIn({ id: "original-authorizer" });
+    const api = createSessionScopedSampleApi(raw, async () => current);
+    const enabled = await api.updateRepositoryAutoReplySettings(repositoryId, autoReplyInput());
+    current = signedIn({ id: "template-editor" });
+    const edited = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...enabled,
+      pullRequestTemplate: enabled.pullRequestTemplate.replace("## Summary", "## Review summary"),
+    });
+    expect(edited).toMatchObject({
+      authorizedById: "original-authorizer",
+      updatedById: "template-editor",
+      authorizationEpoch: enabled.authorizationEpoch,
+    });
+    const renewed = await api.updateRepositoryAutoReplySettings(repositoryId, {
+      ...edited,
+      reauthorize: true,
+    });
+    expect(renewed).toMatchObject({
+      authorizedById: "template-editor",
+      updatedById: "template-editor",
+      authorizationEpoch: enabled.authorizationEpoch + 1,
+    });
+    expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(renewed);
+  });
+
   it("allows repository readers to inspect settings and delivery history while blocking outsiders", async () => {
     const raw = createSampleInvestigationApi();
     const settings = await raw.repositoryAutoReplySettings(repositoryId);
     const reading = vi.spyOn(raw, "repositoryAutoReplySettings");
     const replies = vi.spyOn(raw, "repositoryAutoReplies");
+    const progressReplies = vi.spyOn(raw, "repositoryProgressReplies");
     const updating = vi.spyOn(raw, "updateRepositoryAutoReplySettings");
     let current = signedIn({ permissions: [], actionCapabilities: [] });
     const api = createSessionScopedSampleApi(raw, async () => current);
     expect(await api.repositoryAutoReplySettings(repositoryId)).toEqual(settings);
     expect(await api.repositoryAutoReplies(repositoryId)).toEqual({ items: [] });
+    expect(await api.repositoryProgressReplies(repositoryId)).toEqual({ items: [] });
     await expectDenied(api.updateRepositoryAutoReplySettings(repositoryId, autoReplyInput()));
     expect(updating).not.toHaveBeenCalled();
     reading.mockClear();
     replies.mockClear();
+    progressReplies.mockClear();
     current = signedIn({ repositoryIds: [foreignRepositoryId] });
     await expectDenied(api.repositoryAutoReplySettings(repositoryId));
     await expectDenied(api.repositoryAutoReplies(repositoryId));
+    await expectDenied(api.repositoryProgressReplies(repositoryId));
     await expectDenied(api.updateRepositoryAutoReplySettings(repositoryId, autoReplyInput()));
     expect(reading).not.toHaveBeenCalled();
     expect(replies).not.toHaveBeenCalled();
+    expect(progressReplies).not.toHaveBeenCalled();
     expect(updating).not.toHaveBeenCalled();
   });
 
@@ -406,7 +602,13 @@ describe("sample automatic reply access", () => {
     let current = signedIn({ id: "first-operator", username: "first" });
     const api = createSessionScopedSampleApi(raw, async () => current);
     const first = await api.updateRepositoryAutoReplySettings(repositoryId, autoReplyInput());
-    expect(first).toMatchObject({ enabled: true, authorizedById: "first-operator", version: 1 });
+    expect(first).toMatchObject({
+      enabled: true,
+      authorizedById: "first-operator",
+      updatedById: "first-operator",
+      authorizationEpoch: 1,
+      version: 1,
+    });
     current = signedIn({ id: "second-operator", username: "second" });
     expect((await api.repositoryAutoReplySettings(repositoryId)).authorizedById).toBe(
       "first-operator",
@@ -415,7 +617,13 @@ describe("sample automatic reply access", () => {
       ...first,
       enabled: true,
     });
-    expect(second).toMatchObject({ enabled: true, authorizedById: "second-operator", version: 2 });
+    expect(second).toMatchObject({
+      enabled: true,
+      authorizedById: "first-operator",
+      updatedById: "second-operator",
+      authorizationEpoch: 1,
+      version: 2,
+    });
     const external = await raw.updateRepositoryAutoReplySettings(repositoryId, {
       ...second,
       enabled: true,
@@ -487,28 +695,29 @@ describe("sample automatic reply access", () => {
     },
   );
 
-  it.each(["repositoryAutoReplySettings", "repositoryAutoReplies"] as const)(
-    "rechecks repository access after awaiting %s",
-    async (method) => {
-      const raw = createSampleInvestigationApi();
-      let current = signedIn();
-      if (method === "repositoryAutoReplySettings") {
-        const settings = await raw.repositoryAutoReplySettings(repositoryId);
-        vi.spyOn(raw, method).mockImplementation(async () => {
-          current = signedIn({ repositoryIds: [] });
-          return settings;
-        });
-      } else {
-        vi.spyOn(raw, method).mockImplementation(async () => {
-          current = signedIn({ repositoryIds: [] });
-          return { items: [] };
-        });
-      }
-      const api = createSessionScopedSampleApi(raw, async () => current);
-      await expectDenied(api[method](repositoryId));
-      expect(raw[method]).toHaveBeenCalledOnce();
-    },
-  );
+  it.each([
+    "repositoryAutoReplySettings",
+    "repositoryAutoReplies",
+    "repositoryProgressReplies",
+  ] as const)("rechecks repository access after awaiting %s", async (method) => {
+    const raw = createSampleInvestigationApi();
+    let current = signedIn();
+    if (method === "repositoryAutoReplySettings") {
+      const settings = await raw.repositoryAutoReplySettings(repositoryId);
+      vi.spyOn(raw, method).mockImplementation(async () => {
+        current = signedIn({ repositoryIds: [] });
+        return settings;
+      });
+    } else {
+      vi.spyOn(raw, method).mockImplementation(async () => {
+        current = signedIn({ repositoryIds: [] });
+        return { items: [] };
+      });
+    }
+    const api = createSessionScopedSampleApi(raw, async () => current);
+    await expectDenied(api[method](repositoryId));
+    expect(raw[method]).toHaveBeenCalledOnce();
+  });
 
   it("freezes the enabling decision and templates before awaiting the session", async () => {
     const raw = createSampleInvestigationApi();
@@ -518,13 +727,19 @@ describe("sample automatic reply access", () => {
       release = resolve;
     });
     const api = createSessionScopedSampleApi(raw, () => pendingSession);
-    const input = autoReplyInput();
+    const input = {
+      ...autoReplyInput(),
+      progressEnabled: true,
+      progressTemplates: structuredClone(sampleAutoReplyProgressTemplates),
+    };
     const expected = structuredClone(input);
     const pending = api.updateRepositoryAutoReplySettings(repositoryId, input);
     input.enabled = false;
     input.version = 100;
     input.pullRequestTemplate = "Replaced template";
     input.issueTemplate = "Replaced template";
+    input.progressEnabled = false;
+    input.progressTemplates.received = "Replaced progress template";
     release(signedIn());
     const saved = await pending;
     expect(updating).toHaveBeenCalledWith(repositoryId, expected);

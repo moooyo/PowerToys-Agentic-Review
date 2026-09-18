@@ -60,6 +60,12 @@ export default function RepositoriesPage() {
             </Button>
             <ImportWorkItemButton repository={repository} />
             <Button
+              component={Link}
+              to={`/comments?repositoryId=${encodeURIComponent(repository.id)}`}
+            >
+              Comments
+            </Button>
+            <Button
               component="a"
               href={`https://github.com/${repository.fullName}`}
               target="_blank"

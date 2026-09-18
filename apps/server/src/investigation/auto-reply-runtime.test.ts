@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,8 @@ import type {
   InvestigationCheckpointResponse,
   InvestigationClaim,
   InvestigationClaimResponse,
+  InvestigationCommentDelivery,
+  InvestigationCommentPublicationSummary,
   InvestigationFinalizeResponse,
   InvestigationLoopRoundV1,
   InvestigationResultV1,
@@ -23,13 +26,17 @@ import {
   defaultAutomaticReplyTemplates,
 } from "../../dist/investigation/auto-reply-template.js";
 import { InvestigationPasswordStore } from "../../dist/investigation/password-store.js";
+import type { ProgressReplyReceipt } from "../../dist/investigation/progress-reply.js";
 import {
   type InvestigationRuntimeConfig,
   loadInvestigationRuntimeConfig,
 } from "../../dist/investigation/runtime-config.js";
 import { createInvestigationRuntime } from "../../dist/investigation/runtime-main.js";
 import { InvestigationStore } from "../../dist/investigation/store.js";
-import type { InvestigationActionTransport } from "../../dist/investigation/types.js";
+import type {
+  InvestigationActionTransport,
+  InvestigationProgressCommentRequest,
+} from "../../dist/investigation/types.js";
 
 const applications = new Set<FastifyInstance>();
 const directories: string[] = [];
@@ -41,6 +48,8 @@ const workerToken = "W".repeat(43);
 const repository = { id: "repo-1", githubRepositoryId: 123, fullName: "fixture/reply-runtime" };
 const settingsUrl = `/api/repositories/${repository.id}/auto-reply-settings`;
 const repliesUrl = `/api/repositories/${repository.id}/auto-replies`;
+const progressUrl = `/api/repositories/${repository.id}/progress-replies`;
+const webhookSecret = "Synthetic progress webhook signing secret";
 const enabledSettings = {
   version: 0,
   enabled: true,
@@ -151,6 +160,8 @@ async function fixture(
     transport?: boolean;
     identity?: boolean;
     additionalAccounts?: boolean;
+    assignment?: boolean;
+    pauseSource?: boolean;
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "automatic-reply-runtime-"));
@@ -172,6 +183,7 @@ async function fixture(
     INVESTIGATION_WORKERS_JSON: JSON.stringify([
       { id: "worker-1", token: workerToken, repositoryIds: [repository.id] },
     ]),
+    ...(options.assignment ? { INVESTIGATION_GITHUB_WEBHOOK_SECRET: webhookSecret } : {}),
     ...(github
       ? {
           INVESTIGATION_GITHUB_TOKEN: "synthetic-transport-token",
@@ -248,11 +260,25 @@ async function fixture(
     state: "open",
     comments: 0,
     updated_at: "2026-09-16T10:00:00.000Z",
+    assignees: [{ id: 55, login: "synthetic-publisher" }],
   };
+  const sourceEntered = gate();
+  const sourceReleased = gate();
+  let suspendSource = options.pauseSource === true;
+  blockedGates.add(sourceReleased.release);
   const sourceImportFetch: typeof globalThis.fetch = async (input, init) => {
     expect(init?.method).toBe("GET");
     const url = new URL(String(input));
     expect(url.origin).toBe("https://api.github.com");
+    if (
+      suspendSource &&
+      ["/repos/fixture/reply-runtime/issues/7", "/repos/fixture/reply-runtime/pulls/7"].includes(
+        url.pathname,
+      )
+    ) {
+      sourceEntered.release();
+      await sourceReleased.promise;
+    }
     if (url.pathname === "/user") return Response.json({ id: 55, login: "synthetic-publisher" });
     if (url.pathname === "/repos/fixture/reply-runtime")
       return Response.json({ id: repository.githubRepositoryId, full_name: repository.fullName });
@@ -309,6 +335,44 @@ async function fixture(
     githubUserId: 55,
     githubLogin: "synthetic-publisher",
   }));
+  const progressPublished: InvestigationProgressCommentRequest[] = [];
+  let unknownProgressWrite = false;
+  const publishProgressComment = vi.fn<
+    NonNullable<InvestigationActionTransport["publishProgressComment"]>
+  >(async (request, targetRepository, item, actor, beforeDispatch) => {
+    expect(targetRepository).toEqual(repository);
+    expect(item.number).toBe(7);
+    expect(actor.githubIdentity?.githubUserId).toBe(55);
+    expect(beforeDispatch).toBeTypeOf("function");
+    beforeDispatch?.();
+    if (progressPublished.length === 0) {
+      expect(request.externalId).toBeNull();
+      expect(request.previousBody).toBeNull();
+    } else {
+      expect(request.externalId).toBe("1901");
+      expect(request.previousBody).toBe(progressPublished.at(-1)?.body);
+    }
+    progressPublished.push(structuredClone(request));
+    if (unknownProgressWrite) {
+      unknownProgressWrite = false;
+      return {
+        state: "unknown",
+        externalId: request.externalId,
+        message: "Synthetic response was lost.",
+        effect: "unknown",
+        retryable: false,
+        reasonCode: "mutation_response_unknown",
+      };
+    }
+    return {
+      state: "succeeded",
+      externalId: "1901",
+      message: "Synthetic progress saved.",
+      effect: "applied",
+      retryable: false,
+      reasonCode: "mutation_applied",
+    };
+  });
   const actionTransport: InvestigationActionTransport = {
     supportedActions: ["comment"],
     ...(options.identity === false ? {} : { readPublisherIdentity }),
@@ -321,6 +385,17 @@ async function fixture(
     })),
     execute,
     reconcile,
+    publishProgressComment,
+    reconcileProgressComment: vi.fn(async () => {
+      return {
+        state: "succeeded",
+        externalId: "1901",
+        message: "Synthetic exact readback.",
+        effect: "applied",
+        retryable: false,
+        reasonCode: "readback_applied",
+      };
+    }),
   };
   const start = async () => {
     const app = await createInvestigationRuntime(config, {
@@ -347,6 +422,44 @@ async function fixture(
     execute,
     reconcile,
     readPublisherIdentity,
+    progressPublished,
+    publishProgressComment,
+    loseNextProgressResponse: () => {
+      unknownProgressWrite = true;
+    },
+    sourceEntered: sourceEntered.promise,
+    releaseSource: () => {
+      suspendSource = false;
+      sourceReleased.release();
+    },
+    assignmentDelivery: (kind: "issue" | "pull_request") => {
+      const item =
+        kind === "issue"
+          ? upstream
+          : {
+              ...upstream,
+              base: { sha: "b".repeat(40), repo: { id: repository.githubRepositoryId } },
+              head: { sha: "a".repeat(40) },
+            };
+      const body = JSON.stringify({
+        action: "assigned",
+        repository: { id: repository.githubRepositoryId, full_name: repository.fullName },
+        sender: { id: 44, login: "trusted-maintainer", type: "User" },
+        assignee: { id: 55, login: "synthetic-publisher", type: "User" },
+        ...(kind === "issue" ? { issue: item } : { pull_request: item }),
+      });
+      return {
+        method: "POST" as const,
+        url: "/api/github/webhook",
+        headers: {
+          "content-type": "application/json",
+          "x-github-delivery": "progress-runtime-assignment",
+          "x-github-event": kind === "issue" ? "issues" : "pull_request",
+          "x-hub-signature-256": `sha256=${createHmac("sha256", webhookSecret).update(body).digest("hex")}`,
+        },
+        payload: body,
+      };
+    },
     pauseExecution: () => {
       suspendExecution = true;
     },
@@ -582,7 +695,331 @@ async function receipts(app: FastifyInstance, cookie: string): Promise<Automatic
   return response.json<{ items: AutomaticReplyReceipt[] }>().items;
 }
 
+async function commentHistory(app: FastifyInstance, cookie: string, query = "") {
+  const response = await get(app, `/api/comment-deliveries${query}`, cookie);
+  expect(response.statusCode, response.body).toBe(200);
+  return response.json<{ items: InvestigationCommentDelivery[]; nextCursor: string | null }>();
+}
+
+async function enableAssignmentProgress(app: FastifyInstance, cookie: string) {
+  const settings = await put(app, { ...enabledSettings, progressEnabled: true }, cookie);
+  expect(settings.statusCode, settings.body).toBe(200);
+  const webhook = await app.inject({
+    method: "PUT",
+    url: `/api/repositories/${repository.id}/webhook-settings`,
+    headers: { host, origin, cookie },
+    payload: { version: 0, enabled: true, reviewerUserId: 55, allowedActorUserIds: [44] },
+  });
+  expect(webhook.statusCode, webhook.body).toBe(200);
+}
+
+async function assignmentTask(app: FastifyInstance, cookie: string): Promise<string> {
+  let taskId = "";
+  await vi.waitFor(
+    async () => {
+      const response = await get(
+        app,
+        "/api/github/webhook-deliveries/progress-runtime-assignment",
+        cookie,
+      );
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json()).toMatchObject({ state: "completed" });
+      taskId = response.json().taskId;
+      expect(taskId).toBeTypeOf("string");
+    },
+    { timeout: 5_000, interval: 10 },
+  );
+  return taskId;
+}
+
 describe("automatic reply production runtime", () => {
+  it.each([
+    { kind: "issue", outcome: "completed" },
+    { kind: "pull_request", outcome: "completed" },
+    { kind: "issue", outcome: "blocked" },
+  ] as const)(
+    "updates one assignment progress comment through $kind $outcome",
+    async ({ kind, outcome }) => {
+      const context = await fixture({ assignment: true, additionalAccounts: true });
+      const { app, cookie, progressPublished } = context;
+      expect((await get(app, progressUrl)).statusCode).toBe(401);
+      const foreign = await login(app, "fixture-foreign");
+      expect((await get(app, progressUrl, foreign)).statusCode).toBe(403);
+      const settings = await put(app, { ...enabledSettings, progressEnabled: true }, cookie);
+      expect(settings.statusCode, settings.body).toBe(200);
+      const webhook = await app.inject({
+        method: "PUT",
+        url: `/api/repositories/${repository.id}/webhook-settings`,
+        headers: { host, origin, cookie },
+        payload: { version: 0, enabled: true, reviewerUserId: 55, allowedActorUserIds: [44] },
+      });
+      expect(webhook.statusCode, webhook.body).toBe(200);
+      const accepted = await app.inject(context.assignmentDelivery(kind));
+      expect(accepted.statusCode, accepted.body).toBe(202);
+      await assignmentTask(app, cookie);
+      const progress = async () => {
+        const response = await get(app, progressUrl, cookie);
+        expect(response.statusCode, response.body).toBe(200);
+        expect(response.headers["cache-control"]).toBe("no-store");
+        return response.json<{ items: ProgressReplyReceipt[] }>().items;
+      };
+      await vi.waitFor(
+        async () => {
+          expect(await progress()).toMatchObject([
+            { stage: "received", state: "sent", externalId: "1901" },
+          ]);
+        },
+        { timeout: 5000, interval: 10 },
+      );
+      expect(progressPublished.length).toBeGreaterThanOrEqual(1);
+      expect(progressPublished.filter((entry) => entry.externalId === null)).toHaveLength(1);
+      expect(progressPublished[0]?.body).toContain("trusted-maintainer");
+      expect(progressPublished[0]?.body).toContain("synthetic-publisher");
+      const taskKind = kind === "issue" ? "issue-investigate" : "pr-review";
+      const claimed = await workerPost(app, "/api/worker/claims", { supportedKinds: [taskKind] });
+      expect(claimed.statusCode, claimed.body).toBe(200);
+      const claim = claimed.json<InvestigationClaimResponse>().claim;
+      if (claim === null) throw new Error("The assignment task must be available to the Worker.");
+      await vi.waitFor(
+        async () => {
+          expect(await progress()).toMatchObject([
+            { stage: "started", state: "sent", externalId: "1901" },
+          ]);
+        },
+        { timeout: 5000, interval: 10 },
+      );
+      const sealed = await sealReport(app, claim, outcome);
+      await vi.waitFor(
+        async () => {
+          expect(await progress()).toMatchObject([
+            {
+              stage: outcome === "completed" ? "completed" : "failed",
+              state: "sent",
+              externalId: "1901",
+              reportId: sealed.reportRef.id,
+            },
+          ]);
+        },
+        { timeout: 5000, interval: 10 },
+      );
+      expect(progressPublished.length).toBeGreaterThanOrEqual(3);
+      expect(progressPublished.filter((entry) => entry.externalId === null)).toHaveLength(1);
+      if (outcome === "completed") {
+        expect(progressPublished.at(-1)?.body).toContain("GPT-6 Astra");
+        expect(progressPublished.at(-1)?.body).toContain("<details>");
+      }
+      expect(await receipts(app, cookie)).toEqual([]);
+      expect(context.execute).not.toHaveBeenCalled();
+      const publishedCount = progressPublished.length;
+      const history = await commentHistory(app, cookie, `?taskId=${claim.task.id}`);
+      expect(history.items).toHaveLength(publishedCount);
+      expect(history.items.every((entry) => entry.state === "succeeded")).toBe(true);
+      expect(history.items.filter((entry) => entry.operation === "create")).toHaveLength(1);
+      expect(history.items.map((entry) => entry.body).sort()).toEqual(
+        progressPublished.map((entry) => entry.body).sort(),
+      );
+      expect(
+        history.items.every(
+          (entry) => entry.body?.startsWith("I'm ") && entry.body.includes("Agentic Review"),
+        ),
+      ).toBe(true);
+      const replay = await app.inject(context.assignmentDelivery(kind));
+      expect(replay.statusCode, replay.body).toBe(202);
+      expect(await progress()).toHaveLength(1);
+      expect(progressPublished).toHaveLength(publishedCount);
+    },
+    20000,
+  );
+
+  it("publishes a scoped receipt before source import completes and attaches its history to the Task", async () => {
+    const context = await fixture({
+      assignment: true,
+      pauseSource: true,
+      additionalAccounts: true,
+    });
+    const { app, cookie, config } = context;
+    await enableAssignmentProgress(app, cookie);
+    expect((await app.inject(context.assignmentDelivery("issue"))).statusCode).toBe(202);
+    await context.sourceEntered;
+    let first!: InvestigationCommentDelivery;
+    await vi.waitFor(
+      async () => {
+        const history = await commentHistory(app, cookie);
+        expect(history.items).toHaveLength(1);
+        first = history.items[0]!;
+        expect(first).toMatchObject({ taskId: null, operation: "create", state: "succeeded" });
+      },
+      { timeout: 5_000, interval: 10 },
+    );
+    expect(stored(config, (store) => store.list("tasks"))).toEqual([]);
+    expect(first.body).toContain("AI assistant");
+    expect(first.body).toContain("synthetic-publisher");
+    expect(first.body).not.toContain("snapshot captured");
+    const foreign = await login(app, "fixture-foreign");
+    expect(
+      (await get(app, `/api/comments/${encodeURIComponent(first.commentId)}`, foreign)).statusCode,
+    ).toBe(403);
+    expect(
+      (await get(app, `/api/comment-deliveries?repositoryId=${repository.id}`, foreign)).statusCode,
+    ).toBe(403);
+    context.releaseSource();
+    const taskId = await assignmentTask(app, cookie);
+    const attached = await commentHistory(app, cookie, `?taskId=${taskId}`);
+    expect(attached.items.find((entry) => entry.id === first.id)).toMatchObject({
+      taskId,
+      body: first.body,
+    });
+    const summaries = await get(
+      app,
+      `/api/comments?taskIds=${encodeURIComponent(taskId)}&repositoryId=${repository.id}`,
+      cookie,
+    );
+    expect(summaries.statusCode, summaries.body).toBe(200);
+    expect(summaries.json().items).toMatchObject([
+      { id: first.commentId, taskId, mode: "progress" },
+    ]);
+  }, 20_000);
+
+  it("uses edited templates for later updates while retaining exact earlier delivery bodies", async () => {
+    const context = await fixture({ assignment: true });
+    const { app, cookie } = context;
+    await enableAssignmentProgress(app, cookie);
+    await app.inject(context.assignmentDelivery("issue"));
+    const taskId = await assignmentTask(app, cookie);
+    await vi.waitFor(
+      async () => {
+        const response = await get(app, `/api/comments?taskIds=${taskId}`, cookie);
+        expect(response.json().items).toMatchObject([{ state: "synced" }]);
+      },
+      { timeout: 5_000, interval: 10 },
+    );
+    const oldBodies = (await commentHistory(app, cookie)).items.map((entry) => ({
+      id: entry.id,
+      body: entry.body,
+    }));
+    const previous = (await get(app, settingsUrl, cookie)).json();
+    const saved = await put(
+      app,
+      {
+        ...enabledSettings,
+        version: previous.version,
+        progressEnabled: true,
+        progressTemplates: {
+          ...previous.progressTemplates,
+          started:
+            previous.progressTemplates.started + "\nNew progress wording for subsequent updates.",
+        },
+      },
+      cookie,
+    );
+    expect(saved.statusCode, saved.body).toBe(200);
+    expect(saved.json().authorizationEpoch).toBe(previous.authorizationEpoch);
+    expect(
+      (await commentHistory(app, cookie)).items.map((entry) => ({
+        id: entry.id,
+        body: entry.body,
+      })),
+    ).toEqual(oldBodies);
+    const claimed = await workerPost(app, "/api/worker/claims", {
+      supportedKinds: ["issue-investigate"],
+    });
+    expect(claimed.statusCode, claimed.body).toBe(200);
+    await vi.waitFor(
+      () => expect(context.progressPublished.at(-1)?.body).toContain("New progress wording"),
+      { timeout: 5_000, interval: 10 },
+    );
+    const history = await commentHistory(app, cookie);
+    for (const before of oldBodies)
+      expect(history.items.find((entry) => entry.id === before.id)?.body).toBe(before.body);
+  }, 20_000);
+
+  it("keeps unknown delivery history during HTTP reconciliation and rejects stale or unprivileged commands", async () => {
+    const context = await fixture({ assignment: true, additionalAccounts: true });
+    const { app, cookie } = context;
+    await enableAssignmentProgress(app, cookie);
+    context.loseNextProgressResponse();
+    await app.inject(context.assignmentDelivery("issue"));
+    const taskId = await assignmentTask(app, cookie);
+    let summary!: InvestigationCommentPublicationSummary;
+    await vi.waitFor(
+      async () => {
+        const response = await get(app, `/api/comments?taskIds=${taskId}`, cookie);
+        summary = response.json().items[0];
+        expect(summary.state).toBe("unconfirmed");
+      },
+      { timeout: 5_000, interval: 10 },
+    );
+    const initialHistory = await commentHistory(app, cookie);
+    expect(initialHistory.items).toHaveLength(1);
+    expect(initialHistory.items[0]?.state).toBe("unknown");
+    const endpoint = `/api/comments/${encodeURIComponent(summary.id)}/reconcile`;
+    const input = { version: summary.version, idempotencyKey: "synthetic-reconcile" };
+    const viewer = await login(app, "fixture-viewer");
+    expect((await post(app, endpoint, input, viewer)).statusCode).toBe(403);
+    expect(
+      (await post(app, endpoint, { ...input, version: "0".repeat(64) }, cookie)).statusCode,
+    ).toBe(409);
+    expect((await post(app, endpoint, input, cookie)).statusCode).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const history = await commentHistory(app, cookie);
+        expect(history.items).toHaveLength(1);
+        expect(history.items[0]).toMatchObject({
+          id: initialHistory.items[0]!.id,
+          state: "succeeded",
+        });
+        expect(history.items[0]!.observations.length).toBeGreaterThan(0);
+      },
+      { timeout: 5_000, interval: 10 },
+    );
+    expect(context.progressPublished).toHaveLength(1);
+    expect((await post(app, endpoint, input, cookie)).statusCode).toBe(202);
+    expect((await commentHistory(app, cookie)).items).toHaveLength(1);
+  }, 20_000);
+
+  it("expires Worker leases on the server timer without a Task read or another Worker claim", async () => {
+    const nativeSetInterval = globalThis.setInterval;
+    let sweep: (() => void) | undefined;
+    const scheduled = vi.spyOn(globalThis, "setInterval").mockImplementation(((
+      callback,
+      delay,
+      ...args
+    ) => {
+      if (delay === 30_000 && typeof callback === "function") sweep = () => callback(...args);
+      return nativeSetInterval(callback, delay, ...args);
+    }) as typeof globalThis.setInterval);
+    try {
+      const context = await fixture({ assignment: true });
+      const { app, cookie, config } = context;
+      await enableAssignmentProgress(app, cookie);
+      await app.inject(context.assignmentDelivery("issue"));
+      const taskId = await assignmentTask(app, cookie);
+      const claimed = await workerPost(app, "/api/worker/claims", {
+        supportedKinds: ["issue-investigate"],
+      });
+      expect(claimed.statusCode, claimed.body).toBe(200);
+      const claim = claimed.json<InvestigationClaimResponse>().claim!;
+      stored(config, (store) => {
+        const attempt = store.get<Record<string, unknown>>("attempts", claim.attempt.id)!;
+        store.put("attempts", claim.attempt.id, {
+          ...attempt,
+          leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
+        });
+      });
+      expect(sweep).toBeTypeOf("function");
+      sweep!();
+      expect(
+        stored(config, (store) => store.get<InvestigationTaskV1>("tasks", taskId)?.state),
+      ).toBe("interrupted");
+      await vi.waitFor(
+        () => expect(context.progressPublished.at(-1)?.body).toContain("Investigation interrupted"),
+        { timeout: 5_000, interval: 10 },
+      );
+    } finally {
+      scheduled.mockRestore();
+    }
+  }, 20_000);
+
   it.each([
     { publisher: false },
     { publisher: false, github: false, transport: false },

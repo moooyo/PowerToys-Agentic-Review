@@ -82,7 +82,7 @@ export function loadInvestigationExecutionBindings(
           if (
             path.startsWith("/") ||
             path.includes("\0") ||
-            /[\\:*?\[\]]/u.test(path) ||
+            /[\\:*?[\]]/u.test(path) ||
             path
               .split("/")
               .some(
@@ -130,6 +130,22 @@ interface SnapshotPointer {
 }
 type JsonObject = Record<string, unknown>;
 
+/** Trusted publication receipts classify metadata without changing imported conversation text. */
+export type InvestigationProgressCommentClassifier = (
+  repository: InvestigationRepositoryRecord,
+  target: {
+    readonly kind: "pull_request" | "issue";
+    readonly number: number;
+    readonly githubWorkItemId: number;
+  },
+  comment: {
+    readonly externalId: string;
+    readonly authorUserId: number;
+    readonly body: string;
+    readonly issueUrl: string;
+  },
+) => NonNullable<InvestigationInputSnapshotV1["comments"][number]["provenance"]> | undefined;
+
 export interface InvestigationSourceImportOptions {
   readonly store: InvestigationStore;
   readonly github?: { token: string; expectedGitHubUserId: number };
@@ -138,6 +154,7 @@ export interface InvestigationSourceImportOptions {
   readonly maximumPages?: number;
   readonly requestTimeoutMs?: number;
   readonly executionBindings?: readonly InvestigationTrustedExecutionBinding[];
+  readonly classifyProgressComment?: InvestigationProgressCommentClassifier;
 }
 
 export interface InvestigationSourceImportExpectation {
@@ -462,6 +479,9 @@ export class InvestigationSourceImporter {
       `${base}/issues/${request.number}/comments`,
       "issue-comment",
       budget,
+      typeof upstream.id === "number" && Number.isSafeInteger(upstream.id) && upstream.id > 0
+        ? { repository, target: { ...request, githubWorkItemId: upstream.id } }
+        : undefined,
     );
     requireCondition(
       conversation.length === count(upstream.comments, "comment count"),
@@ -897,6 +917,10 @@ export class InvestigationSourceImporter {
     path: string,
     prefix: string,
     budget: SourceBudget,
+    progressContext?: {
+      readonly repository: InvestigationRepositoryRecord;
+      readonly target: Parameters<InvestigationProgressCommentClassifier>[1];
+    },
   ): Promise<InvestigationInputSnapshotV1["comments"]> {
     const result: InvestigationInputSnapshotV1["comments"] = [];
     const seen = new Set<string>();
@@ -931,9 +955,35 @@ export class InvestigationSourceImporter {
           "The conversation changed between pages; retry the complete import.",
         );
         seen.add(id);
+        const body = comment.body === null ? "" : text(comment.body, "comment body", true);
+        const user = comment.user;
+        const authorUserId =
+          typeof user === "object" && user !== null && !Array.isArray(user) && "id" in user
+            ? user.id
+            : undefined;
+        const provenance =
+          prefix === "issue-comment" &&
+          progressContext !== undefined &&
+          typeof authorUserId === "number" &&
+          Number.isSafeInteger(authorUserId) &&
+          authorUserId > 0 &&
+          typeof comment.issue_url === "string" &&
+          comment.issue_url.length > 0
+            ? this.options.classifyProgressComment?.(
+                progressContext.repository,
+                progressContext.target,
+                {
+                  externalId: String(numericId),
+                  authorUserId,
+                  body,
+                  issueUrl: comment.issue_url,
+                },
+              )
+            : undefined;
         result.push({
           id,
-          body: comment.body === null ? "" : text(comment.body, "comment body", true),
+          body,
+          ...(provenance === undefined ? {} : { provenance }),
         });
       }
       const next = response.link?.split(",").find((part) => /;\s*rel="next"/u.test(part));

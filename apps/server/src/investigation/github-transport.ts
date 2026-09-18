@@ -8,14 +8,23 @@ import type {
 import { contentDigest } from "./integrity.js";
 import type {
   InvestigationActionTransport,
+  InvestigationCommentTarget,
   InvestigationGitHubIdentity,
   InvestigationOperatorPrincipal,
+  InvestigationProgressCommentDelivery,
+  InvestigationProgressCommentRequest,
+  InvestigationProgressCommentTransport,
   InvestigationRepositoryRecord,
   InvestigationWorkItemRecord,
 } from "./types.js";
 
 type Json = Record<string, unknown>;
 type Delivery = Awaited<ReturnType<InvestigationActionTransport["execute"]>>;
+type ProgressDelivery = InvestigationProgressCommentDelivery & {
+  readonly effect: "not_sent" | "rejected" | "applied" | "unknown";
+  readonly retryable: boolean;
+  readonly reasonCode: string;
+};
 type RemoteRequest = { method: "POST" | "PATCH" | "PUT"; path: string; body: Json };
 
 export interface InvestigationGitHubTransportOptions {
@@ -34,6 +43,7 @@ class GitHubActionFailure extends Error {
   constructor(
     readonly code: string,
     readonly status: number | null = null,
+    readonly retryAfterMs?: number,
   ) {
     super(code);
     this.name = "GitHubActionFailure";
@@ -97,8 +107,112 @@ const delivery = (
   externalId: string | null = null,
 ): Delivery => ({ state, message, externalId });
 
+const progressDelivery = (
+  state: ProgressDelivery["state"],
+  effect: ProgressDelivery["effect"],
+  retryable: boolean,
+  reasonCode: string,
+  message: string,
+  externalId: string | null = null,
+  retryAfterMs?: number,
+): ProgressDelivery => ({
+  state,
+  effect,
+  retryable,
+  reasonCode,
+  message,
+  externalId,
+  ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+});
+
+const retryDelay = (headers: Headers): number | undefined => {
+  const value = headers.get("retry-after");
+  if (value !== null) {
+    const delay = /^\d+(?:\.\d+)?$/u.test(value.trim())
+      ? Math.ceil(Number(value) * 1_000)
+      : Date.parse(value) - Date.now();
+    if (Number.isSafeInteger(delay)) return Math.max(0, delay);
+  }
+  if (headers.get("x-ratelimit-remaining") === "0") {
+    const reset = headers.get("x-ratelimit-reset");
+    if (reset !== null && /^\d+$/u.test(reset)) {
+      const delay = Number(reset) * 1_000 - Date.now();
+      if (Number.isSafeInteger(delay)) return Math.max(0, delay);
+    }
+  }
+  return undefined;
+};
+
+const progressFailureReason = (error: unknown): string => {
+  if (!(error instanceof GitHubActionFailure)) return "github_read_failed";
+  if (error.code === "progress_comment_missing") return "comment_missing";
+  if (error.code.startsWith("progress_comment_"))
+    return `conflict_${error.code.slice("progress_".length)}`;
+  if (error.code === "github_request_rejected" && error.status !== null)
+    return `github_http_${error.status}`;
+  return error.code;
+};
+
+const transientProgressReadFailure = (error: unknown): boolean => {
+  if (!(error instanceof GitHubActionFailure)) return true;
+  if (error.code === "github_rate_limited") return true;
+  if (error.status !== null) return error.status === 408 || error.status >= 500;
+  return [
+    "invalid_github_response",
+    "missing_github_response",
+    "github_response_too_large",
+    "invalid_reconciliation_response",
+  ].includes(error.code);
+};
+
+const progressRequest = (
+  request: InvestigationProgressCommentRequest,
+): InvestigationProgressCommentRequest => {
+  const frozen = {
+    marker: request.marker,
+    body: request.body,
+    externalId: request.externalId,
+    previousBody: request.previousBody,
+    ...(request.expectedAssigneeUserId === undefined
+      ? {}
+      : { expectedAssigneeUserId: positiveId(request.expectedAssigneeUserId) }),
+  };
+  if (
+    typeof frozen.marker !== "string" ||
+    !/^<!-- agentic-review-progress:[A-Za-z0-9][A-Za-z0-9._:-]{0,199} -->$/u.test(frozen.marker)
+  )
+    throw new GitHubActionFailure("invalid_progress_comment_marker");
+  for (const body of [
+    frozen.body,
+    ...(frozen.previousBody === null ? [] : [frozen.previousBody]),
+  ]) {
+    if (
+      typeof body !== "string" ||
+      Buffer.byteLength(body, "utf8") > 60_000 ||
+      body.split(frozen.marker).length !== 2 ||
+      body.split("<!-- agentic-review-progress:").length !== 2
+    )
+      throw new GitHubActionFailure("invalid_progress_comment_body");
+  }
+  if (frozen.externalId === null) {
+    if (frozen.previousBody !== null)
+      throw new GitHubActionFailure("invalid_progress_comment_create");
+  } else {
+    if (
+      typeof frozen.externalId !== "string" ||
+      !/^[1-9][0-9]*$/u.test(frozen.externalId) ||
+      frozen.previousBody === null
+    )
+      throw new GitHubActionFailure("invalid_progress_comment_update");
+    positiveId(Number(frozen.externalId));
+  }
+  return frozen;
+};
+
 /** The transport performs one mutation at most; ambiguous delivery is only reconciled with GETs. */
-export class InvestigationGitHubTransport implements InvestigationActionTransport {
+export class InvestigationGitHubTransport
+  implements InvestigationActionTransport, InvestigationProgressCommentTransport
+{
   readonly supportedActions: readonly InvestigationActionKind[] = [
     "comment",
     "approve",
@@ -169,6 +283,269 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
         return false;
       }
     });
+  }
+
+  async publishProgressComment(
+    request: InvestigationProgressCommentRequest,
+    repositoryInput: InvestigationRepositoryRecord,
+    workItemInput: InvestigationCommentTarget,
+    actor: InvestigationOperatorPrincipal,
+    beforeDispatch?: () => void,
+  ): Promise<ProgressDelivery> {
+    const repository = { ...repositoryInput };
+    const workItem = { ...workItemInput };
+    let frozen: InvestigationProgressCommentRequest | undefined;
+    let mutation: RemoteRequest;
+    let checkingDispatchGuard = false;
+    try {
+      frozen = progressRequest(request);
+      this.assertProgressAuthority(repository, workItem, actor);
+      const base = repositoryPath(repository);
+      mutation = {
+        method: frozen.externalId === null ? "POST" : "PATCH",
+        path:
+          frozen.externalId === null
+            ? `${base}/issues/${workItem.number}/comments`
+            : `${base}/issues/comments/${frozen.externalId}`,
+        body: { body: frozen.body },
+      };
+      let alreadyPublished = false;
+      if (frozen.externalId !== null) {
+        const existing = await this.readProgressComment(mutation.path);
+        this.assertProgressComment(existing, frozen, repository, workItem, true);
+        alreadyPublished = existing.body === frozen.body;
+      }
+      const remote = await this.preflightIdentity(repository, workItem, actor);
+      this.assertProgressAuthority(repository, workItem, actor);
+      this.assertRemotePermission({ action: "comment" }, remote.repository, remote.value);
+      if (
+        frozen.externalId === null &&
+        frozen.expectedAssigneeUserId !== undefined &&
+        (!Array.isArray(remote.value.assignees) ||
+          !remote.value.assignees.some(
+            (assignee) => object(assignee).id === frozen?.expectedAssigneeUserId,
+          ))
+      )
+        throw new GitHubActionFailure("assignment_not_current");
+      if (alreadyPublished)
+        return progressDelivery(
+          "succeeded",
+          "applied",
+          false,
+          "comment_already_applied",
+          "The exact progress comment update is already present.",
+          frozen.externalId,
+        );
+      checkingDispatchGuard = true;
+      beforeDispatch?.();
+    } catch (error) {
+      return progressDelivery(
+        "failed",
+        "not_sent",
+        !checkingDispatchGuard && transientProgressReadFailure(error),
+        checkingDispatchGuard ? "dispatch_guard_rejected" : progressFailureReason(error),
+        this.failureMessage(error),
+        frozen?.externalId ?? null,
+        error instanceof GitHubActionFailure ? error.retryAfterMs : undefined,
+      );
+    }
+    try {
+      const response = await this.request(mutation.path, mutation.method, mutation.body);
+      const comment = object(response.value);
+      this.assertProgressComment(comment, frozen, repository, workItem, false);
+      return progressDelivery(
+        "succeeded",
+        "applied",
+        false,
+        frozen.externalId === null ? "comment_created" : "comment_updated",
+        "GitHub acknowledged the exact progress comment.",
+        String(positiveId(comment.id)),
+      );
+    } catch (error) {
+      if (
+        error instanceof GitHubActionFailure &&
+        error.status !== null &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408
+      )
+        return progressDelivery(
+          "failed",
+          "rejected",
+          error.code === "github_rate_limited",
+          (error.status === 404 || error.status === 410) && frozen.externalId !== null
+            ? "comment_missing"
+            : progressFailureReason(error),
+          this.failureMessage(error),
+          frozen.externalId,
+          error.retryAfterMs,
+        );
+      return progressDelivery(
+        "unknown",
+        "unknown",
+        false,
+        error instanceof GitHubActionFailure && error.status === null
+          ? "mutation_receipt_unverified"
+          : "mutation_response_unknown",
+        "The progress request may have reached GitHub. Reconcile it before any further submission.",
+        frozen.externalId,
+        error instanceof GitHubActionFailure ? error.retryAfterMs : undefined,
+      );
+    }
+  }
+
+  async reconcileProgressComment(
+    request: InvestigationProgressCommentRequest,
+    repositoryInput: InvestigationRepositoryRecord,
+    workItemInput: InvestigationCommentTarget,
+    actor: InvestigationOperatorPrincipal,
+  ): Promise<ProgressDelivery> {
+    const repository = { ...repositoryInput };
+    const workItem = { ...workItemInput };
+    let frozen: InvestigationProgressCommentRequest | undefined;
+    try {
+      frozen = progressRequest(request);
+      this.assertProgressAuthority(repository, workItem, actor);
+      const remote = await this.preflightIdentity(repository, workItem, actor);
+      this.assertProgressAuthority(repository, workItem, actor);
+      this.assertRemotePermission({ action: "comment" }, remote.repository, remote.value);
+      const base = repositoryPath(repository);
+      if (frozen.externalId !== null) {
+        const comment = await this.readProgressComment(
+          `${base}/issues/comments/${frozen.externalId}`,
+        );
+        this.assertProgressComment(comment, frozen, repository, workItem, true);
+        if (comment.body !== frozen.body)
+          return progressDelivery(
+            "unknown",
+            "unknown",
+            true,
+            "previous_body_observed",
+            "The previous progress body is still visible; this does not authorize a resend.",
+            frozen.externalId,
+          );
+        return progressDelivery(
+          "succeeded",
+          "applied",
+          false,
+          "comment_reconciled",
+          "Read-only reconciliation found the exact progress comment update.",
+          frozen.externalId,
+        );
+      }
+      let match: Json | undefined;
+      for (let page = 1; page <= 100; page += 1) {
+        const response = await this.request(
+          `${base}/issues/${workItem.number}/comments?per_page=100&page=${page}`,
+        );
+        if (!Array.isArray(response.value))
+          throw new GitHubActionFailure("invalid_reconciliation_response");
+        for (const entry of response.value) {
+          const comment = object(entry);
+          if (typeof comment.body !== "string" || !comment.body.includes(frozen.marker)) continue;
+          if (match !== undefined)
+            return progressDelivery(
+              "unknown",
+              "unknown",
+              false,
+              "conflict_multiple_comments",
+              "Multiple matching progress comments need manual reconciliation.",
+            );
+          match = comment;
+        }
+        if (response.value.length < 100) {
+          if (match !== undefined) {
+            this.assertProgressComment(match, frozen, repository, workItem, false);
+            return progressDelivery(
+              "succeeded",
+              "applied",
+              false,
+              "comment_reconciled",
+              "Read-only reconciliation found the exact progress comment.",
+              String(positiveId(match.id)),
+            );
+          }
+          return progressDelivery(
+            "unknown",
+            "unknown",
+            true,
+            "comment_not_observed",
+            "No exact progress comment was found; absence does not authorize a resend.",
+          );
+        }
+      }
+      return progressDelivery(
+        "unknown",
+        "unknown",
+        true,
+        "reconciliation_incomplete",
+        "Progress reconciliation reached its page budget without a complete result.",
+      );
+    } catch (error) {
+      return progressDelivery(
+        "unknown",
+        "unknown",
+        transientProgressReadFailure(error),
+        progressFailureReason(error),
+        this.failureMessage(error),
+        frozen?.externalId ?? null,
+        error instanceof GitHubActionFailure ? error.retryAfterMs : undefined,
+      );
+    }
+  }
+
+  private async readProgressComment(path: string): Promise<Json> {
+    try {
+      return object((await this.request(path)).value);
+    } catch (error) {
+      if (error instanceof GitHubActionFailure && (error.status === 404 || error.status === 410))
+        throw new GitHubActionFailure("progress_comment_missing", error.status);
+      throw error;
+    }
+  }
+
+  private assertProgressAuthority(
+    repository: InvestigationRepositoryRecord,
+    workItem: InvestigationCommentTarget,
+    actor: InvestigationOperatorPrincipal,
+  ): void {
+    positiveId(workItem.number);
+    if (workItem.githubWorkItemId !== undefined) positiveId(workItem.githubWorkItemId);
+    if (workItem.repositoryId !== repository.id || !actor.repositoryIds.includes(repository.id))
+      throw new GitHubActionFailure("repository_scope_denied");
+    if (!actor.actionCapabilities.includes("comment"))
+      throw new GitHubActionFailure("action_permission_denied");
+  }
+
+  private assertProgressComment(
+    comment: Json,
+    request: InvestigationProgressCommentRequest,
+    repository: InvestigationRepositoryRecord,
+    workItem: InvestigationCommentTarget,
+    allowPreviousBody: boolean,
+  ): void {
+    const id = String(positiveId(comment.id));
+    if (request.externalId !== null && id !== request.externalId)
+      throw new GitHubActionFailure("progress_comment_identity_changed");
+    if (positiveId(object(comment.user).id) !== this.options.expectedGitHubUserId)
+      throw new GitHubActionFailure("progress_comment_owner_changed");
+    if (
+      typeof comment.issue_url !== "string" ||
+      comment.issue_url.toLowerCase() !==
+        `https://api.github.com${repositoryPath(repository)}/issues/${workItem.number}`.toLowerCase()
+    )
+      throw new GitHubActionFailure("progress_comment_target_changed");
+    if (
+      typeof comment.body !== "string" ||
+      comment.body.split(request.marker).length !== 2 ||
+      comment.body.split("<!-- agentic-review-progress:").length !== 2
+    )
+      throw new GitHubActionFailure("progress_comment_marker_changed");
+    if (
+      comment.body !== request.body &&
+      !(allowPreviousBody && comment.body === request.previousBody)
+    )
+      throw new GitHubActionFailure("progress_comment_body_changed");
   }
 
   async validateRemoteBranch(
@@ -519,7 +896,7 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
 
   private async preflightIdentity(
     repository: InvestigationRepositoryRecord,
-    workItem: InvestigationWorkItemRecord,
+    workItem: InvestigationCommentTarget,
     actor: InvestigationOperatorPrincipal,
   ): Promise<{ repository: Json; value: Json }> {
     if (workItem.repositoryId !== repository.id || !actor.repositoryIds.includes(repository.id))
@@ -547,7 +924,12 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
       (workItem.kind === "issue" && value.pull_request !== undefined)
     )
       throw new GitHubActionFailure("work_item_identity_changed");
-    positiveId(value.id);
+    const remoteWorkItemId = positiveId(value.id);
+    if (
+      workItem.githubWorkItemId !== undefined &&
+      positiveId(workItem.githubWorkItemId) !== remoteWorkItemId
+    )
+      throw new GitHubActionFailure("work_item_identity_changed");
     return { repository: remoteRepository, value };
   }
 
@@ -603,7 +985,7 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
   }
 
   private assertRemotePermission(
-    intent: InvestigationActionIntentV1,
+    intent: Pick<InvestigationActionIntentV1, "action">,
     repository: Json,
     item: Json,
   ): void {
@@ -895,8 +1277,17 @@ export class InvestigationGitHubTransport implements InvestigationActionTranspor
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
     if (!response.ok) {
-      await response.body?.cancel();
-      throw new GitHubActionFailure("github_request_rejected", response.status);
+      const retryAfterMs = retryDelay(response.headers);
+      const rateLimited =
+        response.status === 429 ||
+        (response.status === 403 &&
+          (retryAfterMs !== undefined || response.headers.get("x-ratelimit-remaining") === "0"));
+      await response.body?.cancel().catch(() => {});
+      throw new GitHubActionFailure(
+        rateLimited ? "github_rate_limited" : "github_request_rejected",
+        response.status,
+        retryAfterMs,
+      );
     }
     if (response.status === 204) {
       await response.body?.cancel();
