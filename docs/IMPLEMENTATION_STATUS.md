@@ -1,5 +1,28 @@
 # Implementation Status
 
+## Fork comment lifecycle acceptance, 2026-09-19
+
+One explicitly authorized fork-only run passed the production source importer, signed native
+assignment intake, progress publisher, Worker HTTP protocol, report builder, and Dashboard.
+The Issue fixture completed; the PR fixture deliberately failed. Each target received one
+comment before Task creation, followed by queued, running, and terminal updates to that same
+comment. The run made exactly twelve GitHub mutations: two temporary assignments, two comment
+creates, six comment updates, and two assignment removals. Independent GitHub reads matched
+every published body, target, publisher, and comment identity. Existing comments remained intact.
+
+The native ledger retained all eight successful delivery bodies. Editing the completion template
+after the Issue started changed only its next update; previously retained bodies stayed unchanged.
+The production Dashboard displayed four deliveries per target and distinguished failed Task
+execution from successful comment synchronization. Browser assertions and four screenshots passed
+against the actual isolated native database, with no browser API mutations or external requests.
+The runtime and browser closed cleanly, temporary assignments were restored, and the temporary
+publisher credential was removed.
+
+This acceptance used explicitly labeled deterministic test reports and locally signed assignment
+events after real assignments. It did not invoke a model, execute repository commands, validate
+GitHub's outbound webhook forwarding, or test same-Task Issue resume. Earlier unsuccessful
+rehearsal receipts remain preserved rather than being rewritten as successful runs.
+
 ## Comment history HTTP query parsing, 2026-09-19
 
 A native-runtime rehearsal exposed that numeric URL query values were rejected by the server's
