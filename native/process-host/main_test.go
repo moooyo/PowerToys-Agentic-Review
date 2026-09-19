@@ -62,6 +62,24 @@ func TestValidMaximumConcurrentRequests(t *testing.T) {
 	}
 }
 
+func TestProcessHostNamedJobRecoveryRequiresExplicitFlag(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		flags := flag.NewFlagSet("recovery", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		options := registerProcessHostFlags(flags)
+		arguments := []string{"--stdio", "--instance-key=" + strings.Repeat("a", 64)}
+		if enabled {
+			arguments = append(arguments, "--named-job-recovery")
+		}
+		if err := flags.Parse(arguments); err != nil {
+			t.Fatal(err)
+		}
+		if options.namedJobRecovery != enabled {
+			t.Fatalf("namedJobRecovery = %t, want %t", options.namedJobRecovery, enabled)
+		}
+	}
+}
+
 func TestValidInstanceKey(t *testing.T) {
 	valid := strings.Repeat("a", 64)
 	if !host.ValidInstanceKey(valid) {

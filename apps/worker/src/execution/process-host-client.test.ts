@@ -12,6 +12,7 @@ import {
 import {
   type ProcessHostEvent,
   ProcessHostProtocolError,
+  type ProcessHostRecoverySnapshot,
   type ProcessHostRequest,
   type ProcessLaunchSpec,
   processHostMaximumFrameBytes,
@@ -213,6 +214,122 @@ async function closeNormally(
 }
 
 describe("StdioProcessHostClient", () => {
+  it("retains immutable named Job recovery evidence only after an opted-in matching handshake", async () => {
+    const child = new FakeProcessHost();
+    const snapshot: ProcessHostRecoverySnapshot = {
+      capability: "named-job-tree-v1",
+      instanceKey: defaultInstanceKey,
+      generation: "b".repeat(64),
+      previousTreeDrained: true,
+    };
+    let argumentsList: readonly string[] = [];
+    const connected = StdioProcessHostClient.create({
+      processHostPath: "C:\\AgenticReview\\AgenticReview.ProcessHost.exe",
+      instanceKey: defaultInstanceKey,
+      maximumConcurrentRequests: 4,
+      namedJobRecovery: true,
+      spawnProcess: (_path, args) => {
+        argumentsList = args;
+        return child.asChild();
+      },
+    });
+    const ready = readyEvent();
+    if (ready.type !== "ready") throw new Error("Missing ready fixture.");
+    child.writeEvent({
+      ...ready,
+      capabilities: { ...ready.capabilities, namedJobRecovery: snapshot },
+    });
+    const client = await connected;
+    expect(argumentsList).toContain("--named-job-recovery");
+    expect(client.recovery()).toEqual(snapshot);
+    expect(Object.isFrozen(client.recovery())).toBe(true);
+    const closing = client.close();
+    expect(client.recovery()).toBeUndefined();
+    const request = (await waitForRequests(child, "shutdown")).at(-1);
+    if (request === undefined) throw new Error("Missing shutdown request.");
+    expect(client.recovery()).toBeUndefined();
+    child.writeEvent({
+      protocolVersion: processHostProtocolVersion,
+      type: "shutdown_complete",
+      requestId: request.requestId,
+    });
+    expect(client.recovery()).toBeUndefined();
+    child.closeHost(0, null);
+    await closing;
+    expect(client.recovery()).toBeUndefined();
+  });
+
+  it("withdraws recovery evidence immediately after the Host fails", async () => {
+    const child = new FakeProcessHost();
+    const connected = StdioProcessHostClient.create({
+      processHostPath: "C:\\AgenticReview\\AgenticReview.ProcessHost.exe",
+      instanceKey: defaultInstanceKey,
+      maximumConcurrentRequests: 4,
+      namedJobRecovery: true,
+      spawnProcess: () => child.asChild(),
+    });
+    const ready = readyEvent();
+    if (ready.type !== "ready") throw new Error("Missing ready fixture.");
+    child.writeEvent({
+      ...ready,
+      capabilities: {
+        ...ready.capabilities,
+        namedJobRecovery: {
+          capability: "named-job-tree-v1",
+          instanceKey: defaultInstanceKey,
+          generation: "b".repeat(64),
+          previousTreeDrained: true,
+        },
+      },
+    });
+    const client = await connected;
+    expect(client.recovery()).toBeDefined();
+    child.closeHost(1, null);
+    expect(client.recovery()).toBeUndefined();
+    await expect(client.close()).rejects.toBeInstanceOf(ProcessHostProtocolError);
+  });
+
+  it("does not infer recovery ownership from a legacy ready event", async () => {
+    const { child, client } = await connect();
+    expect(client.recovery()).toBeUndefined();
+    await closeNormally(client, child);
+  });
+
+  it.each(["missing", "wrong-instance", "unrequested"] as const)(
+    "rejects %s named Job recovery evidence",
+    async (mode) => {
+      const child = new FakeProcessHost();
+      const connected = StdioProcessHostClient.create({
+        processHostPath: "C:\\AgenticReview\\AgenticReview.ProcessHost.exe",
+        instanceKey: defaultInstanceKey,
+        maximumConcurrentRequests: 4,
+        ...(mode === "unrequested" ? {} : { namedJobRecovery: true as const }),
+        spawnProcess: () => child.asChild(),
+      });
+      const rejected = expect(connected).rejects.toThrow(/recovery evidence/u);
+      const ready = readyEvent();
+      if (ready.type !== "ready") throw new Error("Missing ready fixture.");
+      child.writeEvent({
+        ...ready,
+        capabilities: {
+          ...ready.capabilities,
+          ...(mode === "missing"
+            ? {}
+            : {
+                namedJobRecovery: {
+                  capability: "named-job-tree-v1",
+                  instanceKey: mode === "wrong-instance" ? "c".repeat(64) : defaultInstanceKey,
+                  generation: "b".repeat(64),
+                  previousTreeDrained: true,
+                },
+              }),
+        },
+      });
+      await rejected;
+      expect(child.killed).toBe(true);
+    },
+  );
+
   it("observes dispatch only after launch validation and immediately before the start write", async () => {
     const { child, client } = await connect();
     const onDispatch = vi.fn(() => {

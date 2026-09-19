@@ -6,12 +6,16 @@ import {
   InvestigationArtifactV1Schema,
   InvestigationCheckpointRequestSchema,
   InvestigationClaimRequestSchema,
+  InvestigationCleanupRequestSchema,
   InvestigationConfirmActionIntentRequestSchema,
   InvestigationCreateActionIntentRequestSchema,
   InvestigationCreateTaskRequestV1Schema,
   InvestigationFinalizeRequestSchema,
   InvestigationHeartbeatRequestSchema,
+  InvestigationModelInvocationReceiptSchema,
+  InvestigationProgressRequestSchema,
   InvestigationReportPartRequestSchema,
+  InvestigationSchedulerSettingsRequestSchema,
   InvestigationTaskKindSchema,
   InvestigationWorkerLeaseSchema,
 } from "@agentic-review/contracts";
@@ -49,9 +53,12 @@ export interface InvestigationAppOptions
     | "resolveTaskSource"
     | "resolvePlanPrerequisites"
     | "maxReportBytes"
+    | "staticConcurrency"
+    | "defaultTaskBudget"
     | "evidencePolicy"
     | "onReportSealed"
     | "onTaskStateChanged"
+    | "onTaskUsageChanged"
     | "onTaskProgress"
     | "onRepositoryChanged"
   > {
@@ -71,6 +78,17 @@ export interface InvestigationAppOptions
 
 const idParamsSchema = Type.Object({ id: EntityIdSchema }, { additionalProperties: false });
 const emptyBodySchema = Type.Object({}, { additionalProperties: false });
+const modelUsageBodySchema = Type.Object(
+  {
+    lease: InvestigationWorkerLeaseSchema,
+    receipt: InvestigationModelInvocationReceiptSchema,
+  },
+  { additionalProperties: false },
+);
+const reportUsageBodySchema = Type.Object(
+  { lease: InvestigationWorkerLeaseSchema },
+  { additionalProperties: false },
+);
 const artifactUploadBodySchema = Type.Object(
   {
     lease: InvestigationWorkerLeaseSchema,
@@ -315,6 +333,11 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
     },
     async (request) => await service.resumeTask(actor(request), request.params.id, request.body),
   );
+  app.get<{ Params: IdParams }>(
+    "/api/tasks/:id/usage",
+    { preHandler: authenticateOperator, schema: { params: idParamsSchema } },
+    async (request) => service.getTaskUsage(actor(request), request.params.id),
+  );
   app.post<{ Params: IdParams }>(
     "/api/tasks/:id/cancel",
     { preHandler: authenticateOperator, schema: { params: idParamsSchema, body: emptyBodySchema } },
@@ -416,6 +439,25 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
     async (request) => await service.reconcileIntent(actor(request), request.params.id),
   );
 
+  app.get("/api/investigation/scheduler", { preHandler: authenticateOperator }, async (request) =>
+    service.schedulerStatus(actor(request)),
+  );
+  app.put<{ Body: BodyOf<InvestigationService["configureScheduler"]> }>(
+    "/api/investigation/scheduler",
+    {
+      preHandler: authenticateOperator,
+      schema: { body: InvestigationSchedulerSettingsRequestSchema },
+    },
+    async (request) => service.configureScheduler(actor(request), request.body),
+  );
+  app.post<{ Params: IdParams; Body: LastBodyOf<InvestigationService["workerCleanup"]> }>(
+    "/api/worker/tasks/:id/cleanup",
+    {
+      preHandler: authenticateWorker,
+      schema: { params: idParamsSchema, body: InvestigationCleanupRequestSchema },
+    },
+    async (request) => service.workerCleanup(worker(request), request.params.id, request.body),
+  );
   app.post<{ Body: BodyOf<InvestigationService["workerClaim"]> }>(
     "/api/worker/claims",
     { preHandler: authenticateWorker, schema: { body: InvestigationClaimRequestSchema } },
@@ -429,6 +471,31 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
     },
     async (request) =>
       await service.workerHeartbeat(worker(request), request.params.id, request.body),
+  );
+  app.post<{ Params: IdParams; Body: LastBodyOf<InvestigationService["workerModelUsage"]> }>(
+    "/api/worker/tasks/:id/model-usage",
+    {
+      preHandler: authenticateWorker,
+      bodyLimit: 1_048_576,
+      schema: { params: idParamsSchema, body: modelUsageBodySchema },
+    },
+    async (request) => service.workerModelUsage(worker(request), request.params.id, request.body),
+  );
+  app.post<{ Params: IdParams; Body: LastBodyOf<InvestigationService["workerReportUsage"]> }>(
+    "/api/worker/tasks/:id/report-usage",
+    {
+      preHandler: authenticateWorker,
+      schema: { params: idParamsSchema, body: reportUsageBodySchema },
+    },
+    async (request) => service.workerReportUsage(worker(request), request.params.id, request.body),
+  );
+  app.post<{ Params: IdParams; Body: LastBodyOf<InvestigationService["workerProgress"]> }>(
+    "/api/worker/tasks/:id/progress",
+    {
+      preHandler: authenticateWorker,
+      schema: { params: idParamsSchema, body: InvestigationProgressRequestSchema },
+    },
+    async (request) => service.workerProgress(worker(request), request.params.id, request.body),
   );
   app.post<{ Params: IdParams; Body: LastBodyOf<InvestigationService["workerCheckpoint"]> }>(
     "/api/worker/tasks/:id/checkpoints",

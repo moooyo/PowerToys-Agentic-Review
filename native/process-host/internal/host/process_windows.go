@@ -25,13 +25,15 @@ const (
 	procThreadAttributeJobList uintptr = 0x0002000D
 )
 
-type windowsLauncher struct{}
+type windowsLauncher struct {
+	recoveryJob windows.Handle
+}
 
 func newProcessLauncher() processLauncher {
 	return windowsLauncher{}
 }
 
-func (windowsLauncher) Launch(spec protocol.ProcessLaunchSpec, limits protocol.EffectiveLimits) (launchedProcess, error) {
+func (launcher windowsLauncher) Launch(spec protocol.ProcessLaunchSpec, limits protocol.EffectiveLimits) (launchedProcess, error) {
 	executable, err := validateRuntimePath(spec.Executable, true)
 	if err != nil {
 		return nil, fmt.Errorf("validate executable: %w", err)
@@ -113,6 +115,10 @@ func (windowsLauncher) Launch(spec protocol.ProcessLaunchSpec, limits protocol.E
 	}
 	defer attributes.Delete()
 	jobHandles := []windows.Handle{job}
+	if launcher.recoveryJob != 0 {
+		// Job-list assignment is atomic with creation and is ordered outer to inner.
+		jobHandles = []windows.Handle{launcher.recoveryJob, job}
+	}
 	for _, attribute := range creationAttributes {
 		switch attribute {
 		case processCreationAttributeInheritedHandles:

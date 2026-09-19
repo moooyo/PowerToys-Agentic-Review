@@ -236,6 +236,20 @@ export type ProcessHostRequest =
   | Readonly<Static<typeof ProcessHostTerminateRequestSchema>>
   | Readonly<Static<typeof ProcessHostShutdownRequestSchema>>;
 
+export const ProcessHostRecoverySnapshotSchema = Type.Object(
+  {
+    capability: Type.Literal("named-job-tree-v1"),
+    instanceKey: Type.String({ pattern: "^[a-f0-9]{64}(?![\\s\\S])" }),
+    generation: Type.String({ pattern: "^[a-f0-9]{64}(?![\\s\\S])" }),
+    previousTreeDrained: Type.Literal(true),
+  },
+  { additionalProperties: false },
+);
+
+export type ProcessHostRecoverySnapshot = Readonly<
+  Static<typeof ProcessHostRecoverySnapshotSchema>
+>;
+
 export const ProcessHostReadyEventSchema = Type.Object(
   {
     protocolVersion: Type.Literal(processHostProtocolVersion),
@@ -247,6 +261,7 @@ export const ProcessHostReadyEventSchema = Type.Object(
         maximumConcurrentRequests: Type.Integer({ minimum: 1, maximum: 64 }),
         maximumFrameBytes: Type.Literal(processHostMaximumFrameBytes),
         interactiveStdin: Type.Optional(ProcessHostInteractiveStdinCapabilitySchema),
+        namedJobRecovery: Type.Optional(ProcessHostRecoverySnapshotSchema),
       },
       { additionalProperties: false },
     ),
@@ -724,6 +739,8 @@ export interface ManagedProcess {
 }
 
 export interface ProcessHostClient {
+  /** Trusted native startup evidence, available only while this Host remains ready for work. */
+  recovery?(): ProcessHostRecoverySnapshot | undefined;
   /** onDispatch runs only when a validated start request is about to be written to the native host. */
   start(
     spec: ProcessLaunchSpec,

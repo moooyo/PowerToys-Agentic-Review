@@ -239,6 +239,21 @@ export function createSessionScopedSampleApi(
   }
 
   return {
+    async scheduler() {
+      const user = await currentUser();
+      const value = await api.scheduler();
+      await currentUser(user.id);
+      return structuredClone({ ...value, leases: [] });
+    },
+    async updateScheduler(input) {
+      const snapshot = structuredClone(input);
+      const user = await currentUser();
+      if (!user.isAdmin) forbidden();
+      const value = await api.updateScheduler(snapshot);
+      const current = await currentUser(user.id);
+      if (!current.isAdmin) forbidden();
+      return structuredClone({ ...value, leases: [] });
+    },
     async commentDeliveries(query = {}) {
       const snapshot = structuredClone(query);
       const user = await currentUser();
@@ -407,8 +422,19 @@ export function createSessionScopedSampleApi(
       const user = await currentUser();
       const values = await api.tasks(workItemId);
       const current = await currentUser(user.id);
+      const items = values.items.filter((item) =>
+        current.repositoryIds.includes(item.repository.id),
+      );
+      const visibleIds = new Set(items.map((item) => item.id));
       return structuredClone({
-        items: values.items.filter((item) => current.repositoryIds.includes(item.repository.id)),
+        items,
+        ...(values.usageByTaskId
+          ? {
+              usageByTaskId: Object.fromEntries(
+                Object.entries(values.usageByTaskId).filter(([id]) => visibleIds.has(id)),
+              ),
+            }
+          : {}),
       });
     },
 

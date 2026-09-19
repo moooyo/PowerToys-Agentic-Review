@@ -21,6 +21,7 @@ import { Link, useLocation } from "react-router-dom";
 import { ActionPanel } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
 import { ArtifactPanel } from "./artifact-panel";
+import { E2eCoveragePanel } from "./e2e-panel";
 import {
   createFeedbackSelection,
   feedbackSelectionReducer,
@@ -41,6 +42,7 @@ import {
   assertReportBindings,
   selectionContext,
 } from "./report-state";
+import { TokenUsagePanel } from "./usage-panel";
 
 export function StandaloneActions({ workItem }: { workItem: WorkItem }) {
   const query = useQuery({
@@ -202,6 +204,16 @@ export function ReportWorkspace({ reportId }: { reportId: string }) {
       <Box>
         <Stack direction="row" useFlexGap spacing={1} sx={{ mb: 1, flexWrap: "wrap" }}>
           <Chip
+            label={
+              value.context.task.kind === "pr-e2e"
+                ? "E2E"
+                : ["pr-review", "issue-investigate"].includes(value.context.task.kind)
+                  ? "Static"
+                  : "Execution"
+            }
+            variant="outlined"
+          />
+          <Chip
             label={`Execution: ${value.outcome}`}
             color={
               value.outcome === "completed"
@@ -247,7 +259,7 @@ export function ReportWorkspace({ reportId }: { reportId: string }) {
       {value.report.completeness === "partial" && (
         <Alert severity="warning">
           This is an incomplete investigation. Retained findings and evidence are available, but the
-          report does not claim to cover the entire frozen scope. Stop reason:{" "}
+          report does not claim to cover the entire declared scope. Stop reason:{" "}
           {value.report.loop.stopReason}.
         </Alert>
       )}
@@ -263,6 +275,14 @@ export function ReportWorkspace({ reportId }: { reportId: string }) {
         </Alert>
       )}
       <AssessmentPanel assessment={value.assessment} />
+      {value.context.task.kind === "pr-e2e" && (
+        <E2eCoveragePanel result={value.context.e2e} artifacts={result?.artifacts} />
+      )}
+      <TokenUsagePanel
+        summary={value.report.usage}
+        legacyTokens={value.report.loop.consumed.tokens}
+        scope="report"
+      />
       <Tabs
         value={tab}
         onChange={(_event, next: number) => setTab(next)}
@@ -461,26 +481,40 @@ export function ReportWorkspace({ reportId }: { reportId: string }) {
               <Typography color="text.secondary">No diagnostics recorded.</Typography>
             ) : (
               <Stack spacing={1}>
-                {result.diagnostics.map((diagnostic) => (
-                  <Alert
-                    key={diagnostic.id}
-                    severity={
-                      diagnostic.category === "error"
-                        ? "error"
-                        : diagnostic.category === "blocker"
-                          ? "warning"
-                          : "info"
-                    }
-                  >
-                    <Typography variant="subtitle2">{diagnostic.code}</Typography>
-                    {diagnostic.message}
-                    <Typography variant="caption" component="div">
-                      {diagnostic.retryable
-                        ? "Retry may resolve this condition."
-                        : "Review the recorded prerequisites before continuing."}
-                    </Typography>
-                  </Alert>
-                ))}
+                {result.diagnostics.map((diagnostic) => {
+                  const recoveredSourcePreparation =
+                    result.outcome === "completed" &&
+                    result.context.task.kind === "pr-e2e" &&
+                    result.context.e2e?.cleanup.confirmed === true &&
+                    diagnostic.code === "SOURCE_TREE_UNSUPPORTED";
+                  return (
+                    <Alert
+                      key={diagnostic.id}
+                      severity={
+                        recoveredSourcePreparation
+                          ? "info"
+                          : diagnostic.category === "error"
+                            ? "error"
+                            : diagnostic.category === "blocker"
+                              ? "warning"
+                              : "info"
+                      }
+                    >
+                      <Typography variant="subtitle2">
+                        {diagnostic.code}
+                        {recoveredSourcePreparation ? " · Earlier preparation attempt" : ""}
+                      </Typography>
+                      {diagnostic.message}
+                      <Typography variant="caption" component="div">
+                        {recoveredSourcePreparation
+                          ? "Source preparation subsequently succeeded and this task completed. The earlier diagnostic is retained for history."
+                          : diagnostic.retryable
+                            ? "Retry may resolve this condition."
+                            : "Review the recorded prerequisites before continuing."}
+                      </Typography>
+                    </Alert>
+                  );
+                })}
               </Stack>
             )}
           </Section>

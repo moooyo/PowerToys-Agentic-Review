@@ -30,6 +30,10 @@ async function buildWorkerBundle() {
   };
   const bundles = [
     { name: "worker", entryPoint: "src/main.ts" },
+    {
+      name: "cleanup-recovery-operations",
+      entryPoint: "src/investigation/cleanup-recovery-operations-entry.ts",
+    },
     { name: "web-driver", entryPoint: "src/ui/web-driver-entry.ts" },
   ];
   const results = await Promise.all(
@@ -59,6 +63,10 @@ async function buildWorkerBundle() {
 
 export async function copyWorkerRuntimeAssets(targetDirectory) {
   await mkdir(targetDirectory, { recursive: true });
+  await copyFile(
+    resolve(workerRoot, "src", "investigation", "e2e-desktop-driver.ps1"),
+    resolve(targetDirectory, "e2e-desktop-driver.ps1"),
+  );
   // Web readiness also uses this entry for Windows process and TCP ownership probes.
   await copyFile(
     resolve(workerRoot, "src", "ui", "windows-driver-entry.ps1"),

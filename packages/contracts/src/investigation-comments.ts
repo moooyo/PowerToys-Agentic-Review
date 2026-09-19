@@ -16,6 +16,7 @@ export const InvestigationCommentDeliveryStateSchema = Type.Union([
   Type.Literal("sending"),
   Type.Literal("succeeded"),
   Type.Literal("failed"),
+  Type.Literal("cancelled"),
   Type.Literal("unknown"),
 ]);
 export type InvestigationCommentDeliveryState = Static<

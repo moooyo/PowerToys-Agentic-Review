@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
+import { legacySupersededCommentDeliveryReason } from "./comment-delivery-state.js";
 
-export const investigationSchemaVersion = "investigation-v3";
+export const investigationSchemaVersion = "investigation-v4";
 
 const investigationV2Collections = [
   "repositories",
@@ -22,9 +23,12 @@ const investigationV2Collections = [
   "sourceSnapshots",
 ] as const;
 
+const investigationV3Collections = [...investigationV2Collections, "commentDeliveries"] as const;
+
 export const investigationCollections = [
-  ...investigationV2Collections,
-  "commentDeliveries",
+  ...investigationV3Collections,
+  "resourceLeases",
+  "schedulerSettings",
 ] as const;
 
 export type InvestigationCollection = (typeof investigationCollections)[number];
@@ -282,12 +286,20 @@ export class InvestigationStore {
       );
       values.push(...query.repositoryIds);
     }
-    for (const field of ["taskId", "commentId", "workItemNumber", "state", "mode"] as const) {
+    for (const field of ["taskId", "commentId", "workItemNumber", "mode"] as const) {
       const value = query[field];
       if (value !== undefined) {
         predicates.push(`json_extract("value", '$.${field}') = ?`);
         values.push(value);
       }
+    }
+    if (query.state !== undefined) {
+      // Match the read-only DTO projection without rewriting historical delivery receipts.
+      predicates.push(`(CASE WHEN json_extract("value", '$.state') = 'failed'
+        AND json_extract("value", '$.effect') = 'not_sent'
+        AND json_extract("value", '$.reason') = ?
+        THEN 'cancelled' ELSE json_extract("value", '$.state') END) = ?`);
+      values.push(legacySupersededCommentDeliveryReason, query.state);
     }
     if (query.before !== undefined) {
       predicates.push(
@@ -396,8 +408,9 @@ export class InvestigationStore {
         );
       });
     const current = matches(definitions(investigationCollections, true));
-    const previous = matches(definitions(investigationV2Collections));
-    if (!current && !previous) {
+    const previousV3 = matches(definitions(investigationV3Collections, true));
+    const previousV2 = matches(definitions(investigationV2Collections));
+    if (!current && !previousV3 && !previousV2) {
       throw new InvestigationStoreError(
         "incompatible_schema",
         "The investigation database has an unrecognized schema; no migration was applied.",
@@ -406,9 +419,16 @@ export class InvestigationStore {
     const version = this.database
       .prepare(`SELECT "value" FROM "${metadataTable}" WHERE "key" = ?`)
       .get("schema_version");
-    if (previous && version?.value === "investigation-v2") {
-      this.database.exec(collectionDefinition("commentDeliveries"));
-      for (const definition of deliveryIndexes.values()) this.database.exec(definition);
+    if (
+      (previousV2 && version?.value === "investigation-v2") ||
+      (previousV3 && version?.value === "investigation-v3")
+    ) {
+      if (previousV2) {
+        this.database.exec(collectionDefinition("commentDeliveries"));
+        for (const definition of deliveryIndexes.values()) this.database.exec(definition);
+      }
+      this.database.exec(collectionDefinition("resourceLeases"));
+      this.database.exec(collectionDefinition("schedulerSettings"));
       this.database
         .prepare(`UPDATE "${metadataTable}" SET "value" = ? WHERE "key" = ?`)
         .run(investigationSchemaVersion, "schema_version");

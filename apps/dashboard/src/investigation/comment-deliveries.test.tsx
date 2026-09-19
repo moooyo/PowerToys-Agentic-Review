@@ -147,6 +147,30 @@ describe("comment delivery history", () => {
     expect(unresolved).toContain("may have reached GitHub");
   });
 
+  it("shows superseded deliveries as neutral cancellations and retains genuine failures", () => {
+    const html = renderHistory([
+      delivery({
+        operation: "update",
+        state: "cancelled",
+        effect: "not_sent",
+        reason: "A newer task update superseded this prepared comment before it was sent.",
+      }),
+    ]);
+    expect(html).toContain("Cancelled");
+    expect(html).toContain("MuiChip-colorDefault");
+    expect(html).not.toContain("MuiChip-colorError");
+    expect(html).not.toContain(">Failed<");
+    expect(html).toContain("A newer task update superseded this prepared comment");
+    for (const effect of ["not_sent", "rejected"] as const) {
+      const failed = renderHistory([
+        delivery({ state: "failed", effect, reason: "Comment preparation or delivery failed." }),
+      ]);
+      expect(failed).toContain("Failed");
+      expect(failed).toContain("MuiChip-colorError");
+      expect(failed).not.toContain("Cancelled");
+    }
+  });
+
   it("shows preparation and retained legacy evidence without inventing a Task or earlier attempts", () => {
     const html = renderHistory([
       delivery({ taskId: null, workItemId: null, legacy: true, body: null }),
@@ -232,6 +256,7 @@ describe("comment delivery history", () => {
     expect(
       commentHistoryFilters("?repositoryId=repo-1&taskId=task-1&workItemNumber=7&state=failed"),
     ).toEqual({ repositoryId: "repo-1", taskId: "task-1", workItemNumber: 7, state: "failed" });
+    expect(commentHistoryFilters("?state=cancelled")).toEqual({ state: "cancelled" });
     for (const number of ["0", "-1", "7.5", "9007199254740992", "one"])
       expect(commentHistoryFilters(`?workItemNumber=${number}`)).toEqual({});
     expect(commentHistoryFilters("?state=completed")).toEqual({});

@@ -56,12 +56,14 @@ const deliveryColors = {
   sending: "info",
   succeeded: "success",
   failed: "error",
+  cancelled: "default",
   unknown: "warning",
 } as const;
 const deliveryLabels = {
   sending: "Sending",
   succeeded: "Delivered",
   failed: "Failed",
+  cancelled: "Cancelled",
   unknown: "Unconfirmed",
 } as const;
 

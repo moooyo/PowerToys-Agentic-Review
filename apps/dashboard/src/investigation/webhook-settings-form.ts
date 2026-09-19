@@ -6,6 +6,7 @@ import type {
 
 export type WebhookSettingsFormValues = {
   enabled: boolean;
+  e2eEnabled?: boolean;
   reviewerUserIdText: string;
   allowedActorUserIdsText: string;
 };
@@ -15,6 +16,7 @@ export function webhookSettingsFormValues(
 ): WebhookSettingsFormValues {
   return {
     enabled: settings.enabled,
+    ...(settings.e2eEnabled === undefined ? {} : { e2eEnabled: settings.e2eEnabled }),
     reviewerUserIdText: settings.reviewerUserId === null ? "" : String(settings.reviewerUserId),
     allowedActorUserIdsText: settings.allowedActorUserIds.join("\n"),
   };
@@ -48,12 +50,21 @@ export function webhookSettingsInput(
   const reviewer = form.reviewerUserIdText.trim();
   const reviewerUserId = reviewer ? parseGitHubUserId(reviewer) : null;
   const allowedActorUserIds = parseGitHubUserIds(form.allowedActorUserIdsText);
-  if (form.enabled && (reviewerUserId === null || allowedActorUserIds.length === 0)) {
+  if (
+    (form.enabled || form.e2eEnabled === true) &&
+    (reviewerUserId === null || allowedActorUserIds.length === 0)
+  ) {
     throw new Error(
       "Choose a recipient and at least one trusted user before enabling assignments.",
     );
   }
-  return { version, enabled: form.enabled, reviewerUserId, allowedActorUserIds };
+  return {
+    version,
+    enabled: form.enabled,
+    reviewerUserId,
+    allowedActorUserIds,
+    ...(form.e2eEnabled === undefined ? {} : { e2eEnabled: form.e2eEnabled }),
+  };
 }
 
 export async function submitWebhookSettings(

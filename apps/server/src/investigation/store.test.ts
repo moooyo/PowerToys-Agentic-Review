@@ -46,7 +46,7 @@ function createV2(path: string): void {
       .prepare('INSERT INTO "investigation_metadata" ("key", "value") VALUES (?, ?)')
       .run("schema_version", "investigation-v2");
     for (const collection of investigationCollections.filter(
-      (name) => name !== "commentDeliveries",
+      (name) => !["commentDeliveries", "resourceLeases", "schedulerSettings"].includes(name),
     ))
       database.exec(`CREATE TABLE "${collection}" (
         "id" TEXT PRIMARY KEY NOT NULL,
@@ -321,6 +321,43 @@ describe("InvestigationStore", () => {
       body: "Retained publication bytes",
       unknown: true,
     });
+  });
+
+  it("adds scheduler storage to an exact v3 database without altering historical receipts", async () => {
+    const path = await databasePath();
+    open(path).close();
+    const raw = ' { "state" : "failed", "effect" : "not_sent", "reason" : "Historical receipt" } ';
+    const writer = new DatabaseSync(path);
+    try {
+      writer.exec('DROP TABLE "resourceLeases"; DROP TABLE "schedulerSettings";');
+      writer
+        .prepare('UPDATE "investigation_metadata" SET "value" = ? WHERE "key" = ?')
+        .run("investigation-v3", "schema_version");
+      writer
+        .prepare('INSERT INTO "commentDeliveries" ("id", "value") VALUES (?, ?)')
+        .run("historical-delivery", raw);
+    } finally {
+      writer.close();
+    }
+    const migrated = open(path);
+    expect(migrated.list("resourceLeases")).toEqual([]);
+    expect(migrated.list("schedulerSettings")).toEqual([]);
+    migrated.close();
+    const reader = new DatabaseSync(path, { readOnly: true });
+    try {
+      expect(
+        reader
+          .prepare('SELECT "value" FROM "commentDeliveries" WHERE "id" = ?')
+          .get("historical-delivery")?.value,
+      ).toBe(raw);
+      expect(
+        reader
+          .prepare('SELECT "value" FROM "investigation_metadata" WHERE "key" = ?')
+          .get("schema_version")?.value,
+      ).toBe(investigationSchemaVersion);
+    } finally {
+      reader.close();
+    }
   });
 
   it.each(["extra-index", "partial-new-table", "wrong-version", "changed-definition"])(

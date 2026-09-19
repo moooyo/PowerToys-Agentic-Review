@@ -6,6 +6,7 @@ import type {
   InvestigationLoopCheckpointV1,
   InvestigationResultV1,
   InvestigationTaskV1,
+  InvestigationUsageSummary,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import type {
@@ -48,6 +49,10 @@ import type {
   InvestigationRepositoryRecord,
   InvestigationWorkItemRecord,
 } from "./types.js";
+import {
+  investigationUsagePublicationPendingKey,
+  investigationUsagePublicationPendingPrefix,
+} from "./usage-ledger.js";
 import type { AssignmentProgressState, TrustedAssignmentAdmission } from "./webhook-intake.js";
 
 export type ProgressReplyState = "pending" | "sending" | "sent" | "blocked" | "failed" | "unknown";
@@ -75,6 +80,11 @@ export interface InvestigationProgressRepliesOptions {
   readonly transport: InvestigationActionTransport | undefined;
   readonly deliveries?: InvestigationCommentDeliveries;
   readonly isAssignmentAuthorized?: (admission: TrustedAssignmentAdmission) => boolean;
+  readonly usageSummary?: (taskId: string) => InvestigationUsageSummary;
+  readonly prepareReportMedia?: (
+    report: InvestigationResultV1,
+    task: InvestigationTaskV1,
+  ) => Promise<string>;
   readonly resolveOperator: (id: string) => InvestigationOperatorPrincipal | null;
   readonly enableExternalWrites: boolean;
   readonly now?: () => Date;
@@ -82,6 +92,7 @@ export interface InvestigationProgressRepliesOptions {
   readonly leaseDurationMs?: number;
   readonly maximumAttempts?: number;
   readonly phaseIntervalMs?: number;
+  readonly usageIntervalMs?: number;
   readonly onError?: (code: string) => void;
 }
 interface Reference {
@@ -126,7 +137,8 @@ function sameTrigger(
   return (
     left.eventName === right.eventName &&
     left.actorUserId === right.actorUserId &&
-    left.assigneeUserId === right.assigneeUserId
+    left.assigneeUserId === right.assigneeUserId &&
+    left.commandCommentId === right.commandCommentId
   );
 }
 function publicCode(error: unknown): string {
@@ -179,6 +191,9 @@ export class InvestigationProgressReplies {
       "The registered repository identity changed.",
     );
     const context: ProgressReplyContext = {
+      ...(admission.mode === "e2e" || admission.trigger.eventName === "issue_comment"
+        ? { mode: "e2e" as const }
+        : {}),
       status: "preparing",
       receivedAt: admission.receivedAt,
       scope:
@@ -188,7 +203,7 @@ export class InvestigationProgressReplies {
               ...(admission.headSha === undefined ? {} : { headSha: admission.headSha }),
             }
           : { kind: "issue" },
-      nextStep: stoppedCopy("preparing").nextStep,
+      nextStep: stoppedCopy("preparing", undefined, admission.mode).nextStep,
     };
     this.#create(
       `progress-reply:assignment:${investigationContentDigest(admission.id).slice(0, 48)}`,
@@ -216,7 +231,7 @@ export class InvestigationProgressReplies {
     if (
       task.state !== "queued" ||
       task.parentTaskId !== null ||
-      !["pr-review", "issue-investigate"].includes(task.kind)
+      !["pr-review", "pr-e2e", "issue-investigate"].includes(task.kind)
     )
       return;
     const policy = this.#policy(task.repository.id);
@@ -244,10 +259,15 @@ export class InvestigationProgressReplies {
       trigger,
       task.createdAt,
       {
+        ...(task.kind === "pr-e2e" ? { mode: "e2e" as const } : {}),
         status: "queued",
         receivedAt: task.createdAt,
         scope: this.#scopeForTask(task),
-        nextStep: stoppedCopy("queued").nextStep,
+        ...(this.options.usageSummary === undefined
+          ? {}
+          : { usage: this.options.usageSummary(task.id) }),
+        nextStep: stoppedCopy("queued", undefined, task.kind === "pr-e2e" ? "e2e" : undefined)
+          .nextStep,
       },
       policy,
       null,
@@ -273,7 +293,11 @@ export class InvestigationProgressReplies {
   updateAssignment(receiptId: string, state: AssignmentProgressState, reasonCode?: string): void {
     const record = this.#assignment(receiptId);
     if (record === undefined || record.taskId !== null) return;
-    const copy = stoppedCopy(state, state === "failed" ? "source_preparation_failed" : reasonCode);
+    const copy = stoppedCopy(
+      state,
+      state === "failed" ? "source_preparation_failed" : reasonCode,
+      record.desired.context.mode,
+    );
     if (record.desired.context.status === state && record.desired.failure === copy.failure) return;
     this.#accept(
       record,
@@ -302,13 +326,16 @@ export class InvestigationProgressReplies {
       );
       const attempt = this.#latestAttempt(task.id);
       const stopReason = source?.report.loop.stopReason ?? attempt?.terminationReason ?? undefined;
-      const copy = stoppedCopy(task.state, stopReason);
+      const copy = stoppedCopy(task.state, stopReason, record.desired.context.mode);
       const startedAt =
         record.firstStartedAt ??
         attempt?.startedAt ??
         (task.state === "running" ? task.updatedAt : undefined);
       const context: ProgressReplyContext = {
         ...record.desired.context,
+        ...(this.options.usageSummary === undefined
+          ? {}
+          : { usage: this.options.usageSummary(task.id) }),
         status: task.state,
         scope: this.#scopeForTask(task),
         receivedAt: record.receivedAt,
@@ -322,7 +349,7 @@ export class InvestigationProgressReplies {
         context,
         copy.failure,
         source ?? null,
-        `task:${task.updatedAt}:${task.state}:${attempt?.number ?? 0}:${task.latestReportRef?.digest ?? ""}:${stopReason ?? ""}`,
+        `task:${task.updatedAt}:${task.state}:${attempt?.number ?? 0}:${task.latestReportRef?.digest ?? ""}:${stopReason ?? ""}:${investigationContentDigest(context.usage ?? null)}`,
         task.updatedAt,
       );
     } catch {
@@ -367,6 +394,9 @@ export class InvestigationProgressReplies {
       return;
     const context: ProgressReplyContext = {
       ...record.desired.context,
+      ...(this.options.usageSummary === undefined
+        ? {}
+        : { usage: this.options.usageSummary(task.id) }),
       status: "running",
       phase: checkpoint.lastPhase,
       attemptNumber: attempt.number,
@@ -375,11 +405,12 @@ export class InvestigationProgressReplies {
         completedRounds: checkpoint.round,
         adoptedAttemptIds: structuredClone(checkpoint.adoptedAttemptIds),
       },
-      nextStep: stoppedCopy("running").nextStep,
+      nextStep: stoppedCopy("running", undefined, record.desired.context.mode).nextStep,
     };
     if (
       record.desired.context.phase === context.phase &&
-      record.desired.context.attemptNumber === context.attemptNumber
+      record.desired.context.attemptNumber === context.attemptNumber &&
+      equal(record.desired.context.usage ?? null, context.usage ?? null)
     )
       return;
     this.#accept(
@@ -389,13 +420,64 @@ export class InvestigationProgressReplies {
       null,
       `phase:${attempt.id}:${checkpoint.id}:${checkpoint.version}`,
       checkpoint.recordedAt,
-      true,
+      "phase",
     );
+  }
+  /** Usage changes do not advance a task's phase, attempt, lifecycle, or sealed report. */
+  updateUsage(task: InvestigationTaskV1): void {
+    if (this.options.usageSummary === undefined) return;
+    try {
+      this.#atomic(() => {
+        const notificationId = investigationUsagePublicationPendingKey(task.id);
+        const record = this.#task(task.id);
+        if (record === undefined) {
+          this.options.store.delete("idempotency", notificationId);
+          return;
+        }
+        if (!this.#currentTask(record, task) || record.desired.context.status !== task.state)
+          return;
+        const usage = this.options.usageSummary!(task.id);
+        if (!equal(record.desired.context.usage ?? null, usage)) {
+          this.#accept(
+            record,
+            { ...record.desired.context, usage },
+            record.desired.failure,
+            this.#assertRevision(record.desired) ?? null,
+            `usage:${task.updatedAt}:${investigationContentDigest(usage)}`,
+            this.#now().toISOString(),
+            "usage",
+          );
+        }
+        this.options.store.delete("idempotency", notificationId);
+      });
+    } catch {
+      this.options.onError?.("progress_reply_usage_update_failed");
+    }
   }
   hasTask(taskId: string): boolean {
     return (
       this.options.store.has("idempotency", taskIndex(taskId)) ||
       this.options.store.has("idempotency", oldTaskId(taskId))
+    );
+  }
+  /** Match only durable comment identities, never the requesting user's login. */
+  isOwnComment(repositoryId: string, commentId: number): boolean {
+    if (!Number.isSafeInteger(commentId) || commentId < 1) return false;
+    const externalId = String(commentId);
+    return (
+      this.options.store.list<CommentPublication>(
+        "idempotency",
+        (record) =>
+          record !== null &&
+          typeof record === "object" &&
+          record.schemaVersion === 2 &&
+          typeof record.id === "string" &&
+          record.id.startsWith("progress-reply:") &&
+          record.repository?.id === repositoryId &&
+          (record.confirmed?.externalId === externalId ||
+            (record.operation?.dispatched === true &&
+              record.operation.request.externalId === externalId)),
+      ).length > 0
     );
   }
   getComment(
@@ -534,6 +616,22 @@ export class InvestigationProgressReplies {
       if (page.length < 100) break;
     }
     this.#started = true;
+    let usageCursor: string | undefined;
+    while (true) {
+      const notifications = this.options.store.pagePrefix<{ id: string; taskId: string }>(
+        "idempotency",
+        investigationUsagePublicationPendingPrefix,
+        100,
+        false,
+        usageCursor,
+      );
+      for (const notification of notifications) {
+        const task = this.options.store.get<InvestigationTaskV1>("tasks", notification.taskId);
+        if (task !== undefined) this.updateUsage(task);
+        usageCursor = notification.id;
+      }
+      if (notifications.length < 100) break;
+    }
     this.#wake();
   }
   async stop(): Promise<void> {
@@ -637,7 +735,7 @@ export class InvestigationProgressReplies {
       failure: null,
       reportRef: null,
       reportDigest: null,
-      policy: publicationPolicy(policy, target.kind),
+      policy: publicationPolicy(policy, target.kind, context.mode),
     };
     const record: CommentPublication = {
       schemaVersion: 2,
@@ -701,6 +799,7 @@ export class InvestigationProgressReplies {
       equal(record.repository, task.repository) &&
         record.target.kind === task.workItem.kind &&
         record.target.number === task.workItem.number &&
+        (record.desired.context.mode === "e2e") === (task.kind === "pr-e2e") &&
         (record.taskId === null || sameTask(record, task)),
       409,
       "progress_reply_task_conflict",
@@ -766,7 +865,7 @@ export class InvestigationProgressReplies {
     report: InvestigationResultV1 | null,
     sourceEventId: string,
     updatedAt: string,
-    phaseOnly = false,
+    throttle: "none" | "phase" | "usage" = "none",
   ): void {
     if (record.desired.sourceEventId === sourceEventId) return;
     const eventKey = `progress-reply:event:${investigationContentDigest([record.id, sourceEventId])}`;
@@ -791,7 +890,9 @@ export class InvestigationProgressReplies {
             },
       reportDigest: report === null ? null : investigationContentDigest(report),
       policy:
-        policy === null ? record.desired.policy : publicationPolicy(policy, record.target.kind),
+        policy === null
+          ? record.desired.policy
+          : publicationPolicy(policy, record.target.kind, context.mode),
     };
     this.options.store.insert("idempotency", revision.id, revision);
     this.options.store.insert("idempotency", eventKey, { revisionId: revision.id });
@@ -805,13 +906,29 @@ export class InvestigationProgressReplies {
         : grantValid
           ? "pending"
           : "paused";
-    const nextAt = uncertain
+    const scheduledAt = uncertain
       ? record.nextAttemptAt
       : keepConflict || !grantValid
         ? null
-        : phaseOnly
+        : throttle === "phase"
           ? Math.max(this.#now().valueOf(), record.nextPhaseAt)
-          : this.#now().valueOf();
+          : throttle === "usage" &&
+              record.confirmed !== null &&
+              record.confirmed.revision.context.status === context.status &&
+              record.confirmed.revision.context.attemptNumber === context.attemptNumber
+            ? Math.max(
+                this.#now().valueOf(),
+                Date.parse(record.confirmed.confirmedAt ?? record.confirmed.revision.updatedAt) +
+                  (this.options.usageIntervalMs ?? 30_000),
+              )
+            : this.#now().valueOf();
+    const nextAt =
+      throttle !== "none" &&
+      record.state === "pending" &&
+      record.nextAttemptAt !== null &&
+      scheduledAt !== null
+        ? Math.min(record.nextAttemptAt, scheduledAt)
+        : scheduledAt;
     this.#store({
       ...record,
       desired: revision,
@@ -902,7 +1019,9 @@ export class InvestigationProgressReplies {
       !actor.permissions.includes("action:execute") ||
       !this.options.enableExternalWrites ||
       record.operation?.dispatched ||
-      ["conflict", "unconfirmed", "synced"].includes(record.state) ||
+      ["conflict", "unconfirmed"].includes(record.state) ||
+      (record.state === "synced" &&
+        !(record.taskKind === "pr-e2e" && record.desired.reportRef !== null)) ||
       (record.claim?.expiresAt ?? 0) > this.#now().valueOf()
     )
       return false;
@@ -1075,6 +1194,24 @@ export class InvestigationProgressReplies {
           nextAttemptAt: this.#now().valueOf(),
           updatedAt: this.#now().toISOString(),
         };
+        if (record.taskKind === "pr-e2e" && record.desired.reportRef !== null) {
+          // Explicit synchronization may retry media publication without rerunning E2E.
+          // The previous revision, body, and delivery receipts remain immutable.
+          this.#accept(
+            record,
+            {
+              ...record.desired.context,
+              ...(this.options.usageSummary === undefined
+                ? {}
+                : { usage: this.options.usageSummary(record.taskId!) }),
+            },
+            record.desired.failure,
+            this.#assertRevision(record.desired)!,
+            `media-sync:${command.idempotencyKey}`,
+            this.#now().toISOString(),
+          );
+          record = this.#record(record.id);
+        }
       } else
         record = {
           ...record,
@@ -1251,6 +1388,7 @@ export class InvestigationProgressReplies {
             trigger: record.trigger,
             receivedAt: record.receivedAt,
             expectedAssigneeUserId: record.trigger.assigneeUserId,
+            ...(record.desired.context.mode === "e2e" ? { mode: "e2e" as const } : {}),
             ...(record.desired.context.scope?.headSha === undefined
               ? {}
               : { headSha: record.desired.context.scope.headSha }),
@@ -1289,7 +1427,7 @@ export class InvestigationProgressReplies {
       record = this.#mutate(id, claim, (current) => {
         if (superseded.attemptId !== null && !superseded.finished)
           this.#deliveries.finish(superseded.attemptId, {
-            state: "failed",
+            state: "cancelled",
             effect: "not_sent",
             reason: publicationReason("superseded"),
           });
@@ -1300,6 +1438,28 @@ export class InvestigationProgressReplies {
     if (operation === null) {
       const revision = record.desired;
       const report = this.#assertRevision(revision);
+      let trustedMediaMarkdown: string | undefined;
+      if (report !== undefined && record.taskKind === "pr-e2e") {
+        const task = this.options.store.get<InvestigationTaskV1>("tasks", record.taskId!);
+        requireCondition(
+          task !== undefined && sameTask(record, task),
+          409,
+          "progress_reply_report_binding_changed",
+          "The E2E task is unavailable for evidence publication.",
+        );
+        trustedMediaMarkdown =
+          this.options.prepareReportMedia === undefined
+            ? "## E2E evidence\n\nEvidence publication is unavailable. The recorded test outcome is unchanged."
+            : await this.options.prepareReportMedia(report, task);
+        record = this.#assertWritable(id, claim);
+        requireCondition(
+          record.desired.id === revision.id,
+          409,
+          "progress_reply_superseded",
+          "A newer task update superseded this prepared comment.",
+        );
+        this.#assertRevision(revision);
+      }
       const render = (result?: RenderedAutomaticReply) =>
         `${renderProgressReply({
           stage: revision.stage,
@@ -1311,6 +1471,7 @@ export class InvestigationProgressReplies {
           ...(report === undefined ? {} : { report }),
           ...(result === undefined ? {} : { result }),
           ...(revision.failure === null ? {} : { failure: revision.failure }),
+          ...(trustedMediaMarkdown === undefined ? {} : { trustedMediaMarkdown }),
         })}\n\n${record.marker}`;
       let body = render(
         revision.stage === "completed" && report !== undefined
@@ -1318,6 +1479,10 @@ export class InvestigationProgressReplies {
               report,
               revision.policy.resultTemplate,
               record.githubIdentity ?? identity,
+              {
+                ...(revision.context.usage === undefined ? {} : { usage: revision.context.usage }),
+                includeUsage: !revision.policy.templates[revision.stage].includes("{{usage}}"),
+              },
             )
           : undefined,
       );
@@ -1327,7 +1492,12 @@ export class InvestigationProgressReplies {
         revision.stage === "completed" &&
         report !== undefined
       ) {
-        body = render(renderAutomaticReplySummaryParts(report, record.githubIdentity ?? identity));
+        body = render(
+          renderAutomaticReplySummaryParts(report, record.githubIdentity ?? identity, {
+            ...(revision.context.usage === undefined ? {} : { usage: revision.context.usage }),
+            includeUsage: !revision.policy.templates[revision.stage].includes("{{usage}}"),
+          }),
+        );
         reasonCode = "summary_only";
       }
       requireCondition(
@@ -1343,7 +1513,7 @@ export class InvestigationProgressReplies {
           body,
           externalId: record.confirmed?.externalId ?? null,
           previousBody: record.confirmed?.body ?? null,
-          ...(record.confirmed === null
+          ...(record.confirmed === null && record.desired.context.mode !== "e2e"
             ? { expectedAssigneeUserId: record.trigger.assigneeUserId }
             : {}),
         },
@@ -1617,6 +1787,11 @@ export class InvestigationProgressReplies {
     const summaryOnly =
       operation.limitationCode === "summary_only" || record.reasonCode === "summary_only";
     const invalidReport = record.reasonCode === "report_binding_changed";
+    const deferUsage =
+      newer &&
+      record.desired.sourceEventId.startsWith("usage:") &&
+      record.desired.context.status === operation.revision.context.status &&
+      record.desired.context.attemptNumber === operation.revision.context.attemptNumber;
     const deferPhase =
       newer &&
       record.desired.context.status === "running" &&
@@ -1662,9 +1837,11 @@ export class InvestigationProgressReplies {
       reconcileRequested: false,
       nextAttemptAt:
         newer && !explicitRead && !invalidReport
-          ? deferPhase
-            ? nextPhaseAt
-            : this.#now().valueOf()
+          ? deferUsage
+            ? this.#now().valueOf() + (this.options.usageIntervalMs ?? 30_000)
+            : deferPhase
+              ? nextPhaseAt
+              : this.#now().valueOf()
           : null,
       nextPhaseAt,
     };
@@ -1747,9 +1924,9 @@ export class InvestigationProgressReplies {
         attempts += 1;
       }
       this.#deliveries.finish(attemptId, {
-        state: "failed",
+        state: superseded ? "cancelled" : "failed",
         effect: "not_sent",
-        reason: publicationReason(stopped ? "publisher_stopped" : code),
+        reason: publicationReason(superseded ? "superseded" : stopped ? "publisher_stopped" : code),
       });
       const retryable =
         !(error instanceof InvestigationRequestError) ||

@@ -3,6 +3,7 @@ import {
   type BeginCommentDeliveryInput,
   InvestigationCommentDeliveries,
 } from "./comment-deliveries.js";
+import { legacySupersededCommentDeliveryReason } from "./comment-delivery-state.js";
 import { InvestigationStore } from "./store.js";
 import type { InvestigationOperatorPrincipal } from "./types.js";
 
@@ -133,6 +134,79 @@ describe("InvestigationCommentDeliveries", () => {
       h.ledger.observe(row.id, { state: "unknown", reason: "A later read timed out." }).state,
     ).toBe("succeeded");
     expect(h.ledger.read(actor, row.id).observations).toHaveLength(2);
+  });
+
+  it("records an unsent cancellation separately from failures and rejects dispatched cancellations", () => {
+    const h = harness();
+    const first = h.ledger.begin(h.input);
+    for (const effect of ["rejected", "applied", "unknown"] as const)
+      expect(() => h.ledger.finish(first.id, { state: "cancelled", effect })).toThrow(
+        expect.objectContaining({ code: "comment_delivery_receipt_invalid" }),
+      );
+    const cancelled = h.ledger.finish(first.id, {
+      state: "cancelled",
+      reason: "A newer update replaced this prepared body.",
+    });
+    expect(cancelled).toMatchObject({ state: "cancelled", effect: "not_sent" });
+    expect(h.ledger.read(actor, first.id)).toEqual(cancelled);
+    expect(() => h.ledger.markDispatched(first.id)).toThrow(
+      expect.objectContaining({ code: "comment_delivery_finished" }),
+    );
+
+    const sent = h.ledger.begin({ ...h.input, id: "delivery-two" });
+    h.ledger.markDispatched(sent.id);
+    expect(() => h.ledger.finish(sent.id, { state: "cancelled", effect: "not_sent" })).toThrow(
+      expect.objectContaining({ code: "comment_delivery_receipt_invalid" }),
+    );
+    expect(h.ledger.read(actor, sent.id).state).toBe("sending");
+  });
+
+  it("projects only the exact legacy superseded receipt as cancelled without rewriting history", () => {
+    const h = harness();
+    const results = [
+      { state: "failed", effect: "not_sent", reason: legacySupersededCommentDeliveryReason },
+      { state: "cancelled", effect: "not_sent", reason: "A newer update replaced this body." },
+      {
+        state: "failed",
+        effect: "not_sent",
+        reason: `${legacySupersededCommentDeliveryReason} Extra.`,
+      },
+      { state: "failed", effect: "rejected", reason: legacySupersededCommentDeliveryReason },
+      { state: "unknown", effect: "unknown", reason: legacySupersededCommentDeliveryReason },
+      { state: "failed", effect: "not_sent", reason: "Comment preparation failed." },
+    ] as const;
+    for (const [index, result] of results.entries()) {
+      const id = `delivery-${index}`;
+      h.ledger.begin({ ...h.input, id });
+      h.ledger.finish(id, result);
+    }
+    const before = h.store.list("commentDeliveries");
+    expect(h.ledger.read(actor, "delivery-0").state).toBe("cancelled");
+    expect(h.store.get("commentDeliveries", "delivery-0")).toMatchObject({
+      state: "failed",
+      originalReceipt: { state: "failed", effect: "not_sent" },
+    });
+    const first = h.ledger.list(actor, { state: "cancelled", limit: 1 });
+    expect(first.items.map((item) => item.id)).toEqual(["delivery-1"]);
+    expect(first.nextCursor).not.toBeNull();
+    const second = h.ledger.list(actor, {
+      state: "cancelled",
+      limit: 1,
+      cursor: first.nextCursor!,
+    });
+    expect(second.items.map((item) => [item.id, item.state])).toEqual([
+      ["delivery-0", "cancelled"],
+    ]);
+    expect(second.nextCursor).toBeNull();
+    expect(h.ledger.list(actor, { state: "failed" }).items.map((item) => item.id)).toEqual([
+      "delivery-5",
+      "delivery-3",
+      "delivery-2",
+    ]);
+    expect(h.ledger.list(actor, { state: "unknown" }).items.map((item) => item.id)).toEqual([
+      "delivery-4",
+    ]);
+    expect(h.store.list("commentDeliveries")).toEqual(before);
   });
 
   it("deduplicates the same observation and rejects a different external comment identity", () => {

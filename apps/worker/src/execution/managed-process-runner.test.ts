@@ -198,6 +198,145 @@ describe("ProductionManagedProcessRunner", () => {
     expect(result).toEqual({ exitCode: 0, stdout: "revision\n", stderr: "diagnostic\n" });
     expect(processHost.seenSignal).toBe(signal);
   });
+  it("preserves every successful output byte up to the combined one-MiB ceiling", async () => {
+    const processHost = new FakeProcessHost();
+    const stderr = "diagnostic\n";
+    const ending = "中🙂done\n";
+    const stdout = "x".repeat(1024 * 1024 - Buffer.byteLength(stderr + ending)) + ending;
+    processHost.startHandler = async () => managedProcess(stdout, stderr);
+    const result = await new ProductionManagedProcessRunner({
+      maximumErrorPreviewBytes: 16 * 1024,
+    }).run(launchSpec(1024 * 1024), { processHost, signal: new AbortController().signal });
+    expect(result).toEqual({ exitCode: 0, stdout, stderr });
+    expect(Buffer.byteLength(result.stdout + result.stderr)).toBe(1024 * 1024);
+  });
+  it("retains the final compiler error after long restore output on a nonzero exit", async () => {
+    const processHost = new FakeProcessHost();
+    const errorLine = "error MSB4019: The imported build targets could not be found.\n";
+    processHost.startHandler = async () =>
+      managedProcess(
+        "Restored package.\n".repeat(6000) + errorLine,
+        "warning\n".repeat(3000) + "error NU1301: Package feed unavailable.\n",
+        exitEvent({ exitCode: 1 }),
+      );
+    const error = await new ProductionManagedProcessRunner({ maximumErrorPreviewBytes: 16 * 1024 })
+      .run(launchSpec(1024 * 1024), { processHost, signal: new AbortController().signal })
+      .catch((failure: unknown) => failure as ManagedProcessRunError);
+    expect(error).toMatchObject({ code: "NON_ZERO_EXIT", exitCode: 1, outputTruncated: true });
+    expect(error.stdout.endsWith(errorLine)).toBe(true);
+    expect(error.stderr.endsWith("error NU1301: Package feed unavailable.\n")).toBe(true);
+    expect(Buffer.byteLength(error.stdout)).toBeLessThanOrEqual(16 * 1024);
+    expect(Buffer.byteLength(error.stderr)).toBeLessThanOrEqual(16 * 1024);
+  });
+  it("keeps independent final stdout and stderr suffixes after the shared budget overflows", async () => {
+    const processHost = new FakeProcessHost();
+    let stdoutDrained = false;
+    let stderrDrained = false;
+    processHost.startHandler = async () => ({
+      ...managedProcess("", "", exitEvent({ exitCode: 1 })),
+      stdout: Readable.from(
+        (async function* () {
+          yield "r".repeat(256);
+          yield "estoring";
+          yield "error MSB4019\n";
+          stdoutDrained = true;
+        })(),
+      ),
+      stderr: Readable.from(
+        (async function* () {
+          yield "w".repeat(256);
+          yield "arning";
+          yield "error NU1301\n";
+          stderrDrained = true;
+        })(),
+      ),
+    });
+    const error = await new ProductionManagedProcessRunner({
+      maximumCapturedOutputBytes: 64,
+      maximumErrorPreviewBytes: 64,
+    })
+      .run(launchSpec(), { processHost, signal: new AbortController().signal })
+      .catch((failure: unknown) => failure as ManagedProcessRunError);
+    expect(error).toMatchObject({ code: "OUTPUT_TRUNCATED", outputTruncated: true });
+    expect(error.stdout.endsWith("error MSB4019\n")).toBe(true);
+    expect(error.stderr.endsWith("error NU1301\n")).toBe(true);
+    expect(Buffer.byteLength(error.stdout) + Buffer.byteLength(error.stderr)).toBeLessThanOrEqual(
+      64,
+    );
+    expect(stdoutDrained && stderrDrained).toBe(true);
+  });
+  it("keeps valid UTF-8 suffixes when the ring and preview cut through a multibyte character", async () => {
+    const processHost = new FakeProcessHost();
+    const ending = Buffer.from("中🙂结尾");
+    processHost.startHandler = async () => ({
+      ...managedProcess("", "", exitEvent({ exitCode: 1 })),
+      stdout: Readable.from([
+        Buffer.alloc(200, 114),
+        ending.subarray(0, 4),
+        ending.subarray(4, 6),
+        ending.subarray(6),
+      ]),
+    });
+    const error = await new ProductionManagedProcessRunner({
+      maximumCapturedOutputBytes: 128,
+      maximumErrorPreviewBytes: 11,
+    })
+      .run(launchSpec(), { processHost, signal: new AbortController().signal })
+      .catch((failure: unknown) => failure as ManagedProcessRunError);
+    expect(error).toMatchObject({
+      code: "OUTPUT_TRUNCATED",
+      stdout: "🙂结尾",
+      outputTruncated: true,
+    });
+    expect(error.stdout).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(error.stdout)).toBeLessThanOrEqual(11);
+  });
+  it("does not invent a replacement character for an incomplete terminal UTF-8 sequence", async () => {
+    const processHost = new FakeProcessHost();
+    processHost.startHandler = async () =>
+      managedProcess(
+        Buffer.concat([Buffer.from("error: "), Buffer.from([0xe4, 0xb8])]),
+        "",
+        exitEvent({ exitCode: 1 }),
+      );
+    const error = await new ProductionManagedProcessRunner()
+      .run(launchSpec(), { processHost, signal: new AbortController().signal })
+      .catch((failure: unknown) => failure as ManagedProcessRunError);
+    expect(error).toMatchObject({
+      code: "NON_ZERO_EXIT",
+      stdout: "error: ",
+      outputTruncated: true,
+    });
+  });
+  it("still rejects malformed UTF-8 on a successful process instead of returning preview text", async () => {
+    const processHost = new FakeProcessHost();
+    processHost.startHandler = async () => managedProcess(Buffer.from([0xff]), "");
+    await expect(
+      new ProductionManagedProcessRunner().run(launchSpec(), {
+        processHost,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_UTF8_OUTPUT" });
+  });
+  it("preserves zero-preview secrecy for nonzero exits and overflowing captures", async () => {
+    const processHost = new FakeProcessHost();
+    processHost.startHandler = async () =>
+      managedProcess(
+        "private-stdout".repeat(100),
+        "private-stderr".repeat(100),
+        exitEvent({ exitCode: 1 }),
+      );
+    for (const maximumCapturedOutputBytes of [64, 16 * 1024]) {
+      const error = await new ProductionManagedProcessRunner({
+        maximumCapturedOutputBytes,
+        maximumErrorPreviewBytes: 0,
+      })
+        .run(launchSpec(16 * 1024), { processHost, signal: new AbortController().signal })
+        .catch((failure: unknown) => failure as ManagedProcessRunError);
+      expect(error).toMatchObject({ stdout: "", stderr: "", outputTruncated: true });
+      expect(String(error)).not.toContain("private-");
+    }
+  });
 
   it.each([
     {

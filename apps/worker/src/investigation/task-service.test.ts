@@ -1,6 +1,7 @@
 import {
   createInvestigationPreview as createInvestigationFixture,
   type InvestigationClaim,
+  type InvestigationTaskKind,
 } from "@agentic-review/contracts";
 import { createInvestigationCheckpoint } from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
@@ -59,7 +60,147 @@ function fixture() {
   return { client, claim, logger };
 }
 
+function schedulingClaim(kind: InvestigationTaskKind, id: string): InvestigationClaim {
+  const claim = claimFixture();
+  return {
+    ...claim,
+    task: { ...claim.task, id: `task-${id}`, kind },
+    attempt: { ...claim.attempt, id: `attempt-${id}`, taskId: `task-${id}` },
+    lease: { ...claim.lease, attemptId: `attempt-${id}` },
+    checkpoint: null,
+  };
+}
+
+const executionKinds = [
+  "pr-e2e",
+  "pr-verify",
+  "issue-verify",
+  "reproduction-setup",
+  "issue-fix",
+  "feature-implement",
+] as const satisfies readonly InvestigationTaskKind[];
+
 describe("InvestigationTaskService", () => {
+  it.each(["static-first", "e2e-first"] as const)(
+    "fills independent pools and excludes full pools from claims (%s)",
+    async (order) => {
+      const f = fixture();
+      const staticClaims = [
+        schedulingClaim("pr-review", "static-1"),
+        schedulingClaim("issue-investigate", "static-2"),
+      ];
+      const executionClaim = schedulingClaim("pr-e2e", "e2e");
+      const claims =
+        order === "static-first"
+          ? [...staticClaims, executionClaim]
+          : [executionClaim, ...staticClaims];
+      let nextClaim = 0;
+      f.claim.mockImplementation(async () => claims[nextClaim++] ?? null);
+      const allStarted = Promise.withResolvers<void>();
+      const finish = Promise.withResolvers<void>();
+      const signals: AbortSignal[] = [];
+      const service = new InvestigationTaskService({
+        client: f.client,
+        executor: {
+          execute: async (_claim, signal) => {
+            signals.push(signal);
+            if (signals.length === claims.length) allStarted.resolve();
+            await finish.promise;
+          },
+        },
+        supportedKinds: ["pr-review", "issue-investigate", ...executionKinds],
+        maximumConcurrentStaticTasks: 2,
+        logger: f.logger,
+      });
+      const running = service.run();
+      await allStarted.promise;
+      expect(f.claim).toHaveBeenCalledTimes(3);
+      const requests = f.claim.mock.calls.map(([request]) => request.supportedKinds);
+      expect(requests[0]).toEqual(["pr-review", "issue-investigate", ...executionKinds]);
+      if (order === "static-first") {
+        expect(requests[1]).toEqual(requests[0]);
+        expect(requests[2]).toEqual(executionKinds);
+      } else {
+        expect(requests[1]).toEqual(["pr-review", "issue-investigate"]);
+        expect(requests[2]).toEqual(["pr-review", "issue-investigate"]);
+      }
+      service.requestDrain();
+      expect(signals.every((signal) => !signal.aborted)).toBe(true);
+      finish.resolve();
+      await running;
+    },
+  );
+
+  it.each(executionKinds)("keeps %s in the single-slot execution pool", async (kind) => {
+    const f = fixture();
+    const first = schedulingClaim(kind, "first");
+    const second = schedulingClaim("pr-e2e", "second");
+    f.claim.mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValue(null);
+    const firstStarted = Promise.withResolvers<void>();
+    const finishFirst = Promise.withResolvers<void>();
+    const order: string[] = [];
+    const service = new InvestigationTaskService({
+      client: f.client,
+      executor: {
+        execute: async (claim) => {
+          order.push(claim.attempt.id);
+          if (claim.attempt.id === first.attempt.id) {
+            firstStarted.resolve();
+            await finishFirst.promise;
+          } else service.requestDrain();
+        },
+      },
+      supportedKinds: [...executionKinds],
+      maximumConcurrentStaticTasks: 4,
+      logger: f.logger,
+    });
+    const running = service.run();
+    await firstStarted.promise;
+    expect(f.claim).toHaveBeenCalledTimes(1);
+    finishFirst.resolve();
+    await running;
+    expect(order).toEqual([first.attempt.id, second.attempt.id]);
+    expect(f.claim).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["static", "e2e"] as const)(
+    "restricts new claims to the %s Worker role",
+    async (role) => {
+      const f = fixture();
+      const kind = role === "static" ? "pr-review" : "pr-e2e";
+      f.claim.mockResolvedValue(schedulingClaim(kind, role));
+      const service = new InvestigationTaskService({
+        client: f.client,
+        executor: { execute: async () => service.requestDrain() },
+        supportedKinds: ["pr-review", "issue-investigate", ...executionKinds],
+        role,
+        logger: f.logger,
+      });
+      await service.run();
+      expect(f.claim).toHaveBeenCalledWith(
+        {
+          supportedKinds:
+            role === "static" ? ["pr-review", "issue-investigate"] : [...executionKinds],
+        },
+        expect.any(AbortSignal),
+      );
+    },
+  );
+
+  it("rejects a role with no configured matching kinds", () => {
+    const f = fixture();
+    expect(
+      () =>
+        new InvestigationTaskService({
+          client: f.client,
+          executor: { execute: async () => undefined },
+          supportedKinds: ["issue-investigate"],
+          role: "e2e",
+          logger: f.logger,
+        }),
+    ).toThrow(/match the Worker role/);
+  });
+
   it("drains an accepted native task and prevents any additional claim", async () => {
     const f = fixture();
     const execute = vi.fn<InvestigationClaimExecutor["execute"]>(async () => {
@@ -156,52 +297,123 @@ describe("InvestigationTaskService", () => {
     expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain("sensitive upstream response");
   });
 
-  it("aborts concurrent attempts and waits for their cleanup before rejecting", async () => {
+  it.each(["issue-investigate", "pr-e2e"] as const)(
+    "drains after a failure without aborting a concurrent %s attempt",
+    async (peerKind) => {
+      const f = fixture();
+      const first = schedulingClaim("issue-investigate", "first");
+      const second = schedulingClaim(peerKind, "second");
+      f.claim.mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValue(null);
+      const secondStarted = Promise.withResolvers<void>();
+      const failureRecorded = Promise.withResolvers<void>();
+      f.logger.error.mockImplementation(() => failureRecorded.resolve());
+      const finishCleanup = Promise.withResolvers<void>();
+      const order: string[] = [];
+      let peerSignal: AbortSignal | undefined;
+      const service = new InvestigationTaskService({
+        client: f.client,
+        executor: {
+          execute: async (claim, signal) => {
+            if (claim.attempt.id === first.attempt.id) {
+              await secondStarted.promise;
+              throw new Error("Synthetic terminal submission failure.");
+            }
+            peerSignal = signal;
+            secondStarted.resolve();
+            await finishCleanup.promise;
+            order.push("peer.cleanup");
+          },
+        },
+        supportedKinds:
+          peerKind === "issue-investigate"
+            ? ["issue-investigate"]
+            : ["issue-investigate", "pr-e2e"],
+        maximumConcurrentTasks: peerKind === "issue-investigate" ? 2 : 1,
+        logger: f.logger,
+      });
+      const running = service.run().catch((error: unknown) => {
+        order.push("run.rejected");
+        return error;
+      });
+      await failureRecorded.promise;
+      expect(peerSignal?.aborted).toBe(false);
+      expect(order).toEqual([]);
+      finishCleanup.resolve();
+      expect(await running).toMatchObject({
+        message: "Investigation attempt could not complete its terminal submission.",
+      });
+      await expect(service.stop()).rejects.toThrow(/terminal submission/);
+      expect(order).toEqual(["peer.cleanup", "run.rejected"]);
+      expect(f.claim).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("waits for active attempts before rejecting a permanent claim failure", async () => {
     const f = fixture();
-    const first = claimFixture();
-    const second = {
-      ...claimFixture(),
-      attempt: { ...first.attempt, id: "second-attempt" },
-    };
-    f.claim.mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValue(null);
-    const secondStarted = Promise.withResolvers<void>();
-    const secondAborted = Promise.withResolvers<void>();
-    const finishCleanup = Promise.withResolvers<void>();
+    const claimFailed = Promise.withResolvers<void>();
+    f.claim.mockResolvedValueOnce(claimFixture()).mockImplementation(async () => {
+      claimFailed.resolve();
+      throw { code: "unauthorized", retryable: false };
+    });
+    const finish = Promise.withResolvers<void>();
     const order: string[] = [];
+    let activeSignal: AbortSignal | undefined;
     const service = new InvestigationTaskService({
       client: f.client,
       executor: {
-        execute: async (claim, signal) => {
-          if (claim.attempt.id === first.attempt.id) {
-            await secondStarted.promise;
-            throw new Error("Synthetic terminal submission failure.");
-          }
-          secondStarted.resolve();
-          await new Promise<void>((resolve) =>
-            signal.addEventListener("abort", () => resolve(), { once: true }),
-          );
-          order.push("peer.aborted");
-          secondAborted.resolve();
-          await finishCleanup.promise;
-          order.push("peer.cleanup");
+        execute: async (_claim, signal) => {
+          activeSignal = signal;
+          await finish.promise;
+          order.push("attempt.finished");
         },
       },
       supportedKinds: ["issue-investigate"],
-      maximumConcurrentTasks: 2,
+      maximumConcurrentStaticTasks: 2,
       logger: f.logger,
     });
     const running = service.run().catch((error: unknown) => {
       order.push("run.rejected");
       return error;
     });
-    await secondAborted.promise;
-    expect(order).toEqual(["peer.aborted"]);
-    finishCleanup.resolve();
-    expect(await running).toMatchObject({
-      message: "Investigation attempt could not complete its terminal submission.",
-    });
-    await expect(service.stop()).rejects.toThrow(/terminal submission/);
-    expect(order).toEqual(["peer.aborted", "peer.cleanup", "run.rejected"]);
-    expect(f.claim).toHaveBeenCalledTimes(2);
+    await claimFailed.promise;
+    expect(activeSignal?.aborted).toBe(false);
+    expect(order).toEqual([]);
+    finish.resolve();
+    expect(await running).toMatchObject({ code: "unauthorized" });
+    expect(order).toEqual(["attempt.finished", "run.rejected"]);
   });
+
+  it.each(["drain", "stop"] as const)(
+    "tracks a claim accepted while %s is requested",
+    async (operation) => {
+      const f = fixture();
+      const accepted = Promise.withResolvers<InvestigationClaim>();
+      f.claim.mockReturnValueOnce(accepted.promise);
+      const started = Promise.withResolvers<void>();
+      const finish = Promise.withResolvers<void>();
+      let acceptedSignal: AbortSignal | undefined;
+      const service = new InvestigationTaskService({
+        client: f.client,
+        executor: {
+          execute: async (_claim, signal) => {
+            acceptedSignal = signal;
+            started.resolve();
+            await finish.promise;
+          },
+        },
+        supportedKinds: ["issue-investigate"],
+        logger: f.logger,
+      });
+      const running = service.run();
+      const stopping = operation === "stop" ? service.stop() : undefined;
+      if (operation === "drain") service.requestDrain();
+      accepted.resolve(claimFixture());
+      await started.promise;
+      expect(acceptedSignal?.aborted).toBe(operation === "stop");
+      expect(f.claim).toHaveBeenCalledTimes(1);
+      finish.resolve();
+      await running;
+      await stopping;
+    },
+  );
 });

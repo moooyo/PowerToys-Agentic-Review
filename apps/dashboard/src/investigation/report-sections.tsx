@@ -247,7 +247,7 @@ export function CoveragePanel({ report }: { report: InvestigationReportMetadata 
           label={`${report.recheck.validFinalVersionRecheckCount}/${report.recheck.finalFindingCount} final findings rechecked`}
           size="small"
         />
-        <Chip label={`${report.loop.completedRounds} loop rounds`} size="small" />
+        <Chip label={`${report.loop.completedRounds} accepted analysis rounds`} size="small" />
         <Chip label={`Stop: ${report.loop.stopReason}`} size="small" />
       </Stack>
       {report.coverage.includedUnits.map((unit) => (

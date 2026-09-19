@@ -40,6 +40,9 @@ export function createModelEditAdapter(
   options: ModelEditRunnerOptions,
 ): InvestigationModelEditAdapter {
   return {
+    async markUsageDisposition(invocationId, disposition) {
+      await options.usageJournal?.update(invocationId, { disposition });
+    },
     async execute(input, context) {
       context.signal.throwIfAborted();
       if (!options.staticConfiguration.verified)
@@ -191,6 +194,9 @@ export function createModelEditAdapter(
       context.signal.throwIfAborted();
       context.onProgress?.();
       const response = await runner.execute({
+        toolPolicy: "passive_proposal",
+        usageContext: { taskId: task.id, attemptId: attempt.id, purpose: "model_edit" },
+        ...(context.usageLease === undefined ? {} : { usageLease: context.usageLease }),
         workspace,
         signal: context.signal,
         prompt,
@@ -198,51 +204,59 @@ export function createModelEditAdapter(
         hardTimeoutMs: task.budget.maxDurationMs,
         maximumResultBytes: task.budget.maxReportBytes,
       });
-      context.signal.throwIfAborted();
-      if (!Value.Check(InvestigationModelEditsV1Schema, response.value))
-        throw new ModelEditRunnerError(
-          "MODEL_EDIT_OUTPUT_INVALID",
-          "The model edit proposal does not match its authoritative schema.",
-        );
-      const originals = new Map(files.map((file) => [file.path.toLowerCase(), file]));
-      const seen = new Set<string>();
-      const edits: InvestigationModelEditsV1["edits"] = [];
-      for (const edit of response.value.edits) {
-        const normalized = canonicalSourcePath(edit.path);
-        const key = normalized.toLowerCase();
-        const authorizedPath = allowed.get(key);
-        const original = originals.get(key);
-        if (authorizedPath === undefined || original === undefined || seen.has(key))
+      try {
+        context.signal.throwIfAborted();
+        if (!Value.Check(InvestigationModelEditsV1Schema, response.value))
           throw new ModelEditRunnerError(
-            "MODEL_EDIT_PATH_INVALID",
-            "The model proposal contains an unapproved or duplicate source path.",
+            "MODEL_EDIT_OUTPUT_INVALID",
+            "The model edit proposal does not match its authoritative schema.",
           );
-        if (
-          edit.expectedDigest !== original.digest ||
-          (original.content === null && edit.content === null)
-        )
-          throw new ModelEditRunnerError(
-            "MODEL_EDIT_INPUT_CHANGED",
-            "The proposed edit does not match the original source file identity.",
-          );
-        seen.add(key);
-        edits.push({
-          path: authorizedPath,
-          expectedDigest: original.digest,
-          content: edit.content,
-        });
+        const originals = new Map(files.map((file) => [file.path.toLowerCase(), file]));
+        const seen = new Set<string>();
+        const edits: InvestigationModelEditsV1["edits"] = [];
+        for (const edit of response.value.edits) {
+          const normalized = canonicalSourcePath(edit.path);
+          const key = normalized.toLowerCase();
+          const authorizedPath = allowed.get(key);
+          const original = originals.get(key);
+          if (authorizedPath === undefined || original === undefined || seen.has(key))
+            throw new ModelEditRunnerError(
+              "MODEL_EDIT_PATH_INVALID",
+              "The model proposal contains an unapproved or duplicate source path.",
+            );
+          if (
+            edit.expectedDigest !== original.digest ||
+            (original.content === null && edit.content === null)
+          )
+            throw new ModelEditRunnerError(
+              "MODEL_EDIT_INPUT_CHANGED",
+              "The proposed edit does not match the original source file identity.",
+            );
+          seen.add(key);
+          edits.push({
+            path: authorizedPath,
+            expectedDigest: original.digest,
+            content: edit.content,
+          });
+        }
+        await workspace.assertIntegrity();
+        await workspace.assertSourceBinding();
+        context.signal.throwIfAborted();
+        return {
+          proposal: {
+            schemaVersion: "InvestigationModelEditsV1",
+            summary: response.value.summary,
+            edits,
+          },
+          usage: response.usage,
+        };
+      } catch (error) {
+        if (response.usage.invocationId !== undefined)
+          await options.usageJournal?.update(response.usage.invocationId, {
+            disposition: "rejected",
+          });
+        throw error;
       }
-      await workspace.assertIntegrity();
-      await workspace.assertSourceBinding();
-      context.signal.throwIfAborted();
-      return {
-        proposal: {
-          schemaVersion: "InvestigationModelEditsV1",
-          summary: response.value.summary,
-          edits,
-        },
-        usage: response.usage,
-      };
     },
   };
 }

@@ -8,6 +8,11 @@ import {
   Sha256Schema,
 } from "./common.js";
 import {
+  InvestigationE2eExecutionSchema,
+  InvestigationE2eResultSchema,
+  validateInvestigationE2eBindings,
+} from "./investigation-e2e.js";
+import {
   InvestigationInputSnapshotV1Schema,
   InvestigationPlanExecutionBindingSchema,
   InvestigationPlanStepStartedSchema,
@@ -17,6 +22,7 @@ import {
   InvestigationSourceCoverageSchema,
   validateInvestigationSourceCoverage,
 } from "./investigation-source.js";
+import { InvestigationUsageSummarySchema } from "./investigation-usage.js";
 
 const object = <T extends TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -28,6 +34,7 @@ const idempotencyKey = Type.String({ minLength: 1, maxLength: 128, pattern: "\\S
 
 export const InvestigationTaskKindSchema = Type.Union([
   Type.Literal("pr-review"),
+  Type.Literal("pr-e2e"),
   Type.Literal("issue-investigate"),
   Type.Literal("pr-verify"),
   Type.Literal("issue-verify"),
@@ -193,6 +200,7 @@ export const InvestigationArtifactV1Schema = object({
   kind: Type.Union([
     Type.Literal("log"),
     Type.Literal("image"),
+    Type.Literal("video"),
     Type.Literal("trace"),
     Type.Literal("patch"),
     Type.Literal("report"),
@@ -652,6 +660,7 @@ export const InvestigationReportMetadataSchema = object({
   completeness: Type.Union([Type.Literal("complete"), Type.Literal("partial")]),
   summary: text,
   logicalContentDigest: Sha256Schema,
+  usage: Type.Optional(InvestigationUsageSummarySchema),
   coverage: InvestigationCoverageSchema,
   recheck: object({
     finalFindingCount: NonNegativeIntegerSchema,
@@ -665,6 +674,7 @@ export const InvestigationReportMetadataSchema = object({
 });
 export type InvestigationReportMetadata = Static<typeof InvestigationReportMetadataSchema>;
 export const InvestigationResultContextSchema = object({
+  e2e: Type.Optional(InvestigationE2eResultSchema),
   repository: InvestigationRepositorySchema,
   workItem: InvestigationWorkItemSchema,
   task: object({
@@ -749,6 +759,11 @@ export type InvestigationUnacceptedModelUsage = Static<
   typeof InvestigationUnacceptedModelUsageSchema
 >;
 export const InvestigationRuntimeStateSchema = object({
+  e2eExecution: Type.Optional(InvestigationE2eExecutionSchema),
+  e2e: Type.Optional(InvestigationE2eResultSchema),
+  reviewMode: Type.Optional(
+    Type.Union([Type.Literal("local_checkout"), Type.Literal("local_snapshot")]),
+  ),
   sourceCoverage: Type.Optional(InvestigationSourceCoverageSchema),
   modelExecutions: Type.Optional(Type.Array(InvestigationModelExecutionSchema)),
   unacceptedModelUsage: Type.Optional(Type.Array(InvestigationUnacceptedModelUsageSchema)),
@@ -974,6 +989,7 @@ export const InvestigationReportHeaderV1Schema = object({
     completeness: InvestigationReportMetadataSchema.properties.completeness,
     summary: text,
     logicalContentDigest: Sha256Schema,
+    usage: Type.Optional(InvestigationUsageSummarySchema),
     coverage: object({
       scopeManifest: InvestigationVersionRefSchema,
       includedUnitCount: NonNegativeIntegerSchema,
@@ -1152,6 +1168,7 @@ export type InvestigationHeartbeatResponse = Static<typeof InvestigationHeartbea
 export const InvestigationCheckpointRequestSchema = Type.Union([
   object({
     kind: Type.Literal("analysis"),
+    invocationId: Type.Optional(EntityIdSchema),
     lease: InvestigationWorkerLeaseSchema,
     round: InvestigationLoopRoundV1Schema,
     usage: Type.Omit(InvestigationConsumptionSchema, ["rounds"]),
@@ -1170,6 +1187,8 @@ export const InvestigationCheckpointRequestSchema = Type.Union([
   }),
   object({
     kind: Type.Literal("interrupt"),
+    /** Trusted Worker statement emitted only before source preparation returned a workspace. */
+    modelInvocationState: Type.Optional(Type.Literal("not_started")),
     lease: InvestigationWorkerLeaseSchema,
     reason: Type.Union([
       Type.Literal("blocked"),
@@ -1365,6 +1384,26 @@ export function validateInvestigationResult(
   const findings = unique(result.findings, "/findings");
   const evidence = unique(result.verificationEvidence, "/verificationEvidence");
   const artifacts = unique(result.artifacts, "/artifacts");
+  const e2e = result.context.e2e;
+  const e2eSubject = subjects.get(result.context.task.subjectRef);
+  if (e2e !== undefined) {
+    for (const message of validateInvestigationE2eBindings({
+      e2e,
+      taskId: result.context.task.id,
+      taskKind: result.context.task.kind,
+      subjectRef: result.context.task.subjectRef,
+      headSha: e2eSubject?.kind === "original_pr" ? e2eSubject.headSha : null,
+      completed: result.outcome === "completed",
+      artifacts: result.artifacts,
+      evidence: result.verificationEvidence,
+    }))
+      add("/context/e2e", "INVALID_E2E_EVIDENCE", message);
+  } else if (result.context.task.kind === "pr-e2e" && result.outcome === "completed")
+    add(
+      "/context/e2e",
+      "E2E_RESULT_REQUIRED",
+      "Completed E2E tasks require their feature assertions and media evidence.",
+    );
   const sourceArtifacts = unique(result.context.sourceArtifacts ?? [], "/context/sourceArtifacts");
   errors.push(
     ...validateSourceArtifactBindings({
@@ -2453,11 +2492,23 @@ export function validateInvestigationTask(
   }
   if (task.kind.startsWith("pr-") !== (task.workItem.kind === "pull_request"))
     add("/kind", "TASK_WORK_ITEM_MISMATCH", "PR and Issue task kinds must match their work item.");
-  if (task.kind === "pr-review" && primary?.kind !== "original_pr")
+  if ((task.kind === "pr-review" || task.kind === "pr-e2e") && primary?.kind !== "original_pr")
     add(
       "/subjectRef",
       "ORIGINAL_PR_REQUIRED",
       "A PR review must freeze the original base/head source pair.",
+    );
+  if (
+    task.kind === "pr-e2e" &&
+    (task.executionPolicy.mode !== "execute" ||
+      task.parentTaskId !== null ||
+      task.parentReportRef !== null ||
+      task.planRef !== null)
+  )
+    add(
+      "/kind",
+      "E2E_ROOT_EXECUTION_REQUIRED",
+      "E2E is an authorized root execution task and does not require a parent report or saved plan.",
     );
   for (const ref of task.executionPolicy.allowedSubjectRefs)
     if (!subjects.has(ref))
@@ -2579,6 +2630,25 @@ export function validateInvestigationAnalysisForTask(
   const add = (path: string, code: string, message: string) => {
     errors.push({ path, code, message });
   };
+  if (
+    runtime.reviewMode === "local_checkout" &&
+    (task.executionPolicy.mode !== "source_read" ||
+      (task.kind !== "pr-review" && task.kind !== "issue-investigate"))
+  )
+    add(
+      "/runtime/reviewMode",
+      "REVIEW_MODE_TASK_MISMATCH",
+      "Local checkout review mode belongs to source-reading static investigation tasks.",
+    );
+  if (
+    runtime.reviewMode === "local_snapshot" &&
+    (task.executionPolicy.mode !== "snapshot_only" || task.kind !== "issue-investigate")
+  )
+    add(
+      "/runtime/reviewMode",
+      "REVIEW_MODE_TASK_MISMATCH",
+      "Local snapshot review mode belongs to snapshot-only issue investigation tasks.",
+    );
   const subjects = new Map([...task.subjects, ...runtime.subjects].map((item) => [item.id, item]));
   const allowed = new Set(task.executionPolicy.allowedSubjectRefs);
   // Derived patches are authorized only through a trusted runtime record linked to an allowed immutable base.
@@ -2644,20 +2714,39 @@ export function validateInvestigationAnalysisForTask(
       })),
     );
     const coverageUnits = new Map(analysis.coverage.includedUnits.map((unit) => [unit.id, unit]));
-    for (const chunk of runtime.sourceCoverage.manifest.chunks) {
-      const unit = coverageUnits.get(chunk.id);
-      if (
-        !unit ||
-        unit.kind !== "pr_diff_chunk" ||
-        unit.subjectRef !== task.subjectRef ||
-        unit.paths.length !== 1 ||
-        unit.paths[0] !== chunk.path
-      )
-        add(
-          "/coverage/includedUnits",
-          "SOURCE_COVERAGE_UNIT_MISSING",
-          "Every registered PR source chunk must remain an explicit coverage unit for its exact path and subject.",
-        );
+    if (runtime.reviewMode === "local_checkout") {
+      for (const file of runtime.sourceCoverage.manifest.files) {
+        if (
+          !analysis.coverage.includedUnits.some(
+            (unit) =>
+              unit.kind === "source_file" &&
+              unit.subjectRef === task.subjectRef &&
+              unit.paths.length === 1 &&
+              unit.paths[0] === file.path,
+          )
+        )
+          add(
+            "/coverage/includedUnits",
+            "SOURCE_COVERAGE_UNIT_MISSING",
+            "Every registered changed file must remain an explicit coverage unit for its exact path and subject.",
+          );
+      }
+    } else {
+      for (const chunk of runtime.sourceCoverage.manifest.chunks) {
+        const unit = coverageUnits.get(chunk.id);
+        if (
+          !unit ||
+          unit.kind !== "pr_diff_chunk" ||
+          unit.subjectRef !== task.subjectRef ||
+          unit.paths.length !== 1 ||
+          unit.paths[0] !== chunk.path
+        )
+          add(
+            "/coverage/includedUnits",
+            "SOURCE_COVERAGE_UNIT_MISSING",
+            "Every registered PR source chunk must remain an explicit coverage unit for its exact path and subject.",
+          );
+      }
     }
   }
   const records: { subjectRef: string; path: string }[] = [
@@ -2754,5 +2843,19 @@ export function validateInvestigationAnalysisForTask(
       "UNAUTHORIZED_EXECUTION",
       "Read-only analysis cannot incorporate repository execution performed outside its policy.",
     );
+  if (runtime.e2e !== undefined) {
+    const primary = task.subjects.find((subject) => subject.id === task.subjectRef);
+    for (const message of validateInvestigationE2eBindings({
+      e2e: runtime.e2e,
+      taskId: task.id,
+      taskKind: task.kind,
+      subjectRef: task.subjectRef,
+      headSha: primary?.kind === "original_pr" ? primary.headSha : null,
+      completed: false,
+      artifacts: runtime.artifacts,
+      evidence: runtime.evidence,
+    }))
+      add("/runtime/e2e", "INVALID_E2E_EVIDENCE", message);
+  }
   return { valid: errors.length === 0, errors };
 }

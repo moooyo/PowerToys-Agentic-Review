@@ -17,6 +17,7 @@ import {
   type ProcessHostErrorEvent,
   type ProcessHostEvent,
   ProcessHostProtocolError,
+  type ProcessHostRecoverySnapshot,
   type ProcessHostRequest,
   type ProcessHostStdinRequest,
   type ProcessLaunchSpec,
@@ -66,6 +67,7 @@ export interface StdioProcessHostClientOptions {
   readonly spawnProcess?: ProcessHostSpawn;
   readonly interactiveStdin?: true;
   readonly captureResourceUsage?: true;
+  readonly namedJobRecovery?: true;
   /** Receives a deeply frozen metadata snapshot only after a valid, matching exit is observed. */
   readonly onExitObservation?: (observation: ProcessHostExitObservation) => void;
 }
@@ -261,8 +263,11 @@ export class StdioProcessHostClient implements ProcessHostClient {
   readonly #interactiveStdin: boolean;
   readonly #captureResourceUsage: boolean;
   readonly #onExitObservation: StdioProcessHostClientOptions["onExitObservation"];
+  readonly #instanceKey: string;
+  readonly #namedJobRecovery: boolean;
   readonly #inputResultTimeoutMs: number;
   #hostInteractiveStdin = false;
+  #recoverySnapshot: ProcessHostRecoverySnapshot | undefined;
   #onHostAbort: (() => void) | undefined;
   #state: HostState = "awaiting_ready";
   #failure: Error | undefined;
@@ -275,8 +280,12 @@ export class StdioProcessHostClient implements ProcessHostClient {
   private constructor(options: StdioProcessHostClientOptions) {
     const processHostPath = validateProcessHostPath(options.processHostPath);
     const instanceKey = validateInstanceKey(options.instanceKey);
+    this.#instanceKey = instanceKey;
+    if (options.namedJobRecovery !== undefined && options.namedJobRecovery !== true)
+      throw new TypeError("namedJobRecovery must be an explicit true opt-in.");
+    this.#namedJobRecovery = options.namedJobRecovery === true;
     const handshakeTimeoutMs = validateTimeout(
-      options.handshakeTimeoutMs ?? defaultHandshakeTimeoutMs,
+      options.handshakeTimeoutMs ?? (this.#namedJobRecovery ? 20_000 : defaultHandshakeTimeoutMs),
       "handshakeTimeoutMs",
     );
     this.#requestTimeoutMs = validateTimeout(
@@ -321,6 +330,7 @@ export class StdioProcessHostClient implements ProcessHostClient {
         "--instance-key",
         instanceKey,
         ...(this.#interactiveStdin ? ["--interactive-stdin"] : []),
+        ...(this.#namedJobRecovery ? ["--named-job-recovery"] : []),
       ],
       {
         cwd: win32.dirname(processHostPath),
@@ -361,6 +371,12 @@ export class StdioProcessHostClient implements ProcessHostClient {
       await client.#childClosed.promise;
       throw error;
     }
+  }
+
+  public recovery(): ProcessHostRecoverySnapshot | undefined {
+    return this.#state === "ready" && this.#closePromise === undefined
+      ? this.#recoverySnapshot
+      : undefined;
   }
 
   public async start(
@@ -642,6 +658,21 @@ export class StdioProcessHostClient implements ProcessHostClient {
           "ProcessHost ready event reported an unexpected concurrent request capacity.",
         );
       }
+      const recovery = event.capabilities.namedJobRecovery;
+      if (
+        recovery !== undefined &&
+        (!this.#namedJobRecovery || recovery.instanceKey !== this.#instanceKey)
+      ) {
+        throw new ProcessHostProtocolError(
+          "ProcessHost recovery evidence does not match the requested instance.",
+        );
+      }
+      if (this.#namedJobRecovery && recovery === undefined) {
+        throw new ProcessHostProtocolError(
+          "ProcessHost did not provide the requested named Job recovery evidence.",
+        );
+      }
+      this.#recoverySnapshot = recovery === undefined ? undefined : Object.freeze({ ...recovery });
       if (this.#handshakeTimer !== undefined) {
         clearTimeout(this.#handshakeTimer);
         this.#handshakeTimer = undefined;

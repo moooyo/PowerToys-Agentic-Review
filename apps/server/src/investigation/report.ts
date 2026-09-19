@@ -17,12 +17,14 @@ import {
   type InvestigationSubjectV1,
   type InvestigationTaskV1,
   InvestigationTaskV1Schema,
+  projectInvestigationCheckpointPresentation,
   validateInvestigationResult,
   validateInvestigationSourceCoverage,
   validateInvestigationTask,
 } from "@agentic-review/contracts";
 import {
   evaluateInvestigationCompletion,
+  investigationChangedFileCoverageDefinition,
   investigationContentDigest,
   investigationTaskBindingDigest,
   projectInvestigationNextActions,
@@ -31,7 +33,7 @@ import {
 } from "@agentic-review/domain";
 import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-
+import { validateRootE2eRuntime } from "./e2e-runtime.js";
 import { requireCondition } from "./errors.js";
 
 export interface AssembleInvestigationReportInput {
@@ -221,6 +223,48 @@ function validateSourceCoverage(input: AssembleInvestigationReportInput): void {
     "The complete registered source manifest must match its canonical digest.",
   );
   const byId = new Map(units.map((unit) => [unit.id, unit]));
+  const completedFullDiff = units.filter(
+    (unit) => unit.kind === "full_diff" && unit.status === "completed",
+  );
+  if (checkpoint.runtime.reviewMode === "local_checkout") {
+    const changedFiles = source.manifest.files.map((file) =>
+      investigationChangedFileCoverageDefinition(subject.id, file.path),
+    );
+    for (const definition of changedFiles) {
+      const unit = byId.get(definition.id);
+      requireCondition(
+        unit !== undefined &&
+          equal(
+            {
+              id: unit.id,
+              subjectRef: unit.subjectRef,
+              kind: unit.kind,
+              paths: unit.paths,
+              requiredWork: unit.requiredWork,
+            },
+            definition,
+          ),
+        422,
+        "source_coverage_unit_mismatch",
+        "Every registered changed file must retain its exact coverage identity, subject, path, and required work.",
+      );
+    }
+    requireCondition(
+      units.every((unit) => unit.kind !== "pr_diff_chunk"),
+      422,
+      "unregistered_source_coverage_unit",
+      "Local checkout review records changed-file coverage rather than model-delivered source chunks.",
+    );
+    requireCondition(
+      completedFullDiff.every((unit) => unit.subjectRef === subject.id) &&
+        (completedFullDiff.length === 0 ||
+          changedFiles.every((unit) => byId.get(unit.id)?.status === "completed")),
+      422,
+      "full_diff_coverage_incomplete",
+      "A full diff cannot complete before every registered changed file has been investigated.",
+    );
+    return;
+  }
   const chunks = new Set(source.manifest.chunks.map((chunk) => chunk.id));
   const brokered = new Set(source.brokeredUnitIds);
   for (const chunk of source.manifest.chunks) {
@@ -248,9 +292,6 @@ function validateSourceCoverage(input: AssembleInvestigationReportInput): void {
     422,
     "unregistered_source_coverage_unit",
     "Source chunk coverage must originate in the complete registered manifest.",
-  );
-  const completedFullDiff = units.filter(
-    (unit) => unit.kind === "full_diff" && unit.status === "completed",
   );
   requireCondition(
     completedFullDiff.every((unit) => unit.subjectRef === subject.id) &&
@@ -283,6 +324,7 @@ export function reportHeader(result: InvestigationResultV1): InvestigationReport
       completeness: report.completeness,
       summary: report.summary,
       logicalContentDigest: report.logicalContentDigest,
+      ...(report.usage === undefined ? {} : { usage: structuredClone(report.usage) }),
       coverage: {
         scopeManifest: report.coverage.scopeManifest,
         includedUnitCount: report.coverage.includedUnits.length,
@@ -321,6 +363,16 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
     "invalid_report_payload",
     "Every report payload must match its complete versioned schema.",
   );
+  if (task.kind === "pr-e2e") {
+    requireCondition(
+      header.outcome !== "completed" || checkpoint.runtime.e2e !== undefined,
+      422,
+      "e2e_result_required",
+      "Completed root E2E reports require accepted feature assertions and runtime media.",
+    );
+    if (checkpoint.runtime.e2e !== undefined)
+      validateRootE2eRuntime(task, checkpoint, checkpoint.runtime);
+  }
   requireCondition(
     header.id === header.report.id &&
       header.version === header.report.version &&
@@ -382,6 +434,7 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
   requireEqual(
     header.context,
     {
+      ...(checkpoint.runtime.e2e === undefined ? {} : { e2e: checkpoint.runtime.e2e }),
       repository: task.repository,
       workItem: task.workItem,
       task: {
@@ -840,7 +893,10 @@ export function assembleInvestigationReport(
   const parentPlan = validateInput(input);
   const { header, manifest, checkpoint, task } = input;
   const collections = collectParts(input);
-  const { analysis } = checkpoint;
+  const analysis = {
+    ...checkpoint.analysis,
+    ...projectInvestigationCheckpointPresentation(task, checkpoint),
+  };
   const projectedFindings = projectInvestigationReportFindings(
     analysis.findings,
     { id: header.id, version: header.version },
@@ -868,13 +924,13 @@ export function assembleInvestigationReport(
     header.assessment,
     analysis.assessment,
     "report_assessment_mismatch",
-    "The report assessment must match the accepted checkpoint.",
+    "The report assessment must match the accepted checkpoint presentation.",
   );
   requireEqual(
     header.report.summary,
     analysis.summary,
     "report_summary_mismatch",
-    "The report summary must match the accepted checkpoint.",
+    "The report summary must match the accepted checkpoint presentation.",
   );
   const expectedDrafts = [...analysis.plans];
   const repeatedParent =
@@ -1003,6 +1059,7 @@ export function assembleInvestigationReport(
       completeness: complete ? "complete" : "partial",
       summary: analysis.summary,
       logicalContentDigest: header.report.logicalContentDigest,
+      ...(header.report.usage === undefined ? {} : { usage: structuredClone(header.report.usage) }),
       coverage: {
         ...structuredClone(analysis.coverage),
         includedUnits: collections.coverageUnits,

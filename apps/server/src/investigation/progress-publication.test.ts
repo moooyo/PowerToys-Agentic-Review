@@ -39,8 +39,12 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function harness(options: { kind?: "pr" | "bug"; preTask?: boolean } = {}) {
+function harness(options: { kind?: "pr" | "bug"; preTask?: boolean; e2e?: boolean } = {}) {
   const fixture = createInvestigationPreview(options.kind ?? "pr", { findingCount: 0 });
+  if (options.e2e) {
+    fixture.task.kind = "pr-e2e";
+    fixture.result.context.task.kind = "pr-e2e";
+  }
   const store = new InvestigationStore();
   stores.push(store);
   const clock = { value: Date.parse("2026-09-19T01:00:00.000Z") };
@@ -75,7 +79,12 @@ function harness(options: { kind?: "pr" | "bug"; preTask?: boolean } = {}) {
     allowRepositoryExecution: false,
   };
   const trigger: InvestigationProgressTrigger = {
-    eventName: task.workItem.kind === "pull_request" ? "pull_request" : "issues",
+    eventName: options.e2e
+      ? "issue_comment"
+      : task.workItem.kind === "pull_request"
+        ? "pull_request"
+        : "issues",
+    ...(options.e2e ? { commandCommentId: 901 } : {}),
     actorUserId: 11,
     assigneeUserId: 22,
     actorLogin: "synthetic-assigner",
@@ -83,6 +92,7 @@ function harness(options: { kind?: "pr" | "bug"; preTask?: boolean } = {}) {
   };
   const original = task.subjects.find((subject) => subject.id === task.subjectRef);
   const admission: TrustedAssignmentAdmission = {
+    ...(options.e2e ? { mode: "e2e" as const } : {}),
     id: "synthetic-assignment-receipt",
     repository: task.repository,
     target: {
@@ -274,6 +284,34 @@ function harness(options: { kind?: "pr" | "bug"; preTask?: boolean } = {}) {
 }
 
 describe("durable assignment comment publication", () => {
+  it("keeps the accepted E2E command comment through preparation and task attachment", async () => {
+    const h = harness({ preTask: true, e2e: true });
+    h.enqueueAssignment();
+    const accepted = h.summary();
+    await h.run();
+    const received = h.dispatches.mock.calls[0]![0];
+    expect(received.expectedAssigneeUserId).toBeUndefined();
+    expect(received.body).toContain("E2E verification received — preparing");
+    expect(received.body).toContain("pull request comment 901");
+    expect(received.body).not.toContain("assigned the pull request");
+    h.attachTask();
+    await h.run();
+    const attached = h.dispatches.mock.calls.at(-1)![0];
+    expect(h.summary()).toMatchObject({ id: accepted.id, taskId: h.task.id, externalId: "9001" });
+    expect(attached).toMatchObject({
+      marker: received.marker,
+      externalId: "9001",
+      previousBody: received.body,
+    });
+    expect(attached.body).toContain("E2E verification queued");
+    expect(() =>
+      h.publisher.enqueueAssignment({
+        ...h.admission,
+        trigger: { ...h.trigger, commandCommentId: 902 },
+      }),
+    ).toThrow("another comment scope");
+  });
+
   it.each(["pr", "bug"] as const)(
     "publishes an accepted %s assignment before Task creation and attaches the same comment",
     async (kind) => {
@@ -293,7 +331,7 @@ describe("durable assignment comment publication", () => {
       expect(earlyRequest.body).toContain("synthetic-assigner");
       expect(earlyRequest.body).toContain("synthetic-worker");
       if (kind === "bug") {
-        expect(earlyRequest.body).toContain("no frozen investigation snapshot is established yet");
+        expect(earlyRequest.body).toContain("the investigation snapshot has not been captured yet");
         expect(earlyRequest.body).not.toContain("snapshot captured at");
       }
       expect(first).toMatchObject({ taskId: null, workItemId: null, operation: "create" });
@@ -691,12 +729,16 @@ describe("durable assignment comment publication", () => {
     expect(h.publishProgressComment).toHaveBeenCalledTimes(2);
     expect(h.dispatches.mock.calls.map(([request]) => request.body)).not.toContain(body);
     expect(h.deliveries.read(h.actor, abandoned.id)).toMatchObject({
-      state: "failed",
+      state: "cancelled",
       effect: "not_sent",
       body,
       attemptNumber: 2,
       finishedAt: h.now().toISOString(),
       observations: [],
+    });
+    expect(h.store.get("commentDeliveries", abandoned.id)).toMatchObject({
+      state: "cancelled",
+      originalReceipt: { state: "cancelled", effect: "not_sent" },
     });
     expect(h.history()).toHaveLength(3);
     expect(h.history().every((attempt) => attempt.state !== "sending")).toBe(true);

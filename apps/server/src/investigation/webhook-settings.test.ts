@@ -52,6 +52,41 @@ function expectError(operation: () => unknown, statusCode: number, code?: string
 }
 
 describe("repository webhook settings", () => {
+  it("enables E2E independently while reusing stable reviewer and trusted actor IDs", () => {
+    const store = open();
+    const settings = new InvestigationWebhookSettings(store, [], true);
+    const saved = settings.update(actor, repository.id, {
+      ...enabled,
+      enabled: false,
+      e2eEnabled: true,
+    });
+    expect(saved).toMatchObject({
+      enabled: false,
+      e2eEnabled: true,
+      reviewerUserId: 201,
+      allowedActorUserIds: [301, 302],
+    });
+    expect(settings.bindings()).toEqual([
+      {
+        repositoryId: repository.id,
+        reviewerUserId: 201,
+        allowedActorUserIds: [301, 302],
+        e2eEnabled: true,
+        assignmentsEnabled: false,
+      },
+    ]);
+    expectError(
+      () =>
+        settings.update(actor, repository.id, {
+          ...enabled,
+          version: 1,
+          enabled: false,
+          e2eEnabled: true,
+          allowedActorUserIds: [],
+        }),
+      400,
+    );
+  });
   it("starts disabled without credentials and allows a scoped viewer to read settings", () => {
     const store = open();
     const settings = new InvestigationWebhookSettings(store);

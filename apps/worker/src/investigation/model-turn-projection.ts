@@ -188,6 +188,10 @@ export interface ModelTurnProjection {
   readonly selectedCandidateIds: readonly string[];
   readonly selectedFindingIds: readonly string[];
   readonly phase: Phase;
+  /** Local checkout source selection differs from snapshot-only data access. */
+  readonly localSourceReview: boolean;
+  /** Both versioned static modes can finish without a separate finalize invocation. */
+  readonly autonomousReview: boolean;
   /** This complete ledger stays in Worker memory and must never be included in the prompt. */
   readonly baseAnalysis: InvestigationAnalysisV1;
 }
@@ -248,6 +252,8 @@ export function prepareModelTurnProjection(input: {
       recordedAt: task.updatedAt,
     });
   const baseAnalysis = structuredClone(initial.analysis);
+  const localSourceReview = initial.runtime.reviewMode === "local_checkout";
+  const autonomousReview = initial.runtime.reviewMode !== undefined;
   const observations = initial.runtime.evidence;
   const pending = pendingRecords(baseAnalysis, observations);
   // Real diff chunks are a prerequisite for the metadata-level full-diff summary.
@@ -282,7 +288,7 @@ export function prepareModelTurnProjection(input: {
   // Keep typed source work separate from seeds that can restore the full diff.
   // New pending source work precedes a complete batch of interdependent blocked source work.
   const typedSourceUnits =
-    !summarizeRuntimeFirst && task.executionPolicy.mode === "source_read"
+    !localSourceReview && !summarizeRuntimeFirst && task.executionPolicy.mode === "source_read"
       ? baseAnalysis.coverage.includedUnits.filter(
           (unit) => unit.kind === "source_file" && unit.paths.length > 0,
         )
@@ -530,6 +536,8 @@ export function prepareModelTurnProjection(input: {
     selectedCandidateIds: context.analysis.candidates.map((entry) => entry.id),
     selectedFindingIds: context.analysis.findings.map((entry) => entry.id),
     phase,
+    localSourceReview,
+    autonomousReview,
     baseAnalysis,
   };
   projectionObservations.set(projection, structuredClone(observations));
@@ -636,13 +644,15 @@ export function mergeModelTurnDelta(
     next,
     projectionObservations.get(projection) ?? context.observations,
   );
-  // The coordinator still validates the full ledger. A batch cannot claim global completion.
+  // Completion and terminal blockers are decided from the full ledger by the coordinator.
+  // A versioned static agent may finish in its first invocation or stop honestly when blocked.
   const mustContinue =
-    projection.phase !== "finalize" ||
-    pending.units.length > 0 ||
-    pending.observations.length > 0 ||
-    pending.candidates.length > 0 ||
-    pending.findings.length > 0;
+    !projection.autonomousReview &&
+    (projection.phase !== "finalize" ||
+      pending.units.length > 0 ||
+      pending.observations.length > 0 ||
+      pending.candidates.length > 0 ||
+      pending.findings.length > 0);
   return {
     schemaVersion: "InvestigationLoopRoundV1",
     taskId: delta.taskId,

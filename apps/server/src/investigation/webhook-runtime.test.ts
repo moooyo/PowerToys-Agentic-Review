@@ -77,6 +77,8 @@ async function fixture(
     receiver?: boolean;
     kind?: "issue" | "pull_request";
     additionalAccounts?: boolean;
+    e2e?: boolean;
+    defaultTaskBudget?: InvestigationRuntimeConfig["defaultTaskBudget"];
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "investigation-webhook-runtime-"));
@@ -98,6 +100,15 @@ async function fixture(
     INVESTIGATION_WORKERS_JSON: JSON.stringify([
       { id: "worker-1", token: workerToken, repositoryIds: [repository.id] },
     ]),
+    ...(options.defaultTaskBudget === undefined
+      ? {}
+      : {
+          INVESTIGATION_DEFAULT_TASK_MAX_TOKENS: String(options.defaultTaskBudget.maxTokens),
+          INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS: String(options.defaultTaskBudget.maxRounds),
+          INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS: String(
+            options.defaultTaskBudget.maxDurationMs,
+          ),
+        }),
     ...(options.receiver === false ? {} : { INVESTIGATION_GITHUB_WEBHOOK_SECRET: secret }),
   };
   const config = loadInvestigationRuntimeConfig(environment);
@@ -170,6 +181,17 @@ async function fixture(
       });
     }
     if (url.pathname === "/user") return Response.json({ id: 55 });
+    if (url.pathname === "/users/configured-reviewer")
+      return Response.json({ id: 55, login: "configured-reviewer", type: "User" });
+    if (url.pathname === "/repos/fixture/webhook-runtime/issues/comments/501")
+      return Response.json({
+        id: 501,
+        body: "@configured-reviewer e2e",
+        user: { id: 44, type: "User" },
+        issue_url: "https://api.github.com/repos/fixture/webhook-runtime/issues/7",
+      });
+    if (options.e2e && url.pathname === "/repos/fixture/webhook-runtime/issues/7")
+      return Response.json({ ...upstream, id: 88, pull_request: {} });
     if (url.pathname === "/repos/fixture/webhook-runtime")
       return Response.json({ id: repository.githubRepositoryId, full_name: repository.fullName });
     if (
@@ -291,6 +313,58 @@ async function completedReceipt(
 }
 
 describe("production webhook runtime integration", () => {
+  it("applies deployment defaults to signed assignment intake", async () => {
+    const budget = { maxTokens: 5_000_000, maxRounds: 8, maxDurationMs: 7_200_000 };
+    const test = await fixture({ defaultTaskBudget: budget });
+    await enable(test.app, test.cookie);
+    expect((await test.app.inject(test.delivery())).statusCode).toBe(202);
+    await completedReceipt(test.app, test.cookie);
+    const tasks = stored(test.config, (store) => store.list<InvestigationTaskV1>("tasks"));
+    expect(tasks[0]?.budget).toMatchObject(budget);
+  });
+  it("routes a signed trusted comment through E2E intake without an assignment or static report", async () => {
+    const budget = { maxTokens: 5_000_000, maxRounds: 8, maxDurationMs: 7_200_000 };
+    const test = await fixture({ kind: "pull_request", e2e: true, defaultTaskBudget: budget });
+    test.upstream.assignees.length = 0;
+    const configured = await test.app.inject({
+      method: "PUT",
+      url: settingsUrl,
+      headers: { host, origin, cookie: test.cookie },
+      payload: { ...enabledSettings, enabled: false, e2eEnabled: true },
+    });
+    expect(configured.statusCode).toBe(200);
+    const body = JSON.stringify({
+      action: "created",
+      repository: { id: 123, full_name: repository.fullName },
+      sender: { id: 44, login: "trusted-maintainer", type: "User" },
+      issue: { id: 88, number: 7, state: "open", pull_request: {} },
+      comment: { id: 501, body: "@configured-reviewer e2e", user: { id: 44, type: "User" } },
+    });
+    const response = await test.app.inject({
+      method: "POST",
+      url: "/api/github/webhook",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "e2e-runtime-command",
+        "x-github-event": "issue_comment",
+        "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`,
+      },
+      payload: body,
+    });
+    expect(response.statusCode).toBe(202);
+    expect(response.json().status).toBe("accepted");
+    await completedReceipt(test.app, test.cookie, "e2e-runtime-command");
+    const tasks = stored(test.config, (store) => store.list<InvestigationTaskV1>("tasks"));
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      kind: "pr-e2e",
+      planRef: null,
+      parentReportRef: null,
+      executionPolicy: { mode: "execute" },
+      budget,
+    });
+    expect(test.execute).not.toHaveBeenCalled();
+  });
   it("keeps repository settings available without a receiver and preserves UI configuration across restart", async () => {
     const test = await fixture({ receiver: false });
     const initial = await test.app.inject({

@@ -21,9 +21,11 @@ import {
   InvestigationLeaseLost,
   InvestigationTaskCancelled,
 } from "./attempt-heartbeat.js";
+import type { E2eAgentRunner } from "./e2e-agent-runner.js";
 import type { InvestigationWorkerClient } from "./http-client.js";
-import type { ModelTurnRunner } from "./model-turn-runner.js";
+import type { ModelTurnExecutionResult, ModelTurnRunner } from "./model-turn-runner.js";
 import { type InvestigationPlanExecutor, isInvestigationPlanTask } from "./plan-executor.js";
+import { createInvestigationProgressReporter } from "./progress-reporter.js";
 import { buildInvestigationReportSubmission } from "./report-builder.js";
 import {
   type ClaimedInvestigationTask,
@@ -39,6 +41,7 @@ export interface InvestigationLoopCoordinatorOptions {
   readonly client: InvestigationWorkerClient;
   readonly processHost: ProcessHostClient;
   readonly modelTurnRunner: ModelTurnRunner;
+  readonly e2eAgentRunner?: E2eAgentRunner;
   readonly workspaceProvider: InvestigationWorkspaceProvider;
   readonly planExecutor: InvestigationPlanExecutor;
   readonly logger: Logger;
@@ -47,6 +50,8 @@ export interface InvestigationLoopCoordinatorOptions {
   readonly requestRetryMs?: number;
   readonly maximumPartBytes?: number;
   readonly onNodeFault?: (code: string) => void;
+  readonly onAttemptCleanupConfirmed?: () => Promise<void>;
+  readonly onAttemptCleanupUnconfirmed?: (code: string) => Promise<void>;
   readonly now?: () => number;
   readonly createId?: () => string;
 }
@@ -89,11 +94,25 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         : { intervalMs: this.options.heartbeatIntervalMs }),
       now: this.#now,
     });
+    const progress = createInvestigationProgressReporter({
+      client: this.options.client,
+      taskId: claim.task.id,
+      lease: claim.lease,
+      now: this.#now,
+      onFailure: () =>
+        this.options.logger.warn("Investigation progress delivery is temporarily unavailable."),
+    });
     let workspace: PreparedInvestigationWorkspace | undefined;
+    let sourcePreparationStarted = false;
     let cleanupConfirmed = true;
     let outcome: InvestigationOutcome = "interrupted";
     let terminalDiagnostics: InvestigationDiagnostic[] = [];
     let pendingModelUsage: { round: number; tokens: number | null } | undefined;
+    let pendingInvocationId: string | undefined;
+    let pendingInvocationAccepted = false;
+    let pendingUsageComplete = false;
+    const modelRunner =
+      claim.task.kind === "pr-e2e" ? this.options.e2eAgentRunner : this.options.modelTurnRunner;
     const budget = new AbortController();
     const remainingDuration = claim.task.budget.maxDurationMs - checkpoint.consumed.durationMs;
     const deadline = setTimeout(
@@ -118,6 +137,8 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
       await heartbeat.start();
       if (checkpoint.stopReason !== "complete") {
         executionSignal.throwIfAborted();
+        await progress.reportProgress("prepare_source", executionSignal);
+        sourcePreparationStarted = true;
         workspace = await this.options.workspaceProvider.prepare(
           {
             task: claim.task,
@@ -130,6 +151,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
           request: InvestigationCheckpointRequest,
           signal = executionSignal,
         ): Promise<void> => {
+          await progress.reportProgress("save_checkpoint", signal);
           const response = await this.#withRetry(
             () => this.options.client.checkpoint(claim.task.id, request, signal),
             signal,
@@ -138,8 +160,13 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
           assertAcceptedCheckpoint(claim, response.checkpoint);
           checkpoint = response.checkpoint;
           // The acknowledged analysis already charged this call, including its final budget unit.
-          if (request.kind === "analysis" && checkpoint.round === request.round.round)
+          if (request.kind === "analysis" && checkpoint.round === request.round.round) {
             pendingModelUsage = undefined;
+            pendingInvocationAccepted = true;
+            if (pendingInvocationId !== undefined)
+              await modelRunner?.markUsageDisposition?.(pendingInvocationId, "accepted");
+            pendingInvocationId = undefined;
+          }
           if (checkpoint.stopReason === "budget_exhausted") {
             throw new InvestigationExecutionStopped(
               "interrupted",
@@ -152,6 +179,8 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
           artifacts: InvestigationRuntimeState["artifacts"],
         ): Promise<void> => {
           if (workspace === undefined) throw new Error("The attempt workspace is not prepared.");
+          if (artifacts.length > 0)
+            await progress.reportProgress("upload_evidence", executionSignal);
           for (const artifact of artifacts) {
             executionSignal.throwIfAborted();
             const bytes = await workspace.readArtifact(artifact.id);
@@ -210,6 +239,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             {
               processHost: this.options.processHost,
               signal: executionSignal,
+              usageLease: claim.lease,
               onStepStarted: async (event) => {
                 await accepted({
                   kind: "execution",
@@ -264,33 +294,125 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             );
           }
         }
+        if (
+          claim.task.kind === "pr-e2e" &&
+          checkpoint.runtime.e2e === undefined &&
+          checkpoint.runtime.e2eExecution === undefined
+        ) {
+          // This durable marker precedes the first runtime operation, so recovery never
+          // mistakes an interrupted execution for an attempt that has not run yet.
+          await accepted({
+            kind: "execution",
+            lease: claim.lease,
+            execution: {
+              ...checkpoint.runtime,
+              e2eExecution: {
+                attemptId: claim.attempt.id,
+                status: "started",
+                startedAt: new Date(this.#now()).toISOString(),
+                completedAt: null,
+              },
+            },
+          });
+        }
         while (checkpoint.stopReason === "continuing") {
           executionSignal.throwIfAborted();
           await workspace.assertIntegrity();
           const modelRound = checkpoint.round + 1;
-          const observeUsage = (usage: { tokens: number | null }): void => {
+          const observeUsage = (usage: ModelTurnExecutionResult["usage"]): void => {
+            if (usage.invocationId !== undefined) pendingInvocationId = usage.invocationId;
             if (pendingModelUsage !== undefined && pendingModelUsage.tokens !== null) {
               if (usage.tokens === null) return;
-              if (pendingModelUsage.tokens !== usage.tokens)
+              if (
+                usage.tokens < pendingModelUsage.tokens ||
+                (pendingUsageComplete && usage.tokens !== pendingModelUsage.tokens)
+              )
                 throw new InvestigationExecutionStopped(
                   "failed",
                   "MODEL_USAGE_CONFLICT",
-                  "The model invocation reported conflicting token usage; its first complete receipt was retained.",
+                  "The model invocation attempted to reduce its reported token consumption.",
                 );
             }
             pendingModelUsage = { round: modelRound, tokens: usage.tokens };
+            if (
+              usage.tokens !== null &&
+              (usage.completeness === undefined || usage.completeness === "complete")
+            )
+              pendingUsageComplete = true;
           };
-          const turn = await this.options.modelTurnRunner.execute({
+          if (modelRunner === undefined)
+            throw new InvestigationExecutionStopped(
+              "blocked",
+              "E2E_RUNTIME_UNAVAILABLE",
+              "The E2E execution runtime is not configured.",
+            );
+          pendingInvocationAccepted = false;
+          pendingUsageComplete = false;
+          await progress.reportProgress("model", executionSignal);
+          const modelInput = {
             task: claim.task,
             attempt: claim.attempt,
             checkpoint,
             signal: executionSignal,
             workspace,
             onUsage: observeUsage,
-          });
+            onActivity: progress.onActivity,
+            usageLease: claim.lease,
+          };
+          let e2eOutcome: InvestigationOutcome | undefined;
+          let turn: ModelTurnExecutionResult;
+          if (claim.task.kind === "pr-e2e") {
+            const result = await this.options.e2eAgentRunner!.execute({
+              ...modelInput,
+              onRuntimeObservation: async (observation) => {
+                if (checkpoint === null)
+                  throw new Error("An E2E observation requires a persisted checkpoint.");
+                const retained = new Set(
+                  checkpoint.runtime.artifacts.map((artifact) => artifact.id),
+                );
+                await uploadArtifacts(
+                  observation.artifacts.filter((artifact) => !retained.has(artifact.id)),
+                );
+                await accepted({
+                  kind: "execution",
+                  lease: claim.lease,
+                  execution: {
+                    ...checkpoint.runtime,
+                    evidence: mergeRecords(checkpoint.runtime.evidence, observation.evidence),
+                    artifacts: mergeRecords(checkpoint.runtime.artifacts, observation.artifacts),
+                  },
+                });
+                await progress.reportProgress("model", executionSignal);
+              },
+            });
+            observeUsage(result.usage);
+            const retainedArtifactIds = new Set(
+              checkpoint.runtime.artifacts.map((artifact) => artifact.id),
+            );
+            await uploadArtifacts(
+              result.runtime.artifacts.filter((artifact) => !retainedArtifactIds.has(artifact.id)),
+            );
+            await accepted({ kind: "execution", lease: claim.lease, execution: result.runtime });
+            // Execution is accepted before analysis; bind this trusted projection to that exact state.
+            turn = {
+              ...result,
+              round: {
+                ...result.round,
+                inputCheckpointRef: {
+                  id: checkpoint.id,
+                  version: checkpoint.version,
+                  digest: checkpoint.digest,
+                },
+              },
+            };
+            e2eOutcome = result.outcome;
+          } else {
+            turn = await modelRunner.execute(modelInput);
+          }
           // Custom runners can return their complete usage without emitting intermediate observations.
           observeUsage(turn.usage);
           executionSignal.throwIfAborted();
+          await progress.reportProgress("validate_result", executionSignal);
           await workspace.assertIntegrity();
           if (turn.usage.tokens === null) {
             throw new InvestigationExecutionStopped(
@@ -333,6 +455,9 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             round: turn.round,
             usage,
             sourceUnitIds,
+            ...(turn.usage.invocationId === undefined
+              ? {}
+              : { invocationId: turn.usage.invocationId }),
             ...(turn.modelIdentity === undefined ? {} : { modelIdentity: turn.modelIdentity }),
           });
           pendingModelUsage = undefined;
@@ -345,6 +470,12 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             findingCount: checkpoint.analysis.findings.length,
             stopReason: checkpoint.stopReason,
           });
+          if (e2eOutcome !== undefined && e2eOutcome !== "completed")
+            throw new InvestigationExecutionStopped(
+              e2eOutcome,
+              e2eOutcome === "failed" ? "E2E_ASSERTION_FAILED" : "E2E_COVERAGE_BLOCKED",
+              "The E2E session finished without complete successful runtime coverage.",
+            );
         }
       }
       const complete = evaluateInvestigationCompletion(checkpoint);
@@ -363,6 +494,13 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         );
       }
     } catch (error) {
+      if (pendingInvocationId !== undefined && !pendingInvocationAccepted) {
+        try {
+          await modelRunner?.markUsageDisposition?.(pendingInvocationId, "rejected");
+        } catch {
+          this.options.logger.warn("Model disposition remains in the durable usage outbox.");
+        }
+      }
       const processFault = findUnconfirmedProcess(error);
       if (processFault !== null) {
         cleanupConfirmed = false;
@@ -396,6 +534,11 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
                 lease: claim.lease,
                 reason,
                 diagnostics: terminalDiagnostics,
+                ...(sourcePreparationStarted &&
+                workspace === undefined &&
+                pendingModelUsage === undefined
+                  ? { modelInvocationState: "not_started" as const }
+                  : {}),
                 ...(pendingModelUsage === undefined ? {} : { modelUsage: pendingModelUsage }),
               },
               reportSignal,
@@ -411,6 +554,12 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         // Cancellation cannot retroactively rewrite an already accepted complete analysis.
         outcome = "completed";
       }
+      await progress.reportProgress("build_report", reportSignal);
+      const reportUsage = await this.options.client.reportUsage?.(
+        claim.task.id,
+        { lease: claim.lease },
+        reportSignal,
+      );
       const submission = buildInvestigationReportSubmission({
         task: claim.task,
         attempt: claim.attempt,
@@ -418,6 +567,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         reportId: claim.reportId,
         outcome,
         parentPlan: claim.plan,
+        ...(reportUsage === undefined ? {} : { usage: reportUsage.summary }),
         ...(this.options.maximumPartBytes === undefined
           ? {}
           : { maximumPartBytes: this.options.maximumPartBytes }),
@@ -455,16 +605,41 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
       });
     } finally {
       await heartbeat.stop();
-      if (workspace !== undefined && cleanupConfirmed) {
-        await workspace.cleanup();
-      } else if (workspace !== undefined) {
-        this.options.logger.error(
-          "Investigation workspace retained because process termination was not confirmed.",
-          {
-            taskId: claim.task.id,
-            attemptId: claim.attempt.id,
-          },
-        );
+      await progress.reportProgress(
+        "cleanup",
+        AbortSignal.timeout(this.options.terminalTimeoutMs ?? 60_000),
+      );
+      try {
+        if (workspace !== undefined && cleanupConfirmed) await workspace.cleanup();
+        if (!cleanupConfirmed || heartbeat.leaseLost) {
+          await this.options.onAttemptCleanupUnconfirmed?.(
+            heartbeat.leaseLost ? "LEASE_LOST" : "OWNED_PROCESS_CLEANUP_UNCONFIRMED",
+          );
+          if (workspace !== undefined)
+            this.options.logger.error(
+              "Investigation workspace retained because execution cleanup was not confirmed.",
+              { taskId: claim.task.id, attemptId: claim.attempt.id },
+            );
+        } else {
+          await this.options.onAttemptCleanupConfirmed?.();
+          // Resource release is a separate original-owner receipt, never implied by Task completion.
+          await this.options.client.cleanup?.(
+            claim.task.id,
+            {
+              lease: claim.lease,
+              ownedProcessesStopped: true,
+              desktopRestored: true,
+            },
+            AbortSignal.timeout(this.options.terminalTimeoutMs ?? 60_000),
+          );
+        }
+      } catch (error) {
+        // A released local guard remains released if only the Server acknowledgement was lost.
+        await this.options.onAttemptCleanupUnconfirmed?.("ATTEMPT_CLEANUP_UNCONFIRMED");
+        // biome-ignore lint/correctness/noUnsafeFinally: A cleanup failure must stop admission even when report delivery also failed.
+        throw error;
+      } finally {
+        await progress.flush();
       }
     }
   }
@@ -496,7 +671,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
       code,
       message,
       category,
-      retryable: true,
+      retryable: code !== "E2E_EXECUTION_ALREADY_STARTED",
       evidenceRefs: [],
       prerequisiteRefs: [],
     };
@@ -608,6 +783,7 @@ function classifyStop(error: unknown): {
     "SOURCE_DEPENDENCY_LIMIT_EXCEEDED",
     "MODEL_SOURCE_UNAVAILABLE",
     "MODEL_POLICY_UNAVAILABLE",
+    "E2E_EXECUTION_ALREADY_STARTED",
   ].includes(code);
   return {
     outcome: blocked ? "blocked" : "failed",
@@ -633,6 +809,8 @@ function findUnconfirmedProcess(error: unknown, visited = new Set<object>()): st
       "MODEL_PROCESS_CLEANUP_UNCONFIRMED",
       "SOURCE_PROCESS_CLEANUP_UNCONFIRMED",
       "UI_PROCESS_CLEANUP_UNCONFIRMED",
+      "E2E_CLEANUP_UNCONFIRMED",
+      "WORKSPACE_CLEANUP_UNCONFIRMED",
     ].includes(String(error.code))
   ) {
     return String(error.code);

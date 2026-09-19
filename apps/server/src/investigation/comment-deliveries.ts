@@ -9,6 +9,7 @@ import {
 import { investigationContentDigest } from "@agentic-review/domain";
 import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { commentDeliveryState } from "./comment-delivery-state.js";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
 import type { InvestigationStore } from "./store.js";
 import type { InvestigationOperatorPrincipal } from "./types.js";
@@ -44,7 +45,9 @@ export interface CommentDeliveryResult {
   readonly externalId?: string | null;
   readonly at?: string;
 }
-export type CommentDeliveryObservationInput = Omit<CommentDeliveryResult, "effect">;
+export type CommentDeliveryObservationInput = Omit<CommentDeliveryResult, "effect" | "state"> & {
+  readonly state: Exclude<TerminalState, "cancelled">;
+};
 export type LegacyCommentDeliveryInput = BeginCommentDeliveryInput & {
   readonly id: string;
   readonly startedAt: string;
@@ -141,6 +144,12 @@ export class InvestigationCommentDeliveries {
         at: this.#timestamp(result.at ?? record.originalReceipt?.at ?? this.#now().toISOString()),
       };
       this.#validateOutcome(receipt.state, receipt.effect, receipt.externalId);
+      requireCondition(
+        receipt.state !== "cancelled" || record.dispatchedAt === null,
+        400,
+        "comment_delivery_receipt_invalid",
+        "A dispatched delivery attempt cannot be cancelled.",
+      );
       if (record.originalReceipt !== null) {
         requireCondition(
           this.#equal(record.originalReceipt, receipt),
@@ -255,9 +264,11 @@ export class InvestigationCommentDeliveries {
           ? "applied"
           : input.state === "failed"
             ? "rejected"
-            : input.state === "unknown"
-              ? "unknown"
-              : null);
+            : input.state === "cancelled"
+              ? "not_sent"
+              : input.state === "unknown"
+                ? "unknown"
+                : null);
       if (input.state !== "sending") this.#validateOutcome(input.state, effect!, record.externalId);
       const next: StoredDelivery = {
         ...record,
@@ -436,7 +447,7 @@ export class InvestigationCommentDeliveries {
       originalReceipt: _receipt,
       ...view
     } = record;
-    return structuredClone(view);
+    return structuredClone({ ...view, state: commentDeliveryState(view) });
   }
 
   #save(record: StoredDelivery): void {
@@ -470,7 +481,9 @@ export class InvestigationCommentDeliveries {
         ? effect === "applied" && externalId !== null
         : state === "unknown"
           ? effect === "unknown"
-          : effect === "not_sent" || effect === "rejected",
+          : state === "cancelled"
+            ? effect === "not_sent"
+            : effect === "not_sent" || effect === "rejected",
       400,
       "comment_delivery_receipt_invalid",
       "The delivery outcome and its recorded effect are inconsistent.",

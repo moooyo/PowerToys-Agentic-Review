@@ -45,6 +45,7 @@ interface ImportedSource {
 
 /** A signed, authorized assignment scope; it is not a placeholder Task or work item. */
 export interface TrustedAssignmentAdmission {
+  readonly mode?: "e2e";
   readonly id: string;
   readonly repository: InvestigationRepositoryRecord;
   readonly target: {
@@ -327,6 +328,7 @@ export class InvestigationWebhookIntake {
         entry.repositoryId,
       );
       return (
+        entry.assignmentsEnabled !== false &&
         repository?.githubRepositoryId === githubRepositoryId &&
         repository.fullName === remoteRepository.full_name
       );
@@ -608,6 +610,7 @@ export class InvestigationWebhookIntake {
       return undefined;
     return this.#bindings().find(
       (entry) =>
+        entry.assignmentsEnabled !== false &&
         entry.repositoryId === repository.id &&
         entry.reviewerUserId === assignment.assigneeUserId &&
         entry.allowedActorUserIds.includes(assignment.actorUserId),

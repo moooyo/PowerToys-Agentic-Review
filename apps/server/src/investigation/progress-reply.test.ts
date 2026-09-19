@@ -1,7 +1,10 @@
 import {
   createInvestigationPreview,
+  type InvestigationCommentDelivery,
   type InvestigationResultV1,
   type InvestigationTaskV1,
+  type InvestigationUsageSummary,
+  unavailableInvestigationTokenUsage,
 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationAutomaticReplySettings } from "./auto-reply-settings.js";
@@ -26,6 +29,7 @@ import type {
   InvestigationProgressCommentRequest,
   InvestigationWorkItemRecord,
 } from "./types.js";
+import { investigationUsagePublicationPendingKey } from "./usage-ledger.js";
 
 const stores: InvestigationStore[] = [];
 const publishers: InvestigationProgressReplies[] = [];
@@ -51,6 +55,11 @@ function harness(
     legacySettings?: boolean;
     externalWrites?: boolean;
     maximumAttempts?: number;
+    usage?: InvestigationUsageSummary;
+    prepareReportMedia?: (
+      report: InvestigationResultV1,
+      task: InvestigationTaskV1,
+    ) => Promise<string>;
   } = {},
 ) {
   const kind = options.kind ?? "pr";
@@ -170,6 +179,10 @@ function harness(
       leaseDurationMs: 60_000,
       maximumAttempts: options.maximumAttempts ?? 3,
       onError,
+      ...(options.usage === undefined ? {} : { usageSummary: () => options.usage! }),
+      ...(options.prepareReportMedia === undefined
+        ? {}
+        : { prepareReportMedia: options.prepareReportMedia }),
     });
     publishers.push(publisher);
     return publisher;
@@ -248,6 +261,383 @@ function harness(
 }
 
 describe("assignment progress comment outbox", () => {
+  it("coalesces same-phase usage without checkpoints and merges completion immediately", async () => {
+    const usage: InvestigationUsageSummary = {
+      usage: unavailableInvestigationTokenUsage(),
+      reportedTokens: 0,
+      completeness: "unavailable",
+      invocationCount: 0,
+      activeInvocationCount: 0,
+      unknownInvocationCount: 0,
+      legacyTokens: 0,
+    };
+    const h = harness({ usage });
+    h.enqueue();
+    const running = h.transition("running");
+    await h.run();
+    const first = h.mutations.mock.calls[0]![0];
+    const firstPublishedAt = h.clock.value;
+    usage.invocationCount = 1;
+    usage.activeInvocationCount = 1;
+    usage.unknownInvocationCount = 1;
+    h.clock.value += 1;
+    h.publisher.updateUsage(running);
+    await h.run();
+    expect(h.mutations).toHaveBeenCalledTimes(1);
+    expect(h.publisher.taskSummary(h.actor, running.id)?.nextAttemptAt).toBe(
+      new Date(firstPublishedAt + 30_000).toISOString(),
+    );
+    h.clock.value += 20_000;
+    usage.reportedTokens = 100;
+    usage.usage.totalTokens = 100;
+    usage.completeness = "partial";
+    h.publisher.updateUsage(running);
+    await h.run();
+    expect(h.mutations).toHaveBeenCalledTimes(1);
+    expect(h.publisher.taskSummary(h.actor, running.id)?.nextAttemptAt).toBe(
+      new Date(firstPublishedAt + 30_000).toISOString(),
+    );
+    expect(h.store.get("checkpoints", running.id)).toBeUndefined();
+    await h.publisher.stop();
+    const recovered = h.createPublisher();
+    await h.run(recovered);
+    expect(h.mutations).toHaveBeenCalledTimes(1);
+    h.clock.value = firstPublishedAt + 30_000;
+    await h.run(recovered);
+    expect(h.mutations).toHaveBeenCalledTimes(2);
+    const partial = h.mutations.mock.calls.at(-1)![0];
+    expect(partial).toMatchObject({
+      marker: first.marker,
+      externalId: "9001",
+      previousBody: first.body,
+    });
+    expect(partial.body).toContain("100 tokens (partial usage)");
+    expect(partial.body).toContain("1 model call(s) are still running");
+    h.clock.value += 1;
+    usage.reportedTokens = 150;
+    usage.usage.totalTokens = 150;
+    usage.activeInvocationCount = 0;
+    usage.unknownInvocationCount = 0;
+    usage.completeness = "complete";
+    recovered.updateUsage(running);
+    const completed = h.transition("completed");
+    const sealedBytes = JSON.stringify(h.store.get("reports", h.fixture.result.report.id));
+    await h.run(recovered);
+    expect(h.mutations).toHaveBeenCalledTimes(3);
+    const final = h.mutations.mock.calls.at(-1)![0];
+    expect(final.body).toContain("Static review completed");
+    expect(final.body).toContain("150 tokens.");
+    expect(final.body).not.toContain("model call(s) are still running");
+    // A late callback cannot restore the earlier task state or attempt attribution.
+    usage.reportedTokens = 175;
+    usage.usage.totalTokens = 175;
+    recovered.updateUsage(running);
+    expect(recovered.taskSummary(h.actor, running.id)?.state).toBe("synced");
+    recovered.updateUsage(completed);
+    h.clock.value += 30_000;
+    await h.run(recovered);
+    const late = h.mutations.mock.calls.at(-1)![0];
+    expect(late).toMatchObject({
+      marker: first.marker,
+      externalId: "9001",
+      previousBody: final.body,
+    });
+    expect(late.body).toContain("Static review completed");
+    expect(late.body).toContain("175 tokens.");
+    expect(JSON.stringify(h.store.get("reports", h.fixture.result.report.id))).toBe(sealedBytes);
+  });
+
+  it("recovers a committed usage notification after a missed callback", async () => {
+    const usage: InvestigationUsageSummary = {
+      usage: unavailableInvestigationTokenUsage(),
+      reportedTokens: 0,
+      completeness: "unavailable",
+      invocationCount: 0,
+      activeInvocationCount: 0,
+      unknownInvocationCount: 0,
+      legacyTokens: 0,
+    };
+    const h = harness({ usage });
+    h.enqueue();
+    const running = h.transition("running");
+    await h.run();
+    await h.publisher.stop();
+    usage.invocationCount = 1;
+    usage.activeInvocationCount = 1;
+    usage.unknownInvocationCount = 1;
+    const id = investigationUsagePublicationPendingKey(running.id);
+    h.store.put("idempotency", id, { id, taskId: running.id });
+    h.clock.value += 30_000;
+    const recovered = h.createPublisher();
+    await h.run(recovered);
+    expect(h.store.has("idempotency", id)).toBe(false);
+    expect(h.mutations).toHaveBeenCalledTimes(2);
+    expect(h.mutations.mock.calls.at(-1)![0].body).toContain("1 model call(s) are still running");
+    await h.run(recovered);
+    expect(h.mutations).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the usage interval when a newer receipt arrives during comment dispatch", async () => {
+    const usage: InvestigationUsageSummary = {
+      usage: unavailableInvestigationTokenUsage(),
+      reportedTokens: 0,
+      completeness: "unavailable",
+      invocationCount: 0,
+      activeInvocationCount: 0,
+      unknownInvocationCount: 0,
+      legacyTokens: 0,
+    };
+    const h = harness({ usage });
+    const dispatch = deferred();
+    const release = deferred();
+    h.control.afterDispatch = async () => {
+      dispatch.resolve();
+      await release.promise;
+    };
+    h.enqueue();
+    const running = h.transition("running");
+    const sending = h.run();
+    await dispatch.promise;
+    usage.invocationCount = 1;
+    usage.activeInvocationCount = 1;
+    usage.unknownInvocationCount = 1;
+    h.publisher.updateUsage(running);
+    release.resolve();
+    await sending;
+    expect(h.mutations).toHaveBeenCalledTimes(1);
+    expect(h.publisher.taskSummary(h.actor, running.id)?.nextAttemptAt).toBe(
+      new Date(h.clock.value + 30_000).toISOString(),
+    );
+    h.clock.value += 30_000;
+    await h.run();
+    expect(h.mutations).toHaveBeenCalledTimes(2);
+    expect(h.mutations.mock.calls.at(-1)![0].body).toContain("1 model call(s) are still running");
+  });
+
+  it("owns distinct static and E2E comments on the same PR and publishes media only to E2E", async () => {
+    const media = "## E2E evidence\n\nhttps://github.com/user-attachments/assets/synthetic-video";
+    const prepareReportMedia = vi.fn(async () => media);
+    const h = harness({ prepareReportMedia });
+    const ids = new Map<string, string>();
+    h.publishProgressComment.mockImplementation(
+      async (request, _repository, _item, _actor, beforeDispatch) => {
+        beforeDispatch?.();
+        h.mutations(structuredClone(request));
+        const externalId = ids.get(request.marker) ?? String(9001 + ids.size);
+        ids.set(request.marker, externalId);
+        return { state: "succeeded", message: "Synthetic comment accepted.", externalId };
+      },
+    );
+    h.enqueue();
+    const e2e: InvestigationTaskV1 = {
+      ...structuredClone(h.task),
+      id: `${h.task.id}-e2e`,
+      kind: "pr-e2e",
+    };
+    const command: InvestigationProgressTrigger = {
+      ...h.trigger,
+      eventName: "issue_comment",
+      commandCommentId: 77,
+    };
+    h.store.insert("tasks", e2e.id, e2e);
+    h.enqueue(e2e, command);
+    await h.run();
+    const initial = h.mutations.mock.calls.map(([request]) => request);
+    expect(initial).toHaveLength(2);
+    const staticComment = initial.find((request) => request.marker.includes(`${h.task.id} -->`))!;
+    const e2eComment = initial.find((request) => request.marker.includes(`${e2e.id} -->`))!;
+    expect(e2eComment.body).toContain("E2E verification queued");
+    expect(e2eComment.body).toContain("pull request comment 77");
+    expect(e2eComment.expectedAssigneeUserId).toBeUndefined();
+    expect(staticComment.expectedAssigneeUserId).toBe(h.trigger.assigneeUserId);
+    expect(h.publisher.isOwnComment(h.task.repository.id, 9001)).toBe(true);
+    expect(h.publisher.isOwnComment(h.task.repository.id, 9002)).toBe(true);
+    expect(h.publisher.isOwnComment("another-repository", 9001)).toBe(false);
+    expect(h.publisher.isOwnComment(h.task.repository.id, 77)).toBe(false);
+    const report = structuredClone(h.fixture.result);
+    report.context.task.id = e2e.id;
+    report.context.task.kind = "pr-e2e";
+    const completed: InvestigationTaskV1 = {
+      ...e2e,
+      state: "completed",
+      updatedAt: new Date(h.clock.value + 1).toISOString(),
+      latestReportRef: {
+        id: report.report.id,
+        version: report.report.version,
+        digest: report.report.logicalContentDigest,
+      },
+    };
+    h.store.put("tasks", e2e.id, completed);
+    h.store.put("reports", report.report.id, report);
+    h.publisher.update(completed, report);
+    await h.run();
+    const final = h.mutations.mock.calls.at(-1)![0];
+    expect(prepareReportMedia).toHaveBeenCalledExactlyOnceWith(report, completed);
+    expect(final).toMatchObject({
+      marker: e2eComment.marker,
+      externalId: ids.get(e2eComment.marker),
+      previousBody: e2eComment.body,
+    });
+    expect(final.body).toContain(media);
+    expect(final.body).toContain("## E2E result");
+    expect(
+      h.mutations.mock.calls.filter(([request]) => request.marker === staticComment.marker),
+    ).toHaveLength(1);
+    const summary = h.publisher.taskSummary(h.actor, e2e.id)!;
+    expect(summary.availableActions).toContain("sync");
+    h.publisher.sync(h.actor, summary.id, {
+      version: summary.version,
+      idempotencyKey: "retry-e2e-media",
+    });
+    await h.run();
+    expect(prepareReportMedia).toHaveBeenCalledTimes(2);
+    expect(h.mutations.mock.calls.at(-1)![0]).toMatchObject({
+      externalId: final.externalId,
+      previousBody: final.body,
+    });
+    expect(h.store.get<InvestigationTaskV1>("tasks", e2e.id)?.state).toBe("completed");
+  });
+
+  it.each(["interrupted", "cancelled", "failed", "blocked"] as const)(
+    "publishes recorded E2E results through the real %s progress path",
+    async (state) => {
+      const media = "## E2E evidence\n\nhttps://github.com/user-attachments/assets/synthetic-video";
+      const prepareReportMedia = vi.fn(async () => media);
+      const h = harness({ prepareReportMedia });
+      h.task.kind = "pr-e2e";
+      h.store.put("tasks", h.task.id, h.task);
+      h.enqueue(h.task, { ...h.trigger, eventName: "issue_comment", commandCommentId: 77 });
+      await h.run();
+      const queued = h.mutations.mock.calls[0]![0];
+      const report = createInvestigationPreview("pr", { findingCount: 0, outcome: state }).result;
+      report.context.task.kind = "pr-e2e";
+      report.report.loop.completedRounds = state === "blocked" ? 1 : 0;
+      report.report.loop.stopReason =
+        state === "interrupted" ? "budget_exhausted" : state === "failed" ? "error" : state;
+      report.report.summary = "Investigation has not started.";
+      report.diagnostics[0]!.message = "secret=private-diagnostic C:\\private\\worker.log";
+      report.verificationEvidence = [
+        {
+          id: "e2e-observation",
+          subjectRef: h.task.subjectRef,
+          authority: "worker",
+          source: "executor_observation",
+          summary: "The owned application window opened.",
+          evidenceRefs: [],
+          artifactRefs: [],
+          provenance: {
+            taskId: h.task.id,
+            attemptId: report.context.attempt.id,
+            producer: "e2e-tool-server",
+            recordedAt: h.now().toISOString(),
+          },
+        },
+      ];
+      report.artifacts = [];
+      if (state !== "cancelled") {
+        report.context.e2e = {
+          headSha: "b".repeat(40),
+          buildIdentity: "Synthetic pinned build",
+          cleanup: {
+            confirmed: true,
+            recordedAt: h.now().toISOString(),
+            summary: "Owned processes exited.",
+          },
+          features: [
+            {
+              id: "preview-feature",
+              title: "Preview lifecycle",
+              paths: ["src/Preview.cs"],
+              scenario: "Open and close the preview.",
+              userVisible: true,
+              outcome: "failed",
+              artifactRefs: [],
+              limitations: ["Cleanup timing was not verified."],
+              assertions: (
+                ["passed", "passed", "failed", "failed", "failed", "failed", "blocked"] as const
+              ).map((outcome, index) => ({
+                id: `preview-assertion-${index}`,
+                expected: "The expected preview state.",
+                observed: "The recorded preview state.",
+                outcome,
+                evidenceRefs: ["e2e-observation"],
+              })),
+            },
+          ],
+        };
+      }
+      const before = structuredClone(report);
+      const stopped = h.transition(state, report);
+      await h.run();
+      const publication = h.mutations.mock.calls.at(-1)![0];
+      expect(h.receipt()).toMatchObject({
+        stage: "failed",
+        state: "sent",
+        reportId: report.id,
+        externalId: "9001",
+      });
+      expect(publication).toMatchObject({
+        marker: queued.marker,
+        previousBody: queued.body,
+        externalId: "9001",
+      });
+      expect(publication.body).toContain(`Task ${state}; partial E2E report`);
+      expect(publication.body).toContain(media);
+      expect(prepareReportMedia).toHaveBeenCalledExactlyOnceWith(report, stopped);
+      if (state === "cancelled") {
+        expect(publication.body).toContain("Recorded 1 Worker observations and 0 artifacts");
+        expect(publication.body).toContain("Final E2E feature results are unavailable");
+      } else {
+        expect(publication.body).toContain(
+          "Recorded features: 0 passed, 1 failed, 0 blocked, 0 not run",
+        );
+        expect(publication.body).toContain("Preview lifecycle");
+        expect(publication.body).toContain("Assertions: 2 passed, 4 failed, 1 blocked, 0 not run");
+        expect(publication.body).toContain("Cleanup timing was not verified");
+      }
+      if (state === "blocked")
+        expect(publication.body).not.toContain("Final analysis was not adopted");
+      else expect(publication.body).toContain("Final analysis was not adopted");
+      if (state === "interrupted") expect(publication.body).toContain("exhausted its budget");
+      expect(publication.body).not.toContain("Investigation has not started");
+      expect(publication.body).not.toContain("E2E runtime verification: Passed");
+      expect(publication.body).not.toContain("private-diagnostic");
+      expect(publication.body).not.toContain("worker.log");
+      expect(h.mutations).toHaveBeenCalledTimes(2);
+      expect(report).toEqual(before);
+    },
+  );
+
+  it("keeps reported usage on cancelled task comments without inventing provider counts", async () => {
+    const h = harness({
+      usage: {
+        usage: {
+          inputTokens: null,
+          cachedReadTokens: null,
+          outputTokens: null,
+          reasoningTokens: null,
+          cacheWriteTokens: null,
+          totalTokens: null,
+          providerCounters: {},
+        },
+        reportedTokens: 321,
+        completeness: "partial",
+        invocationCount: 1,
+        activeInvocationCount: 0,
+        unknownInvocationCount: 1,
+        legacyTokens: 321,
+      },
+    });
+    h.enqueue();
+    h.transition("cancelled");
+    await h.run();
+    const body = h.mutations.mock.calls.at(-1)![0].body;
+    expect(body).toContain("Static review cancelled");
+    expect(body).toContain("321 tokens (partial usage)");
+    expect(body).toContain("Cached read: Unavailable");
+    expect(body).not.toContain("Cached read: 0");
+  });
+
   it.each(["pr", "bug"] as const)(
     "creates one %s comment and updates it with the complete report",
     async (kind) => {
@@ -301,7 +691,7 @@ describe("assignment progress comment outbox", () => {
     h.transition("completed");
     await h.run();
     expect(h.mutations.mock.calls.map(([request]) => request.externalId)).toEqual([null]);
-    expect(h.mutations.mock.calls[0]![0].body).toContain("Investigation completed");
+    expect(h.mutations.mock.calls[0]![0].body).toContain("Static review completed");
     expect(h.mutations.mock.calls[0]![0].body).toContain(h.task.createdAt);
     expect(h.receipt()).toMatchObject({ stage: "completed", state: "sent" });
   });
@@ -326,13 +716,19 @@ describe("assignment progress comment outbox", () => {
     await h.run();
     h.transition("running");
     h.control.beforeDispatch = (request) => {
-      if (request.body.includes("Investigation running")) h.transition("completed");
+      if (request.body.includes("Static review running")) h.transition("completed");
     };
     await h.run();
     expect(h.publishProgressComment).toHaveBeenCalledTimes(3);
     expect(h.mutations).toHaveBeenCalledTimes(2);
-    expect(h.mutations.mock.calls[1]![0].body).toContain("Investigation completed");
+    expect(h.mutations.mock.calls[1]![0].body).toContain("Static review completed");
     expect(h.receipt()).toMatchObject({ stage: "completed", state: "sent" });
+    const cancelled = h.store
+      .list<InvestigationCommentDelivery>("commentDeliveries")
+      .filter((attempt) => attempt.state === "cancelled");
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0]).toMatchObject({ operation: "update", effect: "not_sent" });
+    expect(cancelled[0]!.body).toContain("Static review running");
   });
 
   it("does not overwrite a completion committed during a slow running PATCH", async () => {
@@ -341,7 +737,7 @@ describe("assignment progress comment outbox", () => {
     await h.run();
     h.transition("running");
     h.control.afterDispatch = (request) => {
-      if (request.body.includes("Investigation running")) h.transition("completed");
+      if (request.body.includes("Static review running")) h.transition("completed");
     };
     await h.run();
     expect(h.mutations).toHaveBeenCalledTimes(3);

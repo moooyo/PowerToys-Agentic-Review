@@ -129,7 +129,7 @@ export function WebhookSettingsForm({
           value="/api/github/webhook"
           fullWidth
           slotProps={{ input: { readOnly: true } }}
-          helperText="Use this path on the public server URL and select Pull requests and Issues events in GitHub."
+          helperText="Use this path on the public server URL and select Pull requests, Issues, and Issue comments events in GitHub."
         />
         <FormControlLabel
           control={
@@ -144,6 +144,24 @@ export function WebhookSettingsForm({
           }
           label="Listen for assignments"
         />
+        <FormControlLabel
+          control={
+            <Switch
+              checked={form.e2eEnabled === true}
+              disabled={!canManage || busy}
+              onChange={(_, e2eEnabled) => {
+                setForm({ ...form, e2eEnabled });
+                setMessage(undefined);
+              }}
+            />
+          }
+          label="Allow trusted @account e2e commands on pull requests"
+        />
+        <Typography variant="body2" color="text.secondary">
+          E2E uses the same recipient and trusted users below. It may build and run repository code,
+          operate the desktop, and publish screenshots or videos in a separate comment. Only one E2E
+          task can use the desktop at a time; static tasks can run alongside it.
+        </Typography>
         <TextField
           label="Assignment recipient GitHub user ID"
           value={form.reviewerUserIdText}

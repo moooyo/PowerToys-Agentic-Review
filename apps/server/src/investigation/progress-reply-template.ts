@@ -1,9 +1,11 @@
-import type { InvestigationResultV1 } from "@agentic-review/contracts";
+import type { InvestigationResultV1, InvestigationUsageSummary } from "@agentic-review/contracts";
 import {
   type AutomaticReplyIdentity,
   type AutomaticReplyModelContext,
   type RenderedAutomaticReply,
+  recordedE2eRerunNextStep,
   renderAutomaticReplyIdentity,
+  renderReplyTokenUsage,
 } from "./auto-reply-template.js";
 import { InvestigationRequestError } from "./errors.js";
 
@@ -16,7 +18,7 @@ export const progressReplyTemplateTokens = {
 
 export type ProgressReplyStage = keyof typeof progressReplyTemplateTokens;
 export type ProgressReplyTemplates = Readonly<Record<ProgressReplyStage, string>>;
-export const progressReplyOptionalTemplateTokens = ["status"] as const;
+export const progressReplyOptionalTemplateTokens = ["status", "usage"] as const;
 
 export type ProgressReplyStatus =
   | "received"
@@ -38,6 +40,7 @@ export interface ProgressReplyScope {
 
 /** Values must come from accepted intake, Task, attempt, checkpoint, or sealed report records. */
 export interface ProgressReplyContext {
+  readonly mode?: "static" | "e2e";
   readonly status?: ProgressReplyStatus;
   readonly phase?: string;
   readonly attemptNumber?: number;
@@ -46,12 +49,14 @@ export interface ProgressReplyContext {
   readonly receivedAt?: string;
   readonly startedAt?: string;
   readonly trustedModels?: AutomaticReplyModelContext;
+  readonly usage?: InvestigationUsageSummary;
   /** A fixed public instruction selected by the service, never a raw diagnostic. */
   readonly nextStep?: string;
 }
 
 export interface InvestigationProgressTrigger {
-  readonly eventName: "issues" | "pull_request";
+  readonly eventName: "issues" | "pull_request" | "issue_comment";
+  readonly commandCommentId?: number;
   readonly actorUserId: number;
   readonly assigneeUserId: number;
   readonly actorLogin?: string;
@@ -93,6 +98,28 @@ Last updated: {{updated_at}}
 `,
 });
 
+/** E2E owns a separate comment and never inherits static-assignment instructions. */
+export const defaultE2eProgressReplyTemplates: ProgressReplyTemplates = Object.freeze({
+  received: `## {{status}}
+
+{{trigger}}
+
+The E2E request has been received. This separate comment tracks runtime verification and its screenshot or video evidence.
+
+Last updated: {{updated_at}}
+`,
+  started: `## {{status}}
+
+{{trigger}}
+
+Runtime verification has started under the exclusive E2E execution lease. Results and evidence will be added to this comment.
+
+Last updated: {{updated_at}}
+`,
+  failed: defaultProgressReplyTemplates.failed,
+  completed: defaultProgressReplyTemplates.completed,
+});
+
 const legacyProgressReplyTemplates: ProgressReplyTemplates = {
   received: `## Investigation received\n\n{{trigger}}\n\nThe task has been queued and will begin as soon as a worker is available.\n\nLast updated: {{updated_at}}\n`,
   started: `## Investigation started\n\n{{trigger}}\n\nThe task is now running. This comment will be updated with the outcome.\n\nLast updated: {{updated_at}}\n`,
@@ -129,7 +156,10 @@ export function validateProgressReplyTemplate(
   const tokens: readonly string[] = progressReplyTemplateTokens[stage];
   const found: string[] = [];
   const remaining = normalized.replace(/\{\{([^{}]*)\}\}/gu, (_, token: string) => {
-    if (!tokens.includes(token) && token !== "status")
+    if (
+      !tokens.includes(token) &&
+      !progressReplyOptionalTemplateTokens.includes(token as "status" | "usage")
+    )
       invalid(`Unknown progress reply token: ${token}.`);
     found.push(token);
     return "";
@@ -142,13 +172,18 @@ export function validateProgressReplyTemplate(
       return invalid(`Progress reply token {{${token}}} must appear exactly once.`);
     }
   }
-  if (found.filter((token) => token === "status").length > 1) {
-    return invalid("The optional progress reply token {{status}} may appear only once.");
+  for (const token of progressReplyOptionalTemplateTokens) {
+    if (found.filter((value) => value === token).length > 1)
+      return invalid(`The optional progress reply token {{${token}}} may appear only once.`);
   }
   if (found.includes("status") && found[0] !== "status") {
     return invalid("The optional status token must appear before the trigger token.");
   }
-  if (found.filter((token) => token !== "status").some((token, index) => token !== tokens[index])) {
+  if (
+    found
+      .filter((token) => token !== "status" && token !== "usage")
+      .some((token, index) => token !== tokens[index])
+  ) {
     return invalid(`Progress reply tokens must appear in the order ${tokens.join(", ")}.`);
   }
   return normalized;
@@ -228,19 +263,25 @@ function triggerText(trigger: InvestigationProgressTrigger): string {
   if (
     trigger === null ||
     typeof trigger !== "object" ||
-    !["issues", "pull_request"].includes(trigger.eventName) ||
+    !["issues", "pull_request", "issue_comment"].includes(trigger.eventName) ||
     !Number.isSafeInteger(trigger.actorUserId) ||
     trigger.actorUserId < 1 ||
     !Number.isSafeInteger(trigger.assigneeUserId) ||
-    trigger.assigneeUserId < 1
+    trigger.assigneeUserId < 1 ||
+    (trigger.eventName === "issue_comment" &&
+      (!Number.isSafeInteger(trigger.commandCommentId) || trigger.commandCommentId! < 1))
   ) {
-    return invalid("A progress reply requires an exact assignment trigger identity.");
+    return invalid(
+      "A progress reply requires an exact assignment or E2E command trigger identity.",
+    );
   }
   const user = (id: number, login: string | undefined): string =>
     typeof login === "string" &&
     /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?(?:\[bot\])?$/u.test(login)
       ? `GitHub user ${publicText(login)}`
       : `GitHub user ID ${id}`;
+  if (trigger.eventName === "issue_comment")
+    return `This E2E verification was requested by ${user(trigger.actorUserId, trigger.actorLogin)} in pull request comment ${trigger.commandCommentId}, mentioning ${user(trigger.assigneeUserId, trigger.assigneeLogin)} with the e2e command.`;
   const subject = trigger.eventName === "pull_request" ? "pull request" : "issue";
   const activity = trigger.eventName === "pull_request" ? "PR review" : "issue investigation";
   return `This ${activity} was triggered when ${user(trigger.actorUserId, trigger.actorLogin)} assigned the ${subject} to ${user(trigger.assigneeUserId, trigger.assigneeLogin)}.`;
@@ -256,25 +297,44 @@ export interface RenderProgressReplyInput {
   readonly context?: ProgressReplyContext;
   /** A complete safe report, or an explicitly labeled safe summary when it cannot fit. */
   readonly result?: RenderedAutomaticReply;
+  /** Generated only from durable, verified media publication receipts, never model prose. */
+  readonly trustedMediaMarkdown?: string;
   /** A fixed, public failure description, never a raw exception or worker output. */
   readonly failure?: string;
 }
 
 const statusLabels: Record<ProgressReplyStatus, string> = {
-  received: "Investigation received — preparing",
-  preparing: "Investigation received — preparing",
-  queued: "Investigation queued",
-  running: "Investigation running",
-  blocked: "Investigation waiting for action",
-  interrupted: "Investigation interrupted",
-  cancelled: "Investigation cancelled",
-  failed: "Investigation failed",
-  completed: "Investigation completed",
+  received: "received — preparing",
+  preparing: "received — preparing",
+  queued: "queued",
+  running: "running",
+  blocked: "waiting for action",
+  interrupted: "interrupted",
+  cancelled: "cancelled",
+  failed: "failed",
+  completed: "completed",
 };
 
+function isE2e(input: RenderProgressReplyInput): boolean {
+  return input.context?.mode === "e2e" || input.trigger.eventName === "issue_comment";
+}
+
+function statusLabel(input: RenderProgressReplyInput, status: ProgressReplyStatus): string {
+  const activity = isE2e(input)
+    ? "E2E verification"
+    : input.trigger.eventName === "issues"
+      ? "Static investigation"
+      : "Static review";
+  const label =
+    status === "queued" && input.context?.queuedForResume === true
+      ? "queued for resume"
+      : statusLabels[status];
+  return `${activity} ${label}`;
+}
+
 const nextActions: Record<ProgressReplyStatus, string> = {
-  received: "The service will prepare the frozen investigation input.",
-  preparing: "The service will prepare the frozen investigation input.",
+  received: "The service will capture the input snapshot for this investigation.",
+  preparing: "The service will capture the input snapshot for this investigation.",
   queued: "An eligible worker must claim the queued task before work can begin.",
   running:
     "The worker will continue the recorded investigation. Its next meaningful change will update this comment.",
@@ -317,8 +377,72 @@ function progressStatus(input: RenderProgressReplyInput): ProgressReplyStatus {
   return status;
 }
 
+/** Partial execution receipts are publishable progress, not a completed report conclusion. */
+function partialE2eResults(input: RenderProgressReplyInput): string {
+  const report = input.report;
+  if (
+    input.stage !== "failed" ||
+    report?.context.task.kind !== "pr-e2e" ||
+    report.report.completeness !== "partial" ||
+    !["interrupted", "cancelled", "failed", "blocked"].includes(report.outcome)
+  )
+    return "";
+  const lines = [
+    "### Recorded E2E results",
+    `**Task ${report.outcome}; partial E2E report.**`,
+    report.report.loop.completedRounds === 0
+      ? "Final analysis was not adopted. These records do not establish a completed E2E conclusion."
+      : "The recorded feature outcomes do not establish a completed E2E conclusion.",
+    report.report.loop.stopReason === "budget_exhausted"
+      ? "The task exhausted its budget before completion."
+      : "",
+  ];
+  const e2e = report.context.e2e;
+  if (e2e === undefined) {
+    const observations = report.verificationEvidence.filter(
+      (entry) => entry.authority === "worker" && entry.provenance.taskId === report.context.task.id,
+    ).length;
+    const artifacts = report.artifacts.filter(
+      (entry) => entry.taskId === report.context.task.id,
+    ).length;
+    lines.push(
+      observations > 0 || artifacts > 0
+        ? `Recorded ${observations} Worker observations and ${artifacts} artifacts. Final E2E feature results are unavailable.`
+        : "No structured E2E feature results were recorded. Application execution is not established by this report.",
+    );
+  } else {
+    const counts = (records: readonly { outcome: string }[]) =>
+      (["passed", "failed", "blocked", "not_run"] as const)
+        .map(
+          (outcome) =>
+            `${records.filter((entry) => entry.outcome === outcome).length} ${outcome.replaceAll("_", " ")}`,
+        )
+        .join(", ");
+    const brief = (value: string) => {
+      const safe = publicText(value).replace(/\s+/gu, " ");
+      return safe.length <= 160 ? safe : `${safe.slice(0, 159)}…`;
+    };
+    const visible = e2e.features.slice(0, 8);
+    lines.push(`Recorded features: ${counts(e2e.features)}.`);
+    for (const feature of visible) {
+      lines.push(
+        [
+          `- **${brief(feature.title)}:** recorded ${feature.outcome.replaceAll("_", " ")}. Assertions: ${counts(feature.assertions)}.`,
+          ...feature.limitations
+            .slice(0, 2)
+            .map((limitation) => `  Limitation: ${brief(limitation)}`),
+        ].join("\n"),
+      );
+    }
+    lines.push(
+      `Summary only: showing ${visible.length} of ${e2e.features.length} recorded features with bounded titles and limitations. Full assertions and limitations remain in the Dashboard report.`,
+    );
+  }
+  return lines.filter(Boolean).join("\n\n");
+}
+
 function sourceScope(input: RenderProgressReplyInput): string {
-  const workItemKind = input.trigger.eventName === "pull_request" ? "pull_request" : "issue";
+  const workItemKind = input.trigger.eventName === "issues" ? "issue" : "pull_request";
   const subject = input.report?.context.subjects.find(
     (item) => item.id === input.report?.context.task.subjectRef,
   );
@@ -334,9 +458,9 @@ function sourceScope(input: RenderProgressReplyInput): string {
     return scope?.snapshotCapturedAt === undefined
       ? input.stage === "received" &&
         [undefined, "received", "preparing"].includes(input.context?.status)
-        ? "Issue input is being prepared; no frozen investigation snapshot is established yet."
-        : "The frozen issue text and discussion snapshot recorded for this investigation. Later edits are outside this scope."
-      : `Frozen issue text and discussion snapshot captured at ${timestamp(scope.snapshotCapturedAt)}. Later edits are outside this scope.`;
+        ? "Issue input is being prepared; the investigation snapshot has not been captured yet."
+        : "The issue text and discussion snapshot recorded for this investigation. Later edits are outside this scope."
+      : `Issue text and discussion snapshot captured at ${timestamp(scope.snapshotCapturedAt)}. Later edits are outside this scope.`;
   }
   const head = scope?.headSha ?? reportHead;
   if (reportHead !== undefined && scope?.headSha !== undefined && reportHead !== scope.headSha) {
@@ -357,8 +481,8 @@ function sourceScope(input: RenderProgressReplyInput): string {
     [undefined, "received", "preparing"].includes(input.context?.status);
   return (
     (preparing
-      ? `Assigned pull request revision ${head}; investigation input is still being prepared.`
-      : `Frozen pull request input at commit ${head}.`) +
+      ? `${isE2e(input) ? "Requested" : "Assigned"} pull request revision ${head}; ${isE2e(input) ? "E2E verification" : "investigation"} input is still being prepared.`
+      : `Pull request snapshot at commit ${head}.`) +
     (scope?.currentHeadSha !== undefined && scope.currentHeadSha !== head
       ? ` The current pull request head is ${scope.currentHeadSha}; this investigation does not cover that newer head.`
       : " Later pushes are outside this scope.")
@@ -373,10 +497,11 @@ function statusCard(input: RenderProgressReplyInput, status: ProgressReplyStatus
   ) {
     return invalid("Progress context requires a positive recorded attempt number.");
   }
-  const label =
-    status === "queued" && context?.queuedForResume === true
-      ? "Investigation queued for resume"
-      : statusLabels[status];
+  const label = statusLabel(input, status);
+  const nextStep =
+    (["blocked", "failed"].includes(status) ? recordedE2eRerunNextStep(input.report) : undefined) ??
+    context?.nextStep ??
+    nextActions[status];
   return [
     `**Status:** ${label}`,
     `**Source scope:** ${sourceScope(input)}`,
@@ -384,7 +509,10 @@ function statusCard(input: RenderProgressReplyInput, status: ProgressReplyStatus
     context?.phase === undefined ? "" : `**Recorded phase:** ${publicText(context.phase)}`,
     context?.receivedAt === undefined ? "" : `**Received:** ${timestamp(context.receivedAt)}`,
     context?.startedAt === undefined ? "" : `**First started:** ${timestamp(context.startedAt)}`,
-    `**Next action:** ${publicText(context?.nextStep ?? nextActions[status])}`,
+    input.template.includes("{{usage}}") || input.result !== undefined
+      ? ""
+      : renderReplyTokenUsage(context?.usage, input.report),
+    `**Next action:** ${publicText(nextStep)}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -424,14 +552,12 @@ export function renderProgressReply(input: RenderProgressReplyInput): string {
     );
   }
   const values: Record<string, string> = {
-    status:
-      status === "queued" && input.context?.queuedForResume === true
-        ? "Investigation queued for resume"
-        : statusLabels[status],
+    status: statusLabel(input, status),
     trigger: triggerText(input.trigger),
     updated_at: new Date(updatedAt).toISOString(),
     failure: input.failure === undefined ? "" : publicText(input.failure),
     result: input.result?.content ?? "",
+    usage: renderReplyTokenUsage(input.context?.usage, input.report),
   };
   let offset = 0;
   let result = "";
@@ -444,5 +570,9 @@ export function renderProgressReply(input: RenderProgressReplyInput): string {
     identity,
     statusCard(input, status),
     `${result}${publicText(template.slice(offset), true)}`.trim(),
-  ].join("\n\n");
+    partialE2eResults(input),
+    input.trustedMediaMarkdown ?? "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }

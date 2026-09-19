@@ -619,7 +619,7 @@ async function sealReport(
       },
     ],
   };
-  for (const phase of (outcome === "completed"
+  for (const phase of (outcome === "completed" && checkpoint.runtime.reviewMode === undefined
     ? ["discovery", "finalize"]
     : ["discovery"]) as readonly ("discovery" | "finalize")[]) {
     const round: InvestigationLoopRoundV1 = {
@@ -634,11 +634,11 @@ async function sealReport(
       round: checkpoint.round + 1,
       phase,
       analysis: structuredClone(analysis),
-      continue: phase !== "finalize",
+      continue: outcome !== "completed",
       continuationReason:
-        phase === "finalize"
+        outcome === "completed"
           ? "The complete synthetic scope is ready for delivery."
-          : "A separate finalization round remains necessary.",
+          : "The incomplete synthetic scope remains explicitly blocked.",
     };
     const accepted = await workerPost(app, `${taskPath}/checkpoints`, {
       kind: "analysis",
@@ -1147,7 +1147,10 @@ describe("automatic reply production runtime", () => {
         stored(config, (store) => store.get<InvestigationTaskV1>("tasks", taskId)?.state),
       ).toBe("interrupted");
       await vi.waitFor(
-        () => expect(context.progressPublished.at(-1)?.body).toContain("Investigation interrupted"),
+        () =>
+          expect(context.progressPublished.at(-1)?.body).toContain(
+            "Static investigation interrupted",
+          ),
         { timeout: 5_000, interval: 10 },
       );
     } finally {

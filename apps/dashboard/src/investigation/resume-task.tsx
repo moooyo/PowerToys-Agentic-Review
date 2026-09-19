@@ -126,8 +126,8 @@ export function ResumeTaskButton({
         <DialogContent dividers>
           <Stack spacing={2}>
             <Typography variant="body2">
-              The source, scope, profile, and prompt remain frozen. You can increase the budget to
-              continue unfinished work.
+              The source, scope, profile, and prompt remain unchanged. You can increase the budget
+              to continue unfinished work.
             </Typography>
             {exhausted.length > 0 && (
               <Alert severity="warning">

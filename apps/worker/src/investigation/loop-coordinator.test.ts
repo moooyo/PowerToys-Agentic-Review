@@ -22,7 +22,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { ProcessHostClient } from "../execution/process-host-protocol.js";
 import { InvestigationLeaseLost } from "./attempt-heartbeat.js";
 import type { InvestigationWorkerClient } from "./http-client.js";
-import { InvestigationLoopCoordinator } from "./loop-coordinator.js";
+import {
+  InvestigationLoopCoordinator,
+  type InvestigationLoopCoordinatorOptions,
+} from "./loop-coordinator.js";
 import type {
   ModelTurnExecutionInput,
   ModelTurnExecutionResult,
@@ -90,7 +93,12 @@ function modelRound(
   };
 }
 
-function fixture(count = 2, maxRounds = 8, kind: "pr" | "bug" = "bug") {
+function fixture(
+  count = 2,
+  maxRounds = 8,
+  kind: "pr" | "bug" = "bug",
+  options: Partial<InvestigationLoopCoordinatorOptions> = {},
+) {
   const initial = createInvestigationFixture(kind, { findingCount: count });
   const task = structuredClone(initial.task);
   task.state = "running";
@@ -280,6 +288,7 @@ function fixture(count = 2, maxRounds = 8, kind: "pr" | "bug" = "bug") {
     logger,
     requestRetryMs: 1,
     maximumPartBytes: 16 * 1024,
+    ...options,
   });
   return {
     claim,
@@ -302,6 +311,113 @@ function fixture(count = 2, maxRounds = 8, kind: "pr" | "bug" = "bug") {
 }
 
 describe("InvestigationLoopCoordinator", () => {
+  it("seals a complete fresh snapshot investigation after one model invocation", async () => {
+    const f = fixture(0);
+    expect(f.current().runtime.reviewMode).toBe("local_snapshot");
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.current().consumed).toMatchObject({ rounds: 1, tokens: 100 });
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+    expect(f.plan.execute).not.toHaveBeenCalled();
+    expect(f.workspace.readPrDiffManifest).not.toHaveBeenCalled();
+  });
+
+  it("confirms owned cleanup before releasing the desktop and acknowledging the Server slot", async () => {
+    const events: string[] = [];
+    const f = fixture(0, 8, "bug", {
+      onAttemptCleanupConfirmed: async () => {
+        events.push("desktop_released");
+      },
+      onAttemptCleanupUnconfirmed: async () => {
+        events.push("quarantined");
+      },
+    });
+    vi.mocked(f.workspace.cleanup).mockImplementation(async () => {
+      events.push("workspace_cleaned");
+    });
+    f.client.cleanup = vi.fn(async (_taskId, request) => {
+      events.push("server_acknowledged");
+      expect(request).toEqual({
+        lease: f.claim.lease,
+        ownedProcessesStopped: true,
+        desktopRestored: true,
+      });
+      return { released: true as const, attemptId: f.claim.attempt.id };
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(events).toEqual(["workspace_cleaned", "desktop_released", "server_acknowledged"]);
+  });
+
+  it("keeps execution resources quarantined when workspace cleanup cannot be confirmed", async () => {
+    const confirmed = vi.fn(async () => undefined);
+    const unconfirmed = vi.fn(async () => undefined);
+    const f = fixture(0, 8, "bug", {
+      onAttemptCleanupConfirmed: confirmed,
+      onAttemptCleanupUnconfirmed: unconfirmed,
+    });
+    vi.mocked(f.workspace.cleanup).mockRejectedValue(new Error("Synthetic owned cleanup failure."));
+    f.client.cleanup = vi.fn(async () => ({
+      released: true as const,
+      attemptId: f.claim.attempt.id,
+    }));
+    await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toThrow(
+      "Synthetic owned cleanup failure.",
+    );
+    expect(confirmed).not.toHaveBeenCalled();
+    expect(unconfirmed).toHaveBeenCalledWith("ATTEMPT_CLEANUP_UNCONFIRMED");
+    expect(f.client.cleanup).not.toHaveBeenCalled();
+  });
+
+  it("does not release a slot after a failed preparation also lost its owned cleanup", async () => {
+    const confirmed = vi.fn(async () => undefined);
+    const unconfirmed = vi.fn(async () => undefined);
+    const f = fixture(0, 8, "bug", {
+      onAttemptCleanupConfirmed: confirmed,
+      onAttemptCleanupUnconfirmed: unconfirmed,
+    });
+    vi.mocked(f.prepare).mockRejectedValue(
+      Object.assign(new AggregateError([], "Synthetic preparation cleanup failure."), {
+        code: "WORKSPACE_CLEANUP_UNCONFIRMED",
+      }),
+    );
+    f.client.cleanup = vi.fn(async () => ({
+      released: true as const,
+      attemptId: f.claim.attempt.id,
+    }));
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(confirmed).not.toHaveBeenCalled();
+    expect(unconfirmed).toHaveBeenCalledWith("OWNED_PROCESS_CLEANUP_UNCONFIRMED");
+    expect(f.client.cleanup).not.toHaveBeenCalled();
+  });
+
+  it("binds usage receipts to accepted rounds and passes the original lease to the runner", async () => {
+    const f = fixture();
+    const original = vi.mocked(f.model.execute).getMockImplementation()!;
+    const dispositions = vi.fn(async () => undefined);
+    f.model.markUsageDisposition = dispositions;
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      expect(input.usageLease).toEqual(f.claim.lease);
+      const result = await original(input);
+      return {
+        ...result,
+        usage: { ...result.usage, invocationId: `invocation-${result.round.round}` },
+      };
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(dispositions.mock.calls).toEqual([
+      ["invocation-1", "accepted"],
+      ["invocation-2", "accepted"],
+    ]);
+    const analyses = vi
+      .mocked(f.client.checkpoint)
+      .mock.calls.map(([, request]) => request)
+      .filter((request) => request.kind === "analysis");
+    expect(analyses.map((request) => request.invocationId)).toEqual([
+      "invocation-1",
+      "invocation-2",
+    ]);
+  });
+
   it("sends trusted model identities with accepted analysis rounds and preserves them in the report", async () => {
     const f = fixture();
     const original = vi.mocked(f.model.execute).getMockImplementation()!;
@@ -333,8 +449,13 @@ describe("InvestigationLoopCoordinator", () => {
     ]);
   });
 
-  it("persists every trusted PR source chunk before allowing a full diff conclusion", async () => {
+  it("preserves legacy chunk coverage before allowing a full diff conclusion", async () => {
     const f = fixture(0, 8, "pr");
+    // A persisted checkpoint without a review mode keeps its original chunk-brokered semantics.
+    const legacy = f.current();
+    delete legacy.runtime.reviewMode;
+    const { digest: _digest, ...legacyContent } = legacy;
+    legacy.digest = investigationContentDigest(legacyContent);
     const base = {
       schemaVersion: "InvestigationPrDiffManifestV1" as const,
       subjectRef: f.claim.task.subjectRef,
@@ -541,10 +662,31 @@ describe("InvestigationLoopCoordinator", () => {
     );
     await f.coordinator.execute(f.claim, f.shutdown.signal);
     expect(f.model.execute).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(f.client.checkpoint)
+        .mock.calls.find(([, request]) => request.kind === "interrupt")?.[1],
+    ).toMatchObject({ modelInvocationState: "not_started" });
     expect(f.submissions[0]?.header).toMatchObject({
       outcome: "blocked",
       report: { completeness: "partial" },
     });
+  });
+
+  it("does not declare pre-dispatch zero consumption after entering the model runner", async () => {
+    const f = fixture();
+    vi.mocked(f.model.execute).mockRejectedValue(
+      Object.assign(new Error("Synthetic model transport failed."), {
+        code: "MODEL_PROCESS_FAILED",
+      }),
+    );
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(
+      vi
+        .mocked(f.client.checkpoint)
+        .mock.calls.find(([, request]) => request.kind === "interrupt")?.[1],
+    ).not.toHaveProperty("modelInvocationState");
   });
 
   it("delivers an already complete checkpoint without preparing a workspace or repeating any work", async () => {

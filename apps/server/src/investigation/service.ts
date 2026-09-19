@@ -3,22 +3,29 @@ import type {
   InvestigationActionGuard,
   InvestigationArtifactV1,
   InvestigationAttemptV1,
+  InvestigationBudget,
   InvestigationCheckpointRequest,
   InvestigationClaimRequest,
   InvestigationClaimResponse,
+  InvestigationCleanupRequest,
   InvestigationCreateTaskRequestV1,
   InvestigationFinalizeRequest,
   InvestigationFindingsPageV1,
   InvestigationHeartbeatRequest,
   InvestigationInputSnapshotV1,
   InvestigationLoopCheckpointV1,
+  InvestigationModelInvocationReceipt,
   InvestigationPlanExecutionBinding,
   InvestigationPlanV1,
+  InvestigationProgressRequest,
   InvestigationReportPartRequest,
   InvestigationReportPartV1,
   InvestigationResultV1,
+  InvestigationSchedulerSettingsRequest,
+  InvestigationSchedulerStatus,
   InvestigationSubjectV1,
   InvestigationTaskV1,
+  InvestigationUsageSummary,
   InvestigationWorkerLease,
 } from "@agentic-review/contracts";
 import {
@@ -34,15 +41,23 @@ import {
   applyInvestigationRuntimeCheckpoint,
   applyInvestigationSourceCoverage,
   createInvestigationCheckpoint,
+  hasInvestigationSemanticProgress,
   increaseInvestigationBudget,
   interruptInvestigationLoop,
   investigationContentDigest,
+  projectInvestigationTokenConsumption,
+  projectRecordedE2eAnalysis,
   restoreCompletedInvestigationForDelivery,
   restoreInvestigationCheckpoint,
 } from "@agentic-review/domain";
 import { FormatRegistry, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { InvestigationActions } from "./actions.js";
+import {
+  attemptHasVerifiedNoModelInvocation,
+  recordAttemptWithoutModelInvocation,
+} from "./attempt-usage-coverage.js";
+import { validateRootE2eRuntime } from "./e2e-runtime.js";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
 import { type InvestigationEvidencePolicy, InvestigationEvidenceStore } from "./evidence-store.js";
 import { constantTimeEqual, encodeCursor, parseCursor } from "./integrity.js";
@@ -54,7 +69,16 @@ import {
   InvestigationWorkItemRecordSchema,
 } from "./protocol.js";
 import { assembleInvestigationReport, reportHeader } from "./report.js";
+import { InvestigationResourceScheduler, investigationResourcePool } from "./resource-scheduler.js";
 import type { InvestigationStore } from "./store.js";
+import {
+  beginInvestigationProgress,
+  investigationTaskProgress,
+  recordInvestigationActivity,
+  recordInvestigationCleanup,
+  recordInvestigationHeartbeat,
+  recordMeaningfulInvestigationProgress,
+} from "./task-progress.js";
 import type {
   InvestigationActionTransport,
   InvestigationOperatorPrincipal,
@@ -63,6 +87,12 @@ import type {
   InvestigationWorkerPrincipal,
   InvestigationWorkItemRecord,
 } from "./types.js";
+import {
+  InvestigationUsageLedgerError,
+  investigationUsageInvocations,
+  investigationUsageSummary,
+  recordInvestigationUsage,
+} from "./usage-ledger.js";
 
 interface AttemptRecord {
   attempt: InvestigationAttemptV1;
@@ -115,11 +145,14 @@ export interface InvestigationServiceOptions {
   now?: () => Date;
   idFactory?: () => string;
   leaseDurationMs?: number;
+  staticConcurrency?: number;
+  defaultTaskBudget?: Readonly<Omit<InvestigationBudget, "maxReportBytes">>;
   maxReportBytes?: number;
   evidencePolicy?: Partial<InvestigationEvidencePolicy>;
   resolvePlanPrerequisites?: InvestigationPrerequisiteResolver;
   onReportSealed?: (report: InvestigationResultV1, task: InvestigationTaskV1) => void;
   onTaskStateChanged?: (task: InvestigationTaskV1, report?: InvestigationResultV1) => void;
+  onTaskUsageChanged?: (task: InvestigationTaskV1) => void;
   onTaskProgress?: (
     task: InvestigationTaskV1,
     checkpoint: InvestigationLoopCheckpointV1,
@@ -151,6 +184,8 @@ export class InvestigationService {
   private readonly idFactory: () => string;
   private readonly leaseDurationMs: number;
   private readonly maxReportBytes: number;
+  private readonly defaultTaskBudget: Readonly<InvestigationBudget>;
+  private readonly resourceScheduler: InvestigationResourceScheduler;
 
   constructor(private readonly options: InvestigationServiceOptions) {
     this.store = options.store;
@@ -158,6 +193,33 @@ export class InvestigationService {
     this.evidence = new InvestigationEvidenceStore(this.store, options.evidencePolicy, this.now);
     this.idFactory = options.idFactory ?? randomUUID;
     this.leaseDurationMs = options.leaseDurationMs ?? 120_000;
+    this.resourceScheduler = new InvestigationResourceScheduler(
+      this.store,
+      this.now,
+      options.staticConcurrency ?? 1,
+    );
+    this.store.transaction(() => {
+      this.resourceScheduler.initialize();
+      for (const record of this.store.list<AttemptRecord>(
+        "attempts",
+        (entry) => entry.attempt.state === "running",
+      )) {
+        const task = this.required<InvestigationTaskV1>("tasks", record.attempt.taskId);
+        requireCondition(
+          record.attempt.workerId !== null,
+          500,
+          "missing_running_attempt_owner",
+          "A running attempt must retain its worker identity before resource scheduling starts.",
+        );
+        this.resourceScheduler.adopt({
+          attemptId: record.attempt.id,
+          taskId: task.id,
+          workerId: record.attempt.workerId,
+          fence: record.attempt.leaseVersion,
+          pool: investigationResourcePool(task.kind),
+        });
+      }
+    });
     this.maxReportBytes = options.maxReportBytes ?? 64 * 1024 * 1024;
     requireCondition(
       Number.isSafeInteger(this.maxReportBytes) &&
@@ -167,6 +229,30 @@ export class InvestigationService {
       "invalid_report_resource_limit",
       "The configured report byte limit must be a positive safe integer no larger than 512 MiB.",
     );
+    const budget =
+      options.defaultTaskBudget === undefined
+        ? { maxRounds: 24, maxDurationMs: 1_800_000, maxTokens: 120_000 }
+        : options.defaultTaskBudget;
+    requireCondition(
+      budget !== null &&
+        typeof budget === "object" &&
+        !Array.isArray(budget) &&
+        Object.keys(budget).length === 3 &&
+        [budget.maxRounds, budget.maxDurationMs, budget.maxTokens].every(
+          (value) => Number.isSafeInteger(value) && value > 0,
+        ) &&
+        budget.maxDurationMs <= 2_147_483_647,
+      500,
+      "invalid_default_task_budget",
+      "Default task budgets require positive safe integer rounds, tokens, and duration no larger than 2147483647 milliseconds.",
+    );
+    // Deployment configuration affects only future Tasks and cannot be mutated after startup.
+    this.defaultTaskBudget = Object.freeze({
+      maxRounds: budget.maxRounds,
+      maxDurationMs: budget.maxDurationMs,
+      maxTokens: budget.maxTokens,
+      maxReportBytes: this.maxReportBytes,
+    });
     this.actions = new InvestigationActions({
       store: this.store,
       now: this.now,
@@ -313,17 +399,19 @@ export class InvestigationService {
   listTasks(actor: InvestigationOperatorPrincipal, query: InvestigationDirectoryQuery) {
     this.reapExpiredLeases();
     if (query.repositoryId !== undefined) this.scope(actor, query.repositoryId);
+    const items = this.store
+      .list<InvestigationTaskV1>(
+        "tasks",
+        (task) =>
+          actor.repositoryIds.includes(task.repository.id) &&
+          (query.repositoryId === undefined || task.repository.id === query.repositoryId) &&
+          (query.workItemId === undefined || task.workItem.id === query.workItemId) &&
+          (query.kind === undefined || task.kind === query.kind),
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return {
-      items: this.store
-        .list<InvestigationTaskV1>(
-          "tasks",
-          (task) =>
-            actor.repositoryIds.includes(task.repository.id) &&
-            (query.repositoryId === undefined || task.repository.id === query.repositoryId) &&
-            (query.workItemId === undefined || task.workItem.id === query.workItemId) &&
-            (query.kind === undefined || task.kind === query.kind),
-        )
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+      items,
+      usageByTaskId: Object.fromEntries(items.map((task) => [task.id, this.usageSummary(task.id)])),
     };
   }
 
@@ -346,13 +434,17 @@ export class InvestigationService {
       FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
     requireCondition(
       Value.Check(InvestigationCreateTaskRequestV1Schema, request) &&
-        (request.kind === "pr-review" || request.kind === "issue-investigate") &&
-        request.executionMode !== "execute" &&
+        (request.kind === "pr-review" ||
+          request.kind === "issue-investigate" ||
+          request.kind === "pr-e2e") &&
+        (request.kind === "pr-e2e"
+          ? request.executionMode === "execute"
+          : request.executionMode !== "execute") &&
         request.parentReportRef === undefined &&
         request.planRef === undefined,
       400,
       "invalid_imported_task_request",
-      "Imported tasks require a root investigation without an executable or parent plan.",
+      "Imported tasks require a root investigation or authorized E2E without a parent plan.",
     );
     requireCondition(
       Value.Check(importedTaskSourceSchema, source),
@@ -451,7 +543,10 @@ export class InvestigationService {
         "The requested plan is not saved in the bound report.",
       );
     }
-    const rootKind = request.kind === "pr-review" || request.kind === "issue-investigate";
+    const rootKind =
+      request.kind === "pr-review" ||
+      request.kind === "issue-investigate" ||
+      request.kind === "pr-e2e";
     requireCondition(
       rootKind || plan !== null,
       400,
@@ -475,7 +570,7 @@ export class InvestigationService {
       );
     }
     requireCondition(
-      request.kind !== "pr-review" || item.kind === "pull_request",
+      (request.kind !== "pr-review" && request.kind !== "pr-e2e") || item.kind === "pull_request",
       400,
       "task_kind_mismatch",
       "PR review requires a pull request.",
@@ -506,7 +601,19 @@ export class InvestigationService {
     );
     const mode =
       request.executionMode ??
-      (rootKind ? (item.kind === "issue" ? "snapshot_only" : "source_read") : "execute");
+      (request.kind === "pr-e2e"
+        ? "execute"
+        : rootKind
+          ? item.kind === "issue"
+            ? "snapshot_only"
+            : "source_read"
+          : "execute");
+    requireCondition(
+      request.kind !== "pr-e2e" || mode === "execute",
+      400,
+      "execution_mode_required",
+      "E2E tasks require repository execution.",
+    );
     requireCondition(
       rootKind || mode === "execute",
       400,
@@ -587,12 +694,19 @@ export class InvestigationService {
             {
               id: "scope-original",
               subjectRef: subject.id,
-              kind: item.kind === "pull_request" ? "full_diff" : "issue_snapshot",
+              kind:
+                request.kind === "pr-e2e"
+                  ? "e2e_features"
+                  : item.kind === "pull_request"
+                    ? "full_diff"
+                    : "issue_snapshot",
               paths: [],
               requiredWork:
-                item.kind === "pull_request"
-                  ? "Inspect the entire frozen diff and all affected behavior, callers, and tests."
-                  : "Investigate the entire frozen issue snapshot, every supplied fact, and all supported hypotheses.",
+                request.kind === "pr-e2e"
+                  ? "Run each affected PR feature at the pinned revision with explicit assertions and successful-state screenshots or videos. Record missing coverage and confirm owned-process cleanup."
+                  : item.kind === "pull_request"
+                    ? "Review the pinned PR changes and affected behavior, including relevant callers and test source."
+                    : "Statically investigate the recorded issue snapshot, supplied facts, and supported hypotheses.",
               status: "pending" as const,
               evidenceRefs: [],
             },
@@ -639,7 +753,13 @@ export class InvestigationService {
     if (rootKind && request.scope !== undefined)
       requireCondition(
         scope.includedUnits.some(
-          (unit) => unit.kind === (item.kind === "pull_request" ? "full_diff" : "issue_snapshot"),
+          (unit) =>
+            unit.kind ===
+            (request.kind === "pr-e2e"
+              ? "e2e_features"
+              : item.kind === "pull_request"
+                ? "full_diff"
+                : "issue_snapshot"),
         ),
         400,
         "complete_scope_required",
@@ -665,12 +785,7 @@ export class InvestigationService {
         allowRepositoryExecution: mode === "execute",
         authorizationRef: mode === "execute" ? actor.id : null,
       },
-      budget: request.budget ?? {
-        maxRounds: 24,
-        maxDurationMs: 1_800_000,
-        maxTokens: 120_000,
-        maxReportBytes: this.maxReportBytes,
-      },
+      budget: structuredClone(request.budget ?? this.defaultTaskBudget),
       profileRef: request.profileRef ??
         parent?.context.profileRef ?? {
           id: "investigation-default",
@@ -679,9 +794,11 @@ export class InvestigationService {
         },
       promptRef: request.promptRef ??
         parent?.context.promptRef ?? {
-          id: "investigation-loop",
+          id: request.kind === "pr-e2e" ? "investigation-e2e" : "investigation-loop",
           version: 1,
-          digest: investigationContentDigest("investigation-loop-v1"),
+          digest: investigationContentDigest(
+            request.kind === "pr-e2e" ? "investigation-e2e-v1" : "investigation-loop-v1",
+          ),
         },
       state: "queued",
       latestReportRef: null,
@@ -924,12 +1041,192 @@ export class InvestigationService {
     const task = this.task(actor, id);
     return {
       task,
+      usage: this.usageSummary(id),
+      invocations: investigationUsageInvocations(this.store, id),
+      progress: investigationTaskProgress(this.store, id),
       attempts: this.attempts(id).map((record) => record.attempt),
+      resourceLeases: this.resourceScheduler.leases().filter((lease) => lease.taskId === id),
       checkpoint: this.store.get<InvestigationLoopCheckpointV1>("checkpoints", id) ?? null,
       latestReport:
         task.latestReportRef === null ? null : this.reportHeader(actor, task.latestReportRef.id),
       children: this.store.list<InvestigationTaskV1>("tasks", (child) => child.parentTaskId === id),
     };
+  }
+  getTaskUsage(actor: InvestigationOperatorPrincipal, id: string) {
+    this.task(actor, id);
+    return {
+      usage: this.usageSummary(id),
+      invocations: investigationUsageInvocations(this.store, id),
+    };
+  }
+
+  /** Trusted publishers and report finalization use the same ledger as the Dashboard. */
+  usageSummary(taskId: string) {
+    this.required<InvestigationTaskV1>("tasks", taskId);
+    const checkpoint = this.store.get<InvestigationLoopCheckpointV1>("checkpoints", taskId);
+    const unknown =
+      this.hasUnaccountedAttempt(taskId) ||
+      (checkpoint?.analysis.diagnostics.some(
+        (diagnostic) => diagnostic.code === "MODEL_USAGE_UNAVAILABLE",
+      ) ??
+        false);
+    const verifiedZeroAttempt =
+      !unknown &&
+      this.attempts(taskId).some((record) =>
+        attemptHasVerifiedNoModelInvocation(
+          this.store,
+          taskId,
+          record.attempt.id,
+          record.attempt.leaseVersion,
+        ),
+      );
+    return investigationUsageSummary(
+      this.store,
+      taskId,
+      checkpoint?.consumed.tokens ?? 0,
+      unknown,
+      verifiedZeroAttempt,
+    );
+  }
+
+  private hasUnaccountedAttempt(taskId: string, registeringAttemptId?: string): boolean {
+    const covered = new Set(
+      investigationUsageInvocations(this.store, taskId).map((receipt) => receipt.attemptId),
+    );
+    return this.attempts(taskId).some(
+      (record) =>
+        record.attempt.id !== registeringAttemptId &&
+        !covered.has(record.attempt.id) &&
+        !attemptHasVerifiedNoModelInvocation(
+          this.store,
+          taskId,
+          record.attempt.id,
+          record.attempt.leaseVersion,
+        ),
+    );
+  }
+
+  /** Late accounting is allowed for the original attempt lease, never for another Worker. */
+  workerModelUsage(
+    worker: InvestigationWorkerPrincipal,
+    taskId: string,
+    request: { lease: InvestigationWorkerLease; receipt: InvestigationModelInvocationReceipt },
+  ) {
+    const accepted = this.store.transaction(() => {
+      const task = this.task(worker, taskId);
+      const record = this.required<AttemptRecord>("attempts", request.lease.attemptId);
+      requireCondition(
+        request.receipt.taskId === taskId &&
+          request.receipt.attemptId === request.lease.attemptId &&
+          record.attempt.taskId === taskId &&
+          record.attempt.workerId === worker.id &&
+          record.attempt.leaseVersion === request.lease.fence &&
+          constantTimeEqual(
+            record.leaseTokenDigest,
+            investigationContentDigest(request.lease.leaseToken),
+          ),
+        409,
+        "usage_lease_mismatch",
+        "The model usage receipt does not belong to the authenticated Worker's original attempt lease.",
+      );
+      const checkpoint = this.store.get<InvestigationLoopCheckpointV1>("checkpoints", taskId);
+      const previousInvocation = investigationUsageInvocations(this.store, taskId).find(
+        (receipt) => receipt.invocationId === request.receipt.invocationId,
+      );
+      const admissionKey = `model-usage-admission:${request.receipt.invocationId}`;
+      const retainedAdmission = this.store.get<{ executionAllowed: boolean }>(
+        "idempotency",
+        admissionKey,
+      );
+      const executionAllowed =
+        retainedAdmission?.executionAllowed ??
+        (previousInvocation !== undefined ||
+          (task.state === "running" &&
+            record.attempt.state === "running" &&
+            !record.cancelRequested &&
+            checkpoint?.attemptId === record.attempt.id &&
+            checkpoint.leaseVersion === request.lease.fence &&
+            checkpoint.stopReason === "continuing" &&
+            Date.parse(record.leaseExpiresAt) > this.now().getTime() &&
+            this.usageSummary(taskId).reportedTokens < task.budget.maxTokens));
+      if (!executionAllowed && request.receipt.revision > 1)
+        requireCondition(
+          ["failed", "cancelled"].includes(request.receipt.state) &&
+            request.receipt.usage.totalTokens === 0 &&
+            request.receipt.completeness === "complete" &&
+            [
+              request.receipt.usage.inputTokens,
+              request.receipt.usage.outputTokens,
+              request.receipt.usage.cachedReadTokens,
+              request.receipt.usage.reasoningTokens,
+              request.receipt.usage.cacheWriteTokens,
+              ...Object.values(request.receipt.usage.providerCounters),
+            ].every((count) => count === null || count === 0),
+          409,
+          "usage_execution_not_admitted",
+          "A late or budget-rejected registration cannot authorize execution or report spent tokens.",
+        );
+      try {
+        const recorded = recordInvestigationUsage(
+          this.store,
+          request.receipt,
+          checkpoint?.consumed.tokens ?? 0,
+          this.hasUnaccountedAttempt(
+            taskId,
+            executionAllowed ? request.receipt.attemptId : undefined,
+          ) ||
+            (checkpoint?.analysis.diagnostics.some(
+              (diagnostic) => diagnostic.code === "MODEL_USAGE_UNAVAILABLE",
+            ) ??
+              false),
+        );
+        if (retainedAdmission === undefined)
+          this.store.insert("idempotency", admissionKey, { executionAllowed });
+        return {
+          task,
+          changed: !recorded.duplicate,
+          response: {
+            invocationId: recorded.receipt.invocationId,
+            revision: recorded.receipt.revision,
+            ...(request.receipt.state === "registered" && request.receipt.revision === 1
+              ? { executionAllowed }
+              : {}),
+          },
+        };
+      } catch (error) {
+        if (error instanceof InvestigationUsageLedgerError)
+          throw new InvestigationRequestError(
+            error.code === "INVALID_USAGE" ? 400 : 409,
+            error.code.toLowerCase(),
+            error.message,
+          );
+        throw error;
+      }
+    });
+    if (accepted.changed) {
+      try {
+        this.options.onTaskUsageChanged?.(accepted.task);
+      } catch {
+        // Accounting is already committed. The durable publication wakeup survives a restart.
+      }
+    }
+    return accepted.response;
+  }
+
+  workerReportUsage(
+    worker: InvestigationWorkerPrincipal,
+    taskId: string,
+    request: { lease: InvestigationWorkerLease },
+  ) {
+    return this.store.transaction(() => {
+      const { record } = this.lease(worker, taskId, request.lease);
+      const key = `report-usage:${record.reportId}`;
+      const previous = this.store.get<{ summary: InvestigationUsageSummary }>("idempotency", key);
+      if (previous !== undefined) return structuredClone(previous);
+      const snapshot = { summary: this.usageSummary(taskId) };
+      this.store.insert("idempotency", key, snapshot);
+      return structuredClone(snapshot);
+    });
   }
   async resumeTask(
     actor: InvestigationOperatorPrincipal,
@@ -1092,7 +1389,10 @@ export class InvestigationService {
     );
     const active = this.attempts(id).findLast((record) => record.attempt.state === "running");
     if (active !== undefined) {
-      this.store.put("attempts", active.attempt.id, { ...active, cancelRequested: true });
+      this.store.transaction(() => {
+        this.store.put("attempts", active.attempt.id, { ...active, cancelRequested: true });
+        this.resourceScheduler.requestCleanup(active.attempt.id, "cancellation_requested");
+      });
       return task;
     }
     const cancelled: InvestigationTaskV1 = { ...task, state: "cancelled", updatedAt: this.time() };
@@ -1101,6 +1401,81 @@ export class InvestigationService {
       this.options.onTaskStateChanged?.(cancelled);
     });
     return cancelled;
+  }
+
+  schedulerStatus(actor: InvestigationOperatorPrincipal): InvestigationSchedulerStatus {
+    this.reapExpiredLeases();
+    const leases = this.resourceScheduler.leases().filter((lease) => lease.state !== "released");
+    return {
+      ...this.resourceScheduler.settings(),
+      occupiedStatic: leases.filter((lease) => lease.pool === "static").length,
+      occupiedE2e: leases.filter((lease) => lease.pool === "e2e").length,
+      leases: leases.filter((lease) => {
+        const task = this.store.get<InvestigationTaskV1>("tasks", lease.taskId);
+        return task !== undefined && actor.repositoryIds.includes(task.repository.id);
+      }),
+    };
+  }
+
+  configureScheduler(
+    actor: InvestigationOperatorPrincipal,
+    request: InvestigationSchedulerSettingsRequest,
+  ): InvestigationSchedulerStatus {
+    requireCondition(
+      actor.isAdmin === true,
+      403,
+      "administrator_required",
+      "Only an administrator may change global task concurrency.",
+    );
+    this.store.transaction(() => this.resourceScheduler.configure(request.staticConcurrency));
+    return this.schedulerStatus(actor);
+  }
+
+  workerCleanup(
+    worker: InvestigationWorkerPrincipal,
+    taskId: string,
+    request: InvestigationCleanupRequest,
+  ) {
+    this.reapExpiredLeases();
+    return this.store.transaction(() => {
+      const task = this.task(worker, taskId);
+      const record = this.required<AttemptRecord>("attempts", request.lease.attemptId);
+      requireCondition(
+        record.attempt.taskId === taskId &&
+          record.attempt.workerId === worker.id &&
+          record.attempt.leaseVersion === request.lease.fence &&
+          constantTimeEqual(
+            record.leaseTokenDigest,
+            investigationContentDigest(request.lease.leaseToken),
+          ),
+        409,
+        "cleanup_owner_mismatch",
+        "Cleanup must be confirmed by the original worker and exact attempt lease.",
+      );
+      const checkpoint = this.store.get<InvestigationLoopCheckpointV1>("checkpoints", task.id);
+      requireCondition(
+        record.attempt.state !== "running" ||
+          record.cancelRequested ||
+          (checkpoint?.attemptId === record.attempt.id && checkpoint.stopReason !== "continuing"),
+        409,
+        "execution_still_active",
+        "Cleanup cannot release a resource while the attempt can still execute work.",
+      );
+      requireCondition(
+        request.ownedProcessesStopped === true && request.desktopRestored === true,
+        409,
+        "cleanup_not_confirmed",
+        "Owned process termination and desktop restoration must both be confirmed.",
+      );
+      this.resourceScheduler.confirmCleanup({
+        attemptId: record.attempt.id,
+        taskId,
+        workerId: worker.id,
+        fence: request.lease.fence,
+      });
+      recordInvestigationCleanup(this.store, taskId, record.attempt.id, this.time());
+      return { released: true as const, attemptId: record.attempt.id };
+    });
   }
 
   reportExport(actor: InvestigationOperatorPrincipal, id: string): InvestigationResultV1 {
@@ -1220,6 +1595,7 @@ export class InvestigationService {
             terminationReason: "lease_expired",
           },
         });
+        this.resourceScheduler.terminate(record.attempt.id, "lease_expired");
         const interrupted: InvestigationTaskV1 = {
           ...task,
           state: record.cancelRequested ? "cancelled" : "interrupted",
@@ -1235,6 +1611,10 @@ export class InvestigationService {
   ): InvestigationClaimResponse {
     this.reapExpiredLeases();
     return this.store.transaction(() => {
+      const availablePools = {
+        static: this.resourceScheduler.available("static"),
+        e2e: this.resourceScheduler.available("e2e"),
+      };
       const task = this.store
         .list<InvestigationTaskV1>(
           "tasks",
@@ -1243,7 +1623,8 @@ export class InvestigationService {
             worker.repositoryIds.includes(entry.repository.id) &&
             request.supportedKinds.includes(entry.kind),
         )
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+        .find((entry) => availablePools[investigationResourcePool(entry.kind)]);
       if (task === undefined) return { claim: null };
       const number = this.attempts(task.id).length + 1;
       const attempt: InvestigationAttemptV1 = {
@@ -1286,9 +1667,17 @@ export class InvestigationService {
         cancelRequested: false,
       };
       const running: InvestigationTaskV1 = { ...task, state: "running", updatedAt: this.time() };
+      this.resourceScheduler.acquire({
+        attemptId: attempt.id,
+        taskId: task.id,
+        workerId: worker.id,
+        fence: number,
+        pool: investigationResourcePool(task.kind),
+      });
       this.store.insert("attempts", attempt.id, record);
       this.store.put("tasks", task.id, running);
       this.store.put("checkpoints", task.id, checkpoint);
+      beginInvestigationProgress(this.store, task.id, attempt.id);
       const input = this.required<FrozenTaskInput>("idempotency", `input:${task.id}`);
       this.options.onTaskStateChanged?.(running);
       return {
@@ -1313,11 +1702,44 @@ export class InvestigationService {
       const serverTime = this.now();
       const leaseExpiresAt = new Date(serverTime.getTime() + this.leaseDurationMs).toISOString();
       this.store.put("attempts", record.attempt.id, { ...record, leaseExpiresAt });
+      recordInvestigationHeartbeat(this.store, taskId, record.attempt.id, serverTime.toISOString());
       return {
         cancelRequested: record.cancelRequested,
         leaseExpiresAt,
         serverTime: serverTime.toISOString(),
       };
+    });
+  }
+
+  workerProgress(
+    worker: InvestigationWorkerPrincipal,
+    taskId: string,
+    request: InvestigationProgressRequest,
+  ) {
+    return this.store.transaction(() => {
+      if (request.stage === "cleanup") {
+        this.task(worker, taskId);
+        const record = this.required<AttemptRecord>("attempts", request.lease.attemptId);
+        const checkpoint = this.required<InvestigationLoopCheckpointV1>("checkpoints", taskId);
+        requireCondition(
+          checkpoint.attemptId === request.lease.attemptId &&
+            checkpoint.leaseVersion === request.lease.fence &&
+            record.attempt.taskId === taskId &&
+            record.attempt.workerId === worker.id &&
+            record.attempt.leaseVersion === request.lease.fence &&
+            constantTimeEqual(
+              record.leaseTokenDigest,
+              investigationContentDigest(request.lease.leaseToken),
+            ) &&
+            (record.attempt.state !== "running" ||
+              record.cancelRequested ||
+              checkpoint.stopReason !== "continuing"),
+          409,
+          "lease_lost",
+          "Cleanup progress requires the latest original attempt after execution has stopped.",
+        );
+      } else this.lease(worker, taskId, request.lease);
+      return { progress: recordInvestigationActivity(this.store, taskId, request, this.time()) };
     });
   }
 
@@ -1341,8 +1763,73 @@ export class InvestigationService {
       return { checkpoint: accepted.checkpoint };
     }
     let next: InvestigationLoopCheckpointV1;
+    const invocations = investigationUsageInvocations(this.store, taskId);
+    const accountedTokens =
+      invocations.length === 0 ? undefined : this.usageSummary(taskId).reportedTokens;
     const durationMs = Math.max(0, this.now().getTime() - Date.parse(checkpoint.recordedAt));
     if (request.kind === "analysis") {
+      const execution = checkpoint.runtime.e2eExecution;
+      const recordedE2eRecovery =
+        task.kind === "pr-e2e" &&
+        checkpoint.runtime.e2e !== undefined &&
+        execution?.status === "completed" &&
+        checkpoint.adoptedAttemptIds.includes(execution.attemptId) &&
+        request.invocationId === undefined &&
+        request.modelIdentity === undefined &&
+        request.usage.tokens === 0 &&
+        request.round.phase === "finalize" &&
+        !request.round.continue &&
+        (request.sourceUnitIds === undefined || request.sourceUnitIds.length === 0);
+      if (recordedE2eRecovery) {
+        // This is deterministic report reconstruction from immutable Worker receipts,
+        // not a model call. Keep the original attempt's ledger charge unchanged.
+        validateRootE2eRuntime(task, checkpoint, checkpoint.runtime);
+        const expected = projectRecordedE2eAnalysis(task, checkpoint);
+        requireCondition(
+          investigationContentDigest(request.round.analysis) ===
+            investigationContentDigest(expected.analysis),
+          409,
+          "e2e_recovery_analysis_mismatch",
+          "E2E recovery must reproduce the exact analysis derived from its accepted execution receipts.",
+        );
+      }
+      const invocation = invocations.find(
+        (receipt) => receipt.invocationId === request.invocationId,
+      );
+      if (
+        !recordedE2eRecovery &&
+        (accountedTokens !== undefined || request.invocationId !== undefined)
+      ) {
+        requireCondition(
+          invocation !== undefined &&
+            invocation.taskId === taskId &&
+            invocation.attemptId === record.attempt.id &&
+            (task.kind === "pr-e2e"
+              ? invocation.purpose === "e2e"
+              : ["analysis", "recheck"].includes(invocation.purpose)) &&
+            invocation.state === "completed" &&
+            invocation.disposition !== "rejected" &&
+            invocation.completeness === "complete" &&
+            invocation.usage.totalTokens === request.usage.tokens &&
+            (request.modelIdentity === undefined ||
+              (request.modelIdentity.engine === invocation.engine &&
+                request.modelIdentity.model === invocation.model)),
+          409,
+          "analysis_usage_mismatch",
+          "Analysis must identify its exact completed model invocation and trusted usage receipt.",
+        );
+        const bound = this.store.get<{ attemptId: string; round: number }>(
+          "idempotency",
+          `model-usage-analysis:${request.invocationId}`,
+        );
+        requireCondition(
+          bound === undefined ||
+            (bound.attemptId === record.attempt.id && bound.round === request.round.round),
+          409,
+          "analysis_invocation_already_used",
+          "A model invocation cannot be accepted as multiple analysis rounds.",
+        );
+      }
       requireCondition(
         !record.cancelRequested,
         409,
@@ -1363,6 +1850,7 @@ export class InvestigationService {
       next = applyInvestigationLoopRound(checkpoint, request.round, {
         recordedAt: this.time(),
         usage: { ...request.usage, durationMs },
+        ...(accountedTokens === undefined ? {} : { accountedTokens }),
         ...(request.modelIdentity === undefined ? {} : { modelIdentity: request.modelIdentity }),
         ...(request.sourceUnitIds === undefined ? {} : { sourceUnitIds: request.sourceUnitIds }),
       });
@@ -1390,6 +1878,26 @@ export class InvestigationService {
         durationMs,
       });
     } else if (request.kind === "interrupt") {
+      if (request.modelInvocationState === "not_started") {
+        const stage = investigationTaskProgress(this.store, taskId).stage;
+        requireCondition(
+          request.modelUsage === undefined &&
+            (stage === null || stage === "prepare_source") &&
+            !invocations.some((receipt) => receipt.attemptId === record.attempt.id) &&
+            !this.store.hasPrefix("idempotency", `checkpoint:${record.attempt.id}:analysis:`) &&
+            !(checkpoint.runtime.modelExecutions ?? []).some(
+              (execution) => execution.attemptId === record.attempt.id,
+            ) &&
+            !(checkpoint.runtime.unacceptedModelUsage ?? []).some(
+              (usage) => usage.attemptId === record.attempt.id,
+            ) &&
+            checkpoint.runtime.e2eExecution?.attemptId !== record.attempt.id &&
+            !checkpoint.runtime.startedSteps.some((step) => step.attemptId === record.attempt.id),
+          409,
+          "model_dispatch_already_recorded",
+          "A pre-dispatch declaration cannot replace a recorded model invocation or execution start.",
+        );
+      }
       const acceptedAnalysis =
         request.modelUsage === undefined
           ? undefined
@@ -1449,30 +1957,46 @@ export class InvestigationService {
       );
       for (const artifact of runtime.artifacts) this.requireArtifact(artifact);
       const frozenInput = this.required<FrozenTaskInput>("idempotency", `input:${task.id}`);
-      requireCondition(
-        frozenInput.execution !== null && frozenInput.plan !== null,
-        409,
-        "execution_binding_missing",
-        "Runtime execution requires an explicitly saved executable plan binding.",
-      );
-      const execution = frozenInput.execution;
-      requireCondition(
-        runtime.startedSteps.every(
-          (step) =>
-            step.taskId === task.id &&
-            checkpoint.adoptedAttemptIds.includes(step.attemptId) &&
-            investigationContentDigest(step.planRef) ===
-              investigationContentDigest(execution.planRef) &&
-            step.subjectRef === execution.subjectRef &&
-            step.subjectRevisionKey === execution.subjectRevisionKey &&
-            execution.steps.some(
-              (entry) => entry.stepId === step.stepId && entry.digest === step.stepDigest,
-            ),
-        ),
-        400,
-        "execution_binding_mismatch",
-        "Every execution receipt must bind the exact frozen executable step and source.",
-      );
+      if (task.kind === "pr-e2e") {
+        requireCondition(
+          !record.cancelRequested || checkpoint.runtime.e2eExecution !== undefined,
+          409,
+          "cancellation_requested",
+          "A cancelled E2E task cannot establish a new execution start.",
+        );
+        requireCondition(
+          frozenInput.execution === null && frozenInput.plan === null,
+          409,
+          "e2e_saved_plan_unexpected",
+          "Root E2E execution cannot inherit a saved executable plan.",
+        );
+        validateRootE2eRuntime(task, checkpoint, runtime);
+      } else {
+        requireCondition(
+          frozenInput.execution !== null && frozenInput.plan !== null,
+          409,
+          "execution_binding_missing",
+          "Runtime execution requires an explicitly saved executable plan binding.",
+        );
+        const execution = frozenInput.execution;
+        requireCondition(
+          runtime.startedSteps.every(
+            (step) =>
+              step.taskId === task.id &&
+              checkpoint.adoptedAttemptIds.includes(step.attemptId) &&
+              investigationContentDigest(step.planRef) ===
+                investigationContentDigest(execution.planRef) &&
+              step.subjectRef === execution.subjectRef &&
+              step.subjectRevisionKey === execution.subjectRevisionKey &&
+              execution.steps.some(
+                (entry) => entry.stepId === step.stepId && entry.digest === step.stepDigest,
+              ),
+          ),
+          400,
+          "execution_binding_mismatch",
+          "Every execution receipt must bind the exact frozen executable step and source.",
+        );
+      }
       requireCondition(
         runtime.evidence.every(
           (evidence) =>
@@ -1521,8 +2045,11 @@ export class InvestigationService {
       next = applyInvestigationRuntimeCheckpoint(checkpoint, runtime, {
         recordedAt: this.time(),
         durationMs,
+        ...(accountedTokens === undefined ? {} : { accountedTokens }),
       });
     }
+    if (accountedTokens !== undefined)
+      next = projectInvestigationTokenConsumption(next, accountedTokens);
     this.store.transaction(() => {
       this.lease(worker, taskId, request.lease);
       const current = this.required<InvestigationLoopCheckpointV1>("checkpoints", taskId);
@@ -1533,6 +2060,24 @@ export class InvestigationService {
         "Another checkpoint was accepted before this write.",
       );
       this.store.put("checkpoints", taskId, next);
+      if (request.kind === "interrupt" && request.modelInvocationState === "not_started")
+        recordAttemptWithoutModelInvocation(this.store, next);
+      if (request.kind === "analysis" && request.invocationId !== undefined)
+        this.store.put("idempotency", `model-usage-analysis:${request.invocationId}`, {
+          attemptId: record.attempt.id,
+          round: request.round.round,
+        });
+      const meaningful =
+        request.kind === "analysis"
+          ? hasInvestigationSemanticProgress(checkpoint, next)
+          : request.kind === "source"
+            ? checkpoint.runtime.sourceCoverage === undefined
+            : request.kind === "execution" &&
+              (next.runtime.completedSteps.length > checkpoint.runtime.completedSteps.length ||
+                next.runtime.evidence.length > checkpoint.runtime.evidence.length ||
+                (checkpoint.runtime.e2e === undefined && next.runtime.e2e !== undefined));
+      if (meaningful)
+        recordMeaningfulInvestigationProgress(this.store, taskId, record.attempt.id, this.time());
       this.evidence.retainCheckpoint(next.runtime.artifacts);
       this.store.insert("idempotency", key, {
         digest,
@@ -1674,6 +2219,20 @@ export class InvestigationService {
       parts,
       parentPlan: frozenInput.plan,
     });
+    const usageSnapshot = this.store.get<{ summary: InvestigationUsageSummary }>(
+      "idempotency",
+      `report-usage:${record.reportId}`,
+    );
+    requireCondition(
+      usageSnapshot === undefined
+        ? result.report.usage === undefined
+        : result.report.usage !== undefined &&
+            investigationContentDigest(result.report.usage) ===
+              investigationContentDigest(usageSnapshot.summary),
+      409,
+      "report_usage_mismatch",
+      "The report must preserve the Server's exact sealed usage snapshot.",
+    );
     for (const artifact of result.artifacts) this.requireArtifact(artifact);
     const linkedRefs = [
       ...(result.assessment.kind === "pr"
@@ -1735,6 +2294,7 @@ export class InvestigationService {
           terminationReason: result.report.loop.stopReason,
         },
       });
+      this.resourceScheduler.terminate(record.attempt.id, result.outcome);
       this.options.onTaskStateChanged?.(finalized, result);
       this.options.onReportSealed?.(result, task);
     });

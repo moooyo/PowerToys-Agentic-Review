@@ -15,6 +15,7 @@ import type {
   InvestigationSubjectV1,
   InvestigationTaskV1,
   InvestigationValidation,
+  InvestigationWorkerLease,
 } from "@agentic-review/contracts";
 import {
   InvestigationModelEditsV1Schema,
@@ -60,6 +61,7 @@ export interface InvestigationPlanExecutorInput {
 }
 
 export interface InvestigationPlanExecutorContext {
+  readonly usageLease?: InvestigationWorkerLease;
   readonly processHost: ProcessHostClient;
   readonly signal: AbortSignal;
   readonly onProgress?: () => void;
@@ -111,6 +113,7 @@ export interface InvestigationUiArtifact {
 }
 
 export interface InvestigationModelEditAdapter {
+  markUsageDisposition?(invocationId: string, disposition: "accepted" | "rejected"): Promise<void>;
   execute(
     input: {
       readonly task: InvestigationTaskV1;
@@ -123,6 +126,7 @@ export interface InvestigationModelEditAdapter {
       readonly workspace: PreparedInvestigationWorkspace;
     },
     context: {
+      readonly usageLease?: InvestigationWorkerLease;
       readonly signal: AbortSignal;
       readonly processHost: ProcessHostClient;
       readonly onProgress?: () => void;
@@ -131,8 +135,9 @@ export interface InvestigationModelEditAdapter {
     readonly proposal: InvestigationModelEditsV1;
     readonly usage: {
       readonly tokens: number | null;
-      readonly source: "cli" | "unavailable";
+      readonly source: "cli" | "unavailable" | "not_invoked";
       readonly durationMs?: number;
+      readonly invocationId?: string;
     };
   }>;
 }
@@ -552,20 +557,26 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
         {
           signal: context.signal,
           processHost: context.processHost,
+          ...(context.usageLease === undefined ? {} : { usageLease: context.usageLease }),
           ...(context.onProgress === undefined ? {} : { onProgress: context.onProgress }),
         },
       );
       const durationMs = Math.max(0, Math.ceil(performance.now() - startedAt));
       context.signal.throwIfAborted();
       const proposal = response.proposal;
-      if (!Value.Check(InvestigationModelEditsV1Schema, proposal))
+      if (!Value.Check(InvestigationModelEditsV1Schema, proposal)) {
+        if (response.usage.invocationId !== undefined)
+          await adapter.markUsageDisposition?.(response.usage.invocationId, "rejected");
         throw new Error("The model edit adapter returned an invalid structured proposal.");
+      }
       if (
         response.usage.source !== "cli" ||
         response.usage.tokens === null ||
         !Number.isSafeInteger(response.usage.tokens) ||
         response.usage.tokens < 0
-      )
+      ) {
+        if (response.usage.invocationId !== undefined)
+          await adapter.markUsageDisposition?.(response.usage.invocationId, "rejected");
         return {
           status: "blocked",
           outcome: "blocked",
@@ -574,8 +585,11 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
             "The model edit proposal was not applied because trusted token usage is unavailable.",
           details: { durationMs, usageSource: response.usage.source },
         };
+      }
       const modelUsage = { tokens: response.usage.tokens, durationMs };
-      if ((input.consumedTokens ?? 0) + modelUsage.tokens > input.task.budget.maxTokens)
+      if ((input.consumedTokens ?? 0) + modelUsage.tokens > input.task.budget.maxTokens) {
+        if (response.usage.invocationId !== undefined)
+          await adapter.markUsageDisposition?.(response.usage.invocationId, "rejected");
         return {
           status: "blocked",
           outcome: "blocked",
@@ -584,10 +598,19 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
           summary: "The model edit proposal exceeded the task token budget and was not applied.",
           details: { modelUsage },
         };
-      await input.workspace.applyEdits({
-        edits: structuredClone(proposal.edits),
-        allowedPaths: [...operation.allowedPaths],
-      });
+      }
+      try {
+        await input.workspace.applyEdits({
+          edits: structuredClone(proposal.edits),
+          allowedPaths: [...operation.allowedPaths],
+        });
+      } catch (error) {
+        if (response.usage.invocationId !== undefined)
+          await adapter.markUsageDisposition?.(response.usage.invocationId, "rejected");
+        throw error;
+      }
+      if (response.usage.invocationId !== undefined)
+        await adapter.markUsageDisposition?.(response.usage.invocationId, "accepted");
       return {
         status: "passed",
         outcome: "completed",

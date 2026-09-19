@@ -22,6 +22,10 @@ import {
   InvestigationClaimRequestSchema,
   type InvestigationClaimResponse,
   InvestigationClaimResponseSchema,
+  type InvestigationCleanupRequest,
+  InvestigationCleanupRequestSchema,
+  type InvestigationCleanupResponse,
+  InvestigationCleanupResponseSchema,
   type InvestigationFinalizeRequest,
   InvestigationFinalizeRequestSchema,
   type InvestigationFinalizeResponse,
@@ -30,12 +34,21 @@ import {
   InvestigationHeartbeatRequestSchema,
   type InvestigationHeartbeatResponse,
   InvestigationHeartbeatResponseSchema,
+  InvestigationModelInvocationReceiptSchema,
+  type InvestigationProgressRequest,
+  InvestigationProgressRequestSchema,
+  type InvestigationProgressResponse,
+  InvestigationProgressResponseSchema,
   type InvestigationReportPartRequest,
   InvestigationReportPartRequestSchema,
   type InvestigationReportPartResponse,
   InvestigationReportPartResponseSchema,
+  InvestigationUsageSummarySchema,
+  InvestigationWorkerLeaseSchema,
+  PositiveIntegerSchema,
+  validateInvestigationTokenUsage,
 } from "@agentic-review/contracts";
-import { type Static, type TSchema } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { registerWorkerContractFormats } from "../contracts-formats.js";
 import { isPermanentWorkerClientError } from "../server-client/errors.js";
@@ -45,6 +58,40 @@ const defaultMaximumResponseBytes = 96 * 1_024 * 1_024;
 const defaultRequestTimeoutMs = 30_000;
 const maximumArtifactBytes = 32 * 1_024 * 1_024;
 const maximumArtifactBase64Characters = 4 * Math.ceil(maximumArtifactBytes / 3);
+
+export const InvestigationModelUsageRequestSchema = Type.Object(
+  {
+    lease: InvestigationWorkerLeaseSchema,
+    receipt: InvestigationModelInvocationReceiptSchema,
+  },
+  { additionalProperties: false },
+);
+export type InvestigationModelUsageRequest = Static<typeof InvestigationModelUsageRequestSchema>;
+export const InvestigationModelUsageResponseSchema = Type.Object(
+  {
+    invocationId: EntityIdSchema,
+    revision: PositiveIntegerSchema,
+    executionAllowed: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+export type InvestigationModelUsageResponse = Static<typeof InvestigationModelUsageResponseSchema>;
+export const InvestigationReportUsageRequestSchema = Type.Object(
+  {
+    lease: InvestigationWorkerLeaseSchema,
+  },
+  { additionalProperties: false },
+);
+export type InvestigationReportUsageRequest = Static<typeof InvestigationReportUsageRequestSchema>;
+export const InvestigationReportUsageResponseSchema = Type.Object(
+  {
+    summary: InvestigationUsageSummarySchema,
+  },
+  { additionalProperties: false },
+);
+export type InvestigationReportUsageResponse = Static<
+  typeof InvestigationReportUsageResponseSchema
+>;
 
 type RequestFactory = (
   url: URL,
@@ -80,6 +127,12 @@ export interface InvestigationWorkerClient {
     request: InvestigationHeartbeatRequest,
     signal?: AbortSignal,
   ): Promise<InvestigationHeartbeatResponse>;
+  /** Optional for older embedded clients; production transports always report activity. */
+  progress?(
+    taskId: string,
+    request: InvestigationProgressRequest,
+    signal?: AbortSignal,
+  ): Promise<InvestigationProgressResponse>;
   checkpoint(
     taskId: string,
     request: InvestigationCheckpointRequest,
@@ -105,6 +158,24 @@ export interface InvestigationWorkerClient {
     request: InvestigationFinalizeRequest,
     signal?: AbortSignal,
   ): Promise<InvestigationFinalizeResponse>;
+  /** Optional for older embedded clients; production transports always provide cleanup. */
+  cleanup?(
+    taskId: string,
+    request: InvestigationCleanupRequest,
+    signal?: AbortSignal,
+  ): Promise<InvestigationCleanupResponse>;
+  /** Durable accounting transport; the original lease remains separate from the public receipt. */
+  modelUsage?(
+    taskId: string,
+    request: InvestigationModelUsageRequest,
+    signal?: AbortSignal,
+  ): Promise<InvestigationModelUsageResponse>;
+  /** Freeze the Server accounting snapshot before computing a report's content digest. */
+  reportUsage?(
+    taskId: string,
+    request: InvestigationReportUsageRequest,
+    signal?: AbortSignal,
+  ): Promise<InvestigationReportUsageResponse>;
 }
 
 export function createInvestigationHttpClient(
@@ -113,6 +184,60 @@ export function createInvestigationHttpClient(
 ): InvestigationWorkerClient {
   const transport = new InvestigationJsonTransport(options, dependencies);
   return {
+    async reportUsage(taskId, request, signal) {
+      request = snapshotRequest(InvestigationReportUsageRequestSchema, request, signal);
+      const response = requireResponse(
+        await transport.request(
+          taskPath(taskId, "report-usage"),
+          request,
+          InvestigationReportUsageResponseSchema,
+          signal,
+        ),
+      );
+      if (!validateInvestigationTokenUsage(response.summary.usage))
+        throw new InvestigationWorkerClientError("invalid_response", false, 200);
+      return response;
+    },
+    async modelUsage(taskId, request, signal) {
+      request = snapshotRequest(InvestigationModelUsageRequestSchema, request, signal);
+      if (
+        request.receipt.taskId !== taskId ||
+        request.receipt.attemptId !== request.lease.attemptId ||
+        !validateInvestigationTokenUsage(request.receipt.usage)
+      ) {
+        throw new InvestigationWorkerClientError("invalid_request", false);
+      }
+      const response = requireResponse(
+        await transport.request(
+          taskPath(taskId, "model-usage"),
+          request,
+          InvestigationModelUsageResponseSchema,
+          signal,
+        ),
+      );
+      if (
+        response.invocationId !== request.receipt.invocationId ||
+        response.revision !== request.receipt.revision
+      ) {
+        throw new InvestigationWorkerClientError("invalid_response", false, 200);
+      }
+      return response;
+    },
+    async cleanup(taskId, request, signal) {
+      request = snapshotRequest(InvestigationCleanupRequestSchema, request, signal);
+      const response = requireResponse(
+        await transport.request(
+          taskPath(taskId, "cleanup"),
+          request,
+          InvestigationCleanupResponseSchema,
+          signal,
+        ),
+      );
+      if (response.attemptId !== request.lease.attemptId) {
+        throw new InvestigationWorkerClientError("invalid_response", false, 200);
+      }
+      return response;
+    },
     async claim(request, signal) {
       request = snapshotRequest(InvestigationClaimRequestSchema, request, signal);
       const response = await transport.request(
@@ -142,6 +267,17 @@ export function createInvestigationHttpClient(
           taskPath(taskId, "heartbeat"),
           request,
           InvestigationHeartbeatResponseSchema,
+          signal,
+        ),
+      );
+    },
+    async progress(taskId, request, signal) {
+      request = snapshotRequest(InvestigationProgressRequestSchema, request, signal);
+      return requireResponse(
+        await transport.request(
+          taskPath(taskId, "progress"),
+          request,
+          InvestigationProgressResponseSchema,
           signal,
         ),
       );

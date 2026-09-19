@@ -12,11 +12,15 @@ import {
   type InvestigationFindingsPageV1,
   type InvestigationHeartbeatResponse,
   type InvestigationLoopCheckpointV1,
+  type InvestigationModelInvocationReceipt,
   type InvestigationPlanExecutionBinding,
   type InvestigationResultV1,
+  type InvestigationRuntimeState,
   type InvestigationTaskV1,
+  type InvestigationUsageSummary,
+  unavailableInvestigationTokenUsage,
 } from "@agentic-review/contracts";
-import { investigationContentDigest } from "@agentic-review/domain";
+import { investigationContentDigest, projectRecordedE2eAnalysis } from "@agentic-review/domain";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildInvestigationApp } from "../../dist/investigation/app.js";
@@ -36,6 +40,7 @@ import type {
   InvestigationWorkerPrincipal,
   InvestigationWorkItemRecord,
 } from "../../dist/investigation/types.js";
+import { investigationUsagePublicationPendingKey } from "../../dist/investigation/usage-ledger.js";
 
 const resources: { app: FastifyInstance; store: InvestigationStore }[] = [];
 const startedAt = Date.parse("2026-09-15T02:01:00.000Z");
@@ -83,7 +88,9 @@ async function harness(
     allowRepositoryExecution?: boolean;
     evidencePolicy?: Partial<InvestigationEvidencePolicy>;
     onTaskStateChanged?: InvestigationServiceOptions["onTaskStateChanged"];
+    onTaskUsageChanged?: InvestigationServiceOptions["onTaskUsageChanged"];
     onTaskProgress?: InvestigationServiceOptions["onTaskProgress"];
+    staticConcurrency?: number;
   } = {},
 ) {
   const item = workItem();
@@ -135,12 +142,18 @@ async function harness(
     now: () => new Date(time),
     idFactory: () => `synthetic-generated-${++sequence}`,
     leaseDurationMs: 1_000,
+    ...(options.staticConcurrency === undefined
+      ? {}
+      : { staticConcurrency: options.staticConcurrency }),
     ...(options.evidencePolicy === undefined ? {} : { evidencePolicy: options.evidencePolicy }),
     ...(options.actionTransport === undefined ? {} : { actionTransport: options.actionTransport }),
     ...(options.onTaskStateChanged === undefined
       ? {}
       : { onTaskStateChanged: options.onTaskStateChanged }),
     ...(options.onTaskProgress === undefined ? {} : { onTaskProgress: options.onTaskProgress }),
+    ...(options.onTaskUsageChanged === undefined
+      ? {}
+      : { onTaskUsageChanged: options.onTaskUsageChanged }),
     authenticateOperator: (request) =>
       request.headers.authorization === "operator"
         ? operator
@@ -224,6 +237,170 @@ function checkpointFor(claimed: InvestigationClaim): InvestigationLoopCheckpoint
   return claimed.checkpoint;
 }
 
+describe("authenticated model usage receipt API", () => {
+  function registered(claimed: InvestigationClaim): InvestigationModelInvocationReceipt {
+    return {
+      invocationId: "synthetic-model-call",
+      taskId: claimed.task.id,
+      attemptId: claimed.attempt.id,
+      purpose: "analysis",
+      engine: "codex",
+      model: null,
+      startedAt: new Date(startedAt).toISOString(),
+      updatedAt: new Date(startedAt).toISOString(),
+      revision: 1,
+      state: "registered",
+      disposition: "pending",
+      usage: unavailableInvestigationTokenUsage(),
+      completeness: "unavailable",
+    };
+  }
+
+  it("does not claim zero consumption for an uncovered historical expired attempt", async () => {
+    const { app, item, advance } = await harness();
+    const task = await createTask(app, item);
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage).toMatchObject({
+      completeness: "complete",
+      reportedTokens: 0,
+    });
+    await claim(app);
+    advance(2_000);
+    await get(app, `/api/tasks/${task.id}`);
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage).toMatchObject({
+      completeness: "unavailable",
+      reportedTokens: 0,
+      usage: { totalTokens: null },
+    });
+  });
+
+  it("freezes report usage once while later receipts only increase the task total", async () => {
+    const { app, item } = await harness();
+    await createTask(app, item);
+    const claimed = await claim(app);
+    const first = registered(claimed);
+    const path = `/api/worker/tasks/${claimed.task.id}/model-usage`;
+    const complete = (
+      receipt: InvestigationModelInvocationReceipt,
+      tokens: number,
+    ): InvestigationModelInvocationReceipt => ({
+      ...receipt,
+      revision: 2,
+      state: "completed",
+      disposition: "accepted",
+      completeness: "complete",
+      usage: { ...unavailableInvestigationTokenUsage(), totalTokens: tokens },
+    });
+    await post(app, path, { lease: claimed.lease, receipt: first }, "worker");
+    await post(app, path, { lease: claimed.lease, receipt: complete(first, 60) }, "worker");
+    const reportUsagePath = `/api/worker/tasks/${claimed.task.id}/report-usage`;
+    const snapshot = await post(app, reportUsagePath, { lease: claimed.lease }, "worker");
+    expect(snapshot.statusCode).toBe(200);
+    expect(snapshot.json().summary.reportedTokens).toBe(60);
+    const second = { ...first, invocationId: "synthetic-late-call" };
+    await post(app, path, { lease: claimed.lease, receipt: second }, "worker");
+    await post(app, path, { lease: claimed.lease, receipt: complete(second, 40) }, "worker");
+    expect((await post(app, reportUsagePath, { lease: claimed.lease }, "worker")).json()).toEqual(
+      snapshot.json(),
+    );
+    expect(
+      (await get(app, `/api/tasks/${claimed.task.id}/usage`)).json().usage.reportedTokens,
+    ).toBe(100);
+    expect(
+      (
+        await post(
+          app,
+          reportUsagePath,
+          { lease: { ...claimed.lease, leaseToken: "wrong-token" } },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(409);
+  });
+
+  it("exposes one total in details, listing and usage API without exposing the lease secret", async () => {
+    const { app, item } = await harness();
+    await createTask(app, item);
+    const claimed = await claim(app);
+    const first = registered(claimed);
+    const path = `/api/worker/tasks/${claimed.task.id}/model-usage`;
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: first }, "worker")).json(),
+    ).toEqual({ invocationId: first.invocationId, revision: 1, executionAllowed: true });
+    const final: InvestigationModelInvocationReceipt = {
+      ...first,
+      revision: 2,
+      state: "completed",
+      disposition: "accepted",
+      completeness: "complete",
+      usage: {
+        ...unavailableInvestigationTokenUsage(),
+        inputTokens: 100,
+        cachedReadTokens: 80,
+        outputTokens: 20,
+        reasoningTokens: 5,
+        totalTokens: 120,
+      },
+    };
+    for (let retry = 0; retry < 2; retry++)
+      expect(
+        (await post(app, path, { lease: claimed.lease, receipt: final }, "worker")).statusCode,
+      ).toBe(200);
+    const detail = await get(app, `/api/tasks/${claimed.task.id}`);
+    const usage = await get(app, `/api/tasks/${claimed.task.id}/usage`);
+    const listing = await get(app, "/api/tasks");
+    expect(detail.json()).toMatchObject({
+      usage: { reportedTokens: 120, invocationCount: 1 },
+      invocations: [final],
+    });
+    expect(usage.json().usage).toEqual(detail.json().usage);
+    expect(listing.json().usageByTaskId[claimed.task.id]).toEqual(detail.json().usage);
+    expect(detail.body).not.toContain(claimed.lease.leaseToken);
+    expect(
+      (await get(app, `/api/tasks/${claimed.task.id}/usage`, "other-operator")).statusCode,
+    ).toBe(403);
+  });
+
+  it("accepts late cancellation accounting only from the original lease owner", async () => {
+    const { app, item, advance } = await harness();
+    await createTask(app, item);
+    const claimed = await claim(app);
+    const first = registered(claimed);
+    const path = `/api/worker/tasks/${claimed.task.id}/model-usage`;
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: first }, "worker")).statusCode,
+    ).toBe(200);
+    advance(2_000);
+    await get(app, `/api/tasks/${claimed.task.id}`);
+    const final: InvestigationModelInvocationReceipt = {
+      ...first,
+      revision: 2,
+      state: "cancelled",
+      disposition: "rejected",
+      completeness: "partial",
+      usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 70 },
+    };
+    for (const payload of [
+      { lease: { ...claimed.lease, fence: claimed.lease.fence + 1 }, receipt: final },
+      { lease: { ...claimed.lease, leaseToken: "wrong-token" }, receipt: final },
+      { lease: claimed.lease, receipt: { ...final, attemptId: "other-attempt" } },
+    ])
+      expect((await post(app, path, payload, "worker")).statusCode).toBe(409);
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: final }, "same-scope-worker"))
+        .statusCode,
+    ).toBe(409);
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: final }, "worker")).statusCode,
+    ).toBe(200);
+    const usage = (await get(app, `/api/tasks/${claimed.task.id}/usage`)).json();
+    expect(usage.usage).toMatchObject({
+      reportedTokens: 70,
+      completeness: "partial",
+      usage: { totalTokens: null },
+    });
+  });
+});
+
 async function acceptAnalysis(
   app: FastifyInstance,
   claimed: InvestigationClaim,
@@ -271,6 +448,89 @@ const unacceptedUsageDiagnostic = {
 };
 
 describe("investigation service API", () => {
+  it("persists autonomous snapshot semantics and accepts a complete issue analysis without a finalize call", async () => {
+    const { app } = await harness();
+    const issue = workItem("bug");
+    expect((await post(app, "/api/work-items", issue)).statusCode).toBe(201);
+    const task = await createTask(app, issue, "snapshot-single-invocation");
+    const claimed = await claim(app, "issue-investigate");
+    const checkpoint = checkpointFor(claimed);
+    expect(checkpoint.runtime.reviewMode).toBe("local_snapshot");
+    expect(claimed.task.executionPolicy.mode).toBe("snapshot_only");
+    const analysis = structuredClone(checkpoint.analysis);
+    analysis.summary =
+      "All supplied reporter facts were assessed; runtime verification remains a follow-up.";
+    analysis.coverage.includedUnits.forEach((unit) => {
+      unit.status = "completed";
+    });
+    analysis.coverage.completedUnitRefs = analysis.coverage.includedUnits.map((unit) => unit.id);
+    analysis.coverage.unresolvedUnitRefs = [];
+    const completed = await acceptAnalysis(app, claimed, checkpoint, 41, { analysis });
+    expect(completed.stopReason).toBe("complete");
+    expect(completed.consumed).toMatchObject({ rounds: 1, tokens: 41 });
+    const detail = (await get(app, `/api/tasks/${task.id}`)).json();
+    expect(detail.checkpoint).toEqual(completed);
+    expect(completed.runtime.sourceCoverage).toBeUndefined();
+  });
+
+  it("authenticates progress and keeps heartbeat separate from real activity and semantic progress", async () => {
+    const { app, item, advance } = await harness();
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const path = `/api/worker/tasks/${task.id}/progress`;
+    const activity = { lease: claimed.lease, sequence: 1, kind: "stage", stage: "model" };
+    expect((await post(app, path, activity, "other-worker")).statusCode).toBe(403);
+    expect((await post(app, path, activity, "same-scope-worker")).statusCode).toBe(409);
+    expect((await post(app, path, { ...activity, meaningful: true }, "worker")).statusCode).toBe(
+      400,
+    );
+    expect((await post(app, path, activity, "worker")).statusCode).toBe(200);
+    const first = (await get(app, `/api/tasks/${task.id}`)).json().progress;
+    expect(first).toMatchObject({
+      stage: "model",
+      lastMeaningfulProgressAt: null,
+      lastHeartbeatAt: null,
+    });
+    advance(100);
+    expect(
+      (
+        await post(
+          app,
+          `/api/worker/tasks/${task.id}/heartbeat`,
+          { lease: claimed.lease },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(200);
+    const heartbeat = (await get(app, `/api/tasks/${task.id}`)).json().progress;
+    expect(heartbeat.lastActivityAt).toBe(first.lastActivityAt);
+    expect(heartbeat.stageStartedAt).toBe(first.stageStartedAt);
+    expect(heartbeat.lastMeaningfulProgressAt).toBeNull();
+    expect(heartbeat.lastHeartbeatAt).not.toBeNull();
+    advance(100);
+    await post(app, path, activity, "worker");
+    expect((await get(app, `/api/tasks/${task.id}`)).json().progress).toEqual(heartbeat);
+    const checkpoint = checkpointFor(claimed);
+    const analysis = structuredClone(checkpoint.analysis);
+    analysis.evidence.push({
+      id: "source-observation",
+      subjectRef: task.subjectRef,
+      source: "static_analysis",
+      summary: "The pinned source delegates cleanup through the shared helper.",
+      evidenceRefs: [],
+    });
+    const accepted = await acceptAnalysis(app, claimed, checkpoint, 3, { analysis });
+    const meaningful = (await get(app, `/api/tasks/${task.id}`)).json().progress
+      .lastMeaningfulProgressAt;
+    expect(meaningful).not.toBeNull();
+    advance(100);
+    analysis.summary = "The same source was summarized again without a new observation.";
+    await acceptAnalysis(app, claimed, accepted, 2, { analysis });
+    expect((await get(app, `/api/tasks/${task.id}`)).json().progress.lastMeaningfulProgressAt).toBe(
+      meaningful,
+    );
+  });
+
   it("records progress only for newly accepted checkpoints in the same transaction", async () => {
     const changes = vi.fn<NonNullable<InvestigationServiceOptions["onTaskProgress"]>>();
     const { app, item, store } = await harness({ onTaskProgress: changes });
@@ -421,7 +681,7 @@ describe("investigation service API", () => {
   });
 
   it("claims only supported task kinds in the worker scope and creates a fresh checkpoint", async () => {
-    const { app, item, repository } = await harness();
+    const { app, item, repository } = await harness({ staticConcurrency: 2 });
     const foreignRepository = {
       id: foreignRepositoryId,
       fullName: "synthetic/other",
@@ -1276,12 +1536,11 @@ describe("investigation service API", () => {
     }));
     analysis.coverage.completedUnitRefs = analysis.coverage.includedUnits.map((unit) => unit.id);
     analysis.coverage.unresolvedUnitRefs = [];
-    const discovery = await acceptAnalysis(app, claimed, checkpoint, 41, { analysis });
-    const completed = await acceptAnalysis(app, claimed, discovery, 59, {
-      analysis,
-      finalize: true,
-    });
+    // Local checkout review completes in its first sufficiently evidenced invocation.
+    // Losing that response retries the same round, never a new paid finalize invocation.
+    const completed = await acceptAnalysis(app, claimed, checkpoint, 41, { analysis });
     expect(completed.stopReason).toBe("complete");
+    expect(await acceptAnalysis(app, claimed, checkpoint, 41, { analysis })).toEqual(completed);
     const response = await post(
       app,
       `/api/worker/tasks/${task.id}/checkpoints`,
@@ -1290,14 +1549,14 @@ describe("investigation service API", () => {
         lease: claimed.lease,
         reason: "error",
         diagnostics: [unacceptedUsageDiagnostic],
-        modelUsage: { round: 2, tokens: 59 },
+        modelUsage: { round: 1, tokens: 41 },
       },
       "worker",
     );
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json<InvestigationCheckpointResponse>().checkpoint).toEqual(completed);
     expect(store.get("checkpoints", task.id)).toEqual(completed);
-    expect(completed.consumed).toMatchObject({ rounds: 2, tokens: 100 });
+    expect(completed.consumed).toMatchObject({ rounds: 1, tokens: 41 });
   });
 
   it.each([187, null])(
@@ -1372,7 +1631,7 @@ describe("investigation service API", () => {
   }, 30_000);
 
   it("verifies artifact bytes and allows content access only within the authorized task scope", async () => {
-    const { app, item, store } = await harness();
+    const { app, item, store } = await harness({ staticConcurrency: 2 });
     const task = await createTask(app, item);
     const claimed = await claim(app);
     const bytes = Buffer.from("Isolated synthetic artifact bytes.\n");
@@ -1495,5 +1754,894 @@ describe("investigation service API", () => {
     expect(rejected.json()).toMatchObject({ code: "evidence_quota_exceeded", retryable: false });
     expect(rejected.json()).not.toHaveProperty("usage");
     expect(store.list("evidenceAssets")).toHaveLength(1);
+  });
+});
+
+describe("ledger-owned checkpoint budgets", () => {
+  function registration(
+    claimed: InvestigationClaim,
+    invocationId: string,
+    purpose: InvestigationModelInvocationReceipt["purpose"] = "analysis",
+  ): InvestigationModelInvocationReceipt {
+    return {
+      invocationId,
+      taskId: claimed.task.id,
+      attemptId: claimed.attempt.id,
+      purpose,
+      engine: "codex",
+      model: null,
+      startedAt: new Date(startedAt).toISOString(),
+      updatedAt: new Date(startedAt).toISOString(),
+      revision: 1,
+      state: "registered",
+      disposition: "pending",
+      completeness: "unavailable",
+      usage: unavailableInvestigationTokenUsage(),
+    };
+  }
+
+  it("commits usage and a durable comment wakeup before notifying the current task state", async () => {
+    let usageStore: InvestigationStore | undefined;
+    const notifications: InvestigationTaskV1[] = [];
+    const onTaskUsageChanged = vi.fn((task: InvestigationTaskV1) => {
+      expect(usageStore?.inTransaction).toBe(false);
+      expect(usageStore?.has("idempotency", investigationUsagePublicationPendingKey(task.id))).toBe(
+        true,
+      );
+      notifications.push(structuredClone(task));
+      throw new Error("Synthetic publisher interruption after accounting commit.");
+    });
+    const { app, item, store, advance } = await harness({ onTaskUsageChanged });
+    usageStore = store;
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const path = `/api/worker/tasks/${task.id}/model-usage`;
+    const first = registration(claimed, "usage-comment-notification");
+    const admitted = await post(app, path, { lease: claimed.lease, receipt: first }, "worker");
+    expect(admitted.statusCode, admitted.body).toBe(200);
+    expect(admitted.json()).toMatchObject({ executionAllowed: true, revision: 1 });
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: first }, "worker")).statusCode,
+    ).toBe(200);
+    expect(onTaskUsageChanged).toHaveBeenCalledTimes(1);
+    const running = {
+      ...first,
+      revision: 2,
+      state: "running",
+      completeness: "partial",
+      usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 20 },
+    };
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: running }, "worker")).statusCode,
+    ).toBe(200);
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage).toMatchObject({
+      reportedTokens: 20,
+      activeInvocationCount: 1,
+    });
+    const cancellation = await post(app, `/api/tasks/${task.id}/cancel`, {});
+    expect(cancellation.statusCode).toBe(200);
+    expect(cancellation.json()).toMatchObject({ id: task.id, state: "running" });
+    // Active cancellation is a request until the Worker stops or its lease expires.
+    advance(1_001);
+    const reaped = await post(
+      app,
+      "/api/worker/claims",
+      { supportedKinds: ["pr-review"] },
+      "worker",
+    );
+    expect(reaped.statusCode, reaped.body).toBe(200);
+    expect(reaped.json()).toEqual({ claim: null });
+    expect(store.get<InvestigationTaskV1>("tasks", task.id)?.state).toBe("cancelled");
+    const cancelled = {
+      ...running,
+      revision: 3,
+      state: "cancelled",
+      completeness: "complete",
+      usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 30 },
+    };
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: cancelled }, "worker")).statusCode,
+    ).toBe(200);
+    expect(notifications.map((item) => item.state)).toEqual(["running", "running", "cancelled"]);
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage).toMatchObject({
+      reportedTokens: 30,
+      activeInvocationCount: 0,
+    });
+    expect(store.has("idempotency", investigationUsagePublicationPendingKey(task.id))).toBe(true);
+  });
+
+  it("charges failed model edits before admitting another model process", async () => {
+    const { app, item, store } = await harness();
+    const task = await createTask(app, item);
+    store.put("tasks", task.id, { ...task, budget: { ...task.budget, maxTokens: 50 } });
+    const claimed = await claim(app);
+    const path = `/api/worker/tasks/${task.id}/model-usage`;
+    const first = registration(claimed, "failed-edit", "model_edit");
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: first }, "worker")).json()
+        .executionAllowed,
+    ).toBe(true);
+    const failed = {
+      ...first,
+      revision: 2,
+      state: "failed",
+      disposition: "rejected",
+      completeness: "complete",
+      usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 50 },
+    };
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: failed }, "worker")).statusCode,
+    ).toBe(200);
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: failed }, "worker")).statusCode,
+    ).toBe(200);
+    const denied = registration(claimed, "not-dispatched");
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: denied }, "worker")).json()
+        .executionAllowed,
+    ).toBe(false);
+    expect(
+      (
+        await post(
+          app,
+          path,
+          { lease: claimed.lease, receipt: { ...denied, revision: 2, state: "running" } },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(409);
+    expect(
+      (
+        await post(
+          app,
+          path,
+          {
+            lease: claimed.lease,
+            receipt: {
+              ...denied,
+              revision: 2,
+              state: "failed",
+              disposition: "rejected",
+              completeness: "complete",
+              usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 0 },
+            },
+          },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(200);
+    const interrupted = await post(
+      app,
+      `/api/worker/tasks/${task.id}/checkpoints`,
+      { kind: "interrupt", lease: claimed.lease, reason: "budget_exhausted", diagnostics: [] },
+      "worker",
+    );
+    expect(interrupted.statusCode, interrupted.body).toBe(200);
+    expect(interrupted.json().checkpoint).toMatchObject({
+      consumed: { tokens: 50 },
+      stopReason: "budget_exhausted",
+    });
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage.reportedTokens).toBe(50);
+  });
+
+  it("binds one invocation to one analysis round and projects rather than recharges its tokens", async () => {
+    const { app, item } = await harness();
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const checkpoint = checkpointFor(claimed);
+    const path = `/api/worker/tasks/${task.id}/model-usage`;
+    const first = registration(claimed, "analysis-call");
+    await post(app, path, { lease: claimed.lease, receipt: first }, "worker");
+    await post(
+      app,
+      path,
+      {
+        lease: claimed.lease,
+        receipt: {
+          ...first,
+          revision: 2,
+          state: "completed",
+          completeness: "complete",
+          usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 40 },
+        },
+      },
+      "worker",
+    );
+    const request = {
+      kind: "analysis",
+      lease: claimed.lease,
+      invocationId: first.invocationId,
+      usage: { durationMs: 0, tokens: 40, reportBytes: 0 },
+      round: {
+        schemaVersion: "InvestigationLoopRoundV1",
+        taskId: task.id,
+        attemptId: claimed.attempt.id,
+        inputCheckpointRef: {
+          id: checkpoint.id,
+          version: checkpoint.version,
+          digest: checkpoint.digest,
+        },
+        round: 1,
+        phase: "discovery",
+        analysis: structuredClone(checkpoint.analysis),
+        continue: true,
+        continuationReason: "Review pending synthetic scope.",
+      },
+    };
+    const checkpointPath = `/api/worker/tasks/${task.id}/checkpoints`;
+    expect(
+      (
+        await post(
+          app,
+          checkpointPath,
+          { ...request, usage: { ...request.usage, tokens: 41 } },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(409);
+    const accepted = await post(app, checkpointPath, request, "worker");
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    expect(accepted.json().checkpoint.consumed.tokens).toBe(40);
+    expect((await post(app, checkpointPath, request, "worker")).json()).toEqual(accepted.json());
+    const current = accepted.json().checkpoint;
+    const reuse = await post(
+      app,
+      checkpointPath,
+      {
+        ...request,
+        round: {
+          ...request.round,
+          round: 2,
+          inputCheckpointRef: { id: current.id, version: current.version, digest: current.digest },
+        },
+      },
+      "worker",
+    );
+    expect(reuse.statusCode).toBe(409);
+    expect(reuse.json().code).toBe("analysis_invocation_already_used");
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage.reportedTokens).toBe(40);
+  });
+
+  it("records a late first registration as not admitted and accepts only zero-cost termination", async () => {
+    const { app, item, advance } = await harness();
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    advance(2_000);
+    await get(app, `/api/tasks/${task.id}`);
+    const first = registration(claimed, "late-registration");
+    const path = `/api/worker/tasks/${task.id}/model-usage`;
+    expect(
+      (await post(app, path, { lease: claimed.lease, receipt: first }, "worker")).json()
+        .executionAllowed,
+    ).toBe(false);
+    expect(
+      (
+        await post(
+          app,
+          path,
+          {
+            lease: claimed.lease,
+            receipt: {
+              ...first,
+              revision: 2,
+              state: "completed",
+              completeness: "complete",
+              usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 1 },
+            },
+          },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(409);
+    expect(
+      (
+        await post(
+          app,
+          path,
+          {
+            lease: claimed.lease,
+            receipt: {
+              ...first,
+              revision: 2,
+              state: "failed",
+              disposition: "rejected",
+              completeness: "complete",
+              usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 0 },
+            },
+          },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(200);
+  });
+});
+
+describe("recorded E2E analysis recovery accounting", () => {
+  async function claimE2e(app: FastifyInstance): Promise<InvestigationClaim> {
+    const response = await post(
+      app,
+      "/api/worker/claims",
+      { supportedKinds: ["pr-e2e"] },
+      "worker",
+    );
+    expect(response.statusCode, response.body).toBe(200);
+    const claimed = response.json<InvestigationClaimResponse>().claim;
+    if (claimed === null || claimed.checkpoint === null)
+      throw new Error("Expected the synthetic E2E claim.");
+    return claimed;
+  }
+  async function billInvocation(
+    app: FastifyInstance,
+    claimed: InvestigationClaim,
+    purpose: InvestigationModelInvocationReceipt["purpose"],
+  ) {
+    const receipt: InvestigationModelInvocationReceipt = {
+      invocationId: "original-e2e-model",
+      taskId: claimed.task.id,
+      attemptId: claimed.attempt.id,
+      purpose,
+      engine: "codex",
+      model: null,
+      startedAt: new Date(startedAt).toISOString(),
+      updatedAt: new Date(startedAt).toISOString(),
+      revision: 1,
+      state: "registered",
+      disposition: "pending",
+      completeness: "unavailable",
+      usage: unavailableInvestigationTokenUsage(),
+    };
+    const path = `/api/worker/tasks/${claimed.task.id}/model-usage`;
+    const registered = await post(app, path, { lease: claimed.lease, receipt }, "worker");
+    expect(registered.statusCode, registered.body).toBe(200);
+    const completed = await post(
+      app,
+      path,
+      {
+        lease: claimed.lease,
+        receipt: {
+          ...receipt,
+          revision: 2,
+          state: "completed",
+          completeness: "complete",
+          usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 70 },
+        },
+      },
+      "worker",
+    );
+    expect(completed.statusCode, completed.body).toBe(200);
+  }
+  function analysisRequest(
+    claimed: InvestigationClaim,
+    checkpoint: InvestigationLoopCheckpointV1,
+    analysis = checkpoint.analysis,
+  ) {
+    return {
+      kind: "analysis" as const,
+      lease: claimed.lease,
+      usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+      round: {
+        schemaVersion: "InvestigationLoopRoundV1" as const,
+        taskId: claimed.task.id,
+        attemptId: claimed.attempt.id,
+        inputCheckpointRef: {
+          id: checkpoint.id,
+          version: checkpoint.version,
+          digest: checkpoint.digest,
+        },
+        round: checkpoint.round + 1,
+        phase: "finalize" as const,
+        analysis,
+        continue: false,
+        continuationReason:
+          "Reconstruct the report from accepted E2E observations without invoking a model.",
+      },
+    };
+  }
+
+  it("recovers accepted execution across attempts, seals a report, and retains exactly one original model charge", async () => {
+    const { app, item, advance } = await harness({ allowRepositoryExecution: true });
+    const created = await post(app, "/api/tasks", {
+      workItemId: item.id,
+      kind: "pr-e2e",
+      executionMode: "execute",
+      idempotencyKey: "e2e-recovery",
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const first = await claimE2e(app);
+    const firstCheckpoint = checkpointFor(first);
+    const subject = first.task.subjects.find((entry) => entry.id === first.task.subjectRef);
+    if (subject?.kind !== "original_pr") throw new Error("Expected the pinned PR subject.");
+    const marker = {
+      attemptId: first.attempt.id,
+      status: "started" as const,
+      startedAt: new Date(startedAt).toISOString(),
+      completedAt: null,
+    };
+    const start = await post(
+      app,
+      `/api/worker/tasks/${first.task.id}/checkpoints`,
+      {
+        kind: "execution",
+        lease: first.lease,
+        execution: { ...firstCheckpoint.runtime, e2eExecution: marker },
+      },
+      "worker",
+    );
+    expect(start.statusCode, start.body).toBe(200);
+    const started = start.json<InvestigationCheckpointResponse>().checkpoint;
+    await billInvocation(app, first, "e2e");
+    const incomplete = await post(
+      app,
+      `/api/worker/tasks/${first.task.id}/checkpoints`,
+      analysisRequest(first, started),
+      "worker",
+    );
+    expect(incomplete.statusCode).toBe(409);
+    expect(incomplete.json().code).toBe("analysis_usage_mismatch");
+
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const artifact: InvestigationArtifactV1 = {
+      id: "recorded-feature-image",
+      taskId: first.task.id,
+      attemptId: first.attempt.id,
+      subjectRef: subject.id,
+      kind: "image",
+      name: "synthetic-feature.png",
+      mediaType: "image/png",
+      digest: createHash("sha256").update(png).digest("hex"),
+      byteLength: png.length,
+      availability: "available",
+    };
+    const uploaded = await post(
+      app,
+      `/api/worker/tasks/${first.task.id}/artifacts`,
+      { lease: first.lease, artifact, contentBase64: png.toString("base64") },
+      "worker",
+    );
+    expect(uploaded.statusCode, uploaded.body).toBe(200);
+    const runtime: InvestigationRuntimeState = {
+      ...structuredClone(started.runtime),
+      artifacts: [artifact],
+      e2eExecution: {
+        ...marker,
+        status: "completed",
+        completedAt: new Date(startedAt).toISOString(),
+      },
+      evidence: [
+        {
+          id: "recorded-observation",
+          subjectRef: subject.id,
+          source: "executor_observation",
+          authority: "worker",
+          summary: "The synthetic feature displayed its expected value.",
+          artifactRefs: [artifact.id],
+          evidenceRefs: [],
+          provenance: {
+            taskId: first.task.id,
+            attemptId: first.attempt.id,
+            producer: "e2e-tool-server",
+            recordedAt: new Date(startedAt).toISOString(),
+          },
+        },
+      ],
+      checks: [
+        {
+          id: "recorded-assertion",
+          scenarioId: "recorded-feature",
+          subjectRef: subject.id,
+          planRef: null,
+          required: true,
+          description: "The expected value is displayed.",
+          status: "passed",
+          executor: "e2e-tool-server",
+          evidenceRefs: ["recorded-observation"],
+          authoritativeAttemptId: first.attempt.id,
+        },
+      ],
+      e2e: {
+        headSha: subject.headSha,
+        buildIdentity: "Synthetic build of the exact pinned revision",
+        cleanup: {
+          confirmed: true,
+          recordedAt: new Date(startedAt).toISOString(),
+          summary: "Synthetic owned processes are stopped.",
+        },
+        features: [
+          {
+            id: "recorded-feature",
+            title: "Changed feature",
+            paths: ["src/feature.cs"],
+            scenario: "Operate the changed feature.",
+            userVisible: true,
+            outcome: "passed",
+            assertions: [
+              {
+                id: "recorded-assertion",
+                expected: "Expected value",
+                observed: "Expected value",
+                outcome: "passed",
+                evidenceRefs: ["recorded-observation"],
+              },
+            ],
+            artifactRefs: [artifact.id],
+            limitations: [],
+          },
+        ],
+      },
+    };
+    const executed = await post(
+      app,
+      `/api/worker/tasks/${first.task.id}/checkpoints`,
+      { kind: "execution", lease: first.lease, execution: runtime },
+      "worker",
+    );
+    expect(executed.statusCode, executed.body).toBe(200);
+    const recorded = executed.json<InvestigationCheckpointResponse>().checkpoint;
+    expect(recorded.consumed.tokens).toBe(70);
+    const forged = projectRecordedE2eAnalysis(first.task, recorded).analysis;
+    forged.summary = "Unrecorded model-authored replacement summary.";
+    const mismatch = await post(
+      app,
+      `/api/worker/tasks/${first.task.id}/checkpoints`,
+      analysisRequest(first, recorded, forged),
+      "worker",
+    );
+    expect(mismatch.statusCode).toBe(409);
+    expect(mismatch.json().code).toBe("e2e_recovery_analysis_mismatch");
+    const interrupted = await post(
+      app,
+      `/api/worker/tasks/${first.task.id}/checkpoints`,
+      { kind: "interrupt", lease: first.lease, reason: "interrupted", diagnostics: [] },
+      "worker",
+    );
+    expect(interrupted.statusCode, interrupted.body).toBe(200);
+    expect(
+      (
+        await post(
+          app,
+          `/api/worker/tasks/${first.task.id}/cleanup`,
+          { lease: first.lease, ownedProcessesStopped: true, desktopRestored: true },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(200);
+    advance(2_000);
+    await get(app, `/api/tasks/${first.task.id}`);
+    const resumed = await post(app, `/api/tasks/${first.task.id}/resume`, {
+      idempotencyKey: "resume-recorded-e2e",
+    });
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    const second = await claimE2e(app);
+    const checkpoint = checkpointFor(second);
+    expect(second.attempt.id).not.toBe(first.attempt.id);
+    expect(checkpoint.runtime.e2eExecution?.attemptId).toBe(first.attempt.id);
+    const projection = projectRecordedE2eAnalysis(second.task, checkpoint);
+    const recoveryRequest = analysisRequest(second, checkpoint, projection.analysis);
+    const accepted = await post(
+      app,
+      `/api/worker/tasks/${second.task.id}/checkpoints`,
+      recoveryRequest,
+      "worker",
+    );
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    const recovered = accepted.json<InvestigationCheckpointResponse>().checkpoint;
+    expect(recovered).toMatchObject({ stopReason: "complete", consumed: { tokens: 70 } });
+    expect(
+      (
+        await post(
+          app,
+          `/api/worker/tasks/${second.task.id}/checkpoints`,
+          recoveryRequest,
+          "worker",
+        )
+      ).json(),
+    ).toEqual(accepted.json());
+    const extraRound = await post(
+      app,
+      `/api/worker/tasks/${second.task.id}/checkpoints`,
+      analysisRequest(
+        second,
+        recovered,
+        projectRecordedE2eAnalysis(second.task, recovered).analysis,
+      ),
+      "worker",
+    );
+    expect(extraRound.statusCode).toBe(409);
+    expect(extraRound.json().code).toBe("loop_already_stopped");
+    const usageResponse = await post(
+      app,
+      `/api/worker/tasks/${second.task.id}/report-usage`,
+      { lease: second.lease },
+      "worker",
+    );
+    expect(usageResponse.statusCode, usageResponse.body).toBe(200);
+    const usage = usageResponse.json<{ summary: InvestigationUsageSummary }>().summary;
+    expect(usage).toMatchObject({ reportedTokens: 70, invocationCount: 1 });
+    const { buildInvestigationReportSubmission } = await import(
+      "../../../worker/src/investigation/report-builder.js"
+    );
+    const submission = buildInvestigationReportSubmission({
+      task: second.task,
+      attempt: second.attempt,
+      checkpoint: recovered,
+      reportId: second.reportId,
+      outcome: "completed",
+      usage,
+    });
+    for (const part of submission.parts) {
+      const uploadedPart = await post(
+        app,
+        `/api/worker/tasks/${second.task.id}/report-parts`,
+        { lease: second.lease, part },
+        "worker",
+      );
+      expect(uploadedPart.statusCode, uploadedPart.body).toBe(200);
+    }
+    const finalized = await post(
+      app,
+      `/api/worker/tasks/${second.task.id}/finalize`,
+      { lease: second.lease, header: submission.header, manifest: submission.manifest },
+      "worker",
+    );
+    expect(finalized.statusCode, finalized.body).toBe(200);
+    const detail = (await get(app, `/api/tasks/${second.task.id}`)).json();
+    expect(detail).toMatchObject({
+      task: { state: "completed" },
+      usage: { reportedTokens: 70, invocationCount: 1 },
+    });
+    expect(detail.invocations).toHaveLength(1);
+    expect(detail.invocations[0].attemptId).toBe(first.attempt.id);
+  });
+
+  it("does not allow a static task to replace a registered model call with zero-cost analysis", async () => {
+    const { app, item } = await harness();
+    await createTask(app, item);
+    const claimed = await claim(app);
+    await billInvocation(app, claimed, "analysis");
+    const rejected = await post(
+      app,
+      `/api/worker/tasks/${claimed.task.id}/checkpoints`,
+      analysisRequest(claimed, checkpointFor(claimed)),
+      "worker",
+    );
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json().code).toBe("analysis_usage_mismatch");
+    expect((await get(app, `/api/tasks/${claimed.task.id}/usage`)).json().usage).toMatchObject({
+      reportedTokens: 70,
+      invocationCount: 1,
+    });
+  });
+});
+
+describe("pre-dispatch attempt usage coverage", () => {
+  const measured = {
+    inputTokens: 377466,
+    cachedReadTokens: 321355,
+    outputTokens: 8569,
+    reasoningTokens: 4351,
+    cacheWriteTokens: 56081,
+    totalTokens: 386035,
+    providerCounters: {},
+  };
+  async function completeMeasuredInvocation(
+    app: FastifyInstance,
+    claimed: InvestigationClaim,
+    onRegistered?: () => void,
+  ) {
+    const receipt: InvestigationModelInvocationReceipt = {
+      invocationId: "measured-resumed-call",
+      taskId: claimed.task.id,
+      attemptId: claimed.attempt.id,
+      purpose: "analysis",
+      engine: "codex",
+      model: null,
+      startedAt: new Date(startedAt + 2_000).toISOString(),
+      updatedAt: new Date(startedAt + 2_000).toISOString(),
+      revision: 1,
+      state: "registered",
+      disposition: "pending",
+      completeness: "unavailable",
+      usage: unavailableInvestigationTokenUsage(),
+    };
+    const path = `/api/worker/tasks/${claimed.task.id}/model-usage`;
+    const registered = await post(app, path, { lease: claimed.lease, receipt }, "worker");
+    expect(registered.statusCode, registered.body).toBe(200);
+    onRegistered?.();
+    const complete = await post(
+      app,
+      path,
+      {
+        lease: claimed.lease,
+        receipt: {
+          ...receipt,
+          revision: 2,
+          state: "completed",
+          disposition: "accepted",
+          completeness: "complete",
+          usage: measured,
+        },
+      },
+      "worker",
+    );
+    expect(complete.statusCode, complete.body).toBe(200);
+  }
+
+  it.each(["legacy source-tree receipt", "explicit pre-dispatch declaration"])(
+    "preserves complete resumed usage after %s without rewriting the old empty baseline",
+    async (proof) => {
+      const { app, item, store, advance } = await harness();
+      const task = await createTask(app, item);
+      const first = await claim(app);
+      const interrupted = await post(
+        app,
+        `/api/worker/tasks/${task.id}/checkpoints`,
+        {
+          kind: "interrupt",
+          lease: first.lease,
+          reason: "blocked",
+          ...(proof === "explicit pre-dispatch declaration"
+            ? { modelInvocationState: "not_started" }
+            : {}),
+          diagnostics: [
+            {
+              id: "preparation-stopped",
+              code:
+                proof === "legacy source-tree receipt"
+                  ? "SOURCE_TREE_UNSUPPORTED"
+                  : "SOURCE_UNAVAILABLE",
+              category: "blocker",
+              message: "A required source or trusted execution prerequisite was unavailable.",
+              retryable: true,
+              evidenceRefs: [],
+              prerequisiteRefs: [],
+            },
+          ],
+        },
+        "worker",
+      );
+      expect(interrupted.statusCode, interrupted.body).toBe(200);
+      const originalReceipt = store.pagePrefix<{
+        digest: string;
+        checkpoint: InvestigationLoopCheckpointV1;
+      }>("idempotency", `checkpoint:${first.attempt.id}:interrupt:`, 10)[0]!;
+      advance(2_000);
+      await get(app, `/api/tasks/${task.id}`);
+      const resumed = await post(app, `/api/tasks/${task.id}/resume`, {
+        idempotencyKey: "resume-after-source-preparation",
+      });
+      expect(resumed.statusCode, resumed.body).toBe(200);
+      const second = await claim(app);
+      const baselineKey = `model-usage:v1:task:${Buffer.from(task.id).toString("hex")}:baseline`;
+      const historicalBaseline = { taskId: task.id, tokens: 0, unknown: true };
+      await completeMeasuredInvocation(app, second, () => {
+        // Reproduce the old deployment's persisted baseline inside this isolated database.
+        store.put("idempotency", baselineKey, historicalBaseline);
+      });
+      const detail = (await get(app, `/api/tasks/${task.id}`)).json();
+      expect(detail.usage).toMatchObject({
+        completeness: "complete",
+        legacyTokens: 0,
+        reportedTokens: measured.totalTokens,
+        invocationCount: 1,
+        unknownInvocationCount: 0,
+        usage: measured,
+      });
+      expect(detail.invocations).toHaveLength(1);
+      expect(detail.invocations[0].attemptId).toBe(second.attempt.id);
+      expect((await get(app, "/api/tasks")).json().usageByTaskId[task.id]).toEqual(detail.usage);
+      expect(
+        (
+          await post(
+            app,
+            `/api/worker/tasks/${task.id}/report-usage`,
+            { lease: second.lease },
+            "worker",
+          )
+        ).json().summary,
+      ).toEqual(detail.usage);
+      expect(store.get("idempotency", baselineKey)).toEqual(historicalBaseline);
+      expect(
+        store.pagePrefix("idempotency", `checkpoint:${first.attempt.id}:interrupt:`, 10)[0],
+      ).toEqual(originalReceipt);
+    },
+  );
+
+  it.each(["missing receipt after lease expiry", "cancelled model with unavailable usage"])(
+    "keeps earlier %s unknown when a later invocation has complete metrics",
+    async (failure) => {
+      const { app, item, advance } = await harness();
+      const task = await createTask(app, item);
+      const first = await claim(app);
+      if (failure === "cancelled model with unavailable usage") {
+        const interrupted = await post(
+          app,
+          `/api/worker/tasks/${task.id}/checkpoints`,
+          {
+            kind: "interrupt",
+            lease: first.lease,
+            reason: "cancelled",
+            diagnostics: [],
+            modelUsage: { round: 1, tokens: null },
+          },
+          "worker",
+        );
+        expect(interrupted.statusCode, interrupted.body).toBe(200);
+      }
+      advance(2_000);
+      await get(app, `/api/tasks/${task.id}`);
+      const resumed = await post(app, `/api/tasks/${task.id}/resume`, {
+        idempotencyKey: "resume-with-unknown-prior-cost",
+      });
+      expect(resumed.statusCode, resumed.body).toBe(200);
+      const second = await claim(app);
+      await completeMeasuredInvocation(app, second);
+      expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage).toMatchObject({
+        completeness: "partial",
+        reportedTokens: measured.totalTokens,
+        usage: { totalTokens: null, inputTokens: null, cachedReadTokens: null },
+      });
+    },
+  );
+
+  it("rejects a pre-dispatch declaration after a model has already registered", async () => {
+    const { app, item } = await harness();
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    await completeMeasuredInvocation(app, claimed);
+    const rejected = await post(
+      app,
+      `/api/worker/tasks/${task.id}/checkpoints`,
+      {
+        kind: "interrupt",
+        lease: claimed.lease,
+        reason: "blocked",
+        diagnostics: [],
+        modelInvocationState: "not_started",
+      },
+      "worker",
+    );
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json().code).toBe("model_dispatch_already_recorded");
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage).toMatchObject({
+      completeness: "complete",
+      reportedTokens: measured.totalTokens,
+      usage: measured,
+    });
+  });
+});
+
+describe("pre-dispatch proof against missing usage", () => {
+  it("does not erase an observed model stage just because its invocation receipt is missing", async () => {
+    const { app, item } = await harness();
+    const task = await createTask(app, item);
+    const claimed = await claim(app);
+    const activity = await post(
+      app,
+      `/api/worker/tasks/${task.id}/progress`,
+      { lease: claimed.lease, sequence: 1, kind: "stage", stage: "model" },
+      "worker",
+    );
+    expect(activity.statusCode, activity.body).toBe(200);
+    const rejected = await post(
+      app,
+      `/api/worker/tasks/${task.id}/checkpoints`,
+      {
+        kind: "interrupt",
+        lease: claimed.lease,
+        reason: "interrupted",
+        diagnostics: [],
+        modelInvocationState: "not_started",
+      },
+      "worker",
+    );
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json().code).toBe("model_dispatch_already_recorded");
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage).toMatchObject({
+      completeness: "unavailable",
+      usage: { totalTokens: null },
+    });
   });
 });

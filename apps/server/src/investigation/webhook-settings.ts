@@ -10,6 +10,7 @@ export interface InvestigationWebhookSettingsUpdate {
   readonly enabled: boolean;
   readonly reviewerUserId: number | null;
   readonly allowedActorUserIds: readonly number[];
+  readonly e2eEnabled?: boolean;
 }
 
 export interface InvestigationWebhookSettingsView extends InvestigationWebhookSettingsUpdate {
@@ -21,7 +22,13 @@ interface StoredWebhookSettings extends InvestigationWebhookSettingsUpdate {
   readonly repositoryId: string;
 }
 
-const requestKeys = new Set(["version", "enabled", "reviewerUserId", "allowedActorUserIds"]);
+const requestKeys = new Set([
+  "version",
+  "enabled",
+  "reviewerUserId",
+  "allowedActorUserIds",
+  "e2eEnabled",
+]);
 
 function isPositiveId(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
@@ -37,7 +44,7 @@ function validateRequest(input: unknown, statusCode = 400): InvestigationWebhook
     input !== null &&
       typeof input === "object" &&
       !Array.isArray(input) &&
-      Object.keys(input).length === requestKeys.size &&
+      (Object.keys(input).length === 4 || Object.keys(input).length === 5) &&
       Object.keys(input).every((key) => requestKeys.has(key)),
     statusCode,
     code,
@@ -49,6 +56,7 @@ function validateRequest(input: unknown, statusCode = 400): InvestigationWebhook
       Number.isSafeInteger(request.version) &&
       request.version >= 0 &&
       typeof request.enabled === "boolean" &&
+      (request.e2eEnabled === undefined || typeof request.e2eEnabled === "boolean") &&
       (request.reviewerUserId === null || isPositiveId(request.reviewerUserId)) &&
       Array.isArray(request.allowedActorUserIds) &&
       request.allowedActorUserIds.length <= 1_024,
@@ -63,7 +71,8 @@ function validateRequest(input: unknown, statusCode = 400): InvestigationWebhook
   }
   requireCondition(
     new Set(actors).size === actors.length &&
-      (!request.enabled || (request.reviewerUserId !== null && actors.length > 0)),
+      (!(request.enabled || request.e2eEnabled === true) ||
+        (request.reviewerUserId !== null && actors.length > 0)),
     statusCode,
     code,
     message,
@@ -73,6 +82,7 @@ function validateRequest(input: unknown, statusCode = 400): InvestigationWebhook
     enabled: request.enabled,
     reviewerUserId: request.reviewerUserId,
     allowedActorUserIds: actors,
+    ...(request.e2eEnabled === undefined ? {} : { e2eEnabled: request.e2eEnabled }),
   };
 }
 
@@ -114,6 +124,7 @@ export class InvestigationWebhookSettings {
             enabled: true,
             reviewerUserId: binding.reviewerUserId,
             allowedActorUserIds: binding.allowedActorUserIds,
+            ...(binding.e2eEnabled === undefined ? {} : { e2eEnabled: binding.e2eEnabled }),
           },
           500,
         ),
@@ -166,6 +177,7 @@ export class InvestigationWebhookSettings {
         enabled: parsed.enabled,
         reviewerUserId: parsed.reviewerUserId,
         allowedActorUserIds: [...parsed.allowedActorUserIds],
+        ...(parsed.e2eEnabled === undefined ? {} : { e2eEnabled: parsed.e2eEnabled }),
       };
       this.#store.put("idempotency", `webhook:settings:${repositoryId}`, next);
       return this.#view(repositoryId, next);
@@ -176,11 +188,13 @@ export class InvestigationWebhookSettings {
     const bindings: InvestigationWebhookBinding[] = [];
     for (const repository of this.#store.list<InvestigationRepositoryRecord>("repositories")) {
       const settings = this.#effective(repository.id);
-      if (settings.enabled && settings.reviewerUserId !== null) {
+      if ((settings.enabled || settings.e2eEnabled === true) && settings.reviewerUserId !== null) {
         bindings.push({
           repositoryId: repository.id,
           reviewerUserId: settings.reviewerUserId,
           allowedActorUserIds: [...settings.allowedActorUserIds],
+          ...(settings.e2eEnabled === undefined ? {} : { e2eEnabled: settings.e2eEnabled }),
+          ...(!settings.enabled ? { assignmentsEnabled: false } : {}),
         });
       }
     }
@@ -221,7 +235,7 @@ export class InvestigationWebhookSettings {
         saved !== null &&
           typeof saved === "object" &&
           !Array.isArray(saved) &&
-          Object.keys(saved).length === requestKeys.size + 1 &&
+          (Object.keys(saved).length === 5 || Object.keys(saved).length === 6) &&
           Object.keys(saved).every((key) => key === "repositoryId" || requestKeys.has(key)) &&
           saved.repositoryId === repositoryId &&
           saved.version > 0,
@@ -235,6 +249,7 @@ export class InvestigationWebhookSettings {
           enabled: saved.enabled,
           reviewerUserId: saved.reviewerUserId,
           allowedActorUserIds: saved.allowedActorUserIds,
+          ...(saved.e2eEnabled === undefined ? {} : { e2eEnabled: saved.e2eEnabled }),
         },
         500,
       );
@@ -260,6 +275,7 @@ export class InvestigationWebhookSettings {
       allowedActorUserIds: [...settings.allowedActorUserIds],
       version: settings.version,
       receiverConfigured: this.#receiverConfigured,
+      ...(settings.e2eEnabled === undefined ? {} : { e2eEnabled: settings.e2eEnabled }),
     };
   }
 }

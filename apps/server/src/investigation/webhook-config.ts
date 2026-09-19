@@ -5,6 +5,9 @@ export interface InvestigationWebhookBinding {
   readonly repositoryId: string;
   readonly reviewerUserId: number;
   readonly allowedActorUserIds: readonly number[];
+  readonly e2eEnabled?: boolean;
+  /** Internal effective setting; deployment bindings enable assignments by default. */
+  readonly assignmentsEnabled?: boolean;
 }
 
 export interface InvestigationWebhookConfig {
@@ -16,7 +19,12 @@ export interface InvestigationWebhookConfig {
 const maximumBindings = 1_024;
 const maximumAllowedActors = 1_024;
 const maximumBodyBytes = 32 * 1_024 * 1_024;
-const bindingKeys = new Set(["repositoryId", "reviewerUserId", "allowedActorUserIds"]);
+const bindingKeys = new Set([
+  "repositoryId",
+  "reviewerUserId",
+  "allowedActorUserIds",
+  "e2eEnabled",
+]);
 
 function isPositiveGitHubId(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
@@ -60,7 +68,7 @@ export function parseInvestigationWebhookConfig(
       entry === null ||
       typeof entry !== "object" ||
       Array.isArray(entry) ||
-      Object.keys(entry).length !== bindingKeys.size ||
+      (Object.keys(entry).length !== 3 && Object.keys(entry).length !== 4) ||
       Object.keys(entry).some((key) => !bindingKeys.has(key))
     ) {
       throw new Error(
@@ -68,6 +76,8 @@ export function parseInvestigationWebhookConfig(
       );
     }
     const binding = entry as Record<string, unknown>;
+    if (binding.e2eEnabled !== undefined && typeof binding.e2eEnabled !== "boolean")
+      throw new Error("GitHub webhook e2eEnabled must be a boolean when configured.");
     const repositoryId = binding.repositoryId;
     if (typeof repositoryId !== "string" || !Value.Check(EntityIdSchema, repositoryId)) {
       throw new Error("GitHub webhook repositoryId must be a valid exact entity ID.");
@@ -103,6 +113,7 @@ export function parseInvestigationWebhookConfig(
         repositoryId,
         reviewerUserId: binding.reviewerUserId,
         allowedActorUserIds: Object.freeze(actors),
+        ...(binding.e2eEnabled === undefined ? {} : { e2eEnabled: binding.e2eEnabled }),
       }),
     );
   }

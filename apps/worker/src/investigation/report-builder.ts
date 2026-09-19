@@ -24,11 +24,15 @@ import {
   type InvestigationSubjectV1,
   type InvestigationTaskV1,
   InvestigationTaskV1Schema,
+  type InvestigationUsageSummary,
+  InvestigationUsageSummarySchema,
   type InvestigationValidation,
   InvestigationValidationSchema,
   PositiveIntegerSchema,
+  projectInvestigationCheckpointPresentation,
   validateInvestigationModelExecutions,
   validateInvestigationTask,
+  validateInvestigationTokenUsage,
 } from "@agentic-review/contracts";
 import {
   evaluateInvestigationCompletion,
@@ -77,6 +81,8 @@ export interface BuildInvestigationReportSubmissionInput {
   readonly checkpoint: InvestigationLoopCheckpointV1;
   readonly reportId: string;
   readonly outcome: InvestigationOutcome;
+  /** Immutable Server accounting snapshot frozen for this report attempt. */
+  readonly usage?: InvestigationUsageSummary;
   readonly reportVersion?: number;
   /** The server-persisted plan claimed for a follow-up task retains its original report source. */
   readonly parentPlan?: InvestigationPlanV1 | null;
@@ -130,7 +136,10 @@ export function buildInvestigationReportSubmission(
   }
 
   const runtime = validatedRuntime(input);
-  const analysis = structuredClone(checkpoint.analysis);
+  const analysis = structuredClone({
+    ...checkpoint.analysis,
+    ...projectInvestigationCheckpointPresentation(task, checkpoint),
+  });
   const sourceReportRef = { id: reportId, version };
   const verificationEvidence: InvestigationEvidenceV1[] = [
     ...analysis.evidence.map(
@@ -155,6 +164,9 @@ export function buildInvestigationReportSubmission(
   );
   const plans = reportPlans(input, analysis.plans, sourceReportRef);
   const context: InvestigationResultV1["context"] = {
+    ...(checkpoint.runtime.e2e === undefined
+      ? {}
+      : { e2e: structuredClone(checkpoint.runtime.e2e) }),
     repository: structuredClone(task.repository),
     workItem: structuredClone(task.workItem),
     task: {
@@ -215,6 +227,7 @@ export function buildInvestigationReportSubmission(
       completeness: outcome === "completed" ? "complete" : "partial",
       summary: analysis.summary,
       logicalContentDigest: emptyDigest,
+      ...(input.usage === undefined ? {} : { usage: structuredClone(input.usage) }),
       coverage: analysis.coverage,
       recheck: {
         finalFindingCount: analysis.findings.length,
@@ -284,6 +297,7 @@ export function buildInvestigationReportSubmission(
       completeness: result.report.completeness,
       summary: result.report.summary,
       logicalContentDigest: result.report.logicalContentDigest,
+      ...(result.report.usage === undefined ? {} : { usage: result.report.usage }),
       coverage: {
         scopeManifest: result.report.coverage.scopeManifest,
         includedUnitCount: result.report.coverage.includedUnits.length,
@@ -328,6 +342,9 @@ function validateInput(input: BuildInvestigationReportSubmissionInput): void {
     !Value.Check(InvestigationLoopCheckpointV1Schema, input.checkpoint) ||
     !Value.Check(EntityIdSchema, input.reportId) ||
     !Value.Check(InvestigationOutcomeSchema, input.outcome) ||
+    (input.usage !== undefined &&
+      (!Value.Check(InvestigationUsageSummarySchema, input.usage) ||
+        !validateInvestigationTokenUsage(input.usage.usage))) ||
     !Value.Check(PositiveIntegerSchema, input.reportVersion ?? 1) ||
     !Value.Check(PositiveIntegerSchema, input.maximumPartBytes ?? defaultMaximumPartBytes) ||
     !Value.Check(PositiveIntegerSchema, input.maximumPartItems ?? defaultMaximumPartItems) ||

@@ -3,11 +3,16 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   EntityIdSchema,
+  type InvestigationBudget,
   InvestigationNewPasswordSchema,
   InvestigationUsernameInputSchema,
   normalizeInvestigationUsername,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
+import {
+  type InvestigationMediaRuntimeConfig,
+  parseInvestigationMediaRuntimeConfig,
+} from "./e2e-media-runtime.js";
 import {
   defaultInvestigationEvidencePolicy,
   type InvestigationEvidencePolicy,
@@ -50,6 +55,9 @@ export interface InvestigationRuntimeConfig {
   readonly sourceImportMaximumBytes: number;
   readonly sourceImportMaximumPages: number;
   readonly evidencePolicy: InvestigationEvidencePolicy;
+  readonly staticConcurrency?: number;
+  readonly defaultTaskBudget?: Readonly<Omit<InvestigationBudget, "maxReportBytes">>;
+  readonly media?: InvestigationMediaRuntimeConfig;
 }
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -317,6 +325,7 @@ export function loadInvestigationRuntimeConfig(
     workers,
     https,
     enableExternalWrites,
+    media: parseInvestigationMediaRuntimeConfig(environment),
     ...(webhook === undefined ? {} : { webhook }),
     executionBindingsPath:
       environment.INVESTIGATION_EXECUTION_BINDINGS_PATH === undefined
@@ -339,6 +348,27 @@ export function loadInvestigationRuntimeConfig(
       1000,
       10000,
     ),
+    staticConcurrency: integer(environment, "INVESTIGATION_STATIC_CONCURRENCY", 1, 16),
+    defaultTaskBudget: Object.freeze({
+      maxTokens: integer(
+        environment,
+        "INVESTIGATION_DEFAULT_TASK_MAX_TOKENS",
+        120_000,
+        Number.MAX_SAFE_INTEGER,
+      ),
+      maxRounds: integer(
+        environment,
+        "INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS",
+        24,
+        Number.MAX_SAFE_INTEGER,
+      ),
+      maxDurationMs: integer(
+        environment,
+        "INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS",
+        1_800_000,
+        2_147_483_647,
+      ),
+    }),
     evidencePolicy: {
       maximumBytes: integer(
         environment,

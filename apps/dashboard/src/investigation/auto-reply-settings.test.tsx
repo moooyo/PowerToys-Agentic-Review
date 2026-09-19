@@ -718,7 +718,7 @@ describe("automatic reply delivery visibility", () => {
     expect(html).toContain("Response lost.");
     expect(html).toContain("needs reconciliation");
     expect(html).toContain("send the comment again");
-    expect(html).toContain("View frozen comment");
+    expect(html).toContain("View saved comment");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).toContain("/reports?reportId=report%3A1&amp;repositoryId=repo-selected");
     expect(html).not.toContain("<script>");

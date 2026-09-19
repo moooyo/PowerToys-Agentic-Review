@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   deriveWorkerProcessHostInstanceKey,
   StdioProcessHostClient,
@@ -13,6 +14,26 @@ import {
 } from "../execution/process-host-protocol.js";
 import { verifyTrustedExecutionBinaries } from "../execution/trusted-binary.js";
 import type { Logger } from "../logging/logger.js";
+import {
+  type AttemptCleanupIdentity,
+  type AttemptCleanupJournal,
+  type AttemptCleanupJournalOptions,
+  type AttemptCleanupRecoveryActions,
+  type AttemptCleanupStatus,
+  InvestigationAttemptCleanupJournal,
+} from "./attempt-cleanup-journal.js";
+import {
+  type AttemptDesktopCleanupHooks,
+  type AttemptDesktopGuard,
+  type AttemptDesktopGuardOptions,
+  executeWithAttemptDesktopGuard,
+} from "./attempt-desktop-guard.js";
+import { createCleanupRecoveryOperations } from "./cleanup-recovery-operations.js";
+import {
+  createE2eAgentRunner,
+  type E2eAgentRunner,
+  type E2eAgentRunnerOptions,
+} from "./e2e-agent-runner.js";
 import {
   type InvestigationGitSourceOptions,
   ProductionInvestigationGitSourceMaterializer,
@@ -33,17 +54,25 @@ import {
   type ModelTurnRunnerOptions,
 } from "./model-turn-runner.js";
 import {
+  InvestigationModelUsageJournal,
+  type ModelUsageJournalOptions,
+} from "./model-usage-journal.js";
+import {
   type InvestigationModelEditAdapter,
   type InvestigationPlanExecutor,
   type InvestigationUiPlanAdapter,
   ProductionInvestigationPlanExecutor,
   type ProductionInvestigationPlanExecutorOptions,
 } from "./plan-executor.js";
-import type { InvestigationWorkerRuntimeConfig } from "./runtime-config.js";
+import {
+  defaultInvestigationDesktopLockDirectory,
+  type InvestigationWorkerRuntimeConfig,
+} from "./runtime-config.js";
 import {
   type InvestigationClaimExecutor,
   InvestigationTaskService,
   type InvestigationTaskServiceOptions,
+  investigationTaskPool,
 } from "./task-service.js";
 import {
   ProductionInvestigationUiPlanAdapter,
@@ -78,7 +107,13 @@ export interface InvestigationRuntimeDependencies {
     options: StdioProcessHostClientOptions,
   ) => Promise<ProcessHostClient>;
   readonly createClient?: (options: InvestigationHttpClientOptions) => InvestigationWorkerClient;
+  readonly createCleanupJournal?: (options: AttemptCleanupJournalOptions) => AttemptCleanupJournal;
+  readonly createCleanupRecoveryOperations?: typeof createCleanupRecoveryOperations;
+  readonly createUsageJournal?: (
+    options: ModelUsageJournalOptions,
+  ) => InvestigationModelUsageJournal;
   readonly createModelTurnRunner?: (options: ModelTurnRunnerOptions) => ModelTurnRunner;
+  readonly createE2eAgentRunner?: (options: E2eAgentRunnerOptions) => E2eAgentRunner;
   readonly createModelEditAdapter?: (
     options: ModelEditRunnerOptions,
   ) => InvestigationModelEditAdapter;
@@ -97,6 +132,9 @@ export interface InvestigationRuntimeDependencies {
   readonly createCoordinator?: (
     options: InvestigationLoopCoordinatorOptions,
   ) => InvestigationClaimExecutor;
+  readonly acquireDesktopGuard?: (
+    options: AttemptDesktopGuardOptions,
+  ) => Promise<AttemptDesktopGuard>;
   readonly createTaskService?: (
     options: InvestigationTaskServiceOptions,
   ) => InvestigationRuntimeService;
@@ -107,6 +145,16 @@ export interface InvestigationExecutionRuntime {
   readonly service: InvestigationRuntimeService;
   run(): Promise<void>;
   stop(): Promise<void>;
+  cleanupStatus(): Promise<AttemptCleanupStatus[]>;
+  confirmCleanupRecovery(
+    attemptId: string,
+    confirmation: {
+      operator: string;
+      reason: string;
+      desktopRestored: true;
+      ownedProcessTreeStopped: boolean;
+    },
+  ): Promise<AttemptCleanupStatus[]>;
 }
 
 /** Constructs the production Task runtime without any Task-to-Job envelope conversion. */
@@ -115,33 +163,119 @@ export async function createInvestigationExecutionRuntime(
   logger: Logger,
   dependencies: InvestigationRuntimeDependencies = {},
 ): Promise<InvestigationExecutionRuntime> {
-  const config = structuredClone(suppliedConfig);
+  const config = {
+    ...structuredClone(suppliedConfig),
+    desktopLockDirectory:
+      suppliedConfig.desktopLockDirectory ?? defaultInvestigationDesktopLockDirectory(),
+  };
   if (!config.modelStaticConfiguration.verified)
     throw new Error(
       "The deployment must verify its isolated static CLI configuration before starting the investigation Worker.",
     );
+  const usageJournalDirectory = win32.join(config.dataDirectory, "model-usage");
+  const cleanupJournalDirectory = win32.join(config.dataDirectory, "attempt-cleanup");
+  if (
+    key(usageJournalDirectory) === key(config.workspaceRootDirectory) ||
+    key(usageJournalDirectory).startsWith(`${key(config.workspaceRootDirectory)}\\`)
+  )
+    throw new Error("The model usage journal must remain outside disposable workspaces.");
   await (dependencies.prepareDirectories ?? prepareInvestigationDirectories)(config);
+  if (
+    key(cleanupJournalDirectory) === key(config.workspaceRootDirectory) ||
+    key(cleanupJournalDirectory).startsWith(`${key(config.workspaceRootDirectory)}\\`)
+  )
+    throw new Error("The attempt cleanup journal must remain outside disposable workspaces.");
+  const cleanupJournal = (
+    dependencies.createCleanupJournal ??
+    ((options) => new InvestigationAttemptCleanupJournal(options))
+  )({ directory: cleanupJournalDirectory });
+  const activeCleanupAttempts = new Set<string>();
+  let replayCleanup = async (): Promise<AttemptCleanupStatus[]> => [];
   const binaries = await (dependencies.verifyDeployment ?? verifyInvestigationDeployment)(config);
-  const client = (dependencies.createClient ?? createInvestigationHttpClient)({
+  const transportClient = (dependencies.createClient ?? createInvestigationHttpClient)({
     serverUrl: config.serverUrl,
     workerToken: config.workerToken,
     allowInsecureHttp: config.allowInsecureHttp,
     requestTimeoutMs: config.requestTimeoutMs,
   });
+  const usageDeliveryLifetime = new AbortController();
+  const usageJournal = (
+    dependencies.createUsageJournal ?? ((options) => new InvestigationModelUsageJournal(options))
+  )({
+    directory: usageJournalDirectory,
+    deliver: async (receipt, lease) => {
+      if (lease === undefined || transportClient.modelUsage === undefined)
+        throw new Error("The model usage receipt has no authenticated delivery context.");
+      return await transportClient.modelUsage(
+        receipt.taskId,
+        { lease, receipt },
+        usageDeliveryLifetime.signal,
+      );
+    },
+  });
+  let usageReplay: Promise<void> | undefined;
+  const replayUsage = (): Promise<void> => {
+    if (usageDeliveryLifetime.signal.aborted) return Promise.resolve();
+    usageReplay ??= usageJournal
+      .replay()
+      .catch(() => {
+        // The durable journal owns retries. Never log private lease or transport payloads.
+        logger.warn("Pending model usage receipts could not be delivered and remain retained.");
+      })
+      .finally(() => {
+        usageReplay = undefined;
+      });
+    return usageReplay;
+  };
+  const client: InvestigationWorkerClient = {
+    ...transportClient,
+    async claim(request, signal) {
+      const response = await transportClient.claim(request, signal);
+      // Idle polling also retries terminal receipts after the last attempt ends.
+      void replayUsage();
+      void replayCleanup().catch(() =>
+        logger.warn("Pending execution cleanup remains retained for recovery."),
+      );
+      return response;
+    },
+    async heartbeat(taskId, request, signal) {
+      const response = await transportClient.heartbeat(taskId, request, signal);
+      // Accounting retries must not delay lease renewal or change execution authority.
+      void replayUsage();
+      return response;
+    },
+    ...(transportClient.cleanup === undefined
+      ? {}
+      : ({
+          async cleanup(taskId, request, signal) {
+            const response = await transportClient.cleanup!(taskId, request, signal);
+            if (activeCleanupAttempts.has(request.lease.attemptId))
+              await cleanupJournal.acknowledged(request.lease.attemptId);
+            return response;
+          },
+        } satisfies Pick<InvestigationWorkerClient, "cleanup">)),
+  };
+  await replayUsage();
   const hostEnvironment = {
     ...config.operatingSystemEnvironment,
     TEMP: win32.join(config.dataDirectory, "host-temp"),
     TMP: win32.join(config.dataDirectory, "host-temp"),
   };
   forbidWorkerCredential(hostEnvironment, config.workerToken);
+  const staticCapacity =
+    config.role === "e2e"
+      ? 0
+      : (config.maximumConcurrentStaticTasks ?? config.maximumConcurrentTasks);
+  const e2eCapacity = config.role === "static" ? 0 : 1;
   const processHost = await (dependencies.createProcessHost ?? StdioProcessHostClient.create)({
     processHostPath: binaries.processHostPath,
     instanceKey: deriveWorkerProcessHostInstanceKey({ dataDirectory: config.dataDirectory }),
-    maximumConcurrentRequests: config.maximumConcurrentTasks * 2,
+    maximumConcurrentRequests: staticCapacity * 2 + e2eCapacity * 6,
     hostEnvironment,
     shutdownTimeoutMs: config.shutdownTimeoutMs,
     interactiveStdin: true,
     captureResourceUsage: true,
+    namedJobRecovery: true,
     onExitObservation: (observation) => {
       logger.info("Investigation native process exit observed.", { ...observation });
     },
@@ -150,26 +284,102 @@ export async function createInvestigationExecutionRuntime(
   let closePromise: Promise<void> | undefined;
   let stopPromise: Promise<void> | undefined;
   let nodeFault: Error | undefined;
+  let claimsStarted = false;
+  let cleanupRecoveryStopping = false;
+  let cleanupReplay: Promise<AttemptCleanupStatus[]> | undefined;
+  let cleanupOperations: ReturnType<typeof createCleanupRecoveryOperations>;
+  const recoveryActions = (): AttemptCleanupRecoveryActions => ({
+    processHostRecovery: processHost.recovery?.(),
+    activeAttemptIds: activeCleanupAttempts,
+    async cleanupWorkspace(identity, ownership) {
+      if (
+        key(identity.workspaceRootDirectory) !== key(config.workspaceRootDirectory) ||
+        key(identity.desktopLockDirectory) !== key(config.desktopLockDirectory)
+      )
+        throw new Error("The retained cleanup identity belongs to another deployment.");
+      await cleanupOperations.cleanupWorkspace(identity, ownership);
+    },
+    async releaseGuard(identity) {
+      if (key(identity.desktopLockDirectory) !== key(config.desktopLockDirectory))
+        throw new Error("The retained desktop guard belongs to another deployment.");
+      const recovery = processHost.recovery?.();
+      if (recovery === undefined || recovery.instanceKey !== identity.processHostInstanceKey)
+        throw new Error(
+          "Exclusive ProcessHost ownership is required for retained desktop cleanup.",
+        );
+      await cleanupOperations.releaseGuard(identity);
+    },
+    async acknowledge(identity) {
+      if (identity.serverOrigin !== config.serverUrl)
+        throw new Error("The retained cleanup identity belongs to another Server origin.");
+      if (transportClient.cleanup === undefined)
+        throw new Error("The Worker cleanup transport is unavailable.");
+      await transportClient.cleanup(
+        identity.taskId,
+        {
+          lease: identity.lease,
+          ownedProcessesStopped: true,
+          desktopRestored: true,
+        },
+        AbortSignal.timeout(config.requestTimeoutMs),
+      );
+    },
+  });
+  replayCleanup = () => {
+    if (cleanupRecoveryStopping) return Promise.resolve([]);
+    cleanupReplay ??= cleanupJournal.recover(recoveryActions()).finally(() => {
+      cleanupReplay = undefined;
+    });
+    return cleanupReplay;
+  };
   const closeHost = (): Promise<void> => {
-    closePromise ??= processHost.close();
+    closePromise ??= (async () => {
+      cleanupRecoveryStopping = true;
+      await cleanupReplay?.catch(() => undefined);
+      await processHost.close();
+    })();
     return closePromise;
   };
   const stop = (): Promise<void> => {
     stopPromise ??= (async () => {
+      cleanupRecoveryStopping = true;
       const stopped = service?.stop() ?? Promise.resolve();
       try {
         await withShutdownDeadline(stopped, config.shutdownTimeoutMs);
       } catch {
+        usageDeliveryLifetime.abort();
         // A broken child stream must not prevent the native host from closing its owned trees.
         await closeHost();
         await withShutdownDeadline(stopped, config.shutdownTimeoutMs);
         return;
       }
+      usageDeliveryLifetime.abort();
+      await usageReplay;
       await closeHost();
     })();
     return stopPromise;
   };
   try {
+    const recoveredOwnership = processHost.recovery?.();
+    if (recoveredOwnership !== undefined) {
+      await usageJournal.closeInterruptedInvocations(recoveredOwnership);
+      await replayUsage();
+    }
+    cleanupOperations = (
+      dependencies.createCleanupRecoveryOperations ?? createCleanupRecoveryOperations
+    )({
+      processHost,
+      nodeExecutablePath: process.execPath,
+      entryPath: fileURLToPath(new URL("./cleanup-recovery-operations.mjs", import.meta.url)),
+      workingDirectory: config.dataDirectory,
+      environment: hostEnvironment,
+      limits: config.processLimits,
+    });
+    const pendingCleanup = await replayCleanup();
+    if (pendingCleanup.some((entry) => entry.state !== "acknowledged"))
+      logger.warn(
+        "Execution cleanup is pending. Use cleanup-recovery list to inspect required recovery actions.",
+      );
     const modelEnvironment = { ...config.operatingSystemEnvironment, ...config.modelEnvironment };
     const planEnvironment = { ...config.operatingSystemEnvironment, ...config.planEnvironment };
     forbidWorkerCredential(modelEnvironment, config.workerToken);
@@ -183,6 +393,7 @@ export async function createInvestigationExecutionRuntime(
       limits: config.processLimits,
       staticConfiguration: config.modelStaticConfiguration,
       protectedValues: [config.workerToken],
+      usageJournal,
       onProcessDiagnostic: (observation) => {
         logger.info("Investigation model process lifecycle observed.", { ...observation });
       },
@@ -190,6 +401,33 @@ export async function createInvestigationExecutionRuntime(
     const modelTurnRunner = (dependencies.createModelTurnRunner ?? createModelTurnRunner)(
       modelOptions,
     );
+    const e2eAgentRunner = (dependencies.createE2eAgentRunner ?? createE2eAgentRunner)({
+      modelOptions,
+      gitExecutablePath: binaries.gitPath,
+      processHost,
+      environment: planEnvironment,
+      processLimits: config.processLimits,
+      powershellExecutablePath:
+        binaries.executables.powershell ??
+        win32.join(
+          config.operatingSystemEnvironment.SYSTEMROOT ?? "C:\\Windows",
+          "System32",
+          "WindowsPowerShell",
+          "v1.0",
+          "powershell.exe",
+        ),
+      buildTools: {
+        ...(binaries.executables.msbuild === undefined
+          ? {}
+          : { msbuild: binaries.executables.msbuild }),
+        ...(binaries.executables.dotnet === undefined
+          ? {}
+          : { dotnet: binaries.executables.dotnet }),
+      },
+      ...(binaries.executables.ffmpeg === undefined
+        ? {}
+        : { ffmpegExecutablePath: binaries.executables.ffmpeg }),
+    });
     const modelEditAdapter = (dependencies.createModelEditAdapter ?? createModelEditAdapter)(
       modelOptions,
     );
@@ -217,96 +455,197 @@ export async function createInvestigationExecutionRuntime(
     });
     const executor: InvestigationClaimExecutor = {
       async execute(claim, signal) {
-        const completedSteps = claim.checkpoint?.runtime.completedSteps ?? [];
-        const uncertainStep =
-          claim.checkpoint?.runtime.startedSteps.some(
-            (step) => !completedSteps.some((completed) => completed.stepId === step.stepId),
-          ) === true;
-        const previousSubject = completedSteps.at(-1)?.subjects.at(-1);
-        const restorePatchSubject =
-          !uncertainStep &&
-          (claim.task.kind === "issue-fix" || claim.task.kind === "feature-implement") &&
-          previousSubject?.kind === "local_patch"
-            ? previousSubject
-            : undefined;
-        // The artifact reader closes over this exact claim lease, never a mutable global current-task map.
-        const materializer = (
-          dependencies.createSourceMaterializer ??
-          ((options) => new ProductionInvestigationGitSourceMaterializer(options))
-        )({
-          gitExecutablePath: binaries.gitPath,
-          allowedRepositories: config.allowedRepositories,
-          environment: config.operatingSystemEnvironment,
-          limits: config.gitLimits,
-          ...(restorePatchSubject === undefined ? {} : { restorePatchSubject }),
-          readPatchArtifact: async (input, artifactId, artifactSignal) => {
-            if (
-              input.task.id !== claim.task.id ||
-              input.attempt.id !== claim.attempt.id ||
-              input.attempt.leaseVersion !== claim.lease.fence
-            )
-              throw new Error("The source artifact request does not belong to this frozen claim.");
-            const response = await client.readArtifact(
-              claim.task.id,
-              { lease: claim.lease, artifactId },
-              artifactSignal,
-            );
-            const primary = input.task.subjects.find((item) => item.id === input.task.subjectRef);
-            const subject = primary?.kind === "local_patch" ? primary : restorePatchSubject;
-            const bytes = Buffer.from(response.contentBase64, "base64");
-            if (
-              subject?.kind !== "local_patch" ||
-              subject.artifactRef !== artifactId ||
-              response.artifact.id !== artifactId ||
-              response.artifact.subjectRef !== subject.id ||
-              response.artifact.kind !== "patch" ||
-              response.artifact.availability !== "available" ||
-              response.artifact.digest !== subject.patchDigest ||
-              response.artifact.byteLength !== bytes.byteLength ||
-              bytes.toString("base64") !== response.contentBase64 ||
-              hash(bytes) !== subject.patchDigest
-            )
-              throw new Error(
-                "The trusted patch response does not match its exact frozen source subject.",
+        let cleanupIdentity: AttemptCleanupIdentity | undefined;
+        const executeAttempt = async (
+          cleanupHooks: Partial<AttemptDesktopCleanupHooks> = {},
+        ): Promise<void> => {
+          const completedSteps = claim.checkpoint?.runtime.completedSteps ?? [];
+          const uncertainStep =
+            claim.checkpoint?.runtime.startedSteps.some(
+              (step) => !completedSteps.some((completed) => completed.stepId === step.stepId),
+            ) === true;
+          const previousSubject = completedSteps.at(-1)?.subjects.at(-1);
+          const restorePatchSubject =
+            !uncertainStep &&
+            (claim.task.kind === "issue-fix" || claim.task.kind === "feature-implement") &&
+            previousSubject?.kind === "local_patch"
+              ? previousSubject
+              : undefined;
+          // The artifact reader closes over this exact claim lease, never a mutable current-task map.
+          const materializer = (
+            dependencies.createSourceMaterializer ??
+            ((options) => new ProductionInvestigationGitSourceMaterializer(options))
+          )({
+            gitExecutablePath: binaries.gitPath,
+            allowedRepositories: config.allowedRepositories,
+            environment: config.operatingSystemEnvironment,
+            limits: config.gitLimits,
+            ...(restorePatchSubject === undefined ? {} : { restorePatchSubject }),
+            readPatchArtifact: async (input, artifactId, artifactSignal) => {
+              if (
+                input.task.id !== claim.task.id ||
+                input.attempt.id !== claim.attempt.id ||
+                input.attempt.leaseVersion !== claim.lease.fence
+              )
+                throw new Error(
+                  "The source artifact request does not belong to this frozen claim.",
+                );
+              const response = await client.readArtifact(
+                claim.task.id,
+                { lease: claim.lease, artifactId },
+                artifactSignal,
               );
-            return bytes;
-          },
-        });
-        const workspaceProvider = (
-          dependencies.createWorkspaceProvider ??
-          ((options) => new ProductionInvestigationWorkspaceProvider(options))
-        )({
-          workspaceRootDirectory: config.workspaceRootDirectory,
-          sourceMaterializer: materializer,
-          maximumTreeEntries: 250_000,
-        });
-        const coordinator = (
-          dependencies.createCoordinator ?? ((options) => new InvestigationLoopCoordinator(options))
-        )({
-          client,
-          processHost,
-          modelTurnRunner,
-          workspaceProvider,
-          planExecutor,
-          logger,
-          terminalTimeoutMs: config.shutdownTimeoutMs,
-          onNodeFault: (code) => {
-            nodeFault ??= new Error(
-              `The investigation Worker encountered an execution lifecycle fault (${code}).`,
-            );
-            logger.error(
-              "The investigation Worker is draining after an execution lifecycle fault.",
-              { code },
-            );
-            service?.requestDrain();
-            void stop().catch(() => {
+              const primary = input.task.subjects.find((item) => item.id === input.task.subjectRef);
+              const subject = primary?.kind === "local_patch" ? primary : restorePatchSubject;
+              const bytes = Buffer.from(response.contentBase64, "base64");
+              if (
+                subject?.kind !== "local_patch" ||
+                subject.artifactRef !== artifactId ||
+                response.artifact.id !== artifactId ||
+                response.artifact.subjectRef !== subject.id ||
+                response.artifact.kind !== "patch" ||
+                response.artifact.availability !== "available" ||
+                response.artifact.digest !== subject.patchDigest ||
+                response.artifact.byteLength !== bytes.byteLength ||
+                bytes.toString("base64") !== response.contentBase64 ||
+                hash(bytes) !== subject.patchDigest
+              )
+                throw new Error(
+                  "The trusted patch response does not match its exact frozen source subject.",
+                );
+              return bytes;
+            },
+          });
+          const workspaceProvider = (
+            dependencies.createWorkspaceProvider ??
+            ((options) => new ProductionInvestigationWorkspaceProvider(options))
+          )({
+            workspaceRootDirectory: config.workspaceRootDirectory,
+            sourceMaterializer: materializer,
+            maximumTreeEntries: 250_000,
+            ...(investigationTaskPool(claim.task.kind) === "static"
+              ? {}
+              : ({
+                  onOwnershipEstablished: (receipt) =>
+                    cleanupJournal.workspaceOwned(claim.attempt.id, receipt),
+                  cleanupOwned: async (receipt) => {
+                    if (cleanupIdentity === undefined)
+                      throw new Error("Execution cleanup has no durable owner.");
+                    await cleanupOperations.cleanupWorkspace(cleanupIdentity, receipt);
+                  },
+                } satisfies Pick<
+                  ProductionInvestigationWorkspaceProviderOptions,
+                  "onOwnershipEstablished" | "cleanupOwned"
+                >)),
+          });
+          const coordinator = (
+            dependencies.createCoordinator ??
+            ((options) => new InvestigationLoopCoordinator(options))
+          )({
+            client,
+            processHost,
+            modelTurnRunner,
+            e2eAgentRunner,
+            workspaceProvider,
+            planExecutor,
+            logger,
+            terminalTimeoutMs: config.shutdownTimeoutMs,
+            ...cleanupHooks,
+            onNodeFault: (code) => {
+              nodeFault ??= new Error(
+                `The investigation Worker encountered an execution lifecycle fault (${code}).`,
+              );
               logger.error(
-                "Investigation Worker shutdown could not confirm complete process closure.",
+                "The investigation Worker is draining after an execution lifecycle fault.",
+                { code },
               );
+              service?.requestDrain();
+            },
+          });
+          await coordinator.execute(claim, signal);
+        };
+        if (investigationTaskPool(claim.task.kind) === "static") {
+          await executeAttempt();
+          return;
+        }
+        activeCleanupAttempts.add(claim.attempt.id);
+        try {
+          const identity = await cleanupJournal.register({
+            taskId: claim.task.id,
+            attemptId: claim.attempt.id,
+            workerId: claim.attempt.workerId ?? "unidentified-worker",
+            serverOrigin: config.serverUrl,
+            lease: claim.lease,
+            guardOwnerId: `${claim.attempt.id}:${claim.lease.fence}`,
+            workspaceRootDirectory: config.workspaceRootDirectory,
+            desktopLockDirectory: config.desktopLockDirectory,
+            processHostInstanceKey: deriveWorkerProcessHostInstanceKey({
+              dataDirectory: config.dataDirectory,
+            }),
+            processHostRecovery: processHost.recovery?.() ?? null,
+          });
+          cleanupIdentity = identity;
+          let physicalGuard: AttemptDesktopGuard;
+          if (dependencies.acquireDesktopGuard !== undefined) {
+            physicalGuard = await dependencies.acquireDesktopGuard({
+              lockDirectory: config.desktopLockDirectory,
+              ownerId: identity.guardOwnerId,
+              ownerToken: identity.guardOwnerToken,
             });
-          },
-        });
-        await coordinator.execute(claim, signal);
+          } else {
+            await cleanupOperations.acquireGuard(identity);
+            // The helper closed its handle while retaining the durable marker. This parent-side
+            // object contains only logical state and cannot create, replace, or delete any file.
+            let state: AttemptDesktopGuard["state"] = "held";
+            physicalGuard = {
+              ownerToken: identity.guardOwnerToken,
+              get state() {
+                return state;
+              },
+              async releaseRestored() {
+                throw new Error("A managed guard requires managed release.");
+              },
+              async quarantine() {
+                if (state === "held") state = "quarantined";
+              },
+              async settleManagedCleanup(next) {
+                if (state !== "released") state = next;
+              },
+            };
+          }
+          // Filesystem release runs inside a managed helper in the native named Job. The parent
+          // only closes its retained handle, so Host failure cannot leave it unlinking a new owner.
+          const guard: AttemptDesktopGuard = {
+            ownerToken: physicalGuard.ownerToken,
+            get state() {
+              return physicalGuard.state;
+            },
+            async releaseRestored() {
+              await cleanupOperations.releaseGuard(identity);
+              await physicalGuard.settleManagedCleanup("released");
+            },
+            async quarantine() {
+              await physicalGuard.settleManagedCleanup("quarantined");
+            },
+            settleManagedCleanup: (state) => physicalGuard.settleManagedCleanup(state),
+          };
+          await executeWithAttemptDesktopGuard(guard, async (hooks) => {
+            await cleanupJournal.executionStarted(claim.attempt.id);
+            await executeAttempt({
+              onAttemptCleanupConfirmed: async () => {
+                await cleanupJournal.localCleanupConfirmed(claim.attempt.id);
+                await hooks.onAttemptCleanupConfirmed();
+                await cleanupJournal.guardReleased(claim.attempt.id);
+              },
+              onAttemptCleanupUnconfirmed: async (code) => {
+                await cleanupJournal.failed(claim.attempt.id, code);
+                await hooks.onAttemptCleanupUnconfirmed(code);
+              },
+            });
+          });
+        } finally {
+          activeCleanupAttempts.delete(claim.attempt.id);
+        }
       },
     };
     service = (
@@ -317,12 +656,17 @@ export async function createInvestigationExecutionRuntime(
       supportedKinds: config.supportedKinds,
       logger,
       maximumConcurrentTasks: config.maximumConcurrentTasks,
+      ...(config.maximumConcurrentStaticTasks === undefined
+        ? {}
+        : { maximumConcurrentStaticTasks: config.maximumConcurrentStaticTasks }),
+      ...(config.role === undefined ? {} : { role: config.role }),
       claimPollMs: config.claimPollMs,
     });
     return {
       processHost,
       service,
       async run() {
+        claimsStarted = true;
         try {
           await service!.run();
         } finally {
@@ -331,8 +675,28 @@ export async function createInvestigationExecutionRuntime(
         if (nodeFault !== undefined) throw nodeFault;
       },
       stop,
+      cleanupStatus: () => cleanupJournal.statuses(processHost.recovery?.()),
+      async confirmCleanupRecovery(attemptId, confirmation) {
+        if (
+          claimsStarted ||
+          cleanupRecoveryStopping ||
+          activeCleanupAttempts.size !== 0 ||
+          cleanupReplay !== undefined
+        )
+          throw new Error(
+            "Operator cleanup recovery requires a dedicated runtime that has not started claiming tasks.",
+          );
+        cleanupReplay = (async () => {
+          await cleanupJournal.confirmRecovery(attemptId, confirmation);
+          return cleanupJournal.recover({ ...recoveryActions(), attemptId });
+        })().finally(() => {
+          cleanupReplay = undefined;
+        });
+        return cleanupReplay;
+      },
     };
   } catch (error) {
+    usageDeliveryLifetime.abort();
     await closeHost();
     throw error;
   }
@@ -376,6 +740,25 @@ async function prepareInvestigationDirectories(
   await requireOrdinaryDirectory(config.dataDirectory, true);
   await requireOrdinaryDirectory(config.workspaceRootDirectory, true);
   await requireOrdinaryDirectory(win32.join(config.dataDirectory, "host-temp"), true);
+  await requireOrdinaryDirectory(win32.join(config.dataDirectory, "model-usage"), true);
+  await requireOrdinaryDirectory(win32.join(config.dataDirectory, "attempt-cleanup"), true);
+  if (
+    config.role !== "static" &&
+    config.supportedKinds.some((kind) => investigationTaskPool(kind) === "e2e")
+  ) {
+    const lockDirectory = config.desktopLockDirectory ?? defaultInvestigationDesktopLockDirectory();
+    for (const root of [config.dataDirectory, config.trustedExecutableRoot]) {
+      if (
+        key(lockDirectory) === key(root) ||
+        key(lockDirectory).startsWith(`${key(root)}\\`) ||
+        key(root).startsWith(`${key(lockDirectory)}\\`)
+      )
+        throw new Error(
+          "The machine execution lock directory must be separate from Worker data and trusted binaries.",
+        );
+    }
+    await requireOrdinaryDirectory(lockDirectory, true);
+  }
   for (const configuration of Object.values(config.uiAdapters)) {
     if (configuration.desktopLockDirectory !== undefined) {
       if (
@@ -404,7 +787,12 @@ async function requireOrdinaryDirectory(path: string, create: boolean): Promise<
       state = await lstat(current);
     } catch (error) {
       if (!create || !hasCode(error, "ENOENT") || index < 0) throw error;
-      await mkdir(current, { recursive: false });
+      try {
+        await mkdir(current, { recursive: false });
+      } catch (creationError) {
+        // Multiple role processes can initialize the shared machine lock root concurrently.
+        if (!hasCode(creationError, "EEXIST")) throw creationError;
+      }
       state = await lstat(current);
     }
     const reparseAware = state as typeof state & { isReparsePoint?(): boolean };

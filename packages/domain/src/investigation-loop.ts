@@ -82,6 +82,30 @@ function sealCheckpoint(checkpoint: InvestigationLoopCheckpointV1): Investigatio
   return { ...checkpoint, digest: checkpointDigest(checkpoint) };
 }
 
+/** Project the single accounting ledger into the legacy checkpoint without charging it twice. */
+export function projectInvestigationTokenConsumption(
+  checkpoint: InvestigationLoopCheckpointV1,
+  tokens: number,
+): InvestigationLoopCheckpointV1 {
+  assertInvestigationCheckpointIntegrity(checkpoint);
+  requireCondition(
+    Number.isSafeInteger(tokens) && tokens >= 0,
+    "invalid_worker_consumption",
+    "The accounting ledger total must be a nonnegative safe integer.",
+  );
+  const next = sealCheckpoint({
+    ...structuredClone(checkpoint),
+    consumed: { ...checkpoint.consumed, tokens },
+    stopReason:
+      (checkpoint.stopReason === "continuing" && tokens >= checkpoint.budget.maxTokens) ||
+      (checkpoint.stopReason === "complete" && tokens > checkpoint.budget.maxTokens)
+        ? "budget_exhausted"
+        : checkpoint.stopReason,
+  });
+  assertInvestigationCheckpointIntegrity(next);
+  return next;
+}
+
 function retainedReportBytes(
   analysis: InvestigationAnalysisV1,
   runtime: InvestigationRuntimeState,
@@ -204,10 +228,22 @@ export interface CreateInvestigationCheckpointInput {
   readonly recordedAt: string;
 }
 
+/** New task semantics are recorded once; absent modes on existing checkpoints remain historical. */
+export function initialInvestigationReviewMode(
+  task: Pick<InvestigationTaskV1, "kind" | "executionPolicy">,
+): InvestigationRuntimeState["reviewMode"] {
+  if (task.kind !== "pr-review" && task.kind !== "issue-investigate") return undefined;
+  if (task.executionPolicy.mode === "source_read") return "local_checkout";
+  if (task.kind === "issue-investigate" && task.executionPolicy.mode === "snapshot_only")
+    return "local_snapshot";
+  return undefined;
+}
+
 export function createInvestigationCheckpoint(
   input: CreateInvestigationCheckpointInput,
 ): InvestigationLoopCheckpointV1 {
   const { task } = input;
+  const reviewMode = initialInvestigationReviewMode(task);
   const subject = task.subjects.find((entry) => entry.id === task.subjectRef);
   requireCondition(
     subject !== undefined,
@@ -279,6 +315,7 @@ export function createInvestigationCheckpoint(
     stopReason: "continuing",
     lastPhase: null,
     runtime: {
+      ...(reviewMode === undefined ? {} : { reviewMode }),
       completedStepIds: [],
       checks: [],
       evidence: [],
@@ -328,6 +365,7 @@ function assertPreserved<T extends { id: string }>(
 function assertAnalysisTransition(
   previous: InvestigationAnalysisV1,
   round: InvestigationLoopRoundV1,
+  autonomousReview = false,
 ): void {
   const analysis = round.analysis;
   for (const [kind, entries] of Object.entries({
@@ -362,6 +400,11 @@ function assertAnalysisTransition(
       unchanged(oldDefinition, newDefinition),
       "changed_scope_definition",
       `The required work for ${unit.id} cannot be narrowed or reassigned.`,
+    );
+    requireCondition(
+      unit.status !== "completed" || next.status === "completed",
+      "coverage_completion_regression",
+      `Completed coverage ${unit.id} cannot be reopened to manufacture additional progress.`,
     );
   }
   assertPreserved(previous.coverage.exclusions, analysis.coverage.exclusions, "exclusion", true);
@@ -493,7 +536,7 @@ function assertAnalysisTransition(
     if (priorRechecks.has(recheck.id)) continue;
     const finding = findings.get(recheck.findingId);
     requireCondition(
-      round.phase === "recheck" || round.phase === "finalize",
+      autonomousReview || round.phase === "recheck" || round.phase === "finalize",
       "recheck_in_discovery",
       "Final-version rechecks must come from a distinct recheck or finalize phase.",
     );
@@ -508,7 +551,9 @@ function assertAnalysisTransition(
     requireCondition(
       analysis.candidates.some(
         (candidate) =>
-          candidate.findingId === recheck.findingId && candidate.discoveredRound < round.round,
+          candidate.findingId === recheck.findingId &&
+          (candidate.discoveredRound < round.round ||
+            (autonomousReview && candidate.discoveredRound === round.round)),
       ),
       "discovery_is_not_recheck",
       "A candidate must be investigated before a later round can recheck it.",
@@ -522,6 +567,26 @@ export interface InvestigationCompletionDecision {
   readonly pendingUnitIds: readonly string[];
   readonly pendingCandidateIds: readonly string[];
   readonly pendingFindingIds: readonly string[];
+}
+
+function finalVersionRecheck(
+  finding: InvestigationAnalysisV1["findings"][number],
+  analysis: InvestigationAnalysisV1,
+  evidence: ReadonlyMap<string, { subjectRef: string }>,
+): InvestigationAnalysisV1["rechecks"][number] | undefined {
+  const record = analysis.rechecks.find((entry) => entry.id === finding.confirmation.recheckRef);
+  if (
+    record === undefined ||
+    record.findingVersion !== finding.version ||
+    record.findingId !== finding.id ||
+    record.subjectRef !== finding.subjectRef ||
+    record.evidenceRefs.length === 0 ||
+    record.evidenceRefs.some((id) => evidence.get(id)?.subjectRef !== finding.subjectRef) ||
+    (finding.confirmation.status === "hypothesis" &&
+      (record.unresolvedQuestions.length === 0 || analysis.limitations.length === 0))
+  )
+    return undefined;
+  return record;
 }
 
 /** Completion is derived from all records, never a model claim or a preferred finding count. */
@@ -550,33 +615,24 @@ export function evaluateInvestigationCompletion(
     .map((candidate) => candidate.id);
   const pendingFindingIds = analysis.findings
     .filter((finding) => {
-      const record = analysis.rechecks.find(
-        (entry) => entry.id === finding.confirmation.recheckRef,
-      );
       return (
-        record === undefined ||
-        record.findingVersion !== finding.version ||
-        record.findingId !== finding.id ||
-        record.subjectRef !== finding.subjectRef ||
-        record.evidenceRefs.length === 0 ||
-        record.evidenceRefs.some((id) => evidence.get(id)?.subjectRef !== finding.subjectRef) ||
+        finalVersionRecheck(finding, analysis, evidence) === undefined ||
         finding.confirmation.evidenceRefs.length === 0 ||
         finding.confirmation.evidenceRefs.some(
           (id) => evidence.get(id)?.subjectRef !== finding.subjectRef,
-        ) ||
-        (finding.confirmation.status === "hypothesis" &&
-          (record.unresolvedQuestions.length === 0 || analysis.limitations.length === 0))
+        )
       );
     })
     .map((finding) => finding.id);
-  if (checkpoint.lastPhase !== "finalize") reasonCodes.push("finalization_round_missing");
+  if (checkpoint.runtime.reviewMode === undefined && checkpoint.lastPhase !== "finalize")
+    reasonCodes.push("finalization_round_missing");
   const sourceCoverage = checkpoint.runtime.sourceCoverage;
   if (
     sourceCoverage === undefined &&
     analysis.coverage.includedUnits.some((unit) => unit.kind === "full_diff")
   )
     reasonCodes.push("source_manifest_required");
-  if (sourceCoverage !== undefined) {
+  if (sourceCoverage !== undefined && checkpoint.runtime.reviewMode !== "local_checkout") {
     const brokered = new Set(sourceCoverage.brokeredUnitIds);
     const units = new Map(analysis.coverage.includedUnits.map((unit) => [unit.id, unit]));
     if (sourceCoverage.manifest.chunks.some((chunk) => !brokered.has(chunk.id)))
@@ -607,9 +663,169 @@ export function evaluateInvestigationCompletion(
   };
 }
 
+export function hasInvestigationSemanticProgress(
+  previous: InvestigationLoopCheckpointV1,
+  current: InvestigationLoopCheckpointV1,
+): boolean {
+  const before = previous.analysis;
+  const after = current.analysis;
+  const oldUnits = new Map(before.coverage.includedUnits.map((unit) => [unit.id, unit]));
+  if (
+    after.coverage.includedUnits.some(
+      (unit) => unit.status === "completed" && oldUnits.get(unit.id)?.status !== "completed",
+    )
+  )
+    return true;
+
+  // IDs and ordering are transport details. Repeating the same evidence under a new ID is not progress.
+  const evidenceKeys = (analysis: InvestigationAnalysisV1) => {
+    const evidence = new Map(analysis.evidence.map((entry) => [entry.id, entry]));
+    const fingerprints = new Map<string, string>();
+    const key = (id: string, seen = new Set<string>()): string => {
+      const fingerprint = fingerprints.get(id);
+      if (fingerprint !== undefined) return fingerprint;
+      const entry = evidence.get(id);
+      if (entry === undefined) return id;
+      if (seen.has(id)) return "cyclic-evidence-reference";
+      const visited = new Set([...seen, id]);
+      const digest = investigationContentDigest({
+        subjectRef: entry.subjectRef,
+        source: entry.source,
+        summary: entry.summary,
+        evidenceRefs: entry.evidenceRefs.map((ref) => key(ref, visited)).sort(),
+      });
+      fingerprints.set(id, digest);
+      return digest;
+    };
+    return { key, keys: new Set(analysis.evidence.map((entry) => key(entry.id))) };
+  };
+  const oldEvidence = evidenceKeys(before);
+  const newEvidence = evidenceKeys(after);
+  if ([...newEvidence.keys].some((key) => !oldEvidence.keys.has(key))) return true;
+  const references = (ids: readonly string[], key: (id: string) => string) =>
+    ids.map((id) => key(id)).sort();
+  const findingKeys = (analysis: InvestigationAnalysisV1, key: (id: string) => string) =>
+    new Set(
+      analysis.findings.map((finding) =>
+        investigationContentDigest({
+          subjectRef: finding.subjectRef,
+          priority: finding.priority,
+          trigger: finding.trigger,
+          locations: finding.locations.map(investigationContentDigest).sort(),
+          evidenceRefs: references(finding.evidenceRefs, key),
+          rootCause: {
+            status: finding.rootCause.status,
+            evidenceRefs: references(finding.rootCause.evidenceRefs, key),
+          },
+          confirmation: {
+            status: finding.confirmation.status,
+            evidenceRefs: references(finding.confirmation.evidenceRefs, key),
+          },
+        }),
+      ),
+    );
+  const oldFindings = findingKeys(before, oldEvidence.key);
+  if ([...findingKeys(after, newEvidence.key)].some((key) => !oldFindings.has(key))) return true;
+
+  // Rechecking a final finding and supplying its confirmation evidence are separate duties.
+  // Credit a newly valid recheck even while confirmation remains incomplete; an ID, version,
+  // or wording-only replacement of the same recheck must not keep the loop alive.
+  const recheckedFindings = (
+    checkpoint: InvestigationLoopCheckpointV1,
+    key: (id: string) => string,
+  ) => {
+    const analysis = checkpoint.analysis;
+    const evidence = new Map<string, { subjectRef: string }>([
+      ...checkpoint.runtime.evidence.map((entry) => [entry.id, entry] as const),
+      ...analysis.evidence.map((entry) => [entry.id, entry] as const),
+    ]);
+    return new Set(
+      analysis.findings.flatMap((finding) => {
+        const recheck = finalVersionRecheck(finding, analysis, evidence);
+        if (recheck === undefined) return [];
+        return [
+          investigationContentDigest({
+            subjectRef: finding.subjectRef,
+            trigger: finding.trigger,
+            locations: finding.locations.map(investigationContentDigest).sort(),
+            evidenceRefs: references(recheck.evidenceRefs, key),
+          }),
+        ];
+      }),
+    );
+  };
+  const priorRechecked = recheckedFindings(previous, oldEvidence.key);
+  if ([...recheckedFindings(current, newEvidence.key)].some((key) => !priorRechecked.has(key)))
+    return true;
+
+  const oldCandidates = new Map(before.candidates.map((candidate) => [candidate.id, candidate]));
+  if (
+    after.candidates.some((candidate) => {
+      const old = oldCandidates.get(candidate.id);
+      return (
+        old !== undefined &&
+        old.status !== candidate.status &&
+        candidate.status !== "pending" &&
+        candidate.evidenceRefs.length > 0
+      );
+    })
+  )
+    return true;
+
+  const pendingBefore = new Set(evaluateInvestigationCompletion(previous).pendingFindingIds);
+  const pendingAfter = new Set(evaluateInvestigationCompletion(current).pendingFindingIds);
+  if ([...pendingBefore].some((id) => !pendingAfter.has(id))) return true;
+  const deliveredBefore = new Set(previous.runtime.sourceCoverage?.brokeredUnitIds ?? []);
+  return (current.runtime.sourceCoverage?.brokeredUnitIds ?? []).some(
+    (id) => !deliveredBefore.has(id),
+  );
+}
+
+function stoppedProgressDiagnostic(
+  previous: InvestigationLoopCheckpointV1,
+  current: InvestigationLoopCheckpointV1,
+  completion: InvestigationCompletionDecision,
+): InvestigationDiagnostic | undefined {
+  if (completion.complete) return undefined;
+  const analysis = current.analysis;
+  const previouslyAnalyzedObservations = new Set(
+    previous.analysis.evidence.flatMap((entry) => entry.evidenceRefs),
+  );
+  // Trusted observations may arrive while coverage is blocked. Analyze every pending batch,
+  // then allow the newly interpreted observations to resolve that coverage. If a later call
+  // adds nothing, the no-progress guard still stops it instead of repeating the same results.
+  const observationWorkAvailable = current.runtime.evidence.some(
+    (entry) => !previouslyAnalyzedObservations.has(entry.id),
+  );
+  // Aggregate diff completion cannot unblock the source work it depends on.
+  const blockedOnly =
+    analysis.coverage.includedUnits.some((unit) => unit.status === "blocked") &&
+    !analysis.coverage.includedUnits.some(
+      (unit) => unit.status === "pending" && unit.kind !== "full_diff",
+    ) &&
+    !observationWorkAvailable &&
+    completion.pendingCandidateIds.length === 0 &&
+    completion.pendingFindingIds.length === 0;
+  const noProgress = previous.round > 0 && !hasInvestigationSemanticProgress(previous, current);
+  if (!blockedOnly && !noProgress) return undefined;
+  return {
+    id: `loop-stopped:${investigationContentDigest([current.attemptId, current.round])}`,
+    code: blockedOnly ? "INVESTIGATION_BLOCKED" : "INVESTIGATION_NO_PROGRESS",
+    category: "blocker",
+    message: blockedOnly
+      ? "The remaining review scope is blocked and no executable investigation or recheck remains. Resume only after the missing prerequisite is available."
+      : "The latest model invocation added no new source evidence, completed coverage, candidate disposition, finding facts, or required final-version recheck. Repeating the same inputs would not advance the investigation.",
+    retryable: false,
+    evidenceRefs: [],
+    prerequisiteRefs: [],
+  };
+}
+
 export interface ApplyInvestigationRoundOptions {
   readonly recordedAt: string;
   readonly checkpointId?: string;
+  /** Server-owned invocation ledger total, replacing legacy additive token accounting. */
+  readonly accountedTokens?: number;
   /** Actual consumption observed by the worker, excluding model-supplied claims. */
   readonly usage: {
     readonly durationMs: number;
@@ -676,7 +892,11 @@ export function applyInvestigationLoopRound(
     "Every round must extend the latest accepted checkpoint exactly once.",
   );
   requireCondition(
-    checkpoint.round > 0 || round.phase === "discovery" || round.phase === "investigation",
+    checkpoint.runtime.reviewMode !== undefined ||
+      checkpoint.round > 0 ||
+      checkpoint.runtime.e2e !== undefined ||
+      round.phase === "discovery" ||
+      round.phase === "investigation",
     "initial_investigation_phase_missing",
     "The initial round must investigate the full scope before a later round can finalize it.",
   );
@@ -693,6 +913,12 @@ export function applyInvestigationLoopRound(
       "invalid_worker_consumption",
       "Worker consumption must be a nonnegative safe integer.",
     );
+  if (options.accountedTokens !== undefined)
+    requireCondition(
+      Number.isSafeInteger(options.accountedTokens) && options.accountedTokens >= 0,
+      "invalid_worker_consumption",
+      "The accounting ledger total must be a nonnegative safe integer.",
+    );
   const normalizedAnalysis = normalizeInvestigationAnalysisPlanReferences(round.analysis);
   preserveUnknownModelUsageDiagnostics(normalizedAnalysis, checkpoint.runtime);
   normalizedAnalysis.coverage = normalizeCoverage(
@@ -700,7 +926,11 @@ export function applyInvestigationLoopRound(
     normalizedAnalysis.coverage,
   );
   const normalizedRound = { ...round, analysis: normalizedAnalysis };
-  assertAnalysisTransition(checkpoint.analysis, normalizedRound);
+  assertAnalysisTransition(
+    checkpoint.analysis,
+    normalizedRound,
+    checkpoint.runtime.reviewMode !== undefined,
+  );
   assertRuntimeTransition(checkpoint, checkpoint.runtime);
   const runtime = structuredClone(checkpoint.runtime);
   if (options.modelIdentity !== undefined) {
@@ -766,7 +996,7 @@ export function applyInvestigationLoopRound(
       .filter((chunk) => brokered.has(chunk.id))
       .map((chunk) => chunk.id);
     const units = new Map(normalizedAnalysis.coverage.includedUnits.map((unit) => [unit.id, unit]));
-    for (const chunk of source.manifest.chunks) {
+    for (const chunk of runtime.reviewMode === "local_checkout" ? [] : source.manifest.chunks) {
       const unit = units.get(chunk.id);
       requireCondition(
         unit !== undefined &&
@@ -785,7 +1015,8 @@ export function applyInvestigationLoopRound(
       (chunk) => brokered.has(chunk.id) && units.get(chunk.id)?.status === "completed",
     );
     requireCondition(
-      allChunksComplete ||
+      runtime.reviewMode === "local_checkout" ||
+        allChunksComplete ||
         !normalizedAnalysis.coverage.includedUnits.some(
           (unit) => unit.kind === "full_diff" && unit.status === "completed",
         ),
@@ -802,7 +1033,7 @@ export function applyInvestigationLoopRound(
   const consumed = {
     rounds: checkpoint.consumed.rounds + 1,
     durationMs: checkpoint.consumed.durationMs + options.usage.durationMs,
-    tokens: checkpoint.consumed.tokens + options.usage.tokens,
+    tokens: options.accountedTokens ?? checkpoint.consumed.tokens + options.usage.tokens,
     reportBytes: Math.max(
       checkpoint.consumed.reportBytes,
       options.usage.reportBytes,
@@ -822,6 +1053,14 @@ export function applyInvestigationLoopRound(
     runtime: structuredClone(runtime),
   };
   const completion = evaluateInvestigationCompletion(next);
+  const progressDiagnostic = stoppedProgressDiagnostic(checkpoint, next, completion);
+  if (progressDiagnostic !== undefined) {
+    next.analysis.diagnostics.push(progressDiagnostic);
+    consumed.reportBytes = Math.max(
+      consumed.reportBytes,
+      retainedReportBytes(next.analysis, runtime),
+    );
+  }
   const exhausted =
     consumed.rounds >= checkpoint.budget.maxRounds ||
     consumed.durationMs >= checkpoint.budget.maxDurationMs ||
@@ -836,11 +1075,13 @@ export function applyInvestigationLoopRound(
   next = {
     ...next,
     stopReason:
-      completion.complete && !round.continue && !exceeded
+      completion.complete && !exceeded
         ? "complete"
         : exhausted
           ? "budget_exhausted"
-          : "continuing",
+          : progressDiagnostic !== undefined
+            ? "blocked"
+            : "continuing",
   };
   return sealCheckpoint(next);
 }
@@ -1044,6 +1285,21 @@ function assertRuntimeTransition(
   checkpoint: InvestigationLoopCheckpointV1,
   runtime: InvestigationRuntimeState,
 ): void {
+  const previousE2e = checkpoint.runtime.e2eExecution;
+  if (previousE2e !== undefined)
+    requireCondition(
+      runtime.e2eExecution !== undefined &&
+        runtime.e2eExecution.attemptId === previousE2e.attemptId &&
+        runtime.e2eExecution.startedAt === previousE2e.startedAt &&
+        (previousE2e.status !== "completed" || unchanged(previousE2e, runtime.e2eExecution)),
+      "e2e_execution_lifecycle_regression",
+      "A durable E2E start marker cannot be removed, replaced or restarted.",
+    );
+  requireCondition(
+    runtime.reviewMode === checkpoint.runtime.reviewMode,
+    "review_mode_is_trusted",
+    "Execution receipts cannot change the trusted source review mode.",
+  );
   requireCondition(
     checkpoint.runtime.unacceptedModelUsage === undefined
       ? runtime.unacceptedModelUsage === undefined
@@ -1131,7 +1387,11 @@ function assertRuntimeTransition(
 export function applyInvestigationRuntimeCheckpoint(
   checkpoint: InvestigationLoopCheckpointV1,
   runtime: InvestigationRuntimeState,
-  options: { readonly recordedAt: string; readonly durationMs?: number },
+  options: {
+    readonly recordedAt: string;
+    readonly durationMs?: number;
+    readonly accountedTokens?: number;
+  },
 ): InvestigationLoopCheckpointV1 {
   assertInvestigationCheckpointIntegrity(checkpoint);
   requireCondition(
@@ -1172,7 +1432,12 @@ export function applyInvestigationRuntimeCheckpoint(
     retainedReportBytes(checkpoint.analysis, runtime),
   );
   const totalDurationMs = checkpoint.consumed.durationMs + durationMs;
-  const totalTokens = checkpoint.consumed.tokens + modelTokens;
+  const totalTokens = options.accountedTokens ?? checkpoint.consumed.tokens + modelTokens;
+  requireCondition(
+    Number.isSafeInteger(totalTokens) && totalTokens >= 0,
+    "invalid_worker_consumption",
+    "The accounting ledger total must be a nonnegative safe integer.",
+  );
   return sealCheckpoint({
     ...structuredClone(checkpoint),
     version: checkpoint.version + 1,
@@ -1192,6 +1457,17 @@ export function applyInvestigationRuntimeCheckpoint(
         ? "budget_exhausted"
         : "continuing",
   });
+}
+
+/** Canonical changed-file scope shared by source registration and sealed report validation. */
+export function investigationChangedFileCoverageDefinition(subjectRef: string, path: string) {
+  return {
+    id: `source-file:${investigationContentDigest([subjectRef, path])}`,
+    subjectRef,
+    kind: "source_file" as const,
+    paths: [path],
+    requiredWork: `Review the changed behavior in ${path}, following relevant implementations and callers in the pinned local checkout and comparing baseline source when needed.`,
+  };
 }
 
 /** Register the full trusted Git materialization before accepting any source completion claim. */
@@ -1264,17 +1540,28 @@ export function applyInvestigationSourceCoverage(
         unit.evidenceRefs = [];
       }
     }
-    expanded.includedUnits.push(
-      ...manifest.chunks.map((chunk) => ({
-        id: chunk.id,
-        subjectRef: manifest.subjectRef,
-        kind: "pr_diff_chunk",
-        paths: [chunk.path],
-        requiredWork: `Inspect complete ${chunk.kind} source chunk ${chunk.ordinal} for ${chunk.path} (${chunk.encoding}, SHA-256 ${chunk.contentDigest}, ${chunk.byteLength} bytes).`,
-        status: "pending" as const,
-        evidenceRefs: [],
-      })),
+    const sourceUnits =
+      runtime.reviewMode === "local_checkout"
+        ? manifest.files.map((file) => ({
+            ...investigationChangedFileCoverageDefinition(manifest.subjectRef, file.path),
+            status: "pending" as const,
+            evidenceRefs: [],
+          }))
+        : manifest.chunks.map((chunk) => ({
+            id: chunk.id,
+            subjectRef: manifest.subjectRef,
+            kind: "pr_diff_chunk",
+            paths: [chunk.path],
+            requiredWork: `Inspect complete ${chunk.kind} source chunk ${chunk.ordinal} for ${chunk.path} (${chunk.encoding}, SHA-256 ${chunk.contentDigest}, ${chunk.byteLength} bytes).`,
+            status: "pending" as const,
+            evidenceRefs: [],
+          }));
+    requireCondition(
+      sourceUnits.every((unit) => !existingIds.has(unit.id)),
+      "source_unit_identity_collision",
+      "Source coverage IDs must not replace existing investigation scope units.",
     );
+    expanded.includedUnits.push(...sourceUnits);
     expanded.completedUnitRefs = expanded.includedUnits
       .filter((unit) => unit.status === "completed")
       .map((unit) => unit.id);

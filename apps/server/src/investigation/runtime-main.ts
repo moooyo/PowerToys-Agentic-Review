@@ -1,5 +1,6 @@
 import { mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
+import type { InvestigationResultV1, InvestigationTaskV1 } from "@agentic-review/contracts";
 import fastifyStatic from "@fastify/static";
 import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
@@ -11,6 +12,8 @@ import {
 } from "./auto-reply-settings.js";
 import { InvestigationCommentDeliveries } from "./comment-deliveries.js";
 import { registerInvestigationCommentRoutes } from "./comment-http.js";
+import { InvestigationE2eIntake } from "./e2e-intake.js";
+import { createInvestigationE2eMediaPublications } from "./e2e-media-runtime.js";
 import { requireCondition } from "./errors.js";
 import { InvestigationGitHubTransport } from "./github-transport.js";
 import { InvestigationProgressReplies } from "./progress-reply.js";
@@ -34,6 +37,7 @@ export interface InvestigationRuntimeDependencies {
   readonly actionTransport?: InvestigationActionTransport;
   readonly logger?: false;
   readonly sourceImportFetch?: typeof globalThis.fetch;
+  readonly mediaUploadFetch?: typeof globalThis.fetch;
 }
 
 export async function createInvestigationRuntime(
@@ -67,10 +71,12 @@ export async function createInvestigationRuntime(
   let taskReaper: NodeJS.Timeout | undefined;
   let reapTaskLeases: (() => void) | undefined;
   let webhook: InvestigationWebhookIntake | undefined;
+  let e2eWebhook: InvestigationE2eIntake | undefined;
   let automaticReplies: InvestigationAutomaticReplies | undefined;
   let progressReplies: InvestigationProgressReplies | undefined;
   const webhookShutdown = new AbortController();
   const actionShutdown = new AbortController();
+  const mediaShutdown = new AbortController();
   try {
     auth = new InvestigationRuntimeAuth(config);
     await auth.initialize();
@@ -125,10 +131,17 @@ export async function createInvestigationRuntime(
       resolvePlanPrerequisites: sourceImporter.resolvePlanPrerequisites,
       enableExternalWrites: config.enableExternalWrites,
       evidencePolicy: config.evidencePolicy,
+      ...(config.staticConcurrency === undefined
+        ? {}
+        : { staticConcurrency: config.staticConcurrency }),
+      ...(config.defaultTaskBudget === undefined
+        ? {}
+        : { defaultTaskBudget: config.defaultTaskBudget }),
       onReportSealed: (report, task) => {
         if (!progressReplies?.hasTask(task.id)) automaticReplies?.enqueue(report, task);
       },
       onTaskStateChanged: (task, report) => progressReplies?.update(task, report),
+      onTaskUsageChanged: (task) => progressReplies?.updateUsage(task),
       onTaskProgress: (task, checkpoint, attempt) =>
         progressReplies?.updateProgress(task, checkpoint, attempt),
       onRepositoryChanged: (previous, next) =>
@@ -153,7 +166,56 @@ export async function createInvestigationRuntime(
           { additionalProperties: false },
         );
         const deliveries = new InvestigationCommentDeliveries({ store });
+        const media = createInvestigationE2eMediaPublications({
+          store,
+          evidence: service.evidence,
+          enableExternalWrites: config.enableExternalWrites,
+          ...(config.github === undefined ? {} : { github: config.github }),
+          ...(config.media === undefined ? {} : { configuration: config.media }),
+          fetch: (input, init) =>
+            (dependencies.mediaUploadFetch ?? globalThis.fetch)(input, {
+              ...init,
+              signal: AbortSignal.any([
+                actionShutdown.signal,
+                mediaShutdown.signal,
+                ...(init?.signal == null ? [] : [init.signal]),
+              ]),
+            }),
+        });
+        const prepareReportMedia = async (
+          report: InvestigationResultV1,
+          task: InvestigationTaskV1,
+        ): Promise<string> => {
+          const grant = automaticReplySettings.policy(task.repository.id);
+          const assertMediaAuthorization = () => {
+            const policy = automaticReplySettings.policy(task.repository.id);
+            const authorizer =
+              policy === null ? null : runtimeAuth.resolveOperator(policy.authorizedById);
+            requireCondition(
+              grant !== null &&
+                policy !== null &&
+                authorizer !== null &&
+                policy.authorizedById === grant.authorizedById &&
+                policy.authorizationEpoch === grant.authorizationEpoch &&
+                policy.repository.fullName === task.repository.fullName &&
+                policy.repository.githubRepositoryId === task.repository.githubRepositoryId &&
+                authorizer.repositoryIds.includes(task.repository.id) &&
+                authorizer.permissions.includes("action:prepare") &&
+                authorizer.permissions.includes("action:execute") &&
+                authorizer.actionCapabilities.includes("comment"),
+              403,
+              "e2e_media_authorization_changed",
+              "The E2E media publication authorization is no longer current.",
+            );
+          };
+          assertMediaAuthorization();
+          media.prepare(report, task);
+          await media.publish(report.report.id, mediaShutdown.signal, assertMediaAuthorization);
+          return media.render(report.report.id);
+        };
         const publisher = new InvestigationAutomaticReplies({
+          usageSummary: (taskId) => service.usageSummary(taskId),
+          prepareReportMedia,
           store,
           deliveries,
           settings: automaticReplySettings,
@@ -168,6 +230,8 @@ export async function createInvestigationRuntime(
         });
         automaticReplies = publisher;
         const progress = new InvestigationProgressReplies({
+          usageSummary: (taskId) => service.usageSummary(taskId),
+          prepareReportMedia,
           store,
           deliveries,
           settings: automaticReplySettings,
@@ -181,6 +245,9 @@ export async function createInvestigationRuntime(
                 (binding) =>
                   binding.repositoryId === admission.repository.id &&
                   binding.reviewerUserId === admission.expectedAssigneeUserId &&
+                  (admission.mode === "e2e"
+                    ? binding.e2eEnabled === true
+                    : binding.assignmentsEnabled !== false) &&
                   binding.allowedActorUserIds.includes(admission.trigger.actorUserId),
               ),
           onError: (code) =>
@@ -193,6 +260,41 @@ export async function createInvestigationRuntime(
           progress,
           automaticReplies: publisher,
         });
+        ingressApp.get<{ Params: { id: string } }>(
+          "/api/reports/:id/media-publication",
+          { schema: { params } },
+          async (request, reply) => {
+            const actor = runtimeAuth.authenticateOperator(request);
+            requireCondition(
+              actor !== null,
+              401,
+              "operator_authentication_required",
+              "Operator authentication is required.",
+            );
+            const report = service.reportExport(actor, request.params.id);
+            requireCondition(
+              report.context.task.kind === "pr-e2e",
+              400,
+              "e2e_media_report_required",
+              "Media publication status belongs to an E2E report.",
+            );
+            reply.header("cache-control", "no-store");
+            return {
+              reportId: report.report.id,
+              ...media.status(report.report.id),
+              uploads: media.uploads(report.report.id).map((upload) => ({
+                artifactId: upload.artifact.id,
+                name: upload.artifact.name,
+                mediaType: upload.artifact.mediaType,
+                digest: upload.artifact.digest,
+                state: upload.state,
+                url: upload.url,
+                reason: upload.code,
+                featureIds: upload.bindings.map((binding) => binding.featureId),
+              })),
+            };
+          },
+        );
         ingressApp.get<{ Params: { id: string } }>(
           "/api/repositories/:id/auto-reply-settings",
           { schema: { params } },
@@ -306,6 +408,7 @@ export async function createInvestigationRuntime(
                 {
                   version: Type.Integer({ minimum: 0 }),
                   enabled: Type.Boolean(),
+                  e2eEnabled: Type.Optional(Type.Boolean()),
                   reviewerUserId: Type.Union([
                     Type.Null(),
                     Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
@@ -363,10 +466,34 @@ export async function createInvestigationRuntime(
           onError: (code) => ingressApp.log.error({ code }, "Webhook task intake needs attention."),
         });
         webhook = intake;
+        const e2eIntake = new InvestigationE2eIntake({
+          store,
+          service,
+          importer: webhookImporter,
+          settings: webhookSettings,
+          onAdmission: (admission) => progress.enqueueAssignment(admission),
+          onAdmissionChanged: (admission, state, reason) =>
+            progress.updateAssignment(admission.id, state, reason),
+          onTaskCreated: (admission, task) => progress.attachTask(admission.id, task),
+          isOwnComment: (repositoryId, commentId) => progress.isOwnComment(repositoryId, commentId),
+          onError: (code) => ingressApp.log.error({ code }, "E2E webhook intake needs attention."),
+        });
+        e2eWebhook = e2eIntake;
         registerInvestigationWebhookRoute(ingressApp, {
           secret: webhookConfig.secret,
           maximumPayloadBytes: webhookConfig.maximumPayloadBytes,
-          accept: (input) => intake.accept(input),
+          accept: (input) => {
+            if (
+              input.eventName === "issue_comment" ||
+              (input.eventName === "pull_request" &&
+                typeof input.payload === "object" &&
+                input.payload !== null &&
+                "action" in input.payload &&
+                input.payload.action === "synchronize")
+            )
+              return e2eIntake.accept(input);
+            return intake.accept(input);
+          },
         });
         ingressApp.get<{ Params: { deliveryId: string } }>(
           "/api/github/webhook-deliveries/:deliveryId",
@@ -387,7 +514,9 @@ export async function createInvestigationRuntime(
               "Operator authentication is required.",
             );
             reply.header("cache-control", "no-store");
-            return intake.readReceipt(actor, request.params.deliveryId);
+            return e2eIntake.hasReceipt(request.params.deliveryId)
+              ? e2eIntake.readReceipt(actor, request.params.deliveryId)
+              : intake.readReceipt(actor, request.params.deliveryId);
           },
         );
       },
@@ -398,6 +527,8 @@ export async function createInvestigationRuntime(
       if (taskReaper !== undefined) clearInterval(taskReaper);
       webhookShutdown.abort();
       await webhook?.stop();
+      await e2eWebhook?.stop();
+      mediaShutdown.abort();
       await automaticReplies?.stop();
       await progressReplies?.stop();
       actionShutdown.abort();
@@ -437,6 +568,7 @@ export async function createInvestigationRuntime(
     await app.ready();
     reapTaskLeases?.();
     webhook?.start();
+    e2eWebhook?.start();
     automaticReplies?.start();
     progressReplies?.start();
     reaper = setInterval(() => {

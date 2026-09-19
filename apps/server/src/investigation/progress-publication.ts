@@ -5,12 +5,14 @@ import type {
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import type { AutomaticReplyPolicy } from "./auto-reply-settings.js";
+import { defaultE2eAutomaticReplyTemplate } from "./auto-reply-template.js";
 import type {
   InvestigationProgressTrigger,
   ProgressReplyContext,
   ProgressReplyStage,
   ProgressReplyTemplates,
 } from "./progress-reply-template.js";
+import { defaultE2eProgressReplyTemplates } from "./progress-reply-template.js";
 import type {
   InvestigationCommentTarget,
   InvestigationGitHubIdentity,
@@ -110,12 +112,20 @@ export const publicationEqual = (left: unknown, right: unknown): boolean =>
 export function publicationPolicy(
   policy: AutomaticReplyPolicy,
   kind: "issue" | "pull_request",
+  mode?: "static" | "e2e",
 ): PublicationPolicySnapshot {
   return {
     settingsVersion: policy.version,
     templateVersion: policy.templateVersion,
-    templates: structuredClone(policy.progressTemplates),
-    resultTemplate: kind === "pull_request" ? policy.pullRequestTemplate : policy.issueTemplate,
+    templates: structuredClone(
+      mode === "e2e" ? defaultE2eProgressReplyTemplates : policy.progressTemplates,
+    ),
+    resultTemplate:
+      mode === "e2e"
+        ? defaultE2eAutomaticReplyTemplate
+        : kind === "pull_request"
+          ? policy.pullRequestTemplate
+          : policy.issueTemplate,
   };
 }
 
@@ -177,7 +187,7 @@ export function publicationReason(code: string | null): string | null {
   if (code === "superseded")
     return "A newer task update superseded this prepared comment before it was sent.";
   if (code === "publisher_stopped")
-    return "The publisher stopped before sending this attempt. Its frozen content is retained for safe recovery.";
+    return "The publisher stopped before sending this attempt. Its saved content is retained for safe recovery.";
   if (code === "lease_lost")
     return "This publisher lost its processing lease before sending the comment.";
   if (
@@ -193,7 +203,32 @@ export function publicationReason(code: string | null): string | null {
 export function stoppedCopy(
   status: NonNullable<ProgressReplyContext["status"]>,
   reasonCode?: string,
+  mode?: "static" | "e2e",
 ): { failure: string | null; nextStep: string } {
+  if (mode === "e2e") {
+    if (status === "queued")
+      return {
+        failure: null,
+        nextStep:
+          "Wait for the exclusive E2E execution slot and an eligible worker. Static review can run in parallel.",
+      };
+    if (status === "running")
+      return {
+        failure: null,
+        nextStep:
+          "The worker will verify the pinned PR revision, capture screenshot or video evidence, and clean up before releasing the E2E slot.",
+      };
+    if (["received", "preparing"].includes(status))
+      return {
+        failure: null,
+        nextStep: "Prepare the pinned pull request revision for E2E runtime verification.",
+      };
+    const copy = stoppedCopy(status, reasonCode);
+    return {
+      failure: copy.failure?.replaceAll("investigation", "E2E verification") ?? null,
+      nextStep: copy.nextStep.replaceAll("investigation", "E2E verification"),
+    };
+  }
   if (reasonCode === "budget_exhausted")
     return {
       failure: "The task stopped because its authorized investigation budget was exhausted.",
@@ -245,7 +280,7 @@ export function stoppedCopy(
     };
   return {
     failure: null,
-    nextStep: "Prepare the frozen investigation input before creating the task.",
+    nextStep: "Capture the input snapshot for this investigation before creating the task.",
   };
 }
 

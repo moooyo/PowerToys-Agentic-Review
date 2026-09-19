@@ -5,6 +5,7 @@ import {
   type InvestigationLoopRoundV1,
   type InvestigationPrDiffManifestV1,
   type InvestigationResultV1,
+  validateInvestigationAnalysisForTask,
 } from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
 
@@ -18,6 +19,7 @@ import {
   interruptInvestigationLoop,
   investigationContentDigest,
   normalizeInvestigationAnalysisPlanReferences,
+  projectInvestigationTokenConsumption,
   restoreCompletedInvestigationForDelivery,
   restoreInvestigationCheckpoint,
 } from "./investigation-loop.js";
@@ -80,8 +82,9 @@ function round(
   };
 }
 
-function setup(count = 1) {
+function setup(count = 1, localCheckout = false) {
   const fixture = createInvestigationFixture("pr", { findingCount: count });
+  if (!localCheckout) fixture.task.executionPolicy.mode = "snapshot_only";
   const checkpoint = createInvestigationCheckpoint({
     task: fixture.task,
     attemptId: fixture.attempt.id,
@@ -102,7 +105,237 @@ function finalAnalysis(
   return next;
 }
 
+function setupSnapshot(count = 0) {
+  const fixture = createInvestigationFixture("bug", { findingCount: count });
+  const checkpoint = createInvestigationCheckpoint({
+    task: fixture.task,
+    attemptId: fixture.attempt.id,
+    checkpointId: "snapshot-checkpoint",
+    leaseVersion: fixture.attempt.leaseVersion,
+    recordedAt,
+  });
+  return { ...fixture, checkpoint, analysis: proposedAnalysis(fixture.result) };
+}
+
 describe("complete investigation loop", () => {
+  it("finishes a fresh snapshot-only issue in one invocation without guessing a source revision", () => {
+    const { checkpoint, task, analysis } = setupSnapshot();
+    expect(checkpoint.runtime.reviewMode).toBe("local_snapshot");
+    expect(task.subjects[0]!.kind).toBe("issue_snapshot");
+    const completed = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    expect(completed.stopReason).toBe("complete");
+    expect(completed.round).toBe(1);
+    expect(completed.runtime.sourceCoverage).toBeUndefined();
+    expect(evaluateInvestigationCompletion(completed).reasonCodes).toEqual([]);
+    expect(
+      validateInvestigationAnalysisForTask(task, completed.analysis, completed.runtime).valid,
+    ).toBe(true);
+  });
+
+  it("accepts a same-invocation snapshot hypothesis recheck only with explicit uncertainty and limitations", () => {
+    const { checkpoint, analysis, result } = setupSnapshot(1);
+    const reviewed = finalAnalysis(result, analysis, 1);
+    reviewed.findings[0]!.confirmation.status = "hypothesis";
+    reviewed.candidates[0]!.status = "unresolved";
+    reviewed.rechecks[0]!.unresolvedQuestions = [
+      "The reported runtime behavior still needs independent execution evidence.",
+    ];
+    reviewed.limitations = [
+      {
+        id: "snapshot-runtime-limitation",
+        description: "Only the supplied issue snapshot was inspected.",
+        impact: "The runtime behavior remains unverified.",
+        evidenceRefs: [],
+      },
+    ];
+    const completed = applyInvestigationLoopRound(checkpoint, round(checkpoint, reviewed), options);
+    expect(completed.stopReason).toBe("complete");
+    for (const omit of ["questions", "limitations", "recheck"] as const) {
+      const incomplete = structuredClone(reviewed);
+      if (omit === "questions") incomplete.rechecks[0]!.unresolvedQuestions = [];
+      if (omit === "limitations") incomplete.limitations = [];
+      if (omit === "recheck") incomplete.rechecks = [];
+      const accepted = applyInvestigationLoopRound(
+        checkpoint,
+        round(checkpoint, incomplete),
+        options,
+      );
+      expect(accepted.stopReason).toBe("continuing");
+      expect(evaluateInvestigationCompletion(accepted).pendingFindingIds).toEqual([
+        reviewed.findings[0]!.id,
+      ]);
+    }
+  });
+
+  it("keeps a historical snapshot checkpoint on its original separate-finalization semantics", () => {
+    const { checkpoint, task, analysis } = setupSnapshot();
+    delete checkpoint.runtime.reviewMode;
+    const { digest: _digest, ...content } = checkpoint;
+    checkpoint.digest = investigationContentDigest(content);
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    expect(first.stopReason).toBe("continuing");
+    expect(evaluateInvestigationCompletion(first).reasonCodes).toContain(
+      "finalization_round_missing",
+    );
+    const restored = restoreInvestigationCheckpoint({
+      checkpoint: interruptInvestigationLoop(first, "interrupted"),
+      task,
+      attemptId: "snapshot-restored",
+      leaseVersion: 2,
+      recordedAt,
+    });
+    expect(restored.runtime.reviewMode).toBeUndefined();
+    const completed = applyInvestigationLoopRound(
+      restored,
+      round(restored, restored.analysis, "finalize"),
+      options,
+    );
+    expect(completed.stopReason).toBe("complete");
+  });
+
+  it("rejects snapshot review mode on a task with a different execution policy", () => {
+    const { task, checkpoint, analysis } = setup(0, true);
+    checkpoint.runtime.reviewMode = "local_snapshot";
+    expect(
+      validateInvestigationAnalysisForTask(task, analysis, checkpoint.runtime).errors,
+    ).toContainEqual(expect.objectContaining({ code: "REVIEW_MODE_TASK_MISMATCH" }));
+  });
+
+  it("allows a local checkout invocation to finish without a separate finalize round", () => {
+    const { checkpoint, analysis } = setup(0, true);
+    expect(checkpoint.runtime.reviewMode).toBe("local_checkout");
+    const proposal = round(checkpoint, analysis);
+    proposal.continue = true;
+    const completed = applyInvestigationLoopRound(checkpoint, proposal, options);
+    expect(completed.stopReason).toBe("complete");
+    expect(completed.round).toBe(1);
+    expect(evaluateInvestigationCompletion(completed).reasonCodes).toEqual([]);
+  });
+
+  it("accepts evidenced discovery and independent recheck within one local invocation", () => {
+    const { checkpoint, analysis, result } = setup(1, true);
+    const completed = applyInvestigationLoopRound(
+      checkpoint,
+      round(checkpoint, finalAnalysis(result, analysis, 1)),
+      options,
+    );
+    expect(completed.stopReason).toBe("complete");
+    expect(completed.analysis.rechecks[0]!.round).toBe(1);
+  });
+
+  it("still requires current finding evidence in local checkout mode", () => {
+    const { checkpoint, analysis, result } = setup(1, true);
+    const proposed = finalAnalysis(result, analysis, 1);
+    proposed.rechecks[0]!.evidenceRefs = [];
+    const accepted = applyInvestigationLoopRound(checkpoint, round(checkpoint, proposed), options);
+    expect(accepted.stopReason).toBe("continuing");
+    expect(evaluateInvestigationCompletion(accepted).pendingFindingIds).toEqual([
+      proposed.findings[0]!.id,
+    ]);
+  });
+
+  it("preserves the historical mode when restoring a source-reading checkpoint without a mode", () => {
+    const { checkpoint, task } = setup(0, true);
+    const historical = structuredClone(checkpoint);
+    delete historical.runtime.reviewMode;
+    const { digest: _digest, ...payload } = historical;
+    historical.digest = investigationContentDigest(payload);
+    const restored = restoreInvestigationCheckpoint({
+      checkpoint: interruptInvestigationLoop(historical, "interrupted"),
+      task,
+      attemptId: "legacy-resume",
+      leaseVersion: 2,
+      recordedAt,
+    });
+    expect(restored.runtime.reviewMode).toBeUndefined();
+    expect(evaluateInvestigationCompletion(restored).reasonCodes).toContain(
+      "finalization_round_missing",
+    );
+  });
+
+  it.each([false, true])("prevents execution receipts from changing review mode: %s", (local) => {
+    const { checkpoint } = setup(0, local);
+    const runtime = structuredClone(checkpoint.runtime);
+    if (local) delete runtime.reviewMode;
+    else runtime.reviewMode = "local_checkout";
+    expect(() => applyInvestigationRuntimeCheckpoint(checkpoint, runtime, { recordedAt })).toThrow(
+      "cannot change the trusted source review mode",
+    );
+  });
+
+  it.each(["summary", "diagnostic", "order", "version", "evidence-id"] as const)(
+    "does not count %s changes as semantic progress",
+    (mutation) => {
+      const { checkpoint, analysis } = setup(2);
+      const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+      const repeated = structuredClone(first.analysis);
+      if (mutation === "summary") {
+        repeated.summary = "The same review described in different words.";
+        repeated.assessment.summary = "A reformatted summary with no new source or result.";
+        repeated.candidates[0]!.rationale = "The same unresolved investigation restated.";
+      }
+      if (mutation === "diagnostic")
+        repeated.diagnostics.push({
+          id: "reworded-diagnostic",
+          code: "SOURCE_UNAVAILABLE",
+          category: "blocker",
+          message: "No additional source was obtained.",
+          retryable: false,
+          evidenceRefs: [],
+          prerequisiteRefs: [],
+        });
+      if (mutation === "order") {
+        repeated.evidence.reverse();
+        repeated.findings.reverse();
+        repeated.candidates.reverse();
+      }
+      if (mutation === "version") {
+        repeated.findings[0]!.version += 1;
+        repeated.candidates[0]!.findingVersion = repeated.findings[0]!.version;
+      }
+      if (mutation === "evidence-id")
+        repeated.evidence.push({
+          ...structuredClone(repeated.evidence[0]!),
+          id: "same-evidence-new-id",
+        });
+      const stopped = applyInvestigationLoopRound(first, round(first, repeated), {
+        ...options,
+        recordedAt: "2026-09-15T04:10:00.000Z",
+        usage: { durationMs: 5_000, tokens: 30_000, reportBytes: 10_000 },
+      });
+      expect(stopped.stopReason).toBe("blocked");
+      expect(stopped.analysis.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "INVESTIGATION_NO_PROGRESS" }),
+      );
+      expect(stopped.consumed.tokens).toBe(30_100);
+    },
+  );
+
+  it("counts a valid required recheck as progress without requiring new source evidence", () => {
+    const { checkpoint, analysis, result } = setup();
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const reviewed = applyInvestigationLoopRound(
+      first,
+      round(first, finalAnalysis(result, analysis, 2), "recheck"),
+      options,
+    );
+    expect(reviewed.stopReason).toBe("continuing");
+    expect(evaluateInvestigationCompletion(reviewed).pendingFindingIds).toEqual([]);
+    expect(
+      reviewed.analysis.diagnostics.some((entry) => entry.code === "INVESTIGATION_NO_PROGRESS"),
+    ).toBe(false);
+  });
+
+  it("does not allow completed coverage to alternate states to manufacture progress", () => {
+    const { checkpoint, analysis } = setup();
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const repeated = structuredClone(first.analysis);
+    repeated.coverage.includedUnits[0]!.status = "pending";
+    expect(() => applyInvestigationLoopRound(first, round(first, repeated), options)).toThrow(
+      "cannot be reopened",
+    );
+  });
+
   it("records trusted model identity only for accepted analysis rounds", () => {
     const { checkpoint, analysis } = setup();
     const modelIdentity = { engine: "codex" as const, model: "gpt-6-astra" };
@@ -223,17 +456,20 @@ describe("complete investigation loop", () => {
     expect(evaluateInvestigationCompletion(final).complete).toBe(true);
   });
 
-  it("does not consider continue false or a fixed third round sufficient", () => {
+  it("stops identical incomplete analysis instead of spending a third round", () => {
     const { checkpoint, analysis } = setup();
     let current = checkpoint;
-    for (let index = 0; index < 3; index += 1)
+    for (let index = 0; index < 2; index += 1)
       current = applyInvestigationLoopRound(
         current,
         round(current, analysis, "investigation"),
         options,
       );
-    expect(current.round).toBe(3);
-    expect(current.stopReason).toBe("continuing");
+    expect(current.round).toBe(2);
+    expect(current.stopReason).toBe("blocked");
+    expect(current.analysis.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "INVESTIGATION_NO_PROGRESS", retryable: false }),
+    );
     expect(evaluateInvestigationCompletion(current).reasonCodes).toContain(
       "final_version_rechecks_pending",
     );
@@ -303,6 +539,82 @@ describe("complete investigation loop", () => {
     expect(evaluateInvestigationCompletion(second).pendingFindingIds).toEqual([
       analysis.findings[0]!.id,
     ]);
+    expect(evaluateInvestigationCompletion(second).complete).toBe(false);
+    expect(
+      second.analysis.diagnostics.some((entry) => entry.code === "INVESTIGATION_NO_PROGRESS"),
+    ).toBe(false);
+    const unchanged = applyInvestigationLoopRound(
+      second,
+      round(second, second.analysis, "finalize"),
+      options,
+    );
+    expect(unchanged.stopReason).toBe("blocked");
+    expect(evaluateInvestigationCompletion(unchanged).pendingFindingIds).toEqual([
+      analysis.findings[0]!.id,
+    ]);
+  });
+
+  it("does not treat a recheck ID, version, or wording replacement as progress while confirmation remains missing", () => {
+    const { checkpoint, analysis, result } = setup();
+    analysis.findings[0]!.confirmation.evidenceRefs = [];
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const second = applyInvestigationLoopRound(
+      first,
+      round(first, finalAnalysis(result, analysis, 2), "finalize"),
+      options,
+    );
+    const repeated = structuredClone(second.analysis);
+    const finding = repeated.findings[0]!;
+    finding.version += 1;
+    finding.confirmation.recheckRef = "equivalent-recheck";
+    repeated.candidates[0]!.findingVersion = finding.version;
+    repeated.rechecks.push({
+      ...repeated.rechecks[0]!,
+      id: "equivalent-recheck",
+      findingVersion: finding.version,
+      round: 3,
+      conclusion: "The same source check expressed again without additional evidence.",
+    });
+    const stopped = applyInvestigationLoopRound(
+      second,
+      round(second, repeated, "finalize"),
+      options,
+    );
+    expect(stopped.stopReason).toBe("blocked");
+    expect(stopped.analysis.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "INVESTIGATION_NO_PROGRESS" }),
+    );
+    expect(evaluateInvestigationCompletion(stopped).complete).toBe(false);
+  });
+
+  it("can complete the remaining confirmation evidence after a valid recheck made progress", () => {
+    const { checkpoint, analysis, result } = setup();
+    analysis.findings[0]!.confirmation.evidenceRefs = [];
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const second = applyInvestigationLoopRound(
+      first,
+      round(first, finalAnalysis(result, analysis, 2), "finalize"),
+      options,
+    );
+    const completed = structuredClone(second.analysis);
+    const finding = completed.findings[0]!;
+    finding.version += 1;
+    finding.confirmation.evidenceRefs = [...finding.evidenceRefs];
+    finding.confirmation.recheckRef = "confirmed-final-recheck";
+    completed.candidates[0]!.findingVersion = finding.version;
+    completed.rechecks.push({
+      ...completed.rechecks[0]!,
+      id: "confirmed-final-recheck",
+      findingVersion: finding.version,
+      round: 3,
+    });
+    const accepted = applyInvestigationLoopRound(
+      second,
+      round(second, completed, "finalize"),
+      options,
+    );
+    expect(accepted.stopReason).toBe("complete");
+    expect(evaluateInvestigationCompletion(accepted).pendingFindingIds).toEqual([]);
   });
 
   it("rejects same-version finding edits without mutating the accepted checkpoint", () => {
@@ -437,6 +749,12 @@ describe("complete investigation loop", () => {
       modelUsage: { tokens: 100, durationMs: 20 },
     });
     const completed = applyInvestigationRuntimeCheckpoint(acceptedStart, runtime, { recordedAt });
+    const precharged = projectInvestigationTokenConsumption(acceptedStart, 100);
+    const ledgerRecorded = applyInvestigationRuntimeCheckpoint(precharged, runtime, {
+      recordedAt,
+      accountedTokens: 100,
+    });
+    expect(ledgerRecorded.consumed.tokens).toBe(100);
     expect(completed.consumed.tokens).toBe(100);
     expect(completed.consumed.durationMs).toBe(20);
     const replayed = applyInvestigationRuntimeCheckpoint(completed, runtime, { recordedAt });
@@ -831,8 +1149,9 @@ describe("complete investigation loop", () => {
   });
 });
 
-function setupSourceCoverage(fileCount = 1) {
+function setupSourceCoverage(fileCount = 1, localCheckout = false) {
   const { task, attempt } = createInvestigationFixture("pr", { findingCount: 0 });
+  if (!localCheckout) task.executionPolicy.mode = "snapshot_only";
   const subject = task.subjects[0]!;
   if (subject.kind !== "original_pr") throw new Error("PR fixture must have an original subject.");
   task.scope.includedUnits = [
@@ -913,6 +1232,126 @@ function sourceRoundAnalysis(
 }
 
 describe("trusted complete PR source coverage", () => {
+  it("registers changed files while retaining chunks only as a local source identity manifest", () => {
+    const { checkpoint, manifest, task } = setupSourceCoverage(2, true);
+    expect(checkpoint.analysis.coverage.includedUnits).toHaveLength(3);
+    expect(
+      checkpoint.analysis.coverage.includedUnits.filter((unit) => unit.kind === "source_file"),
+    ).toHaveLength(2);
+    expect(checkpoint.runtime.sourceCoverage?.manifest).toEqual(manifest);
+    expect(manifest.chunks).toHaveLength(6);
+    expect(checkpoint.runtime.sourceCoverage?.brokeredUnitIds).toEqual([]);
+    const completed = applyInvestigationLoopRound(
+      checkpoint,
+      round(
+        checkpoint,
+        sourceRoundAnalysis(
+          checkpoint,
+          checkpoint.analysis.coverage.includedUnits.map((unit) => unit.id),
+          true,
+        ),
+      ),
+      options,
+    );
+    expect(completed.stopReason).toBe("complete");
+    expect(completed.round).toBe(1);
+    expect(completed.runtime.sourceCoverage?.brokeredUnitIds).toEqual([]);
+    expect(
+      validateInvestigationAnalysisForTask(task, completed.analysis, completed.runtime).valid,
+    ).toBe(true);
+  });
+
+  it("still requires a trusted manifest before local full-diff completion", () => {
+    const { initial } = setupSourceCoverage(1, true);
+    expect(() =>
+      applyInvestigationLoopRound(
+        initial,
+        round(initial, sourceRoundAnalysis(initial, [], true)),
+        options,
+      ),
+    ).toThrow("without a trusted complete source manifest");
+  });
+
+  it("stops when all remaining work is blocked even if the model requests another invocation", () => {
+    const { checkpoint } = setupSourceCoverage(1, true);
+    const analysis = structuredClone(checkpoint.analysis);
+    for (const unit of analysis.coverage.includedUnits)
+      if (unit.kind !== "full_diff") unit.status = "blocked";
+    const proposal = round(checkpoint, analysis);
+    proposal.continue = true;
+    const stopped = applyInvestigationLoopRound(checkpoint, proposal, options);
+    expect(stopped.stopReason).toBe("blocked");
+    expect(stopped.round).toBe(1);
+    expect(stopped.analysis.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "INVESTIGATION_BLOCKED", retryable: false }),
+    );
+  });
+
+  it("allows new source evidence to advance pending work despite a historical blocker", () => {
+    const { checkpoint } = setupSourceCoverage(1, true);
+    const analysis = structuredClone(checkpoint.analysis);
+    analysis.diagnostics.push({
+      id: "missing-helper",
+      code: "SOURCE_UNAVAILABLE",
+      category: "blocker",
+      message: "The helper source was initially unavailable.",
+      retryable: false,
+      evidenceRefs: [],
+      prerequisiteRefs: [],
+    });
+    const first = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const advanced = structuredClone(first.analysis);
+    advanced.evidence.push({
+      id: "helper-source",
+      subjectRef: checkpoint.analysis.assessment.subjectRef,
+      source: "static_analysis",
+      summary: "The pinned Helper.cs implementation was found and inspected.",
+      evidenceRefs: [],
+    });
+    const second = applyInvestigationLoopRound(first, round(first, advanced), options);
+    expect(second.stopReason).toBe("continuing");
+    expect(second.analysis.diagnostics).toEqual(first.analysis.diagnostics);
+  });
+
+  it("allows blocked coverage to consume trusted observation batches but stops after unchanged summaries", () => {
+    const { checkpoint } = setupSourceCoverage(1, true);
+    checkpoint.runtime.evidence = [0, 1].map((index) => ({
+      id: `trusted-observation-${index}`,
+      subjectRef: checkpoint.analysis.assessment.subjectRef,
+      source: "executor_observation" as const,
+      authority: "worker" as const,
+      summary: `Trusted result ${index}.`,
+      artifactRefs: [],
+      evidenceRefs: [],
+      provenance: {
+        taskId: checkpoint.taskId,
+        attemptId: checkpoint.attemptId,
+        producer: "Synthetic executor",
+        recordedAt,
+      },
+    }));
+    const { digest: _digest, ...content } = checkpoint;
+    checkpoint.digest = investigationContentDigest(content);
+    let current = checkpoint;
+    for (const observation of checkpoint.runtime.evidence) {
+      const analysis = structuredClone(current.analysis);
+      for (const unit of analysis.coverage.includedUnits)
+        if (unit.kind !== "full_diff") unit.status = "blocked";
+      analysis.evidence.push({
+        id: `analysis-${observation.id}`,
+        subjectRef: observation.subjectRef,
+        source: "static_analysis",
+        summary: "The observed result was analyzed before resolving aggregate coverage.",
+        evidenceRefs: [observation.id],
+      });
+      current = applyInvestigationLoopRound(current, round(current, analysis), options);
+      expect(current.stopReason).toBe("continuing");
+    }
+    const stopped = applyInvestigationLoopRound(current, round(current, current.analysis), options);
+    expect(stopped.stopReason).toBe("blocked");
+    expect(evaluateInvestigationCompletion(stopped).complete).toBe(false);
+  });
+
   it("registers every chunk and rejects completion based on only the first batch", () => {
     const { checkpoint, manifest } = setupSourceCoverage(47);
     expect(manifest.chunks).toHaveLength(141);
@@ -1017,5 +1456,42 @@ describe("trusted complete PR source coverage", () => {
     expect(accepted.analysis.coverage.scopeManifest).toEqual(
       checkpoint.analysis.coverage.scopeManifest,
     );
+  });
+});
+
+describe("ledger token projection", () => {
+  it("replaces the compatibility total without charging a pre-accounted analysis twice", () => {
+    const { task, analysis } = setup(0, true);
+    task.budget.maxTokens = 50;
+    const initial = createInvestigationCheckpoint({
+      task,
+      attemptId: "ledger-attempt",
+      checkpointId: "ledger-checkpoint",
+      leaseVersion: 1,
+      recordedAt,
+    });
+    const precharged = projectInvestigationTokenConsumption(initial, 40);
+    const accepted = applyInvestigationLoopRound(precharged, round(precharged, analysis), {
+      ...options,
+      usage: { ...options.usage, tokens: 40 },
+      accountedTokens: 40,
+    });
+    expect(accepted.consumed.tokens).toBe(40);
+    expect(accepted.stopReason).toBe("complete");
+    const exceeded = applyInvestigationLoopRound(initial, round(initial, analysis), {
+      ...options,
+      accountedTokens: 70,
+    });
+    expect(exceeded.consumed.tokens).toBe(70);
+    expect(exceeded.stopReason).toBe("budget_exhausted");
+  });
+
+  it("stops continuing work at the token limit and reseals the compatibility snapshot", () => {
+    const { checkpoint } = setup();
+    const projected = projectInvestigationTokenConsumption(checkpoint, checkpoint.budget.maxTokens);
+    expect(projected.stopReason).toBe("budget_exhausted");
+    const { digest, ...content } = projected;
+    expect(digest).toBe(investigationContentDigest(content));
+    expect(() => projectInvestigationTokenConsumption(checkpoint, -1)).toThrow(/nonnegative/u);
   });
 });

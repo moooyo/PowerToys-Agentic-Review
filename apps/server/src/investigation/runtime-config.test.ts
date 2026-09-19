@@ -26,6 +26,89 @@ describe("password runtime configuration", () => {
     expect(config).not.toHaveProperty("oidc");
     expect(config.workers).toEqual([]);
     expect(config.enableExternalWrites).toBe(false);
+    expect(config.staticConcurrency).toBe(1);
+    expect(config.defaultTaskBudget).toEqual({
+      maxTokens: 120_000,
+      maxRounds: 24,
+      maxDurationMs: 1_800_000,
+    });
+    expect(config.media).toEqual({ enabled: true, requestTimeoutMs: 120_000 });
+  });
+
+  it("loads bounded media publication settings without changing the external-write gate", () => {
+    const config = loadInvestigationRuntimeConfig({
+      INVESTIGATION_MEDIA_UPLOADS_ENABLED: "false",
+      INVESTIGATION_MEDIA_UPLOAD_TIMEOUT_MS: "45000",
+    });
+    expect(config.media).toEqual({ enabled: false, requestTimeoutMs: 45_000 });
+    expect(config.enableExternalWrites).toBe(false);
+    expect(() =>
+      loadInvestigationRuntimeConfig({ INVESTIGATION_MEDIA_UPLOAD_TIMEOUT_MS: "600001" }),
+    ).toThrow("INVESTIGATION_MEDIA_UPLOAD_TIMEOUT_MS");
+  });
+
+  it("accepts a bounded independent static concurrency without configuring E2E parallelism", () => {
+    expect(
+      loadInvestigationRuntimeConfig({ INVESTIGATION_STATIC_CONCURRENCY: "4" }).staticConcurrency,
+    ).toBe(4);
+    for (const value of ["0", "17", "1.5", "-1", "invalid"])
+      expect(() =>
+        loadInvestigationRuntimeConfig({ INVESTIGATION_STATIC_CONCURRENCY: value }),
+      ).toThrow("INVESTIGATION_STATIC_CONCURRENCY");
+  });
+
+  it("loads immutable per-Task deployment budgets independently of source import limits", () => {
+    const environment = {
+      INVESTIGATION_DEFAULT_TASK_MAX_TOKENS: "5000000",
+      INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS: "8",
+      INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS: "7200000",
+    };
+    const config = loadInvestigationRuntimeConfig(environment);
+    environment.INVESTIGATION_DEFAULT_TASK_MAX_TOKENS = "7";
+    expect(config.defaultTaskBudget).toEqual({
+      maxTokens: 5_000_000,
+      maxRounds: 8,
+      maxDurationMs: 7_200_000,
+    });
+    expect(Object.isFrozen(config.defaultTaskBudget)).toBe(true);
+    expect(config.sourceImportMaximumBytes).toBe(16 * 1024 * 1024);
+  });
+
+  it.each(["MAX_TOKENS", "MAX_ROUNDS", "MAX_DURATION_MS"])(
+    "rejects invalid default Task %s values",
+    (field) => {
+      for (const value of [
+        "0",
+        "-1",
+        "1.5",
+        "NaN",
+        "Infinity",
+        "1e6",
+        " 1",
+        "01",
+        "9007199254740992",
+        "999999999999999999999",
+      ])
+        expect(() =>
+          loadInvestigationRuntimeConfig({ [`INVESTIGATION_DEFAULT_TASK_${field}`]: value }),
+        ).toThrow(`INVESTIGATION_DEFAULT_TASK_${field}`);
+    },
+  );
+
+  it("accepts safe token counters and bounds durations to the timer implementation", () => {
+    const config = loadInvestigationRuntimeConfig({
+      INVESTIGATION_DEFAULT_TASK_MAX_TOKENS: String(Number.MAX_SAFE_INTEGER),
+      INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS: String(Number.MAX_SAFE_INTEGER),
+      INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS: "2147483647",
+    });
+    expect(config.defaultTaskBudget).toEqual({
+      maxTokens: Number.MAX_SAFE_INTEGER,
+      maxRounds: Number.MAX_SAFE_INTEGER,
+      maxDurationMs: 2_147_483_647,
+    });
+    expect(() =>
+      loadInvestigationRuntimeConfig({ INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS: "2147483648" }),
+    ).toThrow("INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS");
   });
 
   it("rejects every no-password mode and non-loopback HTTP listener", () => {

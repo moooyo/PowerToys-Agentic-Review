@@ -6,6 +6,7 @@ import {
   type ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
 import { assertCanonicalRepository } from "./git-source.js";
+import { type InvestigationWorkerRole, investigationTaskPool } from "./task-service.js";
 import {
   type InvestigationUiPlanAdapterConfiguration,
   parseInvestigationUiPlanAdapterConfiguration,
@@ -22,6 +23,8 @@ export interface InvestigationWorkerRuntimeConfig {
   readonly allowInsecureHttp: boolean;
   readonly dataDirectory: string;
   readonly workspaceRootDirectory: string;
+  /** Shared across every Worker role and data directory on this Windows machine. */
+  readonly desktopLockDirectory?: string;
   readonly trustedExecutableRoot: string;
   readonly processHost: InvestigationExecutableConfiguration;
   readonly git: InvestigationExecutableConfiguration;
@@ -31,7 +34,10 @@ export interface InvestigationWorkerRuntimeConfig {
   };
   readonly allowedRepositories: readonly string[];
   readonly supportedKinds: readonly InvestigationTaskKind[];
+  /** Legacy alias for the static pool capacity. */
   readonly maximumConcurrentTasks: number;
+  readonly maximumConcurrentStaticTasks?: number;
+  readonly role?: InvestigationWorkerRole;
   readonly claimPollMs: number;
   readonly requestTimeoutMs: number;
   readonly shutdownTimeoutMs: number;
@@ -52,6 +58,7 @@ export interface InvestigationWorkerRuntimeConfig {
 const kinds: readonly InvestigationTaskKind[] = [
   "pr-review",
   "issue-investigate",
+  "pr-e2e",
   "pr-verify",
   "issue-verify",
   "reproduction-setup",
@@ -127,6 +134,12 @@ export function loadInvestigationWorkerRuntimeConfig(
     throw invalid("CLI_MODEL", "must be a bounded non-secret model identifier");
   const osRoot = text(environment.SYSTEMROOT ?? environment.SystemRoot, "SYSTEMROOT");
   assertWindowsLocalAbsolutePath(osRoot, "Windows system root", false);
+  const desktopLockDirectory = directory(
+    value("DESKTOP_LOCK_DIRECTORY") ?? defaultInvestigationDesktopLockDirectory(environment),
+    "DESKTOP_LOCK_DIRECTORY",
+  );
+  requireDisjoint(dataDirectory, desktopLockDirectory);
+  requireDisjoint(trustedExecutableRoot, desktopLockDirectory);
   const path =
     value("PATH") ??
     [
@@ -197,6 +210,14 @@ export function loadInvestigationWorkerRuntimeConfig(
     supportedKinds.some((kind) => !kinds.includes(kind as InvestigationTaskKind))
   )
     throw invalid("SUPPORTED_KINDS_JSON", "must contain supported native investigation task kinds");
+  const role = value("ROLE") ?? "all";
+  if (role !== "all" && role !== "static" && role !== "e2e")
+    throw invalid("ROLE", "must be static, e2e, or all");
+  const roleKinds = supportedKinds.filter(
+    (kind) => role === "all" || investigationTaskPool(kind as InvestigationTaskKind) === role,
+  );
+  if (roleKinds.length === 0)
+    throw invalid("SUPPORTED_KINDS_JSON", "must include a task kind matching the Worker role");
   const executables: Record<string, InvestigationExecutableConfiguration> = {};
   const configuredExecutables = jsonObject(value("EXECUTABLES_JSON"), "EXECUTABLES_JSON");
   for (const [id, entry] of Object.entries(configuredExecutables)) {
@@ -240,12 +261,16 @@ export function loadInvestigationWorkerRuntimeConfig(
     }
     uiAdapters[id] = configuration;
   }
-  const maximumConcurrentTasks = integer(
-    value("MAX_CONCURRENT_TASKS"),
+  const staticCapacitySetting =
+    value("MAX_CONCURRENT_STATIC_TASKS") === undefined
+      ? "MAX_CONCURRENT_TASKS"
+      : "MAX_CONCURRENT_STATIC_TASKS";
+  const maximumConcurrentStaticTasks = integer(
+    value(staticCapacitySetting),
     1,
     1,
     16,
-    "MAX_CONCURRENT_TASKS",
+    staticCapacitySetting,
   );
   const processLimits: ProcessResourceLimits = {
     hardTimeoutMs: integer(
@@ -280,13 +305,16 @@ export function loadInvestigationWorkerRuntimeConfig(
     allowInsecureHttp,
     dataDirectory,
     workspaceRootDirectory: win32.join(dataDirectory, "attempts"),
+    desktopLockDirectory,
     trustedExecutableRoot,
     processHost,
     git,
     cli: { ...cliBinary, engine, ...(model === undefined ? {} : { model }) },
     allowedRepositories,
-    supportedKinds: supportedKinds as InvestigationTaskKind[],
-    maximumConcurrentTasks,
+    supportedKinds: roleKinds as InvestigationTaskKind[],
+    maximumConcurrentTasks: maximumConcurrentStaticTasks,
+    maximumConcurrentStaticTasks,
+    role,
     claimPollMs: integer(value("CLAIM_POLL_MS"), 2_000, 100, 60_000, "CLAIM_POLL_MS"),
     requestTimeoutMs: integer(
       value("REQUEST_TIMEOUT_MS"),
@@ -322,6 +350,21 @@ export function loadInvestigationWorkerRuntimeConfig(
       hardTimeoutMs: integer(value("GIT_TIMEOUT_MS"), 600_000, 10_000, 7_200_000, "GIT_TIMEOUT_MS"),
     },
   };
+}
+
+/** ProgramData is machine-wide; never derive the execution lock from a Worker data root. */
+export function defaultInvestigationDesktopLockDirectory(
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): string {
+  const osRoot = environment.SYSTEMROOT ?? environment.SystemRoot ?? "C:\\Windows";
+  const programData =
+    environment.ProgramData ??
+    environment.PROGRAMDATA ??
+    win32.join(win32.parse(osRoot).root, "ProgramData");
+  return directory(
+    win32.join(programData, "PowerToysAgenticReview", "desktop-locks"),
+    "DESKTOP_LOCK_DIRECTORY",
+  );
 }
 
 function directory(value: string, name: string): string {
@@ -419,7 +462,14 @@ function environmentObject(
   const entries: Record<string, string> = {};
   for (const [rawName, rawValue] of Object.entries(jsonObject(value, name))) {
     const key = rawName.toUpperCase();
-    if (!/^[A-Z_][A-Z0-9_]*$/u.test(key) || key.startsWith("INVESTIGATION_") || key in entries)
+    const standardWindowsName = key === "PROGRAMFILES(X86)" || key === "COMMONPROGRAMFILES(X86)";
+    if (
+      (!/^[A-Z_][A-Z0-9_]*$/u.test(key) && !standardWindowsName) ||
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: Explicitly reject control bytes in environment variable names, including terminal newlines.
+      /[\u0000-\u001f\u007f-\u009f]/u.test(key) ||
+      key.startsWith("INVESTIGATION_") ||
+      key in entries
+    )
       throw invalid(name, "contains an invalid or reserved environment variable");
     const entry = text(rawValue, name);
     if (entry.includes(token)) throw invalid(name, "cannot disclose the Worker credential");

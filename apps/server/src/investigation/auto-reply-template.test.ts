@@ -1,5 +1,9 @@
 import { readFileSync } from "node:fs";
-import { createInvestigationPreview, type InvestigationResultV1 } from "@agentic-review/contracts";
+import {
+  createInvestigationPreview,
+  type InvestigationResultV1,
+  type InvestigationUsageSummary,
+} from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
 import {
   type AutomaticReplyModelContext,
@@ -7,11 +11,13 @@ import {
   automaticReplyTemplateTokens,
   automaticReplyTemplateVersion,
   defaultAutomaticReplyTemplates,
+  defaultE2eAutomaticReplyTemplate,
   renderAutomaticReply,
   renderAutomaticReplyIdentity,
   renderAutomaticReplyParts,
   renderAutomaticReplySummary,
   renderAutomaticReplySummaryParts,
+  renderReplyTokenUsage,
   validateAutomaticReplyTemplate,
 } from "../../dist/investigation/auto-reply-template.js";
 import { InvestigationRequestError } from "../../dist/investigation/errors.js";
@@ -81,6 +87,159 @@ function expectCode(operation: () => unknown, code: string): void {
 }
 
 describe("automatic reply templates", () => {
+  it.each([
+    [
+      "pr",
+      "full_diff",
+      "Inspect the entire frozen diff and all affected behavior, callers, and tests.",
+      "Review the pinned PR changes and affected behavior, including relevant callers and test source.",
+    ],
+    [
+      "bug",
+      "issue_snapshot",
+      "Investigate the entire frozen issue snapshot, every supplied fact, and all supported hypotheses.",
+      "Statically investigate the recorded issue snapshot, supplied facts, and supported hypotheses.",
+    ],
+  ] as const)(
+    "projects only the canonical historical %s scope without mutating the report",
+    (kind, unitKind, legacy, wording) => {
+      const report = preview(kind);
+      const unit = report.report.coverage.includedUnits[0]!;
+      unit.kind = unitKind;
+      unit.requiredWork = legacy;
+      report.report.summary = "A frozen collection is intentional in this implementation.";
+      const before = structuredClone(report);
+      const body = render(report);
+      expect(body).toContain(wording);
+      expect(body).not.toContain(legacy);
+      expect(body).toContain("A frozen collection is intentional");
+      expect(report).toEqual(before);
+      unit.requiredWork = `${legacy} Custom investigation requirement.`;
+      expect(render(report)).toContain(legacy);
+      unit.requiredWork = legacy;
+      unit.kind = "source_file";
+      expect(render(report)).toContain(legacy);
+    },
+  );
+
+  it("keeps E2E conclusions, runtime identity, and verified media separate from static review", () => {
+    const report = preview();
+    report.context.task.kind = "pr-e2e";
+    report.context.e2e = {
+      headSha: "a".repeat(40),
+      buildIdentity: "Synthetic pinned build",
+      features: [
+        {
+          id: "feature-preview",
+          title: "Preview lifecycle",
+          paths: ["src/Preview.cs"],
+          scenario: "Open and close the preview",
+          userVisible: true,
+          outcome: "passed",
+          artifactRefs: ["artifact-preview"],
+          limitations: [],
+          assertions: [
+            {
+              id: "assertion-preview",
+              expected: "The preview closes",
+              observed: "The preview closed",
+              outcome: "passed",
+              evidenceRefs: ["evidence-preview"],
+            },
+          ],
+        },
+      ],
+      cleanup: {
+        confirmed: true,
+        recordedAt: "2026-09-19T01:00:00.000Z",
+        summary: "Owned processes exited.",
+      },
+    };
+    const media = "## E2E evidence\n\nhttps://github.com/user-attachments/assets/synthetic-video";
+    const body = renderAutomaticReply(report, defaultE2eAutomaticReplyTemplate, verifiedIdentity, {
+      trustedMediaMarkdown: media,
+    });
+    expect(body).toContain("automated E2E runtime verification");
+    expect(body).toContain("## E2E result");
+    expect(body).toContain("## Runtime verification summary");
+    expect(body).toContain("E2E runtime verification: Passed");
+    expect(body).toContain("Preview lifecycle");
+    expect(body).toContain("**Expected:** The preview closes");
+    expect(body).toContain("**Observed:** The preview closed");
+    expect(body).toContain("**Build identity:** Synthetic pinned build");
+    expect(body).toContain(media);
+    expect(body).not.toContain("request a new E2E run");
+    expect(body).not.toContain("**Review conclusion:**");
+    expect(body).not.toContain("conducting this automated issue triage");
+    expect(
+      renderAutomaticReplySummaryParts(report, verifiedIdentity, { trustedMediaMarkdown: media })
+        .body,
+    ).toContain(media);
+    report.context.e2e.cleanup.confirmed = false;
+    const blocked = renderAutomaticReplySummaryParts(report, verifiedIdentity).body;
+    expect(blocked).toContain("E2E runtime verification: Blocked");
+    expect(blocked).toContain(
+      "**Next action:** Resolve the recorded failures or blockers, then request a new E2E run",
+    );
+    expect(blocked).toContain(
+      "Resuming this task only recovers and republishes its recorded result",
+    );
+    report.context.e2e.cleanup.confirmed = true;
+    report.context.e2e.features[0]!.outcome = "failed";
+    report.context.e2e.features[0]!.assertions[0]!.outcome = "failed";
+    const before = structuredClone(report);
+    const failed = renderAutomaticReplySummaryParts(report, verifiedIdentity).body;
+    expect(failed).toContain("E2E runtime verification: Failed");
+    expect(failed).toContain("request a new E2E run in a new PR comment");
+    expect(
+      renderAutomaticReply(report, defaultE2eAutomaticReplyTemplate, verifiedIdentity),
+    ).toContain("Resuming this task only recovers and republishes its recorded result");
+    expect(report).toEqual(before);
+    delete report.context.e2e;
+    expect(renderAutomaticReplySummaryParts(report, verifiedIdentity).body).not.toContain(
+      "request a new E2E run",
+    );
+  });
+
+  it("renders partial usage and nullable provider breakdowns without double counting", () => {
+    const usage: InvestigationUsageSummary = {
+      usage: {
+        inputTokens: 100,
+        cachedReadTokens: 60,
+        outputTokens: 20,
+        reasoningTokens: 10,
+        cacheWriteTokens: null,
+        totalTokens: 120,
+        providerCounters: {},
+      },
+      reportedTokens: 120,
+      completeness: "partial",
+      invocationCount: 3,
+      activeInvocationCount: 1,
+      unknownInvocationCount: 1,
+      legacyTokens: 0,
+    };
+    const block = renderReplyTokenUsage(usage);
+    expect(block).toContain("120 tokens (partial usage)");
+    expect(block).toContain("Cached read: 60");
+    expect(block).toContain("Cache write: Unavailable");
+    expect(block).toContain("unreported usage is not included yet");
+    expect(block).toContain("missing or incomplete usage");
+    const report = preview();
+    const template = defaultAutomaticReplyTemplates.pullRequest.replace(
+      "{{details}}",
+      "{{usage}}\n\n{{details}}",
+    );
+    const body = renderAutomaticReply(report, template, verifiedIdentity, { usage });
+    expect(body.match(/\*\*Reported token usage:\*\*/gu)).toHaveLength(1);
+    expect(renderAutomaticReplySummaryParts(report, verifiedIdentity, { usage }).body).toContain(
+      block,
+    );
+    expect(() =>
+      validateAutomaticReplyTemplate(template.replace("{{usage}}", "{{usage}}\n{{usage}}")),
+    ).toThrow("only once");
+  });
+
   it("provides the documented English templates with each required section exactly once", () => {
     expect(automaticReplyTemplateVersion).toBe(4);
     expect(automaticReplyTemplateTokens).toEqual({
@@ -683,13 +842,13 @@ describe("automatic reply summary fallback", () => {
     expect(parts.identity).toBe(renderAutomaticReplyIdentity(report, verifiedIdentity));
     expect(parts.body).toBe(`${parts.identity}\n\n${parts.content}`);
     expect(parts.body.split(parts.identity)).toHaveLength(2);
-    expect(parts.content.startsWith("## Investigation completed — summary only")).toBe(true);
+    expect(parts.content.startsWith("## Static review completed — summary only")).toBe(true);
     expect(parts.content).not.toContain(parts.identity);
     expect(automaticReplyResultWithoutIdentity(parts.body, report, verifiedIdentity)).toBe(
       parts.content,
     );
     expect(summary.startsWith(renderAutomaticReplyIdentity(report, verifiedIdentity))).toBe(true);
-    expect(summary).toContain("## Investigation completed — summary only");
+    expect(summary).toContain("## Static review completed — summary only");
     expect(summary).toContain("End-to-end validation:");
     expect(summary).toContain(`Pull request reviewed at commit ${"b".repeat(40)}.`);
     expect(summary).toContain("Later pushes are outside this report.");
@@ -731,10 +890,10 @@ describe("automatic reply summary fallback", () => {
       report.assessment.bugAssessment.status = status;
       report.assessment.reproduction.status = "not_run";
       const summary = renderAutomaticReplySummary(report, verifiedIdentity);
-      expect(summary).toContain("Investigation completed — summary only");
+      expect(summary).toContain("Static investigation completed — summary only");
       expect(summary).toContain(`Bug triage: ${status.replaceAll("_", " ")}`);
       expect(summary).toContain("Runtime reproduction: not run");
-      expect(summary).toContain("The frozen issue text and discussion snapshot");
+      expect(summary).toContain("The issue text and discussion snapshot");
       expect(summary).toContain("Later edits are outside this report.");
       expect(summary).toContain(
         "any requested information or validation remains a follow-up action",
@@ -1114,7 +1273,7 @@ describe("automatic issue replies", () => {
       expect(body).toContain("Which installed version shows the failure?");
       expect(body).toContain("**Existing fix:** Commit abc123");
       expect(body).toContain("**Duplicate reference:** Issue 77");
-      expect(body).toContain("Frozen issue text and discussion snapshot");
+      expect(body).toContain("Issue text and discussion snapshot");
     },
   );
 

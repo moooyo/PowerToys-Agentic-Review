@@ -1,0 +1,501 @@
+import { createInvestigationPreview } from "@agentic-review/contracts";
+import { createInvestigationCheckpoint } from "@agentic-review/domain";
+import { describe, expect, it, vi } from "vitest";
+import type {
+  ProcessHostClient,
+  ProcessResourceLimits,
+} from "../execution/process-host-protocol.js";
+import { createE2eAgentRunner, createE2ePrompt, projectE2eResult } from "./e2e-agent-runner.js";
+import type { E2eBuildRecord } from "./e2e-build.js";
+import { type E2eFeaturePlan, parseE2eFeaturePlan } from "./e2e-feature-plan.js";
+import type { E2eToolReceipt, E2eToolServer } from "./e2e-tool-server.js";
+import type { ModelTurnExecutionInput, ModelTurnRunnerOptions } from "./model-turn-runner.js";
+
+const headSha = "a".repeat(40);
+function fixture() {
+  const plan: E2eFeaturePlan = {
+    id: "conversion",
+    title: "Square mile conversion",
+    paths: ["converter.cs"],
+    scenario: "Enter an area and inspect the calculated value.",
+    userVisible: true,
+    assertions: [
+      {
+        id: "result",
+        kind: "ui",
+        description: "The converted value is correct.",
+        selector: { automationId: "Result" },
+        assertion: { property: "text", expected: "2589988", match: "contains" },
+      },
+    ],
+  };
+  const build: E2eBuildRecord = {
+    id: "build",
+    headSha,
+    projectPath: "converter.csproj",
+    projectDigest: "b".repeat(64),
+    tool: "msbuild",
+    command: ["msbuild.exe", "converter.csproj"],
+    artifacts: [
+      {
+        path: "C:/Fresh/app.exe",
+        relativePath: "app.exe",
+        digest: "c".repeat(64),
+        byteLength: 1024,
+      },
+    ],
+    manifestDigest: "e".repeat(64),
+    manifestFileCount: 3,
+    identity: "Worker-generated build identity",
+  };
+  const receipts: E2eToolReceipt[] = [
+    {
+      id: "build",
+      operation: "build",
+      status: "passed",
+      assertion: false,
+      buildRef: "build",
+      summary: "Controlled compilation succeeded.",
+      observed: {},
+      artifactRefs: [],
+    },
+    {
+      id: "assert",
+      operation: "assert",
+      status: "passed",
+      assertion: true,
+      featureId: "conversion",
+      assertionId: "result",
+      processRef: "application",
+      buildRef: "build",
+      targetPid: 123,
+      windowHandle: "44",
+      interactionVersion: 1,
+      summary: "The registered UI value matched.",
+      observed: {},
+      artifactRefs: [],
+    },
+    {
+      id: "screenshot",
+      operation: "screenshot",
+      status: "passed",
+      assertion: false,
+      featureId: "conversion",
+      processRef: "application",
+      buildRef: "build",
+      targetPid: 123,
+      windowHandle: "44",
+      interactionVersion: 1,
+      relatedAssertionIds: ["assert"],
+      summary: "The matching UI state was captured.",
+      observed: {},
+      artifactRefs: ["png"],
+    },
+  ];
+  const result = {
+    summary: "Conversion verified.",
+    features: [
+      {
+        featureId: "conversion",
+        outcome: "passed" as "passed" | "failed" | "blocked" | "not_run",
+        reason: "All registered assertions ran.",
+        assertionReceiptIds: ["assert"],
+        mediaReceiptIds: ["screenshot"],
+        limitations: [] as string[],
+      },
+    ],
+  };
+  return {
+    plan,
+    build,
+    receipts,
+    result,
+    artifacts: [{ id: "png", kind: "image" }],
+    paths: ["converter.cs"],
+  };
+}
+const project = (f: ReturnType<typeof fixture>, plans = [f.plan], builds = [f.build]) =>
+  projectE2eResult(f.result, f.receipts, f.artifacts, f.paths, headSha, plans, builds);
+
+describe("registered E2E result projection", () => {
+  it.each([{ paths: ["converter.cs"] }, { paths: [] as string[] }])(
+    "never passes an empty unregistered feature response for paths $paths",
+    ({ paths }) => {
+      const result = projectE2eResult(
+        { summary: "The required product build is blocked.", features: [] },
+        [],
+        [],
+        paths,
+        headSha,
+        [],
+        [],
+      );
+      expect(result.outcome).toBe("blocked");
+      expect(result.e2e.features).toHaveLength(1);
+      expect(result.e2e.features[0]?.outcome).toBe("not_run");
+    },
+  );
+  it("rejects non-executable UI specifications and escaped expectations before locking registration", () => {
+    const f = fixture();
+    const assertion = f.plan.assertions[0]!;
+    if (assertion.kind !== "ui") throw new Error("A UI assertion is required.");
+    assertion.selector.automationId = "a".repeat(513);
+    expect(() => parseE2eFeaturePlan(f.plan, f.paths)).toThrow();
+    assertion.selector.automationId = "Result";
+    assertion.assertion = { property: "text", expected: '"'.repeat(8192) };
+    expect(() => parseE2eFeaturePlan(f.plan, f.paths)).toThrow(/length limit/u);
+  });
+  it("accepts matching registered UI assertions and media bound to the exact Worker build", () => {
+    const f = fixture();
+    const accepted = project(f);
+    expect(accepted.outcome).toBe("completed");
+    expect(accepted.e2e.buildIdentity).toBe(f.build.identity);
+    expect(accepted.e2e.features[0]?.scenario).toBe(f.plan.scenario);
+    expect(accepted.e2e.features[0]?.assertions[0]?.expected).toContain("2589988");
+  });
+  it.each([
+    "generic build",
+    "wrong revision",
+    "no registered feature",
+    "missing assertion",
+    "unbound media",
+    "wrong feature",
+    "wrong process",
+    "wrong window",
+    "wrong assertion media",
+    "log as image",
+  ])("blocks the %s false-pass path", (mutation) => {
+    const f = fixture();
+    let plans = [f.plan];
+    if (mutation === "generic build")
+      f.receipts[0] = { ...f.receipts[0]!, operation: "command", assertion: true };
+    if (mutation === "wrong revision") f.build = { ...f.build, headSha: "d".repeat(40) };
+    if (mutation === "no registered feature") plans = [];
+    if (mutation === "missing assertion") f.receipts.splice(1, 1);
+    if (mutation === "unbound media") {
+      const { processRef: _process, ...unbound } = f.receipts[2]!;
+      f.receipts[2] = unbound;
+    }
+    if (mutation === "wrong feature") f.receipts[2] = { ...f.receipts[2]!, featureId: "other" };
+    if (mutation === "wrong process") f.receipts[2] = { ...f.receipts[2]!, processRef: "other" };
+    if (mutation === "wrong window")
+      f.receipts[2] = { ...f.receipts[2]!, windowHandle: "another-window" };
+    if (mutation === "wrong assertion media")
+      f.receipts[2] = { ...f.receipts[2]!, relatedAssertionIds: ["invented"] };
+    if (mutation === "log as image") f.artifacts[0]!.kind = "log";
+    expect(project(f, plans).outcome).toBe("blocked");
+  });
+  it.each(["blocked", "not_run"] as const)(
+    "does not upgrade an honestly declared %s feature after prerequisite checks",
+    (outcome) => {
+      const f = fixture();
+      f.result.features[0]!.outcome = outcome;
+      f.result.features[0]!.reason = "The main scenario could not execute.";
+      expect(project(f).e2e.features[0]?.outcome).toBe(outcome);
+      expect(project(f).outcome).toBe("blocked");
+    },
+  );
+  it("does not hide an observed failure by selecting only a later passed assertion", () => {
+    const f = fixture();
+    f.receipts.push({ ...f.receipts[1]!, id: "failed-observation", status: "failed" });
+    expect(project(f).outcome).toBe("failed");
+  });
+  it("does not reuse one feature's assertion and screenshot to pass another feature", () => {
+    const f = fixture();
+    f.result.features.push({ ...f.result.features[0]!, featureId: "cleanup" });
+    const projected = project(f, [f.plan, { ...f.plan, id: "cleanup", title: "Cleanup" }]);
+    expect(projected.e2e.features[0]?.outcome).toBe("passed");
+    expect(projected.e2e.features[1]?.outcome).toBe("blocked");
+  });
+  it("rejects command acceptance for a registered user-visible feature", () => {
+    const f = fixture();
+    f.receipts[1] = { ...f.receipts[1]!, operation: "run-check" };
+    expect(project(f).outcome).toBe("blocked");
+    expect(() =>
+      parseE2eFeaturePlan(
+        {
+          ...f.plan,
+          assertions: [
+            {
+              id: "fake",
+              kind: "process",
+              description: "Exit zero",
+              outputPath: "app.exe",
+              arguments: [],
+              expectedExitCode: 0,
+              expectedOutputContains: "OK",
+            },
+          ],
+        },
+        f.paths,
+      ),
+    ).toThrow(/UI assertions/u);
+  });
+  it("retains uncovered changed paths instead of completing a partial matrix", () => {
+    const f = fixture();
+    f.paths.push("owner.cs");
+    expect(project(f).e2e.features.at(-1)?.outcome).toBe("not_run");
+  });
+  it("accepts only a bound successful recording rather than an arbitrary MP4", () => {
+    const f = fixture();
+    f.receipts[2] = { ...f.receipts[2]!, operation: "video-stop" };
+    f.artifacts[0]!.kind = "video";
+    expect(project(f).outcome).toBe("completed");
+    f.receipts[2] = { ...f.receipts[2]!, status: "blocked" };
+    expect(project(f).outcome).toBe("blocked");
+  });
+});
+
+function recoveryFixture() {
+  const { task, attempt } = createInvestigationPreview("pr");
+  task.kind = "pr-e2e";
+  task.executionPolicy = {
+    mode: "execute",
+    allowRepositoryExecution: true,
+    authorizationRef: "authorization",
+    allowedSubjectRefs: [task.subjectRef],
+  };
+  const subject = task.subjects.find((entry) => entry.id === task.subjectRef)!;
+  if (subject.kind !== "original_pr") throw new Error("A PR is required.");
+  const checkpoint = createInvestigationCheckpoint({
+    task,
+    attemptId: attempt.id,
+    checkpointId: "recovery",
+    leaseVersion: attempt.leaseVersion,
+    recordedAt: "2026-09-19T00:00:00Z",
+  });
+  const execute = vi.fn(async () => {
+    throw new Error("Recovery must not invoke a model.");
+  });
+  const createTools = vi.fn(() => {
+    throw new Error("Recovery must not reopen the desktop.");
+  });
+  const runner = createE2eAgentRunner({
+    modelOptions: {} as ModelTurnRunnerOptions,
+    processHost: {} as ProcessHostClient,
+    environment: {},
+    processLimits: {} as ProcessResourceLimits,
+    powershellExecutablePath: "C:/Windows/powershell.exe",
+    gitExecutablePath: "C:/Tools/git.exe",
+    jsonRunner: { execute },
+    createTools,
+  });
+  const input = {
+    task,
+    attempt,
+    checkpoint,
+    signal: new AbortController().signal,
+    workspace: {
+      sourceDirectory: "C:/Attempts/source",
+      sourceBinding: { sourceSha: subject.headSha },
+    },
+  } as ModelTurnExecutionInput;
+  return { runner, input, checkpoint, execute, createTools };
+}
+describe("E2E interruption recovery", () => {
+  it("accepts a prerequisite-blocked empty response and retains the trusted build failure evidence", async () => {
+    const f = recoveryFixture();
+    const { task, attempt, checkpoint } = f.input;
+    const subject = task.subjects.find((entry) => entry.id === task.subjectRef)!;
+    if (subject.kind !== "original_pr" || checkpoint === null)
+      throw new Error("A PR checkpoint is required.");
+    checkpoint.runtime.e2eExecution = {
+      attemptId: attempt.id,
+      status: "started",
+      startedAt: "2026-09-19T00:00:00Z",
+      completedAt: null,
+    };
+    const evidence = {
+      id: "build-blocked",
+      subjectRef: task.subjectRef,
+      source: "executor_observation" as const,
+      authority: "worker" as const,
+      summary:
+        "build: blocked. E2E_BUILD_SOURCE_INVALID: The pinned product project could not be verified.",
+      artifactRefs: ["build-log"],
+      evidenceRefs: [],
+      provenance: {
+        taskId: task.id,
+        attemptId: attempt.id,
+        producer: "e2e-tool-server",
+        recordedAt: "2026-09-19T00:00:10Z",
+      },
+    };
+    const artifact = {
+      id: "build-log",
+      taskId: task.id,
+      attemptId: attempt.id,
+      subjectRef: task.subjectRef,
+      kind: "log" as const,
+      name: "build-blocked.json",
+      mediaType: "application/json",
+      digest: "a".repeat(64),
+      byteLength: 100,
+      availability: "available" as const,
+    };
+    const cleanup = vi.fn(async () => {});
+    const tools = {
+      start: vi.fn(async () => ({
+        endpoint: "http://127.0.0.1:1234/tool",
+        capability: "synthetic",
+        directory: "C:/Attempts/evidence",
+      })),
+      cleanup,
+      assertObservationsPersisted: vi.fn(),
+      executionSignal: new AbortController().signal,
+      receipts: [
+        {
+          id: evidence.id,
+          operation: "build",
+          status: "blocked",
+          assertion: false,
+          summary: evidence.summary,
+          observed: { errorCode: "E2E_BUILD_SOURCE_INVALID" },
+          artifactRefs: [artifact.id],
+        },
+      ],
+      evidence: [evidence],
+      artifacts: [artifact],
+      features: [],
+      builds: [],
+    } as unknown as E2eToolServer;
+    const execute = vi.fn(async () => ({
+      value: { summary: "The required product build is blocked.", features: [] },
+      usage: { tokens: 100, source: "cli" as const },
+    }));
+    const runner = createE2eAgentRunner({
+      modelOptions: { engine: "codex" } as ModelTurnRunnerOptions,
+      processHost: {} as ProcessHostClient,
+      environment: {},
+      processLimits: {} as ProcessResourceLimits,
+      powershellExecutablePath: "C:/Windows/powershell.exe",
+      gitExecutablePath: "C:/Tools/git.exe",
+      jsonRunner: { execute },
+      createTools: () => tools,
+    });
+    const result = await runner.execute({
+      ...f.input,
+      workspace: {
+        ...f.input.workspace,
+        assertSourceBinding: vi.fn(async () => {}),
+        readPrDiffManifest: vi.fn(async () => ({
+          schemaVersion: "InvestigationPrDiffManifestV1" as const,
+          subjectRef: subject.id,
+          baseSha: subject.baseSha,
+          headSha: subject.headSha,
+          mergeBaseSha: subject.baseSha,
+          files: [
+            { path: "converter.cs", previousPath: null, status: "modified" as const, chunkIds: [] },
+          ],
+          chunks: [],
+          digest: "b".repeat(64),
+        })),
+      },
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(result.outcome).toBe("blocked");
+    expect(result.runtime.e2e?.features[0]?.outcome).toBe("not_run");
+    expect(result.runtime.evidence).toContainEqual(evidence);
+    expect(result.runtime.artifacts).toContainEqual(artifact);
+    expect(result.round.analysis.coverage.unresolvedUnitRefs).toEqual(
+      task.scope.includedUnits.map((unit) => unit.id),
+    );
+  });
+  it("discloses only HEAD inert links and blocks claims that require real link semantics", () => {
+    const f = recoveryFixture();
+    const sourceSha = f.input.workspace.sourceBinding!.sourceSha;
+    const headLink = { path: ".claude/CLAUDE.md", revisionSha: sourceSha };
+    const prompt = createE2ePrompt({
+      input: {
+        ...f.input,
+        workspace: {
+          ...f.input.workspace,
+          sourceBinding: {
+            ...f.input.workspace.sourceBinding!,
+            inertSymlinks: [headLink, { path: "removed-build-link", revisionSha: "e".repeat(40) }],
+          },
+        },
+      },
+      changedPaths: ["converter.cs"],
+      mergeBaseSha: "d".repeat(40),
+      endpoint: "http://127.0.0.1:1234",
+      capability: "synthetic-capability",
+      directory: "C:/Attempts/evidence",
+    });
+    const envelope = JSON.parse(prompt.split("Trusted task envelope:\n")[1]!);
+    expect(envelope.inertSymlinks).toEqual([headLink]);
+    expect(prompt).toContain("No target was followed or materialized");
+    expect(prompt).toContain("a build or scenario that needs real symlink semantics\nis Blocked");
+    expect(prompt).toContain("Do not follow an external target, create real links");
+    expect(prompt).toContain("When video recording is available, capture a short video");
+  });
+
+  it("recovers accepted observations without calling a model or tools again", async () => {
+    const f = recoveryFixture();
+    f.checkpoint.runtime.e2e = project(fixture()).e2e;
+    f.checkpoint.runtime.e2e.headSha = f.input.workspace.sourceBinding!.sourceSha;
+    f.checkpoint.runtime.e2eExecution = {
+      attemptId: f.input.attempt.id,
+      status: "completed",
+      startedAt: "2026-09-19T00:00:00Z",
+      completedAt: "2026-09-19T00:01:00Z",
+    };
+    f.checkpoint.runtime.artifacts = [
+      {
+        id: "png",
+        taskId: f.input.task.id,
+        attemptId: f.input.attempt.id,
+        subjectRef: f.input.task.subjectRef,
+        kind: "image",
+        name: "observed.png",
+        mediaType: "image/png",
+        digest: "c".repeat(64),
+        byteLength: 100,
+        availability: "available",
+      },
+    ];
+    f.checkpoint.runtime.evidence = [
+      {
+        id: "assert",
+        subjectRef: f.input.task.subjectRef,
+        source: "executor_observation",
+        authority: "worker",
+        summary: "The actual registered UI assertion matched.",
+        artifactRefs: ["png"],
+        evidenceRefs: [],
+        provenance: {
+          taskId: f.input.task.id,
+          attemptId: f.input.attempt.id,
+          producer: "e2e-tool-server",
+          recordedAt: "2026-09-19T00:00:30Z",
+        },
+      },
+    ];
+    const recovered = await f.runner.execute(f.input);
+    expect(recovered.usage).toEqual({ tokens: 0, source: "not_invoked" });
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.createTools).not.toHaveBeenCalled();
+  });
+  it("blocks a previously started interrupted attempt rather than rerunning its side effects", async () => {
+    const f = recoveryFixture();
+    f.checkpoint.runtime.e2eExecution = {
+      attemptId: "previous-attempt",
+      status: "started",
+      startedAt: "2026-09-19T00:00:00Z",
+      completedAt: null,
+    };
+    await expect(f.runner.execute(f.input)).rejects.toMatchObject({
+      code: "E2E_EXECUTION_ALREADY_STARTED",
+    });
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.createTools).not.toHaveBeenCalled();
+  });
+  it("refuses all execution before its durable started marker exists", async () => {
+    const f = recoveryFixture();
+    await expect(f.runner.execute(f.input)).rejects.toMatchObject({
+      code: "E2E_EXECUTION_ALREADY_STARTED",
+    });
+    expect(f.createTools).not.toHaveBeenCalled();
+  });
+});

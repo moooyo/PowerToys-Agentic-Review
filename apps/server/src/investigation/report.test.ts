@@ -9,6 +9,7 @@ import {
   type InvestigationReportCollection,
   type InvestigationReportPartV1,
   type InvestigationResultV1,
+  projectInvestigationCheckpointPresentation,
   validateInvestigationResult,
 } from "@agentic-review/contracts";
 import {
@@ -195,7 +196,11 @@ function submission(
 }
 
 /** All records are isolated synthetic fixtures; these tests never contact upstream repositories. */
-function fixture(findingCount = 2, outcome: "completed" | "blocked" = "completed") {
+function fixture(
+  findingCount = 2,
+  outcome: "completed" | "blocked" = "completed",
+  reviewMode: "legacy" | "local_checkout" = "legacy",
+) {
   const { task, attempt, result } = createInvestigationFixture("pr", { findingCount, outcome });
   for (const unit of task.scope.includedUnits)
     if (unit.kind === "investigation") unit.kind = "full_diff";
@@ -229,6 +234,11 @@ function fixture(findingCount = 2, outcome: "completed" | "blocked" = "completed
     leaseVersion: attempt.leaseVersion,
     recordedAt: "2026-09-15T02:00:03.000Z",
   });
+  // Existing report fixtures preserve historical chunk receipts and separate finalization.
+  if (reviewMode === "legacy") {
+    delete checkpoint.runtime.reviewMode;
+    sealCheckpoint(checkpoint);
+  }
   const source = sourceManifest(task, result);
   checkpoint = applyInvestigationSourceCoverage(checkpoint, source, {
     task,
@@ -252,7 +262,10 @@ function fixture(findingCount = 2, outcome: "completed" | "blocked" = "completed
     .map((unit) => unit.id);
   checkpoint.runtime.sourceCoverage = {
     manifest: source,
-    brokeredUnitIds: outcome === "completed" ? source.chunks.map((chunk) => chunk.id) : [],
+    brokeredUnitIds:
+      reviewMode === "legacy" && outcome === "completed"
+        ? source.chunks.map((chunk) => chunk.id)
+        : [],
   };
   const analysis: InvestigationAnalysisV1 = {
     schemaVersion: "InvestigationAnalysisV1",
@@ -435,6 +448,241 @@ function derivedPatchFixture() {
 }
 
 describe("assembleInvestigationReport", () => {
+  it("seals the deterministic partial E2E presentation without adopting unaccepted analysis", () => {
+    const { task, attempt, result } = createInvestigationFixture("pr", {
+      findingCount: 0,
+      outcome: "interrupted",
+    });
+    task.kind = "pr-e2e";
+    task.scope.includedUnits.forEach((unit) => {
+      unit.kind = "e2e_features";
+      // Initial E2E coverage has not adopted the preview fixture's static snapshot evidence.
+      unit.evidenceRefs = [];
+      unit.status = "pending";
+    });
+    task.scope.completedUnitRefs = [];
+    task.scope.unresolvedUnitRefs = task.scope.includedUnits.map((unit) => unit.id);
+    task.executionPolicy = {
+      mode: "execute",
+      allowRepositoryExecution: true,
+      allowedSubjectRefs: [task.subjectRef],
+      authorizationRef: "synthetic-e2e-authorization",
+    };
+    const checkpoint = createInvestigationCheckpoint({
+      task,
+      attemptId: attempt.id,
+      checkpointId: result.report.loop.checkpointId,
+      leaseVersion: attempt.leaseVersion,
+      recordedAt: "2026-09-19T00:00:00Z",
+    });
+    checkpoint.stopReason = "budget_exhausted";
+    checkpoint.consumed.tokens = task.budget.maxTokens + 1;
+    checkpoint.runtime.e2eExecution = {
+      attemptId: attempt.id,
+      status: "completed",
+      startedAt: checkpoint.recordedAt,
+      completedAt: checkpoint.recordedAt,
+    };
+    checkpoint.runtime.artifacts = [
+      {
+        id: "synthetic-e2e-artifact",
+        taskId: task.id,
+        attemptId: attempt.id,
+        subjectRef: task.subjectRef,
+        kind: "log",
+        name: "preview-observation.json",
+        mediaType: "application/json",
+        digest: "8".repeat(64),
+        byteLength: 256,
+        availability: "available",
+      },
+    ];
+    checkpoint.runtime.evidence = [
+      {
+        id: "synthetic-e2e-observation",
+        subjectRef: task.subjectRef,
+        source: "executor_observation",
+        authority: "worker",
+        summary: "The preview remained open.",
+        artifactRefs: ["synthetic-e2e-artifact"],
+        evidenceRefs: [],
+        provenance: {
+          taskId: task.id,
+          attemptId: attempt.id,
+          producer: "e2e-tool-server",
+          recordedAt: checkpoint.recordedAt,
+        },
+      },
+    ];
+    checkpoint.runtime.checks = [
+      {
+        id: "synthetic-e2e-assertion",
+        scenarioId: "synthetic-e2e-feature",
+        subjectRef: task.subjectRef,
+        planRef: null,
+        required: true,
+        description: "Close the preview.",
+        status: "failed",
+        executor: "e2e-tool-server",
+        evidenceRefs: ["synthetic-e2e-observation"],
+        authoritativeAttemptId: attempt.id,
+      },
+    ];
+    const subject = task.subjects.find((entry) => entry.id === task.subjectRef);
+    if (subject?.kind !== "original_pr") throw new Error("Expected a PR fixture.");
+    checkpoint.runtime.e2e = {
+      headSha: subject.headSha,
+      buildIdentity: "Synthetic pinned build",
+      cleanup: {
+        confirmed: true,
+        recordedAt: checkpoint.recordedAt,
+        summary: "Owned processes exited.",
+      },
+      features: [
+        {
+          id: "synthetic-e2e-feature",
+          title: "Preview lifecycle",
+          paths: ["src/Preview.cs"],
+          scenario: "Close the preview.",
+          userVisible: true,
+          outcome: "failed",
+          artifactRefs: [],
+          limitations: [],
+          assertions: [
+            {
+              id: "synthetic-e2e-assertion",
+              expected: "The preview closes.",
+              observed: "The preview remained open.",
+              outcome: "failed",
+              evidenceRefs: ["synthetic-e2e-observation"],
+            },
+          ],
+        },
+      ],
+    };
+    const presentation = projectInvestigationCheckpointPresentation(task, checkpoint);
+    result.context.task.kind = task.kind;
+    result.context.e2e = structuredClone(checkpoint.runtime.e2e);
+    result.context.adoptedAttemptIds = [...checkpoint.adoptedAttemptIds];
+    result.report.summary = presentation.summary;
+    result.report.coverage = structuredClone(checkpoint.analysis.coverage);
+    result.report.recheck = {
+      finalFindingCount: 0,
+      validFinalVersionRecheckCount: 0,
+      pendingFindingIds: [],
+      records: [],
+    };
+    result.report.loop = {
+      checkpointId: checkpoint.id,
+      checkpointVersion: checkpoint.version,
+      completedRounds: 0,
+      candidates: [],
+      stopReason: checkpoint.stopReason,
+      budget: structuredClone(checkpoint.budget),
+      consumed: structuredClone(checkpoint.consumed),
+    };
+    result.report.limitations = [];
+    result.report.collections = {
+      findings: 0,
+      verificationEvidence: 1,
+      artifacts: 1,
+      plans: 0,
+      nextActions: 0,
+      candidates: 0,
+      rechecks: 0,
+    };
+    result.assessment = presentation.assessment;
+    result.validation = {
+      summary: "One runtime assertion was recorded.",
+      checks: structuredClone(checkpoint.runtime.checks),
+    };
+    result.verificationEvidence = structuredClone(checkpoint.runtime.evidence);
+    result.findings = [];
+    result.diagnostics = [];
+    result.artifacts = structuredClone(checkpoint.runtime.artifacts);
+    result.plans = [];
+    result.nextActions = [];
+    result.feedbackDrafts = [];
+    sealCheckpoint(checkpoint);
+    sealResult(result);
+    const before = structuredClone(checkpoint);
+    const input = submission(result, checkpoint, task, attempt);
+    expect(assembleInvestigationReport(input)).toEqual(result);
+    expect(result.report.summary).toContain("0 passed, 1 failed");
+    expect(result.report.summary).toContain("Final analysis was not adopted");
+    expect(result.outcome).toBe("interrupted");
+    expect(result.report.completeness).toBe("partial");
+    expect(checkpoint).toEqual(before);
+    input.header.report.summary = "E2E completed successfully.";
+    expectCode(() => assembleInvestigationReport(input), "report_summary_mismatch");
+  });
+
+  it("reads a sealed historical E2E header without rewriting its original summary or digest", () => {
+    const { result } = createInvestigationFixture("pr", {
+      findingCount: 0,
+      outcome: "interrupted",
+    });
+    result.context.task.kind = "pr-e2e";
+    result.report.loop.completedRounds = 0;
+    result.report.summary = "Investigation has not started.";
+    sealResult(result);
+    const before = structuredClone(result);
+    const header = reportHeader(result);
+    expect(header.report.summary).toBe("Investigation has not started.");
+    expect(header.report.logicalContentDigest).toBe(before.report.logicalContentDigest);
+    expect(result).toEqual(before);
+  });
+
+  it("seals local checkout reports using canonical changed-file coverage without fabricated chunk delivery", () => {
+    const { input, result } = fixture(2, "completed", "local_checkout");
+    expect(input.checkpoint.runtime.sourceCoverage!.brokeredUnitIds).toEqual([]);
+    expect(
+      input.checkpoint.analysis.coverage.includedUnits.filter(
+        (unit) => unit.kind === "source_file",
+      ),
+    ).toHaveLength(2);
+    expect(
+      input.checkpoint.analysis.coverage.includedUnits.some(
+        (unit) => unit.kind === "pr_diff_chunk",
+      ),
+    ).toBe(false);
+    expect(assembleInvestigationReport(input)).toEqual(result);
+  });
+
+  it.each(["id", "path", "subject", "requiredWork", "missing"] as const)(
+    "rejects altered local changed-file coverage: %s",
+    (field) => {
+      const { input } = fixture(1, "completed", "local_checkout");
+      const unit = input.checkpoint.analysis.coverage.includedUnits.find(
+        (entry) => entry.kind === "source_file",
+      )!;
+      if (field === "id") unit.id = "forged-file-unit";
+      if (field === "path") unit.paths = ["src/unrelated.cs"];
+      if (field === "subject") unit.subjectRef = "foreign-subject";
+      if (field === "requiredWork") unit.requiredWork = "Inspect only the changed line.";
+      if (field === "missing")
+        input.checkpoint.analysis.coverage.includedUnits =
+          input.checkpoint.analysis.coverage.includedUnits.filter((entry) => entry.id !== unit.id);
+      sealCheckpoint(input.checkpoint);
+      expectCode(() => assembleInvestigationReport(input), "source_coverage_unit_mismatch");
+    },
+  );
+
+  it("requires every local changed file to finish before the full diff is complete", () => {
+    const { input } = fixture(2, "completed", "local_checkout");
+    input.checkpoint.analysis.coverage.includedUnits.find(
+      (unit) => unit.kind === "source_file",
+    )!.status = "pending";
+    sealCheckpoint(input.checkpoint);
+    expectCode(() => assembleInvestigationReport(input), "full_diff_coverage_incomplete");
+  });
+
+  it("retains partial local-source reports with their incomplete changed files", () => {
+    const { input, result } = fixture(2, "blocked", "local_checkout");
+    expect(assembleInvestigationReport(input)).toEqual(result);
+    expect(result.report.coverage.unresolvedUnitRefs.length).toBeGreaterThan(0);
+  });
+
   it("reconstructs every finding across many report parts without a top-k limit", () => {
     const { input, result } = fixture(151);
     const assembled = assembleInvestigationReport({ ...input, parts: [...input.parts].reverse() });

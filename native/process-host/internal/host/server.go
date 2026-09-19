@@ -27,6 +27,7 @@ type Server struct {
 	logger           *log.Logger
 	maxConcurrent    int
 	interactiveInput bool
+	namedJobRecovery *protocol.NamedJobRecoveryCapability
 
 	mu           sync.Mutex
 	reservations map[string]*managedProcess
@@ -68,6 +69,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.interactiveInput {
 		capabilities.InteractiveStdin = protocol.DefaultInteractiveStdinCapabilities()
 	}
+	capabilities.NamedJobRecovery = s.namedJobRecovery
 	if err := s.emitter.Emit(protocol.ReadyEvent{
 		ProtocolVersion: protocol.Version,
 		Type:            "ready",

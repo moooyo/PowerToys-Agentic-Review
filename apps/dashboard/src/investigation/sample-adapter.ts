@@ -14,6 +14,7 @@ import {
   type InvestigationReportHeaderV1,
   type InvestigationReportRef,
   type InvestigationResultV1,
+  type InvestigationSchedulerStatus,
   type InvestigationTaskV1,
 } from "@agentic-review/contracts";
 import type {
@@ -392,6 +393,13 @@ export function createSampleInvestigationApi(): InvestigationApi {
     { input: string; result: InvestigationCommentPublicationSummary }
   >();
   let sequence = 0;
+  let scheduler: InvestigationSchedulerStatus = {
+    staticConcurrency: 1,
+    e2eConcurrency: 1,
+    occupiedStatic: 0,
+    occupiedE2e: 0,
+    leases: [],
+  };
 
   for (const fixture of sampleFixtures()) {
     const subject = fixture.task.subjects.find((item) => item.id === fixture.task.subjectRef)!;
@@ -1013,6 +1021,20 @@ export function createSampleInvestigationApi(): InvestigationApi {
     syncComment: async (id, input) => commentCommand(id, structuredClone(input), "sync"),
     reconcileComment: async (id, input) => commentCommand(id, structuredClone(input), "reconcile"),
     repositories: async () => ({ items: [structuredClone(repository)] }),
+    scheduler: async () => structuredClone(scheduler),
+    updateScheduler: async ({ staticConcurrency }) => {
+      if (
+        !Number.isSafeInteger(staticConcurrency) ||
+        staticConcurrency < 1 ||
+        staticConcurrency > 16
+      )
+        throw new InvestigationHttpError(
+          400,
+          "Static concurrency must be an integer between 1 and 16.",
+        );
+      scheduler = { ...scheduler, staticConcurrency };
+      return structuredClone(scheduler);
+    },
     repositoryWebhookSettings: async (repositoryId) => {
       if (repositoryId !== repository.id)
         throw new InvestigationHttpError(404, "The sample repository was not found.");
@@ -1029,13 +1051,16 @@ export function createSampleInvestigationApi(): InvestigationApi {
         input.allowedActorUserIds.some((id) => !validId(id)) ||
         input.allowedActorUserIds.length > 1024 ||
         new Set(input.allowedActorUserIds).size !== input.allowedActorUserIds.length ||
-        (input.enabled && (input.reviewerUserId === null || input.allowedActorUserIds.length === 0))
+        (input.e2eEnabled !== undefined && typeof input.e2eEnabled !== "boolean") ||
+        ((input.enabled || input.e2eEnabled === true) &&
+          (input.reviewerUserId === null || input.allowedActorUserIds.length === 0))
       ) {
         throw new InvestigationHttpError(400, "The sample webhook configuration is invalid.");
       }
       webhookSettings = {
         ...webhookSettings,
         enabled: input.enabled,
+        ...(input.e2eEnabled === undefined ? {} : { e2eEnabled: input.e2eEnabled }),
         reviewerUserId: input.reviewerUserId,
         allowedActorUserIds: [...input.allowedActorUserIds],
         version: webhookSettings.version + 1,

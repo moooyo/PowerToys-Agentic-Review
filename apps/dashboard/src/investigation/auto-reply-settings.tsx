@@ -488,7 +488,7 @@ function ReplyDeliveryList({
               {reply.body !== null && (
                 <Accordion variant="outlined" disableGutters>
                   <AccordionSummary expandIcon={<span aria-hidden="true">+</span>}>
-                    <Typography variant="body2">View frozen comment</Typography>
+                    <Typography variant="body2">View saved comment</Typography>
                   </AccordionSummary>
                   <AccordionDetails>
                     <Typography variant="caption" color="text.secondary">

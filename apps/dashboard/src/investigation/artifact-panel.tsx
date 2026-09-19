@@ -31,6 +31,85 @@ export function assertArtifactBinding(
   }
 }
 
+export function artifactPreviewKind(mediaType: string): "image" | "video" | undefined {
+  switch (mediaType) {
+    case "image/png":
+    case "image/jpeg":
+    case "image/webp":
+    case "image/gif":
+      return "image";
+    case "video/mp4":
+    case "video/webm":
+    case "video/quicktime":
+      return "video";
+    default:
+      return undefined;
+  }
+}
+
+export async function readVerifiedArtifactContent(
+  artifact: InvestigationArtifactV1,
+  metadata: InvestigationArtifactMetadataV1,
+  signal: AbortSignal,
+): Promise<Blob> {
+  signal.throwIfAborted();
+  assertArtifactBinding(artifact, metadata);
+  if (metadata.artifact.availability !== "available") {
+    throw new Error("The artifact content is no longer available.");
+  }
+  const content = await fetchInvestigationArtifactContent(artifact.id, signal);
+  signal.throwIfAborted();
+  const mediaType = (value: string) => value.split(";")[0]?.trim().toLowerCase();
+  if (
+    content.size !== artifact.byteLength ||
+    mediaType(content.type) !== mediaType(artifact.mediaType)
+  ) {
+    throw new Error("The artifact content does not match its recorded size or media type.");
+  }
+  const bytes = await content.arrayBuffer();
+  signal.throwIfAborted();
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  signal.throwIfAborted();
+  const digest = [...new Uint8Array(hash)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  if (digest !== artifact.digest) {
+    throw new Error("The artifact content failed its integrity check.");
+  }
+  return content.slice(0, content.size, artifact.mediaType);
+}
+
+interface ArtifactPreview {
+  kind: "image" | "video";
+  url: string;
+  release: () => void;
+}
+
+export async function createArtifactPreview(
+  artifact: InvestigationArtifactV1,
+  metadata: InvestigationArtifactMetadataV1,
+  signal: AbortSignal,
+): Promise<ArtifactPreview> {
+  const kind = artifactPreviewKind(artifact.mediaType);
+  if (!kind) throw new Error("This artifact is available as a download only.");
+  const content = await readVerifiedArtifactContent(artifact, metadata, signal);
+  signal.throwIfAborted();
+  const url = URL.createObjectURL(content);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    signal.removeEventListener("abort", release);
+    URL.revokeObjectURL(url);
+  };
+  signal.addEventListener("abort", release, { once: true });
+  return {
+    kind,
+    url,
+    release,
+  };
+}
+
 export function ArtifactDetails({
   artifact,
   metadata,
@@ -38,6 +117,12 @@ export function ArtifactDetails({
   busy,
   onDownload,
   onRefresh,
+  preview,
+  previewBusy = false,
+  previewError,
+  onPreview,
+  onClosePreview,
+  onPreviewError,
 }: {
   artifact: InvestigationArtifactV1;
   metadata?: InvestigationArtifactMetadataV1;
@@ -45,7 +130,15 @@ export function ArtifactDetails({
   busy: boolean;
   onDownload: () => void;
   onRefresh: () => void;
+  preview?: Pick<ArtifactPreview, "kind" | "url">;
+  previewBusy?: boolean;
+  previewError?: string;
+  onPreview?: () => void;
+  onClosePreview?: () => void;
+  onPreviewError?: () => void;
 }) {
+  const previewKind = artifactPreviewKind(artifact.mediaType);
+  const available = metadata?.artifact.availability === "available" && !error;
   return (
     <Box>
       <Typography variant="subtitle2">
@@ -91,15 +184,64 @@ export function ArtifactDetails({
         </Alert>
       )}
       <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
-        {metadata?.artifact.availability === "available" && !error && (
+        {available && (
           <Button disabled={busy} onClick={onDownload}>
             Download artifact
           </Button>
+        )}
+        {available && previewKind && onPreview && !preview && (
+          <Button disabled={busy} onClick={onPreview}>
+            Preview {previewKind}
+          </Button>
+        )}
+        {(preview || previewBusy) && onClosePreview && (
+          <Button onClick={onClosePreview}>Close preview</Button>
         )}
         <Button disabled={busy} onClick={onRefresh}>
           {busy ? "Checking artifact…" : "Refresh availability"}
         </Button>
       </Stack>
+      {previewBusy && (
+        <Typography role="status" variant="body2" sx={{ mt: 1 }}>
+          Loading preview…
+        </Typography>
+      )}
+      {previewError && (
+        <Alert severity="warning" sx={{ mt: 1 }}>
+          {previewError}
+        </Alert>
+      )}
+      {available && preview && preview.kind === previewKind && (
+        <Box sx={{ mt: 2 }}>
+          {preview.kind === "image" ? (
+            <Box
+              component="img"
+              src={preview.url}
+              alt={artifact.name}
+              onError={onPreviewError}
+              sx={{ display: "block", maxWidth: "100%", maxHeight: 560, objectFit: "contain" }}
+            />
+          ) : (
+            <>
+              <Box
+                component="video"
+                src={preview.url}
+                aria-label={artifact.name}
+                controls
+                playsInline
+                preload="metadata"
+                onError={onPreviewError}
+                sx={{ display: "block", width: "100%", maxHeight: 560 }}
+              >
+                Your browser does not support video playback. Download the artifact to view it.
+              </Box>
+              <Typography variant="caption" component="div" sx={{ mt: 1 }}>
+                If this video does not play in your browser, download the artifact to view it.
+              </Typography>
+            </>
+          )}
+        </Box>
+      )}
     </Box>
   );
 }
@@ -109,8 +251,13 @@ function ArtifactCard({ artifact }: { artifact: InvestigationArtifactV1 }) {
   const [downloadError, setDownloadError] = useState<string>();
   const [downloading, setDownloading] = useState(false);
   const downloadRequest = useRef<AbortController | null>(null);
+  const [preview, setPreview] = useState<ArtifactPreview>();
+  const [previewError, setPreviewError] = useState<string>();
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const previewRequest = useRef<AbortController | null>(null);
+  const previewResource = useRef<ArtifactPreview | null>(null);
   const current = useQuery({
-    queryKey: ["investigation-artifact", sessionIdentity(session), artifact.id, artifact.digest],
+    queryKey: ["investigation-artifact", sessionIdentity(session), artifact],
     queryFn: async ({ signal }) => {
       const metadata = await investigationApi.artifact(artifact.id, signal);
       assertArtifactBinding(artifact, metadata);
@@ -122,13 +269,69 @@ function ArtifactCard({ artifact }: { artifact: InvestigationArtifactV1 }) {
     refetchOnWindowFocus: "always",
     retry: false,
   });
-  useEffect(() => () => downloadRequest.current?.abort(), []);
+  useEffect(
+    () => () => {
+      downloadRequest.current?.abort();
+      previewRequest.current?.abort();
+      previewResource.current?.release();
+    },
+    [],
+  );
+  useEffect(() => {
+    if (current.isError || current.data?.artifact.availability !== "available") {
+      previewRequest.current?.abort();
+      previewRequest.current = null;
+      previewResource.current?.release();
+      previewResource.current = null;
+      setPreview(undefined);
+      setPreviewBusy(false);
+    }
+  }, [current.isError, current.data?.artifact.availability]);
+  const closePreview = () => {
+    previewRequest.current?.abort();
+    previewRequest.current = null;
+    previewResource.current?.release();
+    previewResource.current = null;
+    setPreview(undefined);
+    setPreviewBusy(false);
+    setPreviewError(undefined);
+  };
   const refresh = () => {
     setDownloadError(undefined);
+    setPreviewError(undefined);
     void current.refetch();
   };
+  const showPreview = async () => {
+    if (previewRequest.current || downloadRequest.current) return;
+    closePreview();
+    const request = new AbortController();
+    previewRequest.current = request;
+    setPreviewBusy(true);
+    let resource: ArtifactPreview | undefined;
+    try {
+      const latest = await current.refetch({ throwOnError: true });
+      request.signal.throwIfAborted();
+      if (latest.data?.artifact.availability !== "available") return;
+      resource = await createArtifactPreview(artifact, latest.data, request.signal);
+      request.signal.throwIfAborted();
+      previewResource.current = resource;
+      setPreview(resource);
+      resource = undefined;
+    } catch (cause) {
+      if (!request.signal.aborted) {
+        setPreviewError(
+          cause instanceof Error ? cause.message : "The preview could not be loaded.",
+        );
+        void current.refetch();
+      }
+    } finally {
+      resource?.release();
+      if (previewRequest.current === request) previewRequest.current = null;
+      if (!request.signal.aborted) setPreviewBusy(false);
+    }
+  };
   const download = async () => {
-    if (downloadRequest.current) return;
+    if (downloadRequest.current || previewRequest.current) return;
     const request = new AbortController();
     downloadRequest.current = request;
     setDownloading(true);
@@ -137,7 +340,8 @@ function ArtifactCard({ artifact }: { artifact: InvestigationArtifactV1 }) {
       const latest = await current.refetch({ throwOnError: true });
       request.signal.throwIfAborted();
       if (latest.data?.artifact.availability !== "available") return;
-      const content = await fetchInvestigationArtifactContent(artifact.id, request.signal);
+      const content = await readVerifiedArtifactContent(artifact, latest.data, request.signal);
+      request.signal.throwIfAborted();
       const url = URL.createObjectURL(content);
       try {
         const link = document.createElement("a");
@@ -164,9 +368,20 @@ function ArtifactCard({ artifact }: { artifact: InvestigationArtifactV1 }) {
       artifact={artifact}
       metadata={current.isSuccess ? current.data : undefined}
       error={current.isError ? current.error.message : downloadError}
-      busy={current.isFetching || downloading}
+      busy={current.isFetching || downloading || previewBusy}
       onDownload={() => void download()}
       onRefresh={refresh}
+      preview={preview}
+      previewBusy={previewBusy}
+      previewError={previewError}
+      onPreview={() => void showPreview()}
+      onClosePreview={closePreview}
+      onPreviewError={() => {
+        closePreview();
+        setPreviewError(
+          "This browser could not display the preview. Download the artifact to view it.",
+        );
+      }}
     />
   );
 }
@@ -190,7 +405,7 @@ export function ArtifactPanel({
           </Typography>
         )}
         {artifacts.map((artifact) => (
-          <ArtifactCard key={artifact.id} artifact={artifact} />
+          <ArtifactCard key={JSON.stringify(artifact)} artifact={artifact} />
         ))}
         {artifacts.length === 0 && (
           <Typography color="text.secondary">No artifacts registered.</Typography>

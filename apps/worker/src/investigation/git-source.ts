@@ -10,11 +10,17 @@ import {
   type ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
 import {
+  type OwnedHardlinkEntry,
+  OwnedHardlinkError,
+  validateOwnedHardlinkGroups,
+} from "./owned-hardlinks.js";
+import {
   type InvestigationPrDiffChunk,
   type InvestigationPrDiffChunkDescriptor,
   type InvestigationPrDiffManifest,
   type InvestigationSourceContext,
   type InvestigationSourceDependencies,
+  type InvestigationSourceFile,
   type InvestigationSourceMaterializer,
   type InvestigationWorkspaceContext,
   type InvestigationWorkspaceFileSystem,
@@ -146,6 +152,7 @@ const dependencySourceExtensions = new Set([
 interface GitSourceTreeEntry {
   readonly path: string;
   readonly mode: "100644" | "100755" | "120000";
+  readonly blobId: string;
 }
 
 /** Public exact-SHA source acquisition; every Git process belongs to the attempt's ProcessHost. */
@@ -335,10 +342,12 @@ export class ProductionInvestigationGitSourceMaterializer
     await this.#assertPath(gitDirectory, "directory");
     const gitIdentity = (await this.#fs.lstat(gitDirectory))!.identity;
     const url = `https://github.com/${repository}.git`;
+    // Git link objects are safe to retain as verified target text in any original checkout.
+    // This never authorizes a filesystem link or supplies the referenced target's semantics.
     const allowInertSymlinks =
-      task.executionPolicy.mode === "source_read" &&
-      subject.kind !== "local_patch" &&
-      this.#options.restorePatchSubject === undefined;
+      subject.kind !== "local_patch" && this.#options.restorePatchSubject === undefined;
+    const allowImmutableSourceDiscovery =
+      task.executionPolicy.mode === "source_read" && allowInertSymlinks;
     const inertSymlinks = new Map<
       string,
       { readonly path: string; readonly revisionSha: string }
@@ -380,7 +389,6 @@ export class ProductionInvestigationGitSourceMaterializer
       await assertGitRevisionTree(mergeBase);
     }
     await run(["checkout", "--quiet", "--detach", "--force", sourceSha]);
-    await this.#assertTree(root);
     // core.symlinks=false must preserve link blobs as ordinary target-text files, never targets.
     for (const entry of inertSymlinks.values()) {
       if (entry.revisionSha !== sourceSha) continue;
@@ -424,7 +432,8 @@ export class ProductionInvestigationGitSourceMaterializer
       }),
     );
     const assertMetadata = async () => {
-      await this.#assertTree(root);
+      await this.#assertPath(root, "directory");
+      await this.#assertPath(gitDirectory, "directory");
       if (
         (await this.#fs.lstat(root))!.identity !== rootIdentity ||
         (await this.#fs.lstat(gitDirectory))?.identity !== gitIdentity
@@ -556,7 +565,15 @@ export class ProductionInvestigationGitSourceMaterializer
           "The materialized patch differs from its canonical saved worktree patch.",
         );
     }
+    const assertCurrentTree = () =>
+      this.#assertTree(
+        root,
+        task.executionPolicy.mode === "execute"
+          ? new Set([...sourceTree.keys()].map((path) => key(win32.join(root, ...path.split("/")))))
+          : undefined,
+      );
     const assertBinding = async () => {
+      await assertCurrentTree();
       await assertMetadata();
       if (decode(await run(["rev-parse", "--verify", "HEAD^{commit}"])).trim() !== sourceSha)
         throw failure("SOURCE_BINDING_MISMATCH", "The checked-out source HEAD changed.");
@@ -582,6 +599,15 @@ export class ProductionInvestigationGitSourceMaterializer
               "SOURCE_BINDING_MISMATCH",
               "The original tracked source changed during a non-mutation task.",
             );
+          if (
+            task.executionPolicy.mode === "source_read" &&
+            (await run(["ls-files", "--others", "--directory", "--no-empty-directory", "-z"]))
+              .byteLength !== 0
+          )
+            throw failure(
+              "SOURCE_BINDING_MISMATCH",
+              "The immutable source checkout contains files outside its original Git tree.",
+            );
         } else if (hash(await capture(context.signal)) !== hash(originalPatch)) {
           throw failure(
             "SOURCE_BINDING_MISMATCH",
@@ -590,6 +616,59 @@ export class ProductionInvestigationGitSourceMaterializer
         }
       }
       await assertMetadata();
+    };
+    const checkoutRepresentations = new Map<string, { digest: string; byteLength: number }>();
+    const assertReadBinding = async (file?: InvestigationSourceFile) => {
+      await assertMetadata();
+      if (file === undefined || mutable) return;
+      if (originalPatch !== null) {
+        await assertBinding();
+        return;
+      }
+      this.#assertGitTree(Buffer.from(`100644 blob ${sourceSha}\t${file.path}\0`, "utf8"));
+      const expected = sourceTree.get(file.path);
+      if (file.content === null) {
+        if (expected !== undefined || file.digest !== null)
+          throw failure(
+            "SOURCE_BINDING_MISMATCH",
+            "The source file is missing from its original checkout location.",
+          );
+        return;
+      }
+      const bytes = Buffer.from(file.content, "utf8");
+      const blobId = createHash("sha1")
+        .update(`blob ${bytes.byteLength}\0`, "utf8")
+        .update(bytes)
+        .digest("hex");
+      if (expected === undefined || file.digest !== hash(bytes))
+        throw failure(
+          "SOURCE_BINDING_MISMATCH",
+          "The source file bytes do not match the original Git blob.",
+        );
+      if (expected.blobId === blobId) return;
+      // A Windows checkout can legitimately contain CRLF although its Git blob uses LF.
+      // Ask Git for the pinned blob's checkout representation rather than stripping bytes:
+      // -text/binary files, literal CR bytes and real edits must retain exact identities.
+      if (expected.mode !== "120000" && file.content.includes("\r\n")) {
+        const representationKey = `${sourceSha}\0${file.path}`;
+        let representation = checkoutRepresentations.get(representationKey);
+        if (representation === undefined) {
+          const checkoutBytes = await run(
+            ["cat-file", "--filters", `${sourceSha}:${file.path}`],
+            context.signal,
+            { GIT_ATTR_SOURCE: sourceSha },
+          );
+          await assertMetadata();
+          representation = { digest: hash(checkoutBytes), byteLength: checkoutBytes.byteLength };
+          checkoutRepresentations.set(representationKey, representation);
+        }
+        if (representation.byteLength === bytes.byteLength && representation.digest === file.digest)
+          return;
+      }
+      throw failure(
+        "SOURCE_BINDING_MISMATCH",
+        "The source file bytes do not match the original Git blob or its pinned checkout representation.",
+      );
     };
     let prDiff:
       | Promise<{
@@ -603,7 +682,7 @@ export class ProductionInvestigationGitSourceMaterializer
           "SOURCE_DIFF_UNAVAILABLE",
           "Only an exact original PR source provides a complete PR diff manifest.",
         );
-      await assertBinding();
+      await assertReadBinding();
       const comparisonBase = mergeBase;
       const listing = decode(
         await run(["diff", "--name-status", "-z", "--no-renames", comparisonBase, sourceSha, "--"]),
@@ -761,7 +840,7 @@ export class ProductionInvestigationGitSourceMaterializer
         ...document,
         digest: createCanonicalResult(document).sha256,
       };
-      await assertBinding();
+      await assertReadBinding();
       return { manifest, chunks };
     };
     const getPrDiff = () => {
@@ -782,7 +861,7 @@ export class ProductionInvestigationGitSourceMaterializer
           "A PR source batch must contain bounded, unique chunk IDs.",
         );
       const requestedIds = [...ids];
-      await assertBinding();
+      await assertReadBinding();
       const frozen = await getPrDiff();
       const chunks = requestedIds.map((id) => {
         const chunk = frozen.chunks.get(id);
@@ -793,14 +872,14 @@ export class ProductionInvestigationGitSourceMaterializer
           );
         return structuredClone(chunk);
       });
-      await assertBinding();
+      await assertReadBinding();
       return chunks;
     };
     const dependencyCache = new Map<string, InvestigationSourceDependencies>();
     const readSourceDependencies = async (
       paths: readonly string[],
     ): Promise<InvestigationSourceDependencies> => {
-      if (!allowInertSymlinks)
+      if (!allowImmutableSourceDiscovery)
         throw failure(
           "SOURCE_DEPENDENCY_UNAVAILABLE",
           "Source dependency discovery requires immutable source-read access without a local patch.",
@@ -1071,7 +1150,7 @@ export class ProductionInvestigationGitSourceMaterializer
       paths: readonly string[],
     ): Promise<InvestigationSourceContext> => {
       const limits = investigationSourceContextLimits;
-      if (!allowInertSymlinks)
+      if (!allowImmutableSourceDiscovery)
         throw failure(
           "SOURCE_DEPENDENCY_UNAVAILABLE",
           "Source context requires immutable source-read access without a local patch.",
@@ -1640,10 +1719,16 @@ export class ProductionInvestigationGitSourceMaterializer
             }),
       },
       assertBinding,
-      capturePatch: capture,
+      ...(originalPatch === null ? { assertReadBinding } : {}),
+      capturePatch: async (signal) => {
+        await assertCurrentTree();
+        return capture(signal);
+      },
       async readPrDiffManifest() {
-        await assertBinding();
-        return structuredClone((await getPrDiff()).manifest);
+        await assertReadBinding();
+        const manifest = structuredClone((await getPrDiff()).manifest);
+        await assertReadBinding();
+        return manifest;
       },
       async readPrDiffChunk(id) {
         const chunks = await readPrDiffChunks([id]);
@@ -1678,10 +1763,11 @@ export class ProductionInvestigationGitSourceMaterializer
     }
   }
 
-  async #assertTree(root: string): Promise<void> {
+  async #assertTree(root: string, trackedPaths?: ReadonlySet<string>): Promise<void> {
     await this.#assertPath(root, "directory");
     const pending = [root];
     let entries = 0;
+    const files: OwnedHardlinkEntry[] = [];
     while (pending.length > 0) {
       const directory = pending.pop()!;
       for (const name of await this.#fs.readDirectory(directory)) {
@@ -1698,7 +1784,7 @@ export class ProductionInvestigationGitSourceMaterializer
         if (
           (state?.kind !== "file" && state?.kind !== "directory") ||
           state.reparsePoint ||
-          (state.kind === "file" && state.linkCount !== 1) ||
+          (state.kind === "file" && state.linkCount !== 1 && trackedPaths === undefined) ||
           key(await this.#fs.realpath(path)) !== key(path)
         )
           throw failure(
@@ -1706,7 +1792,23 @@ export class ProductionInvestigationGitSourceMaterializer
             "A source tree entry is not a regular file or directory.",
           );
         if (state.kind === "directory") pending.push(path);
+        else files.push({ path, state });
       }
+    }
+    try {
+      validateOwnedHardlinkGroups(
+        files,
+        (path) =>
+          trackedPaths !== undefined &&
+          !trackedPaths.has(key(path)) &&
+          !win32
+            .relative(root, path)
+            .split("\\")
+            .some((part) => part.toLowerCase() === ".git"),
+      );
+    } catch (error) {
+      if (error instanceof OwnedHardlinkError) throw failure("SOURCE_PATH_UNSAFE", error.message);
+      throw error;
     }
     await this.#assertPath(root, "directory");
   }
@@ -1724,14 +1826,14 @@ export class ProductionInvestigationGitSourceMaterializer
         "The complete Git tree exceeds its explicit entry budget.",
       );
     for (const record of records) {
-      const match = /^(100644|100755|120000) blob [a-f0-9]{40}\t([^\0]+)$/u.exec(record);
+      const match = /^(100644|100755|120000) blob ([a-f0-9]{40})\t([^\0]+)$/u.exec(record);
       if (match === null || (match[1] === "120000" && !allowInertSymlinks))
         throw failure(
           "SOURCE_TREE_UNSUPPORTED",
-          "Git symlinks require immutable source-read target-text representation; submodules and other non-regular entries are unsupported.",
+          "Git symlinks require an original checkout with verified inert target-text representation; patched link representations, submodules, and other non-regular entries are unsupported.",
         );
-      const path = match[2]!;
-      entries.push({ path, mode: match[1] as GitSourceTreeEntry["mode"] });
+      const path = match[3]!;
+      entries.push({ path, mode: match[1] as GitSourceTreeEntry["mode"], blobId: match[2]! });
       const segments = path.split("/");
       for (let length = 1; length <= segments.length; length++) {
         const segment = segments[length - 1]!;

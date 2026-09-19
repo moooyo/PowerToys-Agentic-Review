@@ -15,11 +15,16 @@ import {
   type InvestigationCreateTaskRequestV1,
   InvestigationFindingsPageV1Schema,
   InvestigationLoopCheckpointV1Schema,
+  InvestigationModelInvocationReceiptSchema,
   InvestigationReportHeaderV1Schema,
   InvestigationRepositorySchema,
+  InvestigationResourceLeaseSchema,
   InvestigationResultV1Schema,
+  InvestigationSchedulerStatusSchema,
   InvestigationSubjectV1Schema,
+  InvestigationTaskProgressSchema,
   InvestigationTaskV1Schema,
+  InvestigationUsageSummarySchema,
   Sha256Schema,
 } from "@agentic-review/contracts";
 import { type Static, Type } from "@sinclair/typebox";
@@ -54,6 +59,7 @@ const githubUserId = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER
 export const RepositoryWebhookSettingsSchema = object({
   repositoryId: EntityIdSchema,
   enabled: Type.Boolean(),
+  e2eEnabled: Type.Optional(Type.Boolean()),
   reviewerUserId: Type.Union([githubUserId, Type.Null()]),
   allowedActorUserIds: Type.Array(githubUserId, { uniqueItems: true, maxItems: 1024 }),
   version: Type.Integer({ minimum: 0 }),
@@ -62,7 +68,7 @@ export const RepositoryWebhookSettingsSchema = object({
 export type RepositoryWebhookSettings = Static<typeof RepositoryWebhookSettingsSchema>;
 export type UpdateRepositoryWebhookSettingsInput = Pick<
   RepositoryWebhookSettings,
-  "version" | "enabled" | "reviewerUserId" | "allowedActorUserIds"
+  "version" | "enabled" | "reviewerUserId" | "allowedActorUserIds" | "e2eEnabled"
 >;
 
 export const RepositoryAutoReplyProgressTemplatesSchema = object({
@@ -157,12 +163,24 @@ export const RepositoryProgressReplySchema = object({
 });
 export type RepositoryProgressReply = Static<typeof RepositoryProgressReplySchema>;
 
+export const TaskProgressSchema = InvestigationTaskProgressSchema;
+export type TaskProgress = Static<typeof TaskProgressSchema>;
+
+export const TaskListSchema = object({
+  items: Type.Array(InvestigationTaskV1Schema),
+  usageByTaskId: Type.Optional(Type.Record(Type.String(), InvestigationUsageSummarySchema)),
+});
+
 export const TaskDetailSchema = object({
   task: InvestigationTaskV1Schema,
   attempts: Type.Array(InvestigationAttemptV1Schema),
   checkpoint: Type.Union([InvestigationLoopCheckpointV1Schema, Type.Null()]),
   latestReport: Type.Union([InvestigationReportHeaderV1Schema, Type.Null()]),
   children: Type.Array(InvestigationTaskV1Schema),
+  resourceLeases: Type.Optional(Type.Array(InvestigationResourceLeaseSchema)),
+  usage: Type.Optional(InvestigationUsageSummarySchema),
+  invocations: Type.Optional(Type.Array(InvestigationModelInvocationReceiptSchema)),
+  progress: Type.Optional(TaskProgressSchema),
 });
 export type TaskDetail = Static<typeof TaskDetailSchema>;
 
@@ -176,6 +194,12 @@ export interface CommentSummaryQuery {
 
 export function createInvestigationApi(transport: InvestigationTransport) {
   return {
+    scheduler: () => transport("/api/investigation/scheduler", InvestigationSchedulerStatusSchema),
+    updateScheduler: (input: { staticConcurrency: number }) =>
+      transport("/api/investigation/scheduler", InvestigationSchedulerStatusSchema, {
+        method: "PUT",
+        body: input,
+      }),
     commentDeliveries: (query: InvestigationCommentDeliveryQuery = {}) =>
       transport(
         `/api/comment-deliveries${queryString(query)}`,
@@ -282,10 +306,7 @@ export function createInvestigationApi(transport: InvestigationTransport) {
         { method: "POST", body: input },
       ),
     tasks: (workItemId?: string) =>
-      transport(
-        `/api/tasks${queryString({ workItemId })}`,
-        object({ items: Type.Array(InvestigationTaskV1Schema) }),
-      ),
+      transport(`/api/tasks${queryString({ workItemId })}`, TaskListSchema),
     task: (id: string) => transport(`/api/tasks/${encodeURIComponent(id)}`, TaskDetailSchema),
     createTask: (input: CreateTaskInput) =>
       transport("/api/tasks", InvestigationTaskV1Schema, { method: "POST", body: input }),

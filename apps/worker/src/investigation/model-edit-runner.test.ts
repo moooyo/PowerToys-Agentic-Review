@@ -278,6 +278,7 @@ describe("saved model edit adapter", () => {
     expect(f.context.processHost.start).not.toHaveBeenCalled();
     const request = f.execute.mock.calls[0]![0];
     expect(request.schema).toBe(InvestigationModelEditsV1Schema);
+    expect(request.toolPolicy).toBe("passive_proposal");
     expect(request.signal).toBe(f.context.signal);
     expect(request.prompt).toContain(JSON.stringify(f.original).slice(1, -1));
     expect(request.prompt).toContain(hash(f.original));

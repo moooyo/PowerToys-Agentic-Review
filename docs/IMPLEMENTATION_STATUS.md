@@ -1,5 +1,35 @@
 # Implementation Status
 
+## Local source review, usage, and E2E acceptance, 2026-09-19
+
+Static reviews now inspect the complete pinned local checkout, with the diff defining scope and
+base files read as needed. Invocation usage, progress, configurable static concurrency, and the
+single E2E execution slot are integrated with the Server, Worker, Dashboard, and independent
+E2E comments. Trusted PR commands can execute the product and publish verified image/video evidence.
+Cancellation retains the E2E slot until process, workspace, and desktop cleanup is confirmed.
+
+Remote Windows build, type, regression, and live acceptance checks passed, including 427 final
+focused cases. Real static reviews completed in one invocation and one analysis round each.
+Actual application cancellation, queued recovery, token projection, and media playback were
+verified. The tested PR scenarios retain their recorded failures and blockers; this does not
+certify that every PR feature passed. See the [complete handoff](handoff/2026-09-19-local-source-review-e2e.md)
+for outcomes and limitations. Dashboard history remains available with automatic execution disabled.
+
+## Comment cancellation labels and source wording, 2026-09-19
+
+Prepared comment updates superseded before dispatch now have a distinct `cancelled` delivery
+state. The Dashboard presents these as neutral **Cancelled** entries and supports matching
+history filters. A narrow read-only projection gives known historical superseded receipts the
+same display classification without rewriting their original records. Genuine failures and
+uncertain deliveries retain their existing states.
+
+Public comment and Dashboard wording now describes recorded inputs, captured snapshots, and
+unchanged task settings directly instead of calling them frozen. Snapshot identity remains
+separate from whether an investigation performs static analysis or runtime verification.
+
+These changes were included in the subsequent remote Windows verification and fork acceptance
+recorded above. The retained Dashboard uses the accepted build with automatic execution disabled.
+
 ## Fork comment lifecycle acceptance, 2026-09-19
 
 One explicitly authorized fork-only run passed the production source importer, signed native

@@ -14,8 +14,10 @@ import type {
   InvestigationHeartbeatRequest,
   InvestigationLoopCheckpointV1,
   InvestigationLoopRoundV1,
+  InvestigationModelInvocationReceipt,
   InvestigationPrDiffManifestV1,
   InvestigationReportPartRequest,
+  InvestigationUsageSummary,
 } from "@agentic-review/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -33,6 +35,38 @@ const digest = "a".repeat(64);
 const claimRequest: InvestigationClaimRequest = { supportedKinds: ["issue-investigate"] };
 const heartbeatRequest: InvestigationHeartbeatRequest = { lease };
 const heartbeatResponse = { cancelRequested: false, leaseExpiresAt: serverTime, serverTime };
+const modelUsageReceipt = (): InvestigationModelInvocationReceipt => ({
+  invocationId: "invocation-1",
+  taskId,
+  attemptId,
+  purpose: "analysis",
+  engine: "codex",
+  model: null,
+  startedAt: serverTime,
+  updatedAt: serverTime,
+  revision: 3,
+  state: "cancelled",
+  disposition: "rejected",
+  completeness: "partial",
+  usage: {
+    inputTokens: 10,
+    cachedReadTokens: 3,
+    outputTokens: 5,
+    reasoningTokens: null,
+    cacheWriteTokens: null,
+    totalTokens: 15,
+    providerCounters: {},
+  },
+});
+const reportUsageSummary = (): InvestigationUsageSummary => ({
+  usage: modelUsageReceipt().usage,
+  reportedTokens: 15,
+  completeness: "complete",
+  invocationCount: 1,
+  activeInvocationCount: 0,
+  unknownInvocationCount: 0,
+  legacyTokens: 0,
+});
 const budget = {
   maxRounds: 3,
   maxDurationMs: 60_000,
@@ -437,6 +471,151 @@ function expectSafeError(error: InvestigationWorkerClientError, ...secrets: stri
 }
 
 describe("Investigation HTTP client requests", () => {
+  it("requests the frozen report usage snapshot with the exact attempt lease", async () => {
+    const fixture = createFixture();
+    const request = { lease };
+    const pending = fixture.client.reportUsage!(taskId, request);
+    const captured = fixture.lastRequest();
+    expect(captured.url.pathname).toBe("/api/worker/tasks/task%3A1/report-usage");
+    expect(JSON.parse(Buffer.concat(captured.request.chunks).toString("utf8"))).toEqual(request);
+    const response = { summary: reportUsageSummary() };
+    captured.request.respondJson(response);
+    await expect(pending).resolves.toEqual(response);
+  });
+
+  it("rejects a report usage response whose token subdivisions contradict its input total", async () => {
+    const fixture = createFixture();
+    const pending = fixture.client.reportUsage!(taskId, { lease });
+    const summary = reportUsageSummary();
+    summary.usage.cachedReadTokens = 100;
+    fixture.lastRequest().request.respondJson({ summary });
+    expect((await rejectionOf(pending)).code).toBe("invalid_response");
+  });
+
+  it("sends retained model accounting under its original lease and acknowledges the exact revision", async () => {
+    const fixture = createFixture();
+    const request = { lease, receipt: modelUsageReceipt() };
+    const pending = fixture.client.modelUsage!(taskId, request);
+    const captured = fixture.lastRequest();
+    expect(captured.url.pathname).toBe("/api/worker/tasks/task%3A1/model-usage");
+    expect(JSON.parse(Buffer.concat(captured.request.chunks).toString("utf8"))).toEqual(request);
+    const response = {
+      invocationId: request.receipt.invocationId,
+      revision: request.receipt.revision,
+    };
+    captured.request.respondJson(response);
+    await expect(pending).resolves.toEqual(response);
+  });
+
+  it.each([true, false])(
+    "preserves explicit execution admission %s in a registration acknowledgement",
+    async (executionAllowed) => {
+      const fixture = createFixture();
+      const receipt: InvestigationModelInvocationReceipt = {
+        ...modelUsageReceipt(),
+        revision: 1,
+        state: "registered",
+        disposition: "pending",
+        completeness: "unavailable",
+        usage: {
+          ...modelUsageReceipt().usage,
+          inputTokens: null,
+          cachedReadTokens: null,
+          outputTokens: null,
+          totalTokens: null,
+        },
+      };
+      const pending = fixture.client.modelUsage!(taskId, { lease, receipt });
+      const response = {
+        invocationId: receipt.invocationId,
+        revision: receipt.revision,
+        executionAllowed,
+      };
+      fixture.lastRequest().request.respondJson(response);
+      await expect(pending).resolves.toEqual(response);
+    },
+  );
+
+  it("rejects a malformed execution admission instead of treating a false-like string as permission", async () => {
+    const fixture = createFixture();
+    const pending = fixture.client.modelUsage!(taskId, { lease, receipt: modelUsageReceipt() });
+    fixture.lastRequest().request.respondJson({
+      invocationId: "invocation-1",
+      revision: 3,
+      executionAllowed: "false",
+    });
+    expect((await rejectionOf(pending)).code).toBe("invalid_response");
+  });
+
+  it.each(["task", "attempt", "usage"])(
+    "rejects an invalid model accounting %s binding before transport",
+    async (binding) => {
+      const fixture = createFixture();
+      const receipt = modelUsageReceipt();
+      if (binding === "task") receipt.taskId = "another-task";
+      if (binding === "attempt") receipt.attemptId = "another-attempt";
+      if (binding === "usage") receipt.usage.cachedReadTokens = 100;
+      expect((await rejectionOf(fixture.client.modelUsage!(taskId, { lease, receipt }))).code).toBe(
+        "invalid_request",
+      );
+      expect(fixture.httpsRequest).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { invocationId: "another-invocation", revision: 3 },
+    { invocationId: "invocation-1", revision: 2 },
+    { invocationId: "invocation-1", revision: 4 },
+  ])(
+    "rejects a model accounting acknowledgement for another identity or revision: %j",
+    async (response) => {
+      const fixture = createFixture();
+      const pending = fixture.client.modelUsage!(taskId, { lease, receipt: modelUsageReceipt() });
+      fixture.lastRequest().request.respondJson(response);
+      expect((await rejectionOf(pending)).code).toBe("invalid_response");
+    },
+  );
+
+  it("authenticates cleanup with the exact original lease even after execution ends", async () => {
+    const fixture = createFixture();
+    const request = { lease, ownedProcessesStopped: true as const, desktopRestored: true as const };
+    const pending = fixture.client.cleanup!(taskId, request);
+    const captured = fixture.lastRequest();
+    expect(captured.url.pathname).toBe("/api/worker/tasks/task%3A1/cleanup");
+    expect(JSON.parse(Buffer.concat(captured.request.chunks).toString("utf8"))).toEqual(request);
+    captured.request.respondJson({ released: true, attemptId });
+    await expect(pending).resolves.toEqual({ released: true, attemptId });
+  });
+
+  it("reports fenced activity separately from heartbeat and accepts unknown progress times", async () => {
+    const fixture = createFixture();
+    const request = { lease, sequence: 1, kind: "stage" as const, stage: "model" as const };
+    const pending = fixture.client.progress!(taskId, request);
+    const captured = fixture.lastRequest();
+    expect(captured.url.pathname).toBe("/api/worker/tasks/task%3A1/progress");
+    expect(JSON.parse(Buffer.concat(captured.request.chunks).toString("utf8"))).toEqual(request);
+    const progress = {
+      stage: "model",
+      stageStartedAt: serverTime,
+      lastActivityAt: serverTime,
+      lastMeaningfulProgressAt: null,
+      lastHeartbeatAt: null,
+    };
+    captured.request.respondJson({ progress });
+    await expect(pending).resolves.toEqual({ progress });
+  });
+
+  it("rejects a cleanup response for another attempt", async () => {
+    const fixture = createFixture();
+    const pending = fixture.client.cleanup!(taskId, {
+      lease,
+      ownedProcessesStopped: true,
+      desktopRestored: true,
+    });
+    fixture.lastRequest().request.respondJson({ released: true, attemptId: "another-attempt" });
+    expect((await rejectionOf(pending)).code).toBe("invalid_response");
+  });
+
   it("reuses verified Server TLS configuration and authenticates each request with the Worker Bearer token", async () => {
     const fixture = createFixture({ tls: { ca: "fixture-ca", serverName: "worker-api.internal" } });
     for (let index = 0; index < 2; index += 1) {

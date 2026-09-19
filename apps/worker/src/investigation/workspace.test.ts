@@ -8,17 +8,23 @@ import {
 } from "@agentic-review/contracts";
 import { describe, expect, it, vi } from "vitest";
 import type { ProcessHostClient } from "../execution/process-host-protocol.js";
+import { ProductionInvestigationGitSourceMaterializer } from "./git-source.js";
 import {
+  assertInvestigationAttemptWorkspaceAbsent,
   assertInvestigationSourceContext,
+  type CleanupOwnedInvestigationAttemptOptions,
+  cleanupOwnedInvestigationAttempt,
   type InvestigationPrDiffChunk,
   type InvestigationPrDiffManifest,
   type InvestigationSourceBinding,
   type InvestigationSourceContext,
   type InvestigationSourceDependencies,
+  type InvestigationSourceFile,
   type InvestigationSourceMaterializer,
   InvestigationWorkspaceError,
   type InvestigationWorkspaceFileSystem,
   type InvestigationWorkspaceInput,
+  type InvestigationWorkspaceOwnershipReceipt,
   type InvestigationWorkspacePathState,
   ProductionInvestigationWorkspaceProvider,
   type ProductionInvestigationWorkspaceProviderOptions,
@@ -145,8 +151,12 @@ class MemoryFileSystem implements InvestigationWorkspaceFileSystem {
   }
 
   public async removeFile(path: string): Promise<void> {
-    if (this.entry(path).readOnly) throw fileError("EPERM");
+    const current = this.entry(path);
+    if (current.readOnly) throw fileError("EPERM");
     this.entries.delete(key(path));
+    for (const entry of this.entries.values())
+      if (entry.kind === "file" && entry.identity === current.identity)
+        this.change(entry.path, { linkCount: entry.linkCount - 1 });
     this.removed.push(path);
   }
 
@@ -194,7 +204,7 @@ function setup(
   materializer?: InvestigationSourceMaterializer,
   options: Pick<
     ProductionInvestigationWorkspaceProviderOptions,
-    "maximumInputBytes" | "maximumArtifactBytes"
+    "maximumInputBytes" | "maximumArtifactBytes" | "onOwnershipEstablished" | "cleanupOwned"
   > = {},
 ) {
   const fs = new MemoryFileSystem();
@@ -218,6 +228,30 @@ function setup(
   return { fs, start, provider, controller, context: { signal: controller.signal, processHost } };
 }
 
+async function prepareRecoveryWorkspace() {
+  let ownership: InvestigationWorkspaceOwnershipReceipt | undefined;
+  const fixture = setup(undefined, {
+    onOwnershipEstablished: async (receipt) => {
+      ownership = structuredClone(receipt);
+    },
+  });
+  fixture.fs.add("C:\\", "directory");
+  const value = input();
+  const workspace = await fixture.provider.prepare(value, fixture.context);
+  if (ownership === undefined)
+    throw new Error("The fixture did not receive its ownership receipt.");
+  const recovery: CleanupOwnedInvestigationAttemptOptions = {
+    workspaceRootDirectory: root,
+    taskId: value.task.id,
+    attemptId: value.attempt.id,
+    leaseVersion: value.attempt.leaseVersion,
+    ownership,
+    processesStopped: true,
+    fileSystem: fixture.fs,
+  };
+  return { ...fixture, value, workspace, ownership, recovery };
+}
+
 function sourceBinding(value: InvestigationWorkspaceInput): InvestigationSourceBinding {
   const subject = value.task.subjects.find((candidate) => candidate.id === value.task.subjectRef);
   if (subject?.kind !== "original_pr")
@@ -229,6 +263,15 @@ function sourceBinding(value: InvestigationWorkspaceInput): InvestigationSourceB
     patchDigest: null,
     artifactRef: "verified-source-artifact",
   };
+}
+
+function addGeneratedHardlinks(fs: MemoryFileSystem, directory: string, readOnly = false) {
+  if (!fs.entries.has(key(directory))) fs.add(directory, "directory");
+  const paths = [win32.join(directory, "one.dat"), win32.join(directory, "two.dat")];
+  for (const path of paths) fs.add(path, "file", "Generated dependency bytes.");
+  const identity = fs.entry(paths[0]!).identity;
+  for (const path of paths) fs.change(path, { identity, linkCount: 2, readOnly });
+  return paths;
 }
 
 function withSource(value: InvestigationWorkspaceInput): InvestigationWorkspaceInput {
@@ -269,9 +312,11 @@ async function prepareSource(
     ProductionInvestigationWorkspaceProviderOptions,
     "maximumInputBytes" | "maximumArtifactBytes"
   > = {},
+  useFastReads = false,
 ) {
   let fs: MemoryFileSystem;
   const assertBinding = vi.fn(async () => undefined);
+  const assertReadBinding = vi.fn(async (_file?: InvestigationSourceFile) => undefined);
   const fixture = setup(
     {
       materialize: async ({ destinationDirectory }) => {
@@ -284,14 +329,18 @@ async function prepareSource(
           }
           fs.add(win32.join(destinationDirectory, ...components), "file", content);
         }
-        return { binding: sourceBinding(value), assertBinding };
+        return {
+          binding: sourceBinding(value),
+          assertBinding,
+          ...(useFastReads ? { assertReadBinding } : {}),
+        };
       },
     },
     options,
   );
   fs = fixture.fs;
   const workspace = await fixture.provider.prepare(value, fixture.context);
-  return { ...fixture, workspace, value, assertBinding };
+  return { ...fixture, workspace, value, assertBinding, assertReadBinding };
 }
 
 function sourceSnapshot(
@@ -323,6 +372,7 @@ async function preparePrDiff(
     head: "new\n",
   },
   useBatch = false,
+  useFastReads = false,
 ) {
   const value = withSource(input());
   const subject = value.task.subjects.find((candidate) => candidate.id === value.task.subjectRef);
@@ -369,10 +419,12 @@ async function preparePrDiff(
     }),
   );
   const assertBinding = vi.fn(async () => undefined);
+  const assertReadBinding = vi.fn(async (_file?: InvestigationSourceFile) => undefined);
   const fixture = setup({
     materialize: async () => ({
       binding: sourceBinding(value),
       assertBinding,
+      ...(useFastReads ? { assertReadBinding } : {}),
       readPrDiffManifest,
       readPrDiffChunk,
       ...(useBatch ? { readPrDiffChunks } : {}),
@@ -387,6 +439,7 @@ async function preparePrDiff(
     readPrDiffChunk,
     readPrDiffChunks,
     assertBinding,
+    assertReadBinding,
   };
 }
 
@@ -1948,6 +2001,78 @@ describe("native investigation source reads and model edits", () => {
 });
 
 describe("native investigation PR diff manifests and chunks", () => {
+  it("caches validated immutable manifests and chunks behind lightweight binding checks", async () => {
+    const {
+      fs,
+      workspace,
+      state,
+      readPrDiffManifest,
+      readPrDiffChunks,
+      assertBinding,
+      assertReadBinding,
+    } = await preparePrDiff(undefined, true, true);
+    const directoryReads = vi.spyOn(fs, "readDirectory");
+    assertBinding.mockClear();
+    const manifest = await workspace.readPrDiffManifest();
+    const ids = manifest.chunks.map((chunk) => chunk.id);
+    const first = await workspace.readPrDiffChunks!(ids);
+    Object.assign(manifest, { baseSha: "f".repeat(40) });
+    Object.assign(first[0]!, { content: "caller mutation" });
+    expect(await workspace.readPrDiffManifest()).toEqual(state.manifest);
+    expect(await workspace.readPrDiffChunks!(ids)).toEqual(ids.map((id) => state.chunks.get(id)));
+    expect(readPrDiffManifest).toHaveBeenCalledTimes(1);
+    expect(readPrDiffChunks).toHaveBeenCalledTimes(1);
+    expect(assertBinding).not.toHaveBeenCalled();
+    expect(assertReadBinding).toHaveBeenCalled();
+    expect(
+      directoryReads.mock.calls.some(([path]) => path.startsWith(workspace.sourceDirectory!)),
+    ).toBe(false);
+    await workspace.assertSourceBinding();
+    expect(assertBinding).toHaveBeenCalledTimes(1);
+    assertReadBinding.mockRejectedValueOnce(new Error("The source metadata changed."));
+    await expect(workspace.readPrDiffChunks!(ids)).rejects.toThrow("The source metadata changed.");
+  });
+
+  it("reads only missing chunks when later requests overlap the immutable cache", async () => {
+    const { workspace, readPrDiffChunks } = await preparePrDiff(undefined, true, true);
+    await workspace.readPrDiffChunks!(["pr-diff-diff", "pr-diff-head"]);
+    const reordered = await workspace.readPrDiffChunks!([
+      "pr-diff-head",
+      "pr-diff-base",
+      "pr-diff-diff",
+    ]);
+    expect(reordered.map((chunk) => chunk.id)).toEqual([
+      "pr-diff-head",
+      "pr-diff-base",
+      "pr-diff-diff",
+    ]);
+    expect(readPrDiffChunks.mock.calls.map(([ids]) => ids)).toEqual([
+      ["pr-diff-diff", "pr-diff-head"],
+      ["pr-diff-base"],
+    ]);
+  });
+
+  it("passes bounded file observations to the lightweight blob guard without rescanning unrelated source", async () => {
+    const { fs, workspace, assertBinding, assertReadBinding } = await prepareSource(
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    const directoryReads = vi.spyOn(fs, "readDirectory");
+    assertBinding.mockClear();
+    const file = await workspace.readSourceFile("src/file.txt");
+    expect(assertReadBinding).toHaveBeenLastCalledWith(expect.objectContaining(file));
+    expect(assertBinding).not.toHaveBeenCalled();
+    expect(
+      directoryReads.mock.calls.some(([path]) => path.startsWith(workspace.sourceDirectory!)),
+    ).toBe(false);
+    fs.change(win32.join(workspace.sourceDirectory!, "src"), { reparsePoint: true });
+    await expect(workspace.readSourceFile("src/file.txt")).rejects.toMatchObject({
+      code: "WORKSPACE_PATH_UNSAFE",
+    });
+  });
+
   it("returns complete frozen PR content and isolates the registered manifest from caller mutation", async () => {
     const { workspace, state, readPrDiffChunk } = await preparePrDiff();
     const manifest = await workspace.readPrDiffManifest();
@@ -2152,5 +2277,531 @@ describe("native investigation PR diff manifests and chunks", () => {
     await expect(workspace.readPrDiffChunk("pr-diff-diff")).rejects.toMatchObject({
       code: "SOURCE_UNAVAILABLE",
     });
+  });
+});
+
+describe("managed investigation workspace cleanup", () => {
+  it("delegates cleanup with its retained receipt without deleting parent-process paths", async () => {
+    const cleanupOwned = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {});
+    const ownershipRecorded = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {});
+    const fixture = setup(undefined, { cleanupOwned, onOwnershipEstablished: ownershipRecorded });
+    const workspace = await fixture.provider.prepare(input(), fixture.context);
+    await workspace.cleanup();
+    await workspace.cleanup();
+    expect(cleanupOwned).toHaveBeenCalledTimes(1);
+    expect(cleanupOwned).toHaveBeenCalledWith(ownershipRecorded.mock.calls[0]![0]);
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("waits for managed cleanup and retains the workspace if that cleanup fails", async () => {
+    const completeCleanup = Promise.withResolvers<void>();
+    const cleanupStarted = Promise.withResolvers<void>();
+    const cleanupOwned = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {
+      cleanupStarted.resolve();
+      await completeCleanup.promise;
+    });
+    const fixture = setup(undefined, { cleanupOwned });
+    const workspace = await fixture.provider.prepare(input(), fixture.context);
+    const cleaning = workspace.cleanup();
+    await cleanupStarted.promise;
+    await expect(workspace.cleanup()).rejects.toMatchObject({ code: "WORKSPACE_CLOSED" });
+    expect(fixture.fs.removed).toEqual([]);
+    completeCleanup.reject(new Error("Synthetic managed cleanup failure."));
+    await expect(cleaning).rejects.toThrow("managed cleanup failure");
+    expect(await fixture.fs.lstat(workspace.attemptDirectory)).not.toBeNull();
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("uses managed cleanup when source preparation fails after establishing ownership", async () => {
+    const cleanupOwned = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {});
+    const fixture = setup(
+      {
+        materialize: async () => {
+          throw new Error("Synthetic source preparation failure.");
+        },
+      },
+      { cleanupOwned },
+    );
+    const value = withSource(input());
+    await expect(fixture.provider.prepare(value, fixture.context)).rejects.toThrow(
+      "source preparation failure",
+    );
+    expect(cleanupOwned).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: value.task.id,
+        attemptId: value.attempt.id,
+        leaseVersion: value.attempt.leaseVersion,
+      }),
+    );
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("retains source ownership when its process cleanup is unconfirmed", async () => {
+    const cleanupOwned = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {});
+    const fault = Object.assign(new Error("Synthetic source cleanup was not confirmed."), {
+      code: "SOURCE_PROCESS_CLEANUP_UNCONFIRMED",
+    });
+    const fixture = setup(
+      {
+        materialize: async () => {
+          throw fault;
+        },
+      },
+      { cleanupOwned },
+    );
+    await expect(fixture.provider.prepare(withSource(input()), fixture.context)).rejects.toBe(
+      fault,
+    );
+    expect(cleanupOwned).not.toHaveBeenCalled();
+    expect(fixture.fs.removed).toEqual([]);
+    expect(await fixture.fs.readDirectory(root)).toHaveLength(1);
+  });
+
+  it("retains an unrecorded directory when its owner marker cannot be written", async () => {
+    const cleanupOwned = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {});
+    const fixture = setup(undefined, { cleanupOwned });
+    vi.spyOn(fixture.fs, "writeExclusive").mockRejectedValueOnce(
+      new Error("Synthetic owner marker write failure."),
+    );
+    await expect(fixture.provider.prepare(input(), fixture.context)).rejects.toMatchObject({
+      code: "WORKSPACE_CLEANUP_UNCONFIRMED",
+      errors: [
+        expect.any(Error),
+        expect.objectContaining({ code: "WORKSPACE_RECOVERY_OWNERSHIP_MISSING" }),
+      ],
+    });
+    expect(cleanupOwned).not.toHaveBeenCalled();
+    expect(fixture.fs.removed).toEqual([]);
+    const names = await fixture.fs.readDirectory(root);
+    expect(names).toHaveLength(1);
+    expect(await fixture.fs.readDirectory(win32.join(root, names[0]!))).toEqual([]);
+  });
+
+  it("can delegate early owned cleanup before its journal callback runs", async () => {
+    const cleanupOwned = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {});
+    const ownershipRecorded = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {});
+    const fixture = setup(undefined, { cleanupOwned, onOwnershipEstablished: ownershipRecorded });
+    vi.spyOn(fixture.fs, "setReadOnly").mockRejectedValueOnce(
+      new Error("Synthetic owner permissions failure."),
+    );
+    await expect(fixture.provider.prepare(input(), fixture.context)).rejects.toThrow(
+      "owner permissions failure",
+    );
+    expect(ownershipRecorded).not.toHaveBeenCalled();
+    expect(cleanupOwned).toHaveBeenCalledTimes(1);
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("keeps the private cleanup receipt independent of the emitted journal copy", async () => {
+    const cleanupOwned = vi.fn(async (_receipt: InvestigationWorkspaceOwnershipReceipt) => {});
+    const fixture = setup(undefined, {
+      cleanupOwned,
+      onOwnershipEstablished: async (receipt) => {
+        (receipt as { nonce: string }).nonce = "mutated-callback-copy";
+      },
+    });
+    const workspace = await fixture.provider.prepare(input(), fixture.context);
+    const original = JSON.parse(
+      Buffer.from(
+        await fixture.fs.readFile(win32.join(workspace.attemptDirectory, ".owner.json")),
+      ).toString("utf8"),
+    );
+    await workspace.cleanup();
+    expect(cleanupOwned.mock.calls[0]![0].nonce).toBe(original.nonce);
+    expect(fixture.fs.removed).toEqual([]);
+  });
+});
+
+describe("owned investigation workspace recovery", () => {
+  it("keeps full production workspace source binding valid after an execution build creates internal generated hardlinks", async () => {
+    const f = setup();
+    f.fs.add("C:\\", "directory");
+    const value = input();
+    value.task.kind = "pr-e2e";
+    value.task.executionPolicy = {
+      ...value.task.executionPolicy,
+      mode: "execute",
+      allowRepositoryExecution: true,
+      authorizationRef: "execution",
+    };
+    const subject = value.task.subjects[0]!;
+    if (subject.kind !== "original_pr") throw new Error("Expected a PR source subject.");
+    subject.revisionKey = textDigest(`${subject.baseSha}\0${subject.headSha}`);
+    (value.inputSnapshot as InvestigationInputSnapshotV1).subjectRevisionKey = subject.revisionKey;
+    const materializer = new ProductionInvestigationGitSourceMaterializer({
+      gitExecutablePath: "C:\\Tools\\git.exe",
+      allowedRepositories: [value.task.repository.fullName],
+      fileSystem: f.fs,
+      environment: { SYSTEMROOT: "C:\\Windows", PATH: "C:\\Tools;C:\\Windows\\System32" },
+      limits: {
+        hardTimeoutMs: 30_000,
+        maximumProcessCount: 8,
+        maximumMemoryBytes: 512 * 1024 * 1024,
+        maximumOutputBytes: 4 * 1024 * 1024,
+      },
+      runner: {
+        async run(spec) {
+          const args = [...spec.arguments];
+          while (args[0] === "-c") args.splice(0, 2);
+          const source = spec.workingDirectory,
+            git = win32.join(source, ".git");
+          let stdout = "";
+          if (args[0] === "init") {
+            f.fs.add(git, "directory");
+            f.fs.add(win32.join(git, "config"), "file", "[core]\n");
+            f.fs.add(win32.join(git, "HEAD"), "file", "initial");
+          } else if (args[0] === "rev-parse")
+            stdout = args[2] === "HEAD^{commit}" ? subject.headSha : args[2]!.slice(0, 40);
+          else if (args[0] === "merge-base") stdout = subject.baseSha;
+          else if (args[0] === "ls-tree") stdout = `100644 blob ${"a".repeat(40)}\tproduct.cs\0`;
+          else if (args[0] === "checkout") {
+            f.fs.change(win32.join(git, "HEAD"), { bytes: Buffer.from(subject.headSha) });
+            f.fs.add(win32.join(git, "index"), "file", "index");
+            f.fs.add(win32.join(source, "product.cs"), "file", "class Product {}\n");
+          }
+          return { exitCode: 0, stdout: Buffer.from(stdout) };
+        },
+      },
+    });
+    const provider = new ProductionInvestigationWorkspaceProvider({
+      workspaceRootDirectory: root,
+      fileSystem: f.fs,
+      sourceMaterializer: materializer,
+    });
+    const workspace = await provider.prepare(value, f.context);
+    const paths = addGeneratedHardlinks(f.fs, win32.join(workspace.sourceDirectory!, "generated"));
+    await expect(workspace.assertSourceBinding()).resolves.toBeUndefined();
+    await expect(workspace.readSourceFile("generated/one.dat")).rejects.toMatchObject({
+      code: "WORKSPACE_PATH_UNSAFE",
+    });
+    const chmod = vi.spyOn(f.fs, "setReadOnly");
+    await expect(workspace.cleanup()).resolves.toBeUndefined();
+    expect(chmod.mock.calls.some(([path]) => paths.includes(path))).toBe(false);
+  });
+
+  it("unlinks closed generated hardlink groups without chmod and without needing Git metadata", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    const paths = addGeneratedHardlinks(
+      fixture.fs,
+      win32.join(fixture.workspace.attemptDirectory, "source"),
+    );
+    const chmod = vi.spyOn(fixture.fs, "setReadOnly");
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).resolves.toEqual({
+      state: "removed",
+    });
+    expect(fixture.fs.removed.filter((path) => paths.includes(path))).toHaveLength(2);
+    expect(chmod.mock.calls.some(([path]) => paths.includes(path))).toBe(false);
+  });
+
+  it("does not chmod readonly generated hardlinks when the filesystem refuses unlink", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    const paths = addGeneratedHardlinks(
+      fixture.fs,
+      win32.join(fixture.workspace.attemptDirectory, "source"),
+      true,
+    );
+    const chmod = vi.spyOn(fixture.fs, "setReadOnly");
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+      code: "EPERM",
+    });
+    expect(chmod.mock.calls.some(([path]) => paths.includes(path))).toBe(false);
+    for (const path of paths) expect(fixture.fs.entry(path).readOnly).toBe(true);
+    expect(
+      await fixture.fs.lstat(win32.join(fixture.workspace.attemptDirectory, ".owner.json")),
+    ).not.toBeNull();
+  });
+
+  it.each(["outside", "control", "artifacts", "model-input", ".git"] as const)(
+    "rejects generated groups with an unaccounted or protected %s alias before changing any entry",
+    async (location) => {
+      const fixture = await prepareRecoveryWorkspace();
+      const paths = addGeneratedHardlinks(
+        fixture.fs,
+        win32.join(fixture.workspace.attemptDirectory, "source"),
+      );
+      if (location === "outside") {
+        fixture.fs.entries.delete(key(paths[1]!));
+        const sentinel = win32.join(root, "sentinel.dat");
+        fixture.fs.add(sentinel, "file", "Outside sentinel");
+        fixture.fs.change(sentinel, {
+          identity: fixture.fs.entry(paths[0]!).identity,
+          linkCount: 2,
+          readOnly: true,
+        });
+      } else {
+        const parent =
+          location === ".git"
+            ? win32.join(fixture.workspace.attemptDirectory, "source", ".git")
+            : win32.join(fixture.workspace.attemptDirectory, location);
+        if (!fixture.fs.entries.has(key(parent))) fixture.fs.add(parent, "directory");
+        const replacement = win32.join(parent, "protected.dat");
+        const prior = fixture.fs.entry(paths[1]!);
+        fixture.fs.entries.delete(key(paths[1]!));
+        fixture.fs.add(replacement, "file", "Protected bytes");
+        fixture.fs.change(replacement, { identity: prior.identity, linkCount: 2 });
+      }
+      const chmod = vi.spyOn(fixture.fs, "setReadOnly");
+      await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+        code: "WORKSPACE_PATH_UNSAFE",
+      });
+      expect(fixture.fs.removed).toEqual([]);
+      expect(chmod).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["external-link", "replacement", "parent"] as const)(
+    "rechecks remaining hardlink identities after the first unlink: %s",
+    async (change) => {
+      const fixture = await prepareRecoveryWorkspace();
+      const directory = win32.join(fixture.workspace.attemptDirectory, "source");
+      const paths = addGeneratedHardlinks(fixture.fs, directory);
+      const originalRemove = fixture.fs.removeFile.bind(fixture.fs);
+      let mutated = false;
+      vi.spyOn(fixture.fs, "removeFile").mockImplementation(async (path) => {
+        await originalRemove(path);
+        if (!mutated && paths.includes(path)) {
+          mutated = true;
+          const remaining = paths.find((entry) => entry !== path)!;
+          if (change === "external-link") fixture.fs.change(remaining, { linkCount: 2 });
+          if (change === "replacement") fixture.fs.change(remaining, { identity: "replaced-file" });
+          if (change === "parent") fixture.fs.change(directory, { identity: "replaced-parent" });
+        }
+      });
+      const chmod = vi.spyOn(fixture.fs, "setReadOnly");
+      await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+        code: change === "external-link" ? "WORKSPACE_PATH_UNSAFE" : "WORKSPACE_NOT_OWNED",
+      });
+      expect(fixture.fs.removed.filter((path) => paths.includes(path))).toHaveLength(1);
+      expect(chmod.mock.calls.some(([path]) => paths.includes(path))).toBe(false);
+    },
+  );
+
+  it("awaits durable ownership recording before preparing any child directories", async () => {
+    const ownershipStarted = Promise.withResolvers<InvestigationWorkspaceOwnershipReceipt>();
+    const ownershipDurable = Promise.withResolvers<void>();
+    const fixture = setup(undefined, {
+      onOwnershipEstablished: async (receipt) => {
+        ownershipStarted.resolve(receipt);
+        await ownershipDurable.promise;
+      },
+    });
+    const preparing = fixture.provider.prepare(input(), fixture.context);
+    const receipt = await ownershipStarted.promise;
+    const [attemptName] = await fixture.fs.readDirectory(root);
+    expect(attemptName).toBeDefined();
+    const attemptDirectory = win32.join(root, attemptName!);
+    expect(await fixture.fs.readDirectory(attemptDirectory)).toEqual([".owner.json"]);
+    const marker = fixture.fs.entry(win32.join(attemptDirectory, ".owner.json"));
+    expect(marker.readOnly).toBe(true);
+    expect(JSON.parse(Buffer.from(marker.bytes).toString("utf8"))).toEqual({
+      taskId: receipt.taskId,
+      attemptId: receipt.attemptId,
+      leaseVersion: receipt.leaseVersion,
+      nonce: receipt.nonce,
+    });
+    expect(receipt.ownerDigest).toBe(createHash("sha256").update(marker.bytes).digest("hex"));
+    ownershipDurable.resolve();
+    const workspace = await preparing;
+    await workspace.cleanup();
+  });
+
+  it("cleans a preparation that cannot durably record its ownership", async () => {
+    const fixture = setup(undefined, {
+      onOwnershipEstablished: async () => {
+        throw new Error("Synthetic durable journal failure.");
+      },
+    });
+    await expect(fixture.provider.prepare(input(), fixture.context)).rejects.toThrow(
+      "durable journal failure",
+    );
+    expect(await fixture.fs.readDirectory(root)).toEqual([]);
+  });
+
+  it("removes only the exact recorded attempt and is idempotent after removal", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    const unrelated = win32.join(root, "unrelated-attempt");
+    fixture.fs.add(unrelated, "directory");
+    fixture.fs.add(win32.join(unrelated, "keep.txt"), "file", "Keep this unrelated content.");
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).resolves.toEqual({
+      state: "removed",
+    });
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).resolves.toEqual({
+      state: "already-absent",
+    });
+    expect(await fixture.fs.lstat(root)).not.toBeNull();
+    expect(await fixture.fs.readDirectory(unrelated)).toEqual(["keep.txt"]);
+  });
+
+  it.each([
+    { taskId: "another-task" },
+    { attemptId: "another-attempt" },
+    { leaseVersion: 9001 },
+    { workspaceRootDirectory: "C:\\another-root" },
+    { nonce: "00000000-0000-4000-8000-000000000000" },
+    { rootIdentity: "another-root-identity" },
+    { attemptIdentity: "another-attempt-identity" },
+    { ownerIdentity: "another-owner-identity" },
+    { ownerDigest: "0".repeat(64) },
+  ] satisfies Partial<InvestigationWorkspaceOwnershipReceipt>[])(
+    "rejects a mismatched ownership receipt without deleting entries: %j",
+    async (changes) => {
+      const fixture = await prepareRecoveryWorkspace();
+      await expect(
+        cleanupOwnedInvestigationAttempt({
+          ...fixture.recovery,
+          ownership: { ...fixture.ownership, ...changes },
+        }),
+      ).rejects.toMatchObject({ code: "WORKSPACE_NOT_OWNED" });
+      expect(fixture.fs.removed).toEqual([]);
+    },
+  );
+
+  it("requires explicit trusted process cleanup evidence", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    await expect(
+      cleanupOwnedInvestigationAttempt({
+        ...fixture.recovery,
+        processesStopped: false,
+      } as unknown as CleanupOwnedInvestigationAttemptOptions),
+    ).rejects.toMatchObject({ code: "WORKSPACE_NOT_OWNED" });
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("rejects a self-consistent receipt nonce that does not match the original owner marker", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    const nonce = "00000000-0000-4000-8000-000000000000";
+    const ownerDigest = textDigest(
+      JSON.stringify({
+        taskId: fixture.ownership.taskId,
+        attemptId: fixture.ownership.attemptId,
+        leaseVersion: fixture.ownership.leaseVersion,
+        nonce,
+      }),
+    );
+    await expect(
+      cleanupOwnedInvestigationAttempt({
+        ...fixture.recovery,
+        ownership: { ...fixture.ownership, nonce, ownerDigest },
+      }),
+    ).rejects.toMatchObject({ code: "WORKSPACE_NOT_OWNED" });
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("rejects a copied ownership marker after the attempt directory is replaced", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    fixture.fs.change(fixture.workspace.attemptDirectory, { identity: "replaced-directory" });
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+      code: "WORKSPACE_NOT_OWNED",
+    });
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("rejects a changed ownership marker even when its file identity is unchanged", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    fixture.fs.change(win32.join(fixture.workspace.attemptDirectory, ".owner.json"), {
+      bytes: Buffer.from('{"owner":"different"}'),
+    });
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+      code: "WORKSPACE_NOT_OWNED",
+    });
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it.each(["ancestor", "root", "attempt", "child"] as const)(
+    "refuses a redirected %s before removing any entry",
+    async (location) => {
+      const fixture = await prepareRecoveryWorkspace();
+      const path = {
+        ancestor: "C:\\",
+        root,
+        attempt: fixture.workspace.attemptDirectory,
+        child: fixture.workspace.tempDirectory,
+      }[location];
+      fixture.fs.change(path, { reparsePoint: true });
+      await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+        code: "WORKSPACE_PATH_UNSAFE",
+      });
+      expect(fixture.fs.removed).toEqual([]);
+    },
+  );
+
+  it("refuses linked files anywhere in the recorded tree", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    const unsafe = win32.join(fixture.workspace.tempDirectory, "linked.txt");
+    fixture.fs.add(unsafe, "file", "Linked content must remain untouched.");
+    fixture.fs.change(unsafe, { linkCount: 2 });
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+      code: "WORKSPACE_PATH_UNSAFE",
+    });
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("retains a non-empty attempt whose marker disappeared", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    fixture.fs.entries.delete(key(win32.join(fixture.workspace.attemptDirectory, ".owner.json")));
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+      code: "WORKSPACE_NOT_OWNED",
+    });
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("finishes the last directory removal after a crash removed its owner marker", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    for (const path of fixture.fs.entries.keys()) {
+      if (path.startsWith(`${key(fixture.workspace.attemptDirectory)}\\`))
+        fixture.fs.entries.delete(path);
+    }
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).resolves.toEqual({
+      state: "removed",
+    });
+    expect(fixture.fs.removed).toEqual([fixture.workspace.attemptDirectory]);
+  });
+
+  it("does not delete an unrecorded empty directory at the same attempt path", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    for (const path of fixture.fs.entries.keys()) {
+      if (path.startsWith(`${key(fixture.workspace.attemptDirectory)}\\`))
+        fixture.fs.entries.delete(path);
+    }
+    fixture.fs.change(fixture.workspace.attemptDirectory, {
+      identity: "unrecorded-empty-directory",
+    });
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+      code: "WORKSPACE_NOT_OWNED",
+    });
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("checks the complete recovery tree budget before deleting entries", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    await expect(
+      cleanupOwnedInvestigationAttempt({ ...fixture.recovery, maximumTreeEntries: 2 }),
+    ).rejects.toMatchObject({ code: "WORKSPACE_TREE_LIMIT_EXCEEDED" });
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it("allows recovery without a receipt only after checking the exact attempt is absent", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    await fixture.workspace.cleanup();
+    await expect(
+      assertInvestigationAttemptWorkspaceAbsent(fixture.recovery),
+    ).resolves.toBeUndefined();
+    fixture.fs.add(fixture.workspace.attemptDirectory, "directory");
+    await expect(assertInvestigationAttemptWorkspaceAbsent(fixture.recovery)).rejects.toMatchObject(
+      {
+        code: "WORKSPACE_RECOVERY_OWNERSHIP_MISSING",
+      },
+    );
+    expect(await fixture.fs.lstat(fixture.workspace.attemptDirectory)).not.toBeNull();
+  });
+
+  it("does not infer ownership from an existing marker when its receipt was never persisted", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    await expect(assertInvestigationAttemptWorkspaceAbsent(fixture.recovery)).rejects.toMatchObject(
+      {
+        code: "WORKSPACE_RECOVERY_OWNERSHIP_MISSING",
+      },
+    );
+    expect(fixture.fs.removed).toEqual([]);
   });
 });

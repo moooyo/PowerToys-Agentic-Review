@@ -33,6 +33,7 @@ export class ManagedProcessRunError extends Error {
   public readonly exitCode: number | null;
   public readonly stdout: string;
   public readonly stderr: string;
+  public readonly outputTruncated: boolean;
 
   public constructor(
     public readonly code: ManagedProcessRunFailureCode,
@@ -41,6 +42,7 @@ export class ManagedProcessRunError extends Error {
       readonly exitCode?: number | null;
       readonly stdout?: string;
       readonly stderr?: string;
+      readonly outputTruncated?: boolean;
       readonly cause?: unknown;
     } = {},
   ) {
@@ -49,6 +51,7 @@ export class ManagedProcessRunError extends Error {
     this.exitCode = options.exitCode ?? null;
     this.stdout = options.stdout ?? "";
     this.stderr = options.stderr ?? "";
+    this.outputTruncated = code === "OUTPUT_TRUNCATED" || options.outputTruncated === true;
   }
 }
 
@@ -69,33 +72,79 @@ const maximumErrorPreviewBytesLimit = 64 * 1024;
 class SharedCaptureBudget {
   public truncated = false;
   #remaining: number;
+  readonly #onOverflow: Array<() => void> = [];
 
   public constructor(maximumBytes: number) {
     this.#remaining = maximumBytes;
   }
 
-  public take(chunk: Buffer): Buffer | null {
-    if (this.#remaining === 0) {
+  public onOverflow(callback: () => void): void {
+    this.#onOverflow.push(callback);
+  }
+
+  public take(chunk: Buffer): boolean {
+    if (this.truncated) return false;
+    if (chunk.byteLength > this.#remaining) {
       this.truncated = true;
-      return null;
+      for (const callback of this.#onOverflow) callback();
+      return false;
     }
-    const acceptedBytes = Math.min(this.#remaining, chunk.byteLength);
-    this.#remaining -= acceptedBytes;
-    if (acceptedBytes < chunk.byteLength) {
-      this.truncated = true;
+    this.#remaining -= chunk.byteLength;
+    return true;
+  }
+}
+
+/** Overflow retains only bounded per-stream suffixes, never another full output capture. */
+class OutputTail {
+  readonly #buffer: Buffer;
+  #offset = 0;
+  #length = 0;
+  public constructor(capacity: number) {
+    this.#buffer = Buffer.alloc(capacity);
+  }
+  public append(bytes: Buffer): void {
+    const capacity = this.#buffer.byteLength;
+    if (capacity === 0) return;
+    if (bytes.byteLength >= capacity) {
+      bytes.copy(this.#buffer, 0, bytes.byteLength - capacity);
+      this.#offset = 0;
+      this.#length = capacity;
+      return;
     }
-    return acceptedBytes === 0 ? null : chunk.subarray(0, acceptedBytes);
+    const first = Math.min(bytes.byteLength, capacity - this.#offset);
+    bytes.copy(this.#buffer, this.#offset, 0, first);
+    if (first < bytes.byteLength) bytes.copy(this.#buffer, 0, first);
+    this.#offset = (this.#offset + bytes.byteLength) % capacity;
+    this.#length = Math.min(capacity, this.#length + bytes.byteLength);
+  }
+  public bytes(): Buffer {
+    return this.#length < this.#buffer.byteLength
+      ? Buffer.from(this.#buffer.subarray(0, this.#length))
+      : Buffer.concat(
+          [this.#buffer.subarray(this.#offset), this.#buffer.subarray(0, this.#offset)],
+          this.#length,
+        );
   }
 }
 
 class StreamCapture {
   readonly #chunks: Buffer[] = [];
   #byteLength = 0;
+  #tail: OutputTail | undefined;
+  public observedBytes = 0;
 
   public constructor(
     private readonly budget: SharedCaptureBudget,
     private readonly onProgress: () => void,
-  ) {}
+    tailCapacity: number,
+  ) {
+    budget.onOverflow(() => {
+      this.#tail = new OutputTail(tailCapacity);
+      for (const chunk of this.#chunks) this.#tail.append(chunk);
+      this.#chunks.length = 0;
+      this.#byteLength = 0;
+    });
+  }
 
   public async drain(stream: Readable): Promise<void> {
     for await (const value of stream) {
@@ -105,17 +154,18 @@ class StreamCapture {
           ? Buffer.from(value)
           : Buffer.from(String(value), "utf8");
       if (chunk.byteLength === 0) continue;
+      this.observedBytes += chunk.byteLength;
       this.onProgress();
       const accepted = this.budget.take(chunk);
-      if (accepted !== null) {
-        this.#chunks.push(Buffer.from(accepted));
-        this.#byteLength += accepted.byteLength;
-      }
+      if (accepted) {
+        this.#chunks.push(Buffer.from(chunk));
+        this.#byteLength += chunk.byteLength;
+      } else this.#tail!.append(chunk);
     }
   }
 
   public bytes(): Buffer {
-    return Buffer.concat(this.#chunks, this.#byteLength);
+    return this.#tail?.bytes() ?? Buffer.concat(this.#chunks, this.#byteLength);
   }
 }
 
@@ -158,9 +208,11 @@ export class ProductionManagedProcessRunner implements ManagedProcessRunner {
       });
     }
 
-    const budget = new SharedCaptureBudget(
-      Math.min(spec.limits.maximumOutputBytes, this.#maximumCapturedOutputBytes),
+    const maximumCaptureBytes = Math.min(
+      spec.limits.maximumOutputBytes,
+      this.#maximumCapturedOutputBytes,
     );
+    const budget = new SharedCaptureBudget(maximumCaptureBytes);
     let progressFailure: { readonly cause: unknown } | undefined;
     const reportProgress = (): void => {
       if (context.signal.aborted || progressFailure !== undefined) return;
@@ -171,8 +223,17 @@ export class ProductionManagedProcessRunner implements ManagedProcessRunner {
         progressFailure = { cause };
       }
     };
-    const stdoutCapture = new StreamCapture(budget, reportProgress);
-    const stderrCapture = new StreamCapture(budget, reportProgress);
+    // Both suffix capacities together remain inside the original shared capture budget.
+    const stdoutCapture = new StreamCapture(
+      budget,
+      reportProgress,
+      Math.min(this.#maximumErrorPreviewBytes, Math.ceil(maximumCaptureBytes / 2)),
+    );
+    const stderrCapture = new StreamCapture(
+      budget,
+      reportProgress,
+      Math.min(this.#maximumErrorPreviewBytes, Math.floor(maximumCaptureBytes / 2)),
+    );
     const [processOutcome, stdoutOutcome, stderrOutcome] = await Promise.allSettled([
       managed.completed,
       stdoutCapture.drain(managed.stdout),
@@ -180,10 +241,19 @@ export class ProductionManagedProcessRunner implements ManagedProcessRunner {
     ] as const);
     const stdoutBytes = stdoutCapture.bytes();
     const stderrBytes = stderrCapture.bytes();
-    const errorOutput = (): { readonly stdout: string; readonly stderr: string } => ({
-      stdout: outputPreview(stdoutBytes, this.#maximumErrorPreviewBytes),
-      stderr: outputPreview(stderrBytes, this.#maximumErrorPreviewBytes),
-    });
+    const errorOutput = (): ManagedProcessErrorOutput => {
+      const stdout = outputPreview(stdoutBytes, this.#maximumErrorPreviewBytes);
+      const stderr = outputPreview(stderrBytes, this.#maximumErrorPreviewBytes);
+      return {
+        stdout,
+        stderr,
+        outputTruncated:
+          budget.truncated ||
+          (processOutcome.status === "fulfilled" && processOutcome.value.outputTruncated) ||
+          Buffer.byteLength(stdout, "utf8") !== stdoutCapture.observedBytes ||
+          Buffer.byteLength(stderr, "utf8") !== stderrCapture.observedBytes,
+      };
+    };
 
     if (context.signal.aborted) {
       throw abortedError(
@@ -268,7 +338,7 @@ export class ProductionManagedProcessRunner implements ManagedProcessRunner {
 function decodeUtf8(
   bytes: Buffer,
   streamName: "stdout" | "stderr",
-  errorOutput: { readonly stdout: string; readonly stderr: string },
+  errorOutput: ManagedProcessErrorOutput,
 ): string {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -288,19 +358,19 @@ function processExitError(
   code: ManagedProcessRunFailureCode,
   message: string,
   exit: ProcessExitedEvent,
-  output: { readonly stdout: string; readonly stderr: string },
+  output: ManagedProcessErrorOutput,
 ): ManagedProcessRunError {
   return new ManagedProcessRunError(code, message, {
     exitCode: exit.exitCode,
-    stdout: output.stdout,
-    stderr: output.stderr,
+    ...output,
+    outputTruncated: output.outputTruncated || exit.outputTruncated,
   });
 }
 
 function abortedError(
   signal: AbortSignal,
   cause?: unknown,
-  output: { readonly stdout: string; readonly stderr: string } = { stdout: "", stderr: "" },
+  output: ManagedProcessErrorOutput = { stdout: "", stderr: "", outputTruncated: false },
 ): ManagedProcessRunError {
   return new ManagedProcessRunError("ABORTED", "Managed process execution was aborted.", {
     ...output,
@@ -308,8 +378,25 @@ function abortedError(
   });
 }
 
+interface ManagedProcessErrorOutput {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly outputTruncated: boolean;
+}
+
 function outputPreview(bytes: Buffer, maximumBytes: number): string {
-  return bytes.subarray(0, maximumBytes).toString("utf8");
+  if (maximumBytes === 0) return "";
+  const suffix = (value: Buffer): Buffer => {
+    let start = Math.max(0, value.byteLength - maximumBytes);
+    while (start < value.byteLength && (value[start]! & 0xc0) === 0x80) start++;
+    return value.subarray(start);
+  };
+  // Streaming decode omits an incomplete terminal code point instead of inventing a replacement.
+  const decoded = new TextDecoder("utf-8", { ignoreBOM: true }).decode(suffix(bytes), {
+    stream: true,
+  });
+  const encoded = Buffer.from(decoded, "utf8");
+  return encoded.byteLength <= maximumBytes ? decoded : suffix(encoded).toString("utf8");
 }
 
 function boundedInteger(value: number, name: string, minimum: number, maximum: number): number {

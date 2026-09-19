@@ -16,6 +16,8 @@ import {
   type InvestigationSubjectV1,
   type InvestigationTaskV1,
   InvestigationTaskV1Schema,
+  type InvestigationUsageSummary,
+  unavailableInvestigationTokenUsage,
 } from "@agentic-review/contracts";
 import {
   createInvestigationCheckpoint,
@@ -33,6 +35,15 @@ import {
 
 const recordedAt = "2026-09-15T02:00:03.000Z";
 const reportId = "report:synthetic";
+const usageSummary = (): InvestigationUsageSummary => ({
+  usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 15 },
+  reportedTokens: 15,
+  completeness: "complete",
+  invocationCount: 1,
+  activeInvocationCount: 0,
+  unknownInvocationCount: 0,
+  legacyTokens: 0,
+});
 
 interface FixtureOptions {
   readonly findingCount?: number;
@@ -558,6 +569,174 @@ function expectBuildError(
 beforeAll(() => registerWorkerContractFormats());
 
 describe("investigation report builder", () => {
+  it("reports persisted E2E results as partial when budget exhaustion precedes analysis adoption", () => {
+    const input = fixture({ allowExecution: true, findingCount: 0 });
+    input.task.kind = "pr-e2e";
+    input.task.scope.includedUnits[0]!.kind = "e2e_features";
+    const checkpoint = createInvestigationCheckpoint({
+      task: input.task,
+      attemptId: input.attempt.id,
+      checkpointId: input.checkpoint.id,
+      leaseVersion: input.attempt.leaseVersion,
+      recordedAt,
+    });
+    checkpoint.stopReason = "budget_exhausted";
+    checkpoint.consumed.tokens = input.task.budget.maxTokens + 1;
+    checkpoint.runtime.e2eExecution = {
+      attemptId: input.attempt.id,
+      status: "completed",
+      startedAt: recordedAt,
+      completedAt: recordedAt,
+    };
+    checkpoint.runtime.artifacts = [
+      {
+        id: "artifact:e2e-image",
+        taskId: input.task.id,
+        attemptId: input.attempt.id,
+        subjectRef: input.task.subjectRef,
+        kind: "image",
+        name: "preview.png",
+        mediaType: "image/png",
+        digest: "8".repeat(64),
+        byteLength: 128,
+        availability: "available",
+      },
+    ];
+    checkpoint.runtime.evidence = [
+      {
+        id: "evidence:e2e",
+        subjectRef: input.task.subjectRef,
+        source: "executor_observation",
+        authority: "worker",
+        summary: "The owned preview window closed.",
+        artifactRefs: ["artifact:e2e-image"],
+        evidenceRefs: [],
+        provenance: {
+          taskId: input.task.id,
+          attemptId: input.attempt.id,
+          producer: "e2e-tool-server",
+          recordedAt,
+        },
+      },
+    ];
+    checkpoint.runtime.e2e = {
+      headSha: "c".repeat(40),
+      buildIdentity: "Synthetic pinned build",
+      cleanup: { confirmed: true, recordedAt, summary: "Owned processes exited." },
+      features: [
+        {
+          id: "feature:preview",
+          title: "Preview lifecycle",
+          paths: ["src/cancellation.ts"],
+          scenario: "Open and close the preview.",
+          userVisible: true,
+          outcome: "passed",
+          artifactRefs: ["artifact:e2e-image"],
+          limitations: [],
+          assertions: [
+            {
+              id: "assertion:preview",
+              expected: "The preview closes.",
+              observed: "The preview closed.",
+              outcome: "passed",
+              evidenceRefs: ["evidence:e2e"],
+            },
+          ],
+        },
+      ],
+    };
+    checkpoint.runtime.checks = [
+      {
+        id: "assertion:preview",
+        scenarioId: "feature:preview",
+        subjectRef: input.task.subjectRef,
+        planRef: null,
+        required: true,
+        description: "Close the preview.",
+        status: "passed",
+        executor: "e2e-tool-server",
+        authoritativeAttemptId: input.attempt.id,
+        evidenceRefs: ["evidence:e2e"],
+      },
+    ];
+    const saved = seal(checkpoint);
+    const before = structuredClone(saved);
+    const usage = usageSummary();
+    usage.reportedTokens = saved.consumed.tokens;
+    usage.usage.totalTokens = saved.consumed.tokens;
+    const submission = buildInvestigationReportSubmission({
+      ...input,
+      checkpoint: saved,
+      outcome: "interrupted",
+      usage,
+    });
+    expect(submission.header).toMatchObject({
+      outcome: "interrupted",
+      report: {
+        completeness: "partial",
+        delivery: "checkpoint",
+        usage,
+        loop: { completedRounds: 0, stopReason: "budget_exhausted" },
+      },
+      assessment: { reviewConclusion: { status: "inconclusive" } },
+    });
+    expect(submission.header.report.summary).toContain("Recorded E2E feature results: 1 passed");
+    expect(submission.header.report.summary).toContain("Final analysis was not adopted");
+    expect(submission.header.report.summary).toContain("task budget was exhausted");
+    expect(submission.header.context.e2e).toEqual(saved.runtime.e2e);
+    expect(collectionItems(submission.parts, "verificationEvidence")).toEqual(
+      saved.runtime.evidence,
+    );
+    expect(collectionItems(submission.parts, "artifacts")).toEqual(saved.runtime.artifacts);
+    expect(collectionItems(submission.parts, "coverageUnits")).toEqual(
+      saved.analysis.coverage.includedUnits,
+    );
+    expect(saved).toEqual(before);
+  });
+
+  it("binds the frozen usage summary into report metadata and the logical content digest", () => {
+    const input = fixture();
+    const usage = usageSummary();
+    const legacy = buildInvestigationReportSubmission(input);
+    const submission = buildInvestigationReportSubmission({ ...input, usage });
+    expect(submission.header.report.usage).toEqual(usage);
+    expect(submission.header.report.usage).not.toBe(usage);
+    expect(Value.Check(InvestigationReportHeaderV1Schema, submission.header)).toBe(true);
+    expect(Object.hasOwn(legacy.header.report, "usage")).toBe(false);
+    expect(submission.manifest.logicalContentDigest).not.toBe(legacy.manifest.logicalContentDigest);
+    const changed = buildInvestigationReportSubmission({
+      ...input,
+      usage: { ...usage, reportedTokens: 16, usage: { ...usage.usage, totalTokens: 16 } },
+    });
+    expect(changed.manifest.logicalContentDigest).not.toBe(
+      submission.manifest.logicalContentDigest,
+    );
+    usage.usage.totalTokens = 99;
+    expect(submission.header.report.usage?.usage.totalTokens).toBe(15);
+  });
+
+  it("retains an unknown exact total and its reported lower bound in a frozen report", () => {
+    const usage: InvestigationUsageSummary = {
+      ...usageSummary(),
+      usage: unavailableInvestigationTokenUsage(),
+      completeness: "partial",
+      unknownInvocationCount: 1,
+    };
+    const submission = buildInvestigationReportSubmission({ ...fixture(), usage });
+    expect(submission.header.report.usage?.reportedTokens).toBe(15);
+    expect(submission.header.report.usage?.usage.totalTokens).toBeNull();
+    expect(submission.header.report.usage?.completeness).toBe("partial");
+  });
+
+  it("rejects a usage snapshot whose canonical token breakdown is inconsistent", () => {
+    const usage = usageSummary();
+    usage.usage = { ...usage.usage, inputTokens: 10, cachedReadTokens: 11, outputTokens: 5 };
+    expectBuildError(
+      () => buildInvestigationReportSubmission({ ...fixture(), usage }),
+      "INVALID_INPUT",
+    );
+  });
+
   it("preserves legacy reports without claiming an unrecorded model identity", () => {
     const input = fixture();
     expect(input.checkpoint.runtime.modelExecutions).toBeUndefined();
@@ -814,12 +993,23 @@ describe("investigation report builder", () => {
         input.checkpoint.analysis.coverage.unresolvedUnitRefs = ["unit:synthetic"];
       } else if (gate === "candidate") input.checkpoint.analysis.candidates[0]!.status = "pending";
       else if (gate === "recheck") input.checkpoint.analysis.rechecks.shift();
-      else if (gate === "finalize") input.checkpoint.lastPhase = "investigation";
-      else input.checkpoint.stopReason = "continuing";
+      else if (gate === "finalize") {
+        // Only historical checkpoints require an otherwise empty finalization invocation.
+        delete input.checkpoint.runtime.reviewMode;
+        input.checkpoint.lastPhase = "investigation";
+      } else input.checkpoint.stopReason = "continuing";
       input.checkpoint = seal(input.checkpoint);
       expectBuildError(() => buildInvestigationReportSubmission(input), "COMPLETION_NOT_READY");
     },
   );
+
+  it("does not require an empty finalize phase after a versioned static review is complete", () => {
+    const input = fixture();
+    expect(input.checkpoint.runtime.reviewMode).toBe("local_checkout");
+    input.checkpoint.lastPhase = "investigation";
+    input.checkpoint = seal(input.checkpoint);
+    expect(buildInvestigationReportSubmission(input).header.outcome).toBe("completed");
+  });
 
   it.each([
     { outcome: "completed" },

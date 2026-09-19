@@ -4,6 +4,8 @@ import { delay } from "../util/async.js";
 import type { InvestigationWorkerClient } from "./http-client.js";
 
 export type ClaimedInvestigationTask = NonNullable<InvestigationClaimResponse["claim"]>;
+export type InvestigationTaskPool = "static" | "e2e";
+export type InvestigationWorkerRole = InvestigationTaskPool | "all";
 
 export interface InvestigationClaimExecutor {
   execute(claim: ClaimedInvestigationTask, signal: AbortSignal): Promise<void>;
@@ -14,7 +16,10 @@ export interface InvestigationTaskServiceOptions {
   readonly executor: InvestigationClaimExecutor;
   readonly supportedKinds: readonly InvestigationTaskKind[];
   readonly logger: Logger;
+  /** Legacy alias for the static pool capacity. */
   readonly maximumConcurrentTasks?: number;
+  readonly maximumConcurrentStaticTasks?: number;
+  readonly role?: InvestigationWorkerRole;
   readonly claimPollMs?: number;
   readonly retryDelayMs?: number;
 }
@@ -31,7 +36,9 @@ export class InvestigationTaskService {
   readonly #shutdown = new AbortController();
   readonly #claimAbort = new AbortController();
   readonly #active = new Map<string, Promise<void>>();
-  readonly #capacity: number;
+  readonly #activeByPool: Record<InvestigationTaskPool, number> = { static: 0, e2e: 0 };
+  readonly #capacity: Readonly<Record<InvestigationTaskPool, number>>;
+  readonly #supportedKinds: readonly InvestigationTaskKind[];
   readonly #claimPollMs: number;
   readonly #retryDelayMs: number;
   #draining = false;
@@ -40,11 +47,23 @@ export class InvestigationTaskService {
   #executionFailure: Error | undefined;
 
   public constructor(private readonly options: InvestigationTaskServiceOptions) {
-    this.#capacity = positiveInteger(options.maximumConcurrentTasks ?? 1, "maximumConcurrentTasks");
+    this.#capacity = {
+      static: positiveInteger(
+        options.maximumConcurrentStaticTasks ?? options.maximumConcurrentTasks ?? 1,
+        "maximumConcurrentStaticTasks",
+      ),
+      e2e: 1,
+    };
     this.#claimPollMs = positiveInteger(options.claimPollMs ?? 2_000, "claimPollMs");
     this.#retryDelayMs = positiveInteger(options.retryDelayMs ?? 5_000, "retryDelayMs");
-    if (options.supportedKinds.length === 0)
-      throw new Error("At least one investigation task kind is required.");
+    const role = options.role ?? "all";
+    if (role !== "all" && role !== "static" && role !== "e2e")
+      throw new Error("The investigation Worker role must be static, e2e, or all.");
+    this.#supportedKinds = options.supportedKinds.filter(
+      (kind) => role === "all" || investigationTaskPool(kind) === role,
+    );
+    if (this.#supportedKinds.length === 0)
+      throw new Error("At least one investigation task kind must match the Worker role.");
   }
 
   public run(): Promise<void> {
@@ -65,18 +84,30 @@ export class InvestigationTaskService {
   }
 
   async #run(): Promise<void> {
+    try {
+      await this.#claimTasks();
+    } finally {
+      // A claim failure must not let runtime shutdown abort unrelated accepted attempts.
+      this.requestDrain();
+      await Promise.allSettled(this.#active.values());
+    }
+    if (this.#executionFailure !== undefined) throw this.#executionFailure;
+  }
+
+  async #claimTasks(): Promise<void> {
     const claimSignal = AbortSignal.any([this.#claimAbort.signal, this.#shutdown.signal]);
     while (!this.#draining && !this.#shutdown.signal.aborted) {
-      if (this.#active.size >= this.#capacity) {
+      const supportedKinds = this.#supportedKinds.filter((kind) => {
+        const pool = investigationTaskPool(kind);
+        return this.#activeByPool[pool] < this.#capacity[pool];
+      });
+      if (supportedKinds.length === 0) {
         await Promise.race(this.#active.values());
         continue;
       }
       let claim: ClaimedInvestigationTask | null;
       try {
-        claim = await this.options.client.claim(
-          { supportedKinds: [...this.options.supportedKinds] },
-          claimSignal,
-        );
+        claim = await this.options.client.claim({ supportedKinds }, claimSignal);
       } catch (error) {
         if (claimSignal.aborted) break;
         if (!isRetryable(error)) throw error;
@@ -91,8 +122,11 @@ export class InvestigationTaskService {
       if (this.#active.has(claim.attempt.id)) {
         throw new Error("The server claimed an investigation attempt that is already active.");
       }
+      if (!supportedKinds.includes(claim.task.kind))
+        throw new Error("The server claimed an investigation task outside the available pools.");
       const attemptId = claim.attempt.id;
       const taskId = claim.task.id;
+      const pool = investigationTaskPool(claim.task.kind);
       const execution = Promise.resolve()
         .then(() => this.options.executor.execute(claim, this.#shutdown.signal))
         .catch(() => {
@@ -101,7 +135,6 @@ export class InvestigationTaskService {
             "Investigation attempt could not complete its terminal submission.",
           );
           this.requestDrain();
-          this.#shutdown.abort(new InvestigationWorkerShutdown());
           this.options.logger.error(
             "Investigation attempt could not complete its terminal submission.",
             { taskId, attemptId },
@@ -109,11 +142,11 @@ export class InvestigationTaskService {
         })
         .finally(() => {
           this.#active.delete(attemptId);
+          this.#activeByPool[pool] -= 1;
         });
+      this.#activeByPool[pool] += 1;
       this.#active.set(attemptId, execution);
     }
-    await Promise.allSettled(this.#active.values());
-    if (this.#executionFailure !== undefined) throw this.#executionFailure;
   }
 
   async #stop(): Promise<void> {
@@ -122,6 +155,11 @@ export class InvestigationTaskService {
     await Promise.allSettled(this.#active.values());
     await this.#runPromise;
   }
+}
+
+/** Execution tasks share one E2E slot, including legacy saved-plan tasks. */
+export function investigationTaskPool(kind: InvestigationTaskKind): InvestigationTaskPool {
+  return kind === "pr-review" || kind === "issue-investigate" ? "static" : "e2e";
 }
 
 export function startInvestigationWorker(

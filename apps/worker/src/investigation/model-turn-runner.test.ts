@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { win32 } from "node:path";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, win32 } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import {
   createInvestigationPreview as createInvestigationFixture,
@@ -7,6 +9,7 @@ import {
   type InvestigationLoopCheckpointV1,
   type InvestigationLoopRoundV1,
   InvestigationModelEditsV1Schema,
+  type InvestigationModelInvocationReceipt,
 } from "@agentic-review/contracts";
 import { createInvestigationCheckpoint, investigationContentDigest } from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
@@ -34,6 +37,7 @@ import {
   type ModelTurnRunnerOptions,
   makePrompt,
 } from "./model-turn-runner.js";
+import { InvestigationModelUsageJournal } from "./model-usage-journal.js";
 import type {
   InvestigationPrDiffChunk,
   InvestigationPrDiffManifest,
@@ -297,8 +301,8 @@ function fixture(
       _onDispatch?: () => void,
     ): Promise<ManagedProcess> => {
       const contextText = (spec.standardInput ?? "")
-        .split("<frozen_investigation_context>\n")[1]!
-        .split("\n</frozen_investigation_context>")[0]!;
+        .split(/<(?:frozen_investigation_context|local_source_review_context)>\n/u)[1]!
+        .split(/\n<\/(?:frozen_investigation_context|local_source_review_context)>/u)[0]!;
       const context = JSON.parse(contextText) as { turn: ModelTurnProjectionContext };
       round.phase = context.turn.phase;
       round.round = context.turn.round;
@@ -455,6 +459,8 @@ function prChunkFixture(
     leaseVersion: 1,
     recordedAt: task.updatedAt,
   });
+  // This fixture exercises persisted legacy chunk-brokered checkpoints.
+  delete checkpoint.runtime.reviewMode;
   checkpoint.analysis.coverage.includedUnits.push(
     ...descriptors.map((chunk) => ({
       id: chunk.id,
@@ -509,8 +515,8 @@ function prChunkFixture(
   };
   f.start.mockImplementation(async (spec) => {
     const contextText = (spec.standardInput ?? "")
-      .split("<frozen_investigation_context>\n")[1]!
-      .split("\n</frozen_investigation_context>")[0]!;
+      .split(/<(?:frozen_investigation_context|local_source_review_context)>\n/u)[1]!
+      .split(/\n<\/(?:frozen_investigation_context|local_source_review_context)>/u)[0]!;
     const context = (JSON.parse(contextText) as { turn: ModelTurnProjectionContext }).turn;
     const delta: InvestigationModelTurnDeltaV1 = {
       schemaVersion: "InvestigationModelTurnDeltaV1",
@@ -609,6 +615,100 @@ function selectFullDiff(p: ReturnType<typeof prChunkFixture>): void {
 }
 
 describe("investigation model turn runner", () => {
+  it("lets a fresh snapshot-only issue finish in its first static invocation", async () => {
+    const f = fixture({ findingCount: 0 });
+    f.round.continue = false;
+    const result = await f.runner.execute(f.input);
+    expect(result.round.phase).toBe("discovery");
+    expect(result.round.continue).toBe(false);
+    expect(f.start).toHaveBeenCalledOnce();
+    const prompt = f.start.mock.calls[0]![0].standardInput!;
+    expect(prompt).toContain("no separate finalize invocation is required");
+    expect(prompt).toContain("Do not guess a repository branch or source revision");
+    expect(prompt).toContain("Only analyze the supplied snapshots and complete source files");
+    expect(prompt).not.toContain("A non-finalize batch cannot finish");
+    expect(f.input.workspace.assertSourceBinding).not.toHaveBeenCalled();
+    expect(f.input.workspace.readSourceFile).not.toHaveBeenCalled();
+  });
+
+  it("keeps the historical snapshot prompt when an existing checkpoint has no review mode", async () => {
+    const f = fixture({ findingCount: 0 });
+    const checkpoint = createInvestigationCheckpoint({
+      task: f.input.task,
+      attemptId: f.input.attempt.id,
+      checkpointId: "historical-snapshot",
+      leaseVersion: f.input.attempt.leaseVersion,
+      recordedAt: f.input.task.updatedAt,
+    });
+    delete checkpoint.runtime.reviewMode;
+    const prepared = await makePrompt({ ...f.input, checkpoint }, f.io, 128 * 1024, 1024 * 1024);
+    expect(prepared.projection.autonomousReview).toBe(false);
+    expect(prepared.prompt).toContain("A non-finalize batch cannot finish");
+    expect(prepared.prompt).not.toContain("no separate finalize invocation is required");
+  });
+
+  it("uses the pinned local checkout and a diff entry point without preselecting dependency paths", async () => {
+    const p = prChunkFixture();
+    p.checkpoint.runtime.reviewMode = "local_checkout";
+    p.checkpoint.analysis.coverage.includedUnits =
+      p.checkpoint.analysis.coverage.includedUnits.filter((unit) => unit.kind !== "pr_diff_chunk");
+    p.checkpoint.analysis.coverage.unresolvedUnitRefs = ["full-diff"];
+    const discover = vi.fn();
+    const workspace = {
+      ...p.workspace,
+      readSourceDependencies: discover,
+      readSourceContext: discover,
+    };
+    const prepared = await makePrompt({ ...p.input, workspace }, p.f.io, 128 * 1024, 1024 * 1024);
+    const context = JSON.parse(
+      prepared.prompt
+        .split("<local_source_review_context>\n")[1]!
+        .split("\n</local_source_review_context>")[0]!,
+    );
+    expect(context.workspace.directory).toBe(p.workspace.sourceDirectory);
+    expect(context.workspace.headSha).toBe(p.manifest.headSha);
+    expect(context.workspace.mergeBaseSha).toBe(p.manifest.mergeBaseSha);
+    expect(context.initialDiff.chunks.map((chunk: { kind: string }) => chunk.kind)).toEqual([
+      "diff",
+    ]);
+    expect(context.initialDiff.complete).toBe(true);
+    expect(prepared.sourceUnitIds).toEqual([]);
+    expect(prepared.prompt).toContain("search the checkout before declaring source unavailable");
+    expect(prepared.prompt).toContain("No separate finalization invocation is required");
+    expect(prepared.prompt).toContain("Do not restore dependencies, build, run tests");
+    expect(discover).not.toHaveBeenCalled();
+    await p.f.runner.execute({ ...p.input, workspace });
+    const spec = p.f.start.mock.calls[0]![0];
+    expect(spec.arguments[spec.arguments.indexOf("--cd") + 1]).toBe(p.workspace.sourceDirectory);
+    expect(spec.environment.GIT_OPTIONAL_LOCKS).toBe("0");
+    expect(spec.arguments).not.toContain("features.shell_tool=false");
+    expect(p.workspace.assertSourceBinding).toHaveBeenCalled();
+  });
+
+  it("leaves oversized initial diff content for exact local Git inspection instead of blocking the review", async () => {
+    const p = prChunkFixture({
+      chunks: [
+        { id: "large-diff", kind: "diff", content: "large diff context\n".repeat(2500) },
+        { id: "large-base", kind: "base", content: "export const removed = true;\n" },
+      ],
+    });
+    p.checkpoint.runtime.reviewMode = "local_checkout";
+    p.checkpoint.analysis.coverage.includedUnits =
+      p.checkpoint.analysis.coverage.includedUnits.filter((unit) => unit.kind !== "pr_diff_chunk");
+    p.checkpoint.analysis.coverage.unresolvedUnitRefs = ["full-diff"];
+    const result = await makePrompt(p.input, p.f.io, 32 * 1024, 1024 * 1024);
+    const context = JSON.parse(
+      result.prompt
+        .split("<local_source_review_context>\n")[1]!
+        .split("\n</local_source_review_context>")[0]!,
+    );
+    expect(context.initialDiff.complete).toBe(false);
+    expect(context.initialDiff.omittedChunkIds).toEqual(["large-diff"]);
+    expect(context.initialDiff.chunks).toEqual([]);
+    expect(context.workspace.files[0].path).toBe("src/deleted.ts");
+    expect(Buffer.byteLength(result.prompt)).toBeLessThanOrEqual(32 * 1024);
+  });
+
   it("retains complete owned progress comments and their provenance in the model input", async () => {
     const f = fixture();
     const original = JSON.parse(f.files.get(f.input.workspace.modelInputPath)!.toString("utf8"));
@@ -1480,8 +1580,6 @@ describe("investigation model turn runner", () => {
         "keep its hypothesis status if uncertainty remains",
       ])
         expect(spec.standardInput).toContain(instruction);
-      expect(spec.arguments).not.toContain("--dangerously-bypass-approvals-and-sandbox");
-      expect(spec.arguments).not.toContain("--allow-all");
       if (engine === "codex") {
         expect(spec.arguments[spec.arguments.indexOf("--cd") + 1]).toBe(
           f.input.workspace.modelInputDirectory,
@@ -1489,12 +1587,12 @@ describe("investigation model turn runner", () => {
         expect(
           spec.arguments.filter((argument) => argument === "--skip-git-repo-check"),
         ).toHaveLength(1);
-        expect(spec.arguments[spec.arguments.indexOf("--sandbox") + 1]).toBe("read-only");
+        expect(spec.arguments).toContain("--dangerously-bypass-approvals-and-sandbox");
+        expect(spec.arguments).not.toContain("features.shell_tool=false");
+        expect(spec.arguments).not.toContain("features.unified_exec=false");
         expect(spec.arguments).toEqual(
           expect.arrayContaining([
             'approval_policy="never"',
-            "features.shell_tool=false",
-            "features.unified_exec=false",
             "features.apps=false",
             "features.hooks=false",
             "features.multi_agent=false",
@@ -1504,7 +1602,8 @@ describe("investigation model turn runner", () => {
         );
         expect(spec.arguments.at(-1)).toBe("-");
       } else {
-        expect(spec.arguments).toContain("--available-tools=view,glob,grep");
+        expect(spec.arguments).toContain("--allow-all");
+        expect(spec.arguments).not.toContain("--available-tools=view,glob,grep");
         expect(spec.arguments).not.toContain("--skip-git-repo-check");
       }
       expect(f.io.writeExclusiveUtf8).toHaveBeenCalledWith(
@@ -2393,7 +2492,7 @@ describe("investigation model turn runner", () => {
       win32.join(f.roundDirectory, "round-schema.json"),
       JSON.stringify(createInvestigationModelOutputSchema(InvestigationModelEditsV1Schema)),
     );
-    expect(f.start.mock.calls[0]![0].arguments).toContain("features.shell_tool=false");
+    expect(f.start.mock.calls[0]![0].arguments).not.toContain("features.shell_tool=false");
     expect(f.io.removeDirectory).toHaveBeenCalledOnce();
   });
 
@@ -2558,17 +2657,62 @@ describe("investigation model turn runner", () => {
     expect(f.io.removeDirectory).toHaveBeenCalledWith(f.roundDirectory);
   });
 
-  it("rejects a prohibited Codex tool event even when a valid result file exists", async () => {
+  it("accepts native source-reading tool events with a structured final response", async () => {
     const f = fixture({
       stdout: jsonl(
-        { type: "item.completed", item: { type: "command_execution", command: "npm test" } },
+        {
+          type: "item.completed",
+          item: { type: "command_execution", command: "rg CleanupTempDir" },
+        },
         codexComplete,
       ),
     });
-    await expect(f.runner.execute(f.input)).rejects.toMatchObject({
-      code: "MODEL_TOOL_POLICY_VIOLATION",
-    });
+    await expect(f.runner.execute(f.input)).resolves.toMatchObject({ usage: { tokens: 50 } });
   });
+
+  it.each(["codex", "copilot"] as const)(
+    "preserves the isolated passive proposal boundary for %s",
+    async (engine) => {
+      const f = fixture({
+        engine,
+        stdout:
+          engine === "codex"
+            ? jsonl(
+                {
+                  type: "item.completed",
+                  item: { type: "command_execution", command: "rg source" },
+                },
+                codexComplete,
+              )
+            : jsonl(
+                { type: "tool.execution_start", data: {} },
+                copilotFinal("{}"),
+                copilotComplete,
+              ),
+      });
+      const prepared = await makePrompt(f.input, f.io, 128 * 1024, 1024 * 1024);
+      const runner = createStaticModelJsonRunner(f.options);
+      await expect(
+        runner.execute({
+          toolPolicy: "passive_proposal",
+          workspace: f.input.workspace,
+          signal: f.input.signal,
+          prompt: prepared.prompt,
+          schema: InvestigationModelTurnDeltaV1Schema,
+          hardTimeoutMs: 30_000,
+          maximumResultBytes: 1024 * 1024,
+        }),
+      ).rejects.toMatchObject({ code: "MODEL_TOOL_POLICY_VIOLATION" });
+      const argumentsList = f.start.mock.calls[0]![0].arguments;
+      if (engine === "codex") {
+        expect(argumentsList).toContain("features.shell_tool=false");
+        expect(argumentsList).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+      } else {
+        expect(argumentsList).toContain("--available-tools=view,glob,grep");
+        expect(argumentsList).not.toContain("--allow-all");
+      }
+    },
+  );
 
   it("rejects nonzero CLI exit even with schema-valid output", async () => {
     const f = fixture({ exit: { exitCode: 9 } });
@@ -2634,7 +2778,7 @@ describe("investigation model turn runner", () => {
     expect(onUsage).not.toHaveBeenCalled();
   });
 
-  it("retains Copilot sidecar usage before a tool-policy rejection", async () => {
+  it("retains Copilot sidecar usage before a malformed final response after tool execution", async () => {
     const f = fixture({
       engine: "copilot",
       stdout: jsonl(
@@ -2646,7 +2790,7 @@ describe("investigation model turn runner", () => {
     });
     const onUsage = vi.fn();
     await expect(f.runner.execute({ ...f.input, onUsage })).rejects.toMatchObject({
-      code: "MODEL_TOOL_POLICY_VIOLATION",
+      code: "MODEL_OUTPUT_INVALID",
     });
     expect(onUsage).toHaveBeenLastCalledWith({ tokens: 30, source: "cli" });
   });
@@ -2667,21 +2811,13 @@ describe("investigation model turn runner", () => {
     expect(onUsage).toHaveBeenCalledExactlyOnceWith({ tokens: null, source: "unavailable" });
   });
 
-  it.each(["invalid JSON", "invalid schema", "binding mismatch", "nonzero exit", "tool policy"])(
+  it.each(["invalid JSON", "invalid schema", "binding mismatch", "nonzero exit"])(
     "retains complete CLI usage when output fails with %s",
     async (mode) => {
       const f = fixture({
         ...(mode === "invalid JSON" ? { outputText: "not-json" } : {}),
         ...(mode === "invalid schema" ? { outputText: "{}" } : {}),
         ...(mode === "nonzero exit" ? { exit: { exitCode: 9 } } : {}),
-        ...(mode === "tool policy"
-          ? {
-              stdout: jsonl(
-                { type: "item.completed", item: { type: "command_execution" } },
-                codexComplete,
-              ),
-            }
-          : {}),
       });
       if (mode === "binding mismatch") f.round.attemptId = "wrong-attempt";
       const onUsage = vi.fn();
@@ -2949,7 +3085,7 @@ describe("investigation model turn runner", () => {
     expect(f.input.workspace.resolveSourcePath).not.toHaveBeenCalled();
   });
 
-  it("reads only concrete selected source paths through the workspace broker", async () => {
+  it("keeps concrete selected source reads for a historical brokered checkpoint", async () => {
     const f = fixture();
     const sourceDirectory = "C:\\Worker\\investigations\\attempt-1\\source";
     const path = "src/example.ts",
@@ -2984,9 +3120,252 @@ describe("investigation model turn runner", () => {
         artifactRef: null,
       },
     };
-    await f.runner.execute({ ...f.input, task, workspace });
+    const checkpoint = createInvestigationCheckpoint({
+      task,
+      attemptId: f.input.attempt.id,
+      checkpointId: "historical-brokered-checkpoint",
+      leaseVersion: f.input.attempt.leaseVersion,
+      recordedAt: task.updatedAt,
+    });
+    delete checkpoint.runtime.reviewMode;
+    const { digest: _digest, ...checkpointContent } = checkpoint;
+    checkpoint.digest = investigationContentDigest(checkpointContent);
+    await f.runner.execute({ ...f.input, task, workspace, checkpoint });
     expect(workspace.resolveSourcePath).toHaveBeenCalledExactlyOnceWith(path);
     expect(f.start.mock.calls[0]![0].standardInput).toContain(content.trim());
     expect(workspace.assertSourceBinding).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("managed model invocation usage integration", () => {
+  it("durably registers before process dispatch and records provider subdivisions once", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "runner-model-usage-"));
+    try {
+      const receipts: InvestigationModelInvocationReceipt[] = [];
+      const f = fixture();
+      const usageLease = {
+        attemptId: f.input.attempt.id,
+        fence: f.input.attempt.leaseVersion,
+        leaseToken: "retained-runner-lease",
+      };
+      const journal = new InvestigationModelUsageJournal({
+        directory,
+        createInvocationId: () => "call-integration",
+        deliver: async (receipt, retainedLease) => {
+          expect(retainedLease).toEqual(usageLease);
+          expect(JSON.stringify(receipt)).not.toContain(usageLease.leaseToken);
+          receipts.push(receipt);
+        },
+      });
+      const originalStart = f.options.processHost.start;
+      const nativeOwnership = {
+        capability: "named-job-tree-v1" as const,
+        instanceKey: "a".repeat(64),
+        generation: "b".repeat(64),
+        previousTreeDrained: true as const,
+      };
+      const runner = createModelTurnRunner({
+        ...f.options,
+        usageJournal: journal,
+        processHost: {
+          recovery: () => nativeOwnership,
+          start: async (...args) => {
+            expect(receipts.map((receipt) => receipt.state)).toEqual(["registered", "running"]);
+            const deliveryPath = join(
+              directory,
+              `${Buffer.from("call-integration").toString("hex")}.delivery.json`,
+            );
+            expect(JSON.parse(await readFile(deliveryPath, "utf8"))).toEqual({
+              lease: usageLease,
+              nativeOwnership,
+            });
+            return originalStart(...args);
+          },
+        },
+      });
+      const result = await runner.execute({ ...f.input, usageLease });
+      expect(result.usage).toMatchObject({
+        invocationId: "call-integration",
+        tokens: 50,
+        details: { inputTokens: 31, cachedReadTokens: 7, outputTokens: 19, totalTokens: 50 },
+      });
+      expect(receipts.at(-1)).toMatchObject({
+        state: "completed",
+        disposition: "pending",
+        completeness: "complete",
+        usage: { totalTokens: 50 },
+      });
+      await runner.markUsageDisposition?.("call-integration", "accepted");
+      expect(receipts.at(-1)).toMatchObject({
+        disposition: "accepted",
+        usage: { totalTokens: 50 },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retains known costs even when the final model output is rejected", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "runner-model-usage-"));
+    try {
+      const receipts: InvestigationModelInvocationReceipt[] = [];
+      const journal = new InvestigationModelUsageJournal({
+        directory,
+        createInvocationId: () => "call-invalid",
+        deliver: async (receipt) => {
+          receipts.push(receipt);
+        },
+      });
+      const f = fixture({
+        outputText: "invalid structured output",
+        options: { usageJournal: journal },
+      });
+      await expect(f.runner.execute(f.input)).rejects.toMatchObject({
+        code: "MODEL_OUTPUT_INVALID",
+      });
+      expect(receipts.at(-1)).toMatchObject({
+        state: "failed",
+        disposition: "rejected",
+        usage: { totalTokens: 50, cachedReadTokens: 7 },
+      });
+      expect(f.io.removeDirectory).toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("model usage survives transport and accounting failures", () => {
+  it("retains a partial token receipt when stdout fails after a complete usage event", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "runner-model-usage-"));
+    try {
+      const receipts: InvestigationModelInvocationReceipt[] = [];
+      const journal = new InvestigationModelUsageJournal({
+        directory,
+        createInvocationId: () => "call-stream-error",
+        deliver: async (receipt) => {
+          receipts.push(receipt);
+        },
+      });
+      const f = fixture();
+      const originalStart = f.options.processHost.start;
+      const runner = createModelTurnRunner({
+        ...f.options,
+        usageJournal: journal,
+        processHost: {
+          start: async (...args) => {
+            const managed = await originalStart(...args);
+            return {
+              ...managed,
+              stdout: Readable.from(
+                (async function* () {
+                  yield JSON.stringify(codexComplete) + "\n";
+                  throw new Error("Synthetic stdout read failure.");
+                })(),
+              ),
+            };
+          },
+        },
+      });
+      await expect(runner.execute(f.input)).rejects.toMatchObject({
+        code: "MODEL_PROCESS_CLEANUP_UNCONFIRMED",
+      });
+      expect(receipts.at(-1)).toMatchObject({
+        state: "failed",
+        disposition: "rejected",
+        completeness: "partial",
+        usage: { totalTokens: 50, cachedReadTokens: 7 },
+      });
+      expect(f.io.removeDirectory).not.toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the process cleanup fault visible when its usage delivery also fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "runner-model-usage-"));
+    try {
+      const journal = new InvestigationModelUsageJournal({
+        directory,
+        createInvocationId: () => "call-multiple-errors",
+        deliver: async (receipt) => {
+          if (receipt.revision >= 3) throw new Error("Synthetic accounting delivery failure.");
+        },
+      });
+      const f = fixture();
+      const originalStart = f.options.processHost.start;
+      const runner = createModelTurnRunner({
+        ...f.options,
+        usageJournal: journal,
+        processHost: {
+          start: async (...args) => {
+            const managed = await originalStart(...args);
+            return {
+              ...managed,
+              stdout: Readable.from(
+                (async function* () {
+                  yield JSON.stringify(codexComplete) + "\n";
+                  throw new Error("Synthetic stdout read failure.");
+                })(),
+              ),
+            };
+          },
+        },
+      });
+      let failure: unknown;
+      try {
+        await runner.execute(f.input);
+      } catch (error) {
+        failure = error;
+      }
+      const errors: unknown[] = [failure];
+      for (let index = 0; index < errors.length; index++) {
+        const error = errors[index];
+        if (error instanceof AggregateError) errors.push(...error.errors);
+      }
+      expect(
+        errors.some(
+          (error) =>
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "MODEL_PROCESS_CLEANUP_UNCONFIRMED",
+        ),
+      ).toBe(true);
+      expect(f.io.removeDirectory).not.toHaveBeenCalled();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("bounded usage prefix retention", () => {
+  it("keeps complete usage events before an oversized output chunk crosses the cap", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "runner-model-usage-"));
+    try {
+      const receipts: InvestigationModelInvocationReceipt[] = [];
+      const journal = new InvestigationModelUsageJournal({
+        directory,
+        createInvocationId: () => "call-output-cap",
+        deliver: async (receipt) => {
+          receipts.push(receipt);
+        },
+      });
+      const f = fixture({ stdout: [JSON.stringify(codexComplete) + "\n" + "x".repeat(8192)] });
+      const runner = createModelTurnRunner({
+        ...f.options,
+        usageJournal: journal,
+        limits: { ...f.options.limits, maximumOutputBytes: 4096 },
+      });
+      await expect(runner.execute(f.input)).rejects.toMatchObject({
+        code: "MODEL_OUTPUT_LIMIT_EXCEEDED",
+      });
+      expect(receipts.at(-1)).toMatchObject({
+        state: "failed",
+        completeness: "partial",
+        usage: { totalTokens: 50 },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

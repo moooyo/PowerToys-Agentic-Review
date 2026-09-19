@@ -59,6 +59,44 @@ code running under the same Windows token. The current Worker therefore admits o
 deployment treats as trusted. ProcessHost still provides deterministic cleanup and resource limits,
 but it must not be described as hostile-code containment.
 
+## Opt-in crash recovery ownership
+
+The Worker opts in with `namedJobRecovery: true`, which supplies `--named-job-recovery`.
+After acquiring its instance mutex, the Host opens or creates
+`Global\AgenticReview.Worker.Recovery.v1.<instance-key>`, terminates any previous members,
+and waits for the aggregate active-process count to reach zero. For an existing Job, it closes
+the drained handle, waits for the old name to disappear, and creates a fresh same-named Job before joining it.
+An external handle retaining the previous Job blocks startup within the same 15-second budget
+used for drain; it never permits reusing a terminated Job or publishing unproved readiness.
+The raw creation call preserves `ERROR_ALREADY_EXISTS`, which distinguishes an existing Job
+from a fresh container. Any open, limit, termination, query, drain, close, or assignment error
+aborts startup without recovery evidence. Child creation atomically assigns the outer recovery Job before the
+per-request resource Job. Neither Job permits breakaway, and their handles are excluded
+from the inherited handle list.
+
+The `ready.capabilities.namedJobRecovery` object contains `capability: "named-job-tree-v1"`,
+the exact `instanceKey`, a fresh random `generation`, and `previousTreeDrained: true`.
+The Host retains its non-inheritable recovery handle until Windows closes it at process
+exit; explicitly closing the last handle while running would kill the Host itself.
+Normal shutdown still drains each request and returns its normal exit code.
+
+Windows retains a Job until all handles have closed and all associated processes have
+terminated; kill-on-close terminates the associated processes before destroying the Job.
+That lifetime rule makes a newly created name meaningful only for a previous journal that
+already records this containment capability. A validated subsequent generation with the same
+instance key proves the previous Host and its process trees exited. A legacy journal, PID
+absence, or acquiring the singleton mutex alone never proves a complete process-tree cleanup.
+This startup receipt says nothing about desktop restoration and cannot authorize test replay.
+It covers the Host and Job member trees; a service or WMI broker that creates processes outside
+that tree requires separate ownership and cleanup evidence.
+Without the flag, the legacy ready payload and launcher remain unchanged. An older binary
+rejects the opt-in flag rather than silently supplying unproved recovery.
+
+The underlying contracts are Microsoft's [Job Object lifetime and containment rules](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects),
+[named Job creation and existing-object result](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-createjobobjecta),
+[ordered process-creation Job list](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute),
+and [nested Job accounting and termination](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs).
+
 ## Windows verification
 
 Run the module tests serially on Windows:
@@ -73,6 +111,14 @@ path, observes it in the configured Job Object while it is blocked on standard i
 standard-I/O closure, process exit, Job drain, and handle cleanup. A second test has that helper
 spawn a real descendant, verifies both PIDs belong to the Job, terminates the Job, and confirms the
 root, descendant, and Job all reach their terminal state without a residual process.
+
+The named recovery tests additionally verify normal exit of a Host contained in its own
+kill-on-close Job. The crash fixture retains both the outer and per-request Job handles so a
+root and grandchild deliberately survive the old Host; the replacement Host must drain those
+exact process handles and the outer Job before the fixture releases its retained references.
+No readiness may appear while the old Job name is retained. Only a newly created container
+permits the new recovery generation; another test holds the old name until startup fails
+without proof. These tests need Windows and must run in the designated verification environment.
 
 ## Opt-in interactive standard input
 

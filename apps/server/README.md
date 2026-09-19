@@ -18,9 +18,9 @@ load a dotenv file. `.env.example` lists the supported settings. Keep both datab
 restricted to the service account and administrators, outside the dashboard static directory.
 Relative database paths resolve against the process working directory.
 
-Investigation data uses schema identity `investigation-v3`. Startup accepts an exact, complete
-`investigation-v2` database and adds only the comment delivery table and its indexes in one
-transaction. Existing entities are preserved. Unrelated, partial, or otherwise incompatible schemas
+Investigation data uses schema identity `investigation-v4`. Startup accepts exact, complete
+`investigation-v2` and `investigation-v3` databases and adds the missing comment history and scheduler
+storage in one transaction. Existing entities are preserved. Unrelated, partial, or otherwise incompatible schemas
 are rejected without deletion or reset. The separate password-account database retains its own
 schema identity and initialization rules.
 
@@ -141,6 +141,21 @@ token from at least 32 cryptographically random bytes encoded as base64url. Work
 `Authorization: Bearer <token>`; the server resolves ID and exact repository scopes from trusted
 configuration, ignoring identity claims in request bodies. Worker tokens cannot administer accounts,
 and browser cookies cannot claim worker tasks. No configured workers means no worker admission.
+
+### Independent task resource pools
+
+Static review and investigation share a configurable global capacity. The initial
+`INVESTIGATION_STATIC_CONCURRENCY` defaults to 1 and accepts 1-16; the first Server persists it.
+Administrators can update `staticConcurrency` with `PUT /api/investigation/scheduler`. The same
+endpoint supports authenticated `GET` for capacities, occupancy, and repository-scoped leases.
+Changing the limit affects future admission without interrupting already-running tasks.
+
+All execution kinds, including `pr-e2e` and legacy saved-plan tasks, share one global E2E slot.
+The claim transaction acquires the resource and creates its Attempt atomically. A blocked E2E
+queue head does not prevent a static task from starting. Static and E2E work can run together.
+E2E cancellation, lease expiry, crashes, and normal report finalization retain `needs_cleanup`
+until the original Worker authenticates the exact task, attempt, fence, and lease token and
+confirms owned processes stopped and the desktop was restored. There is no time-based release.
 
 GitHub transport remains optional. Configure `INVESTIGATION_GITHUB_TOKEN` or its `_PATH` variant
 alongside `INVESTIGATION_GITHUB_USER_ID`. Without credentials, remote operations are unavailable.
@@ -310,6 +325,10 @@ read-only requests; it is never blindly sent again.
 
 Each actual create/update attempt records its timestamp, exact body, status, and safe failure
 reason. Reconciliation adds observations to that attempt instead of inventing another write.
+An update superseded before dispatch is recorded as `cancelled` and displayed as **Cancelled**,
+without error styling. Known historical superseded attempts receive the same read-only display
+and filter classification; their original receipts remain unchanged. Preparation errors and
+rejected requests remain **Failed**, while uncertain writes remain **Unconfirmed**.
 Definitely unsent or rejected transient requests can retry within a bounded policy; ambiguous writes
 only use readback. Exhaustion remains visible and does not discard the latest investigation outcome.
 
@@ -464,6 +483,53 @@ task and attempt IDs. It is not an artifact or execution observation newly produ
 Admission and Worker reads verify the exact saved parent report, patch subject, digest, and current
 content availability. A required patch that has expired or gone missing cannot be replaced with a
 different branch or artifact under the same task identity.
+
+## Deployment Task budget defaults
+
+New Tasks without an explicit budget use the deployment defaults below. This includes signed
+assignment intake and trusted E2E comment intake. These settings are read at startup; GitHub
+comments cannot change them. Existing Tasks, idempotent creation retries, and resumed Tasks retain
+their recorded budgets. An authorized explicit Task budget continues to take precedence.
+
+| Setting | Default | Allowed values |
+| --- | --- | --- |
+| `INVESTIGATION_DEFAULT_TASK_MAX_TOKENS` | `120000` | Positive safe integers |
+| `INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS` | `24` | Positive safe integers |
+| `INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS` | `1800000` | Positive integers up to `2147483647` |
+
+The duration maximum matches the process timer limit. The Server's report-size limit continues
+to supply `maxReportBytes`. These are per-Task limits, not a shared deployment spending allowance;
+an acceptance run with an aggregate token allowance must monitor usage across its Tasks.
+
+## Trusted PR E2E commands
+
+Repository webhook settings support an optional `e2eEnabled` flag, disabled by default. It uses
+the existing `reviewerUserId` and `allowedActorUserIds`; assignment intake and E2E intake can be
+enabled independently. Subscribe the signed webhook receiver to `issue_comment` as well as
+`pull_request` events. A trusted user starts a standalone `pr-e2e` Task with this plain command
+on its own line in a new PR conversation comment:
+
+```text
+@configured-account e2e
+```
+
+The account name is resolved to the configured numeric reviewer ID. Quoted, fenced, indented,
+hidden, edited, bot-authored, or previously published automation comments do not authorize
+execution. The sender must match the comment's author and belong to the trusted numeric ID list.
+The receiver re-reads the comment, repository, and open PR before committing a Task. A trusted
+human may mention the same account they use; automation detection uses recorded comment IDs,
+not a blanket prohibition on self-mentions.
+
+Each command is durable and idempotent by repository/comment ID. An active E2E Task for the same
+base/head revision is reused; a new command after a terminal result can request another run.
+`pull_request.synchronize` re-reads the current PR and cancels obsolete work without starting a
+new revision automatically. Cancellation retains desktop ownership until normal Worker cleanup
+is confirmed. Source preparation is serialized per PR across intake instances to prevent stale
+reads from superseding newer work.
+
+E2E Tasks have no required parent static report or saved plan. They are explicitly authorized to
+execute repository code, use their own prompt, and own a separate progress publication and exact
+GitHub comment ID. Static review comments cannot be selected as E2E update targets.
 
 ## Evidence retention and capacity
 

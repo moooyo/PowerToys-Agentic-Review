@@ -164,6 +164,21 @@ export interface InvestigationSourceImportExpectation {
   readonly headSha?: string;
 }
 
+export interface InvestigationE2eCommandExpectation {
+  readonly githubIssueId: number;
+  readonly commentId: number;
+  readonly actorUserId: number;
+  readonly reviewerUserId: number;
+  readonly mentionLogin: string;
+  readonly bodySha256: string;
+}
+
+export interface InvestigationPullRequestRevision {
+  readonly githubWorkItemId: number;
+  readonly baseSha: string;
+  readonly headSha: string;
+}
+
 const sourceImportExpectationSchema = Type.Object(
   {
     githubWorkItemId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
@@ -693,6 +708,135 @@ export class InvestigationSourceImporter {
       "repository_changed",
       "The repository configuration changed during assignment verification.",
     );
+  }
+
+  /** Re-read the signed command and resolve its mention by numeric identity before execution. */
+  async verifyE2eCommand(
+    actor: InvestigationOperatorPrincipal,
+    repositoryId: string,
+    number: number,
+    expectation: InvestigationE2eCommandExpectation,
+  ): Promise<InvestigationPullRequestRevision> {
+    this.#scope(actor, repositoryId);
+    const repository = this.options.store.get<InvestigationRepositoryRecord>(
+      "repositories",
+      repositoryId,
+    );
+    requireCondition(
+      repository !== undefined,
+      404,
+      "repository_not_found",
+      "The repository is not registered.",
+    );
+    requireCondition(
+      [
+        number,
+        expectation.githubIssueId,
+        expectation.commentId,
+        expectation.actorUserId,
+        expectation.reviewerUserId,
+      ].every((value) => Number.isSafeInteger(value) && value > 0) &&
+        /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u.test(expectation.mentionLogin) &&
+        /^[a-f0-9]{64}$/u.test(expectation.bodySha256),
+      400,
+      "invalid_e2e_command",
+      "E2E commands require exact numeric identities and a body digest.",
+    );
+    const budget = { bytes: 0, pages: 0 };
+    await this.#verifyRepository(repository, budget);
+    const base = sourcePath(repository);
+    const issue = object((await this.#get(`${base}/issues/${number}`, budget)).value);
+    requireCondition(
+      issue.id === expectation.githubIssueId &&
+        issue.number === number &&
+        issue.pull_request !== undefined,
+      409,
+      "e2e_target_changed",
+      "The comment no longer identifies the expected pull request.",
+    );
+    const comment = object(
+      (await this.#get(`${base}/issues/comments/${expectation.commentId}`, budget)).value,
+    );
+    const author = object(comment.user);
+    requireCondition(
+      comment.id === expectation.commentId &&
+        author.id === expectation.actorUserId &&
+        author.type === "User" &&
+        comment.issue_url === `https://api.github.com${base}/issues/${number}` &&
+        typeof comment.body === "string" &&
+        createHash("sha256").update(comment.body, "utf8").digest("hex") === expectation.bodySha256,
+      409,
+      "e2e_command_changed",
+      "The E2E command was edited, removed, or changed identity.",
+    );
+    const mentioned = object((await this.#get(`/users/${expectation.mentionLogin}`, budget)).value);
+    requireCondition(
+      mentioned.id === expectation.reviewerUserId && mentioned.type === "User",
+      403,
+      "e2e_mention_not_authorized",
+      "The mentioned account is not the configured reviewer identity.",
+    );
+    const upstream = object((await this.#get(`${base}/pulls/${number}`, budget)).value);
+    return this.#pullRequestRevision(repository, number, upstream);
+  }
+
+  async readPullRequestRevision(
+    actor: InvestigationOperatorPrincipal,
+    repositoryId: string,
+    number: number,
+  ): Promise<InvestigationPullRequestRevision> {
+    this.#scope(actor, repositoryId);
+    requireCondition(
+      Number.isSafeInteger(number) && number > 0,
+      400,
+      "invalid_e2e_target",
+      "A pull request number is required.",
+    );
+    const repository = this.options.store.get<InvestigationRepositoryRecord>(
+      "repositories",
+      repositoryId,
+    );
+    requireCondition(
+      repository !== undefined,
+      404,
+      "repository_not_found",
+      "The repository is not registered.",
+    );
+    const budget = { bytes: 0, pages: 0 };
+    await this.#verifyRepository(repository, budget);
+    return this.#pullRequestRevision(
+      repository,
+      number,
+      object((await this.#get(`${sourcePath(repository)}/pulls/${number}`, budget)).value),
+    );
+  }
+
+  #pullRequestRevision(
+    repository: InvestigationRepositoryRecord,
+    number: number,
+    upstream: JsonObject,
+  ): InvestigationPullRequestRevision {
+    const base = object(upstream.base);
+    const head = object(upstream.head);
+    requireCondition(
+      upstream.number === number &&
+        Number.isSafeInteger(upstream.id) &&
+        (upstream.id as number) > 0 &&
+        object(base.repo).id === repository.githubRepositoryId &&
+        upstream.state === "open" &&
+        upstream.merged_at == null &&
+        upstream.merged !== true &&
+        Value.Check(GitObjectIdSchema, base.sha) &&
+        Value.Check(GitObjectIdSchema, head.sha),
+      409,
+      "e2e_revision_unavailable",
+      "E2E requires an open pull request with the registered base repository and exact commits.",
+    );
+    return {
+      githubWorkItemId: upstream.id as number,
+      baseSha: base.sha as string,
+      headSha: head.sha as string,
+    };
   }
 
   readonly resolveTaskSource = async (

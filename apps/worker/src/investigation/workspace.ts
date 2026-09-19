@@ -27,6 +27,7 @@ import {
   assertWindowsLocalAbsolutePath,
   type ProcessHostClient,
 } from "../execution/process-host-protocol.js";
+import { OwnedHardlinkError, validateOwnedHardlinkGroups } from "./owned-hardlinks.js";
 
 export interface InvestigationSourceBinding {
   readonly subjectRef: string;
@@ -264,6 +265,13 @@ export interface InvestigationSourceMaterializer {
     readonly binding: InvestigationSourceBinding;
     /** Re-read the materialized source identity instead of trusting declared metadata. */
     assertBinding(): Promise<void>;
+    /**
+     * Check ownership and immutable control metadata without scanning the source tree.
+     * When provided, bind a source file observation to its original blob identity.
+     * Adapters exposing this fast path must validate the complete tree before materialize
+     * returns and on every assertBinding call.
+     */
+    assertReadBinding?(file?: InvestigationSourceFile): Promise<void>;
     /** Capture the actual worktree diff through a trusted managed process. */
     capturePatch?(signal: AbortSignal): Promise<Uint8Array>;
     readPrDiffManifest?(): Promise<InvestigationPrDiffManifest>;
@@ -282,6 +290,46 @@ export interface ProductionInvestigationWorkspaceProviderOptions {
   readonly maximumInputBytes?: number;
   readonly maximumArtifactBytes?: number;
   readonly maximumTreeEntries?: number;
+  /** Persist this private receipt before any source, model, or execution work is started. */
+  readonly onOwnershipEstablished?: (
+    receipt: InvestigationWorkspaceOwnershipReceipt,
+  ) => Promise<void>;
+  /** A trusted managed cleanup helper must confirm removal before this callback resolves. */
+  readonly cleanupOwned?: (receipt: InvestigationWorkspaceOwnershipReceipt) => Promise<void>;
+}
+
+/** Private recovery evidence. Never include the nonce in logs, reports, or public artifacts. */
+export interface InvestigationWorkspaceOwnershipReceipt {
+  readonly schemaVersion: "InvestigationWorkspaceOwnershipReceiptV1";
+  readonly workspaceRootDirectory: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly leaseVersion: number;
+  readonly nonce: string;
+  readonly rootIdentity: string;
+  readonly attemptIdentity: string;
+  readonly ownerIdentity: string;
+  readonly ownerDigest: string;
+}
+
+export interface CleanupOwnedInvestigationAttemptOptions {
+  readonly workspaceRootDirectory: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly leaseVersion: number;
+  readonly ownership: InvestigationWorkspaceOwnershipReceipt;
+  /** A trusted process owner must establish this; a missing PID is not sufficient evidence. */
+  readonly processesStopped: true;
+  readonly fileSystem?: InvestigationWorkspaceFileSystem;
+  readonly maximumTreeEntries?: number;
+}
+
+export interface AssertInvestigationAttemptWorkspaceAbsentOptions {
+  readonly workspaceRootDirectory: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly leaseVersion: number;
+  readonly fileSystem?: InvestigationWorkspaceFileSystem;
 }
 
 export type InvestigationWorkspaceFailureCode =
@@ -289,6 +337,7 @@ export type InvestigationWorkspaceFailureCode =
   | "WORKSPACE_PATH_UNSAFE"
   | "WORKSPACE_ALREADY_EXISTS"
   | "WORKSPACE_NOT_OWNED"
+  | "WORKSPACE_RECOVERY_OWNERSHIP_MISSING"
   | "WORKSPACE_CLOSED"
   | "INPUT_TAMPERED"
   | "SOURCE_UNAVAILABLE"
@@ -462,6 +511,8 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
   readonly #maximumInputBytes: number;
   readonly #maximumArtifactBytes: number;
   readonly #maximumTreeEntries: number;
+  readonly #onOwnershipEstablished: ProductionInvestigationWorkspaceProviderOptions["onOwnershipEstablished"];
+  readonly #cleanupOwned: ProductionInvestigationWorkspaceProviderOptions["cleanupOwned"];
 
   public constructor(options: ProductionInvestigationWorkspaceProviderOptions) {
     assertPath(options.workspaceRootDirectory);
@@ -478,6 +529,8 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
     this.#maximumInputBytes = positiveLimit(options.maximumInputBytes ?? 8 * 1_024 * 1_024);
     this.#maximumArtifactBytes = positiveLimit(options.maximumArtifactBytes ?? 32 * 1_024 * 1_024);
     this.#maximumTreeEntries = positiveLimit(options.maximumTreeEntries ?? 100_000);
+    this.#onOwnershipEstablished = options.onOwnershipEstablished;
+    this.#cleanupOwned = options.cleanupOwned;
   }
 
   public async prepare(
@@ -489,19 +542,12 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
     const snapshot = validateSnapshot(input);
     const snapshotBytes = serializeSnapshot(snapshot, this.#maximumInputBytes);
     const snapshotDigest = digest(snapshotBytes);
-    const attemptName = `task-${digest(Buffer.from(input.task.id)).slice(0, 24)}-attempt-${digest(Buffer.from(input.attempt.id)).slice(0, 24)}-lease-${input.attempt.leaseVersion}`;
-    const attemptDirectory = childPath(this.#root, attemptName);
-    const layout: OwnedLayout = {
-      root: this.#root,
-      attempt: attemptDirectory,
-      owner: childPath(attemptDirectory, ".owner.json"),
-      modelInput: childPath(attemptDirectory, "model-input"),
-      snapshot: childPath(attemptDirectory, "model-input", "snapshot.json"),
-      control: childPath(attemptDirectory, "control"),
-      temp: childPath(attemptDirectory, "temp"),
-      artifacts: childPath(attemptDirectory, "artifacts"),
-      source: childPath(attemptDirectory, "source"),
-    };
+    const layout = ownedWorkspaceLayout(
+      this.#root,
+      input.task.id,
+      input.attempt.id,
+      input.attempt.leaseVersion,
+    );
     const identities = new Map<string, string>();
     const guard = new WorkspaceGuard(this.#fs, layout, identities, this.#maximumTreeEntries);
     await guard.assertPath(layout.root, "directory");
@@ -531,16 +577,18 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
       pathKey(layout.attempt),
       (await guard.assertPath(layout.attempt, "directory")).identity,
     );
+    const ownerNonce = randomUUID();
     const ownerBytes = Buffer.from(
       JSON.stringify({
         taskId: input.task.id,
         attemptId: input.attempt.id,
         leaseVersion: input.attempt.leaseVersion,
-        nonce: randomUUID(),
+        nonce: ownerNonce,
       }),
       "utf8",
     );
     let ownerWritten = false;
+    let ownership: InvestigationWorkspaceOwnershipReceipt | undefined;
     let cleaned = false;
     let cleaning = false;
     let materializedSource: MaterializedSource | null = null;
@@ -554,6 +602,7 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
       { readonly baseSha: string; readonly patchDigest: string }
     >();
     let frozenPrDiffManifest: InvestigationPrDiffManifest | null = null;
+    const frozenPrDiffChunks = new Map<string, InvestigationPrDiffChunk>();
     const assertOpen = () => {
       if (cleaned || cleaning)
         throw failure("WORKSPACE_CLOSED", "The investigation workspace is closed.");
@@ -576,7 +625,16 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
       cleaning = true;
       try {
         await assertOwned();
-        await guard.removeOwnedTree(assertOwned);
+        if (this.#cleanupOwned === undefined) {
+          await guard.removeOwnedTree(assertOwned);
+        } else {
+          if (ownership === undefined)
+            throw failure(
+              "WORKSPACE_RECOVERY_OWNERSHIP_MISSING",
+              "Managed cleanup requires the established workspace ownership receipt.",
+            );
+          await this.#cleanupOwned(structuredClone(ownership));
+        }
         cleaned = true;
       } finally {
         cleaning = false;
@@ -589,7 +647,20 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
         pathKey(layout.owner),
         (await guard.assertPath(layout.owner, "file")).identity,
       );
+      ownership = {
+        schemaVersion: "InvestigationWorkspaceOwnershipReceiptV1",
+        workspaceRootDirectory: this.#root,
+        taskId: input.task.id,
+        attemptId: input.attempt.id,
+        leaseVersion: input.attempt.leaseVersion,
+        nonce: ownerNonce,
+        rootIdentity: identities.get(pathKey(layout.root))!,
+        attemptIdentity: identities.get(pathKey(layout.attempt))!,
+        ownerIdentity: identities.get(pathKey(layout.owner))!,
+        ownerDigest: digest(ownerBytes),
+      };
       await this.#fs.setReadOnly(layout.owner, true);
+      await this.#onOwnershipEstablished?.(structuredClone(ownership));
       for (const directory of [layout.modelInput, layout.control, layout.temp, layout.artifacts]) {
         context.signal.throwIfAborted();
         await assertOwned();
@@ -633,8 +704,10 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
             "The materialized source is bound to a different input artifact.",
           );
         }
-        await guard.assertTree(layout.source);
-        await materializedSource.assertBinding();
+        if (materializedSource.assertReadBinding === undefined) {
+          await guard.assertTree(layout.source);
+          await materializedSource.assertBinding();
+        } else await materializedSource.assertReadBinding();
       }
       const assertIntegrity = async () => {
         assertOpen();
@@ -655,8 +728,22 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
           throw failure("SOURCE_UNAVAILABLE", "This workspace has no verified repository source.");
         }
         validateBinding(input.task, binding);
-        await guard.assertTree(layout.source);
+        if (materializedSource.assertReadBinding === undefined)
+          await guard.assertTree(layout.source);
         await materializedSource.assertBinding();
+        await assertIntegrity();
+      };
+      const assertSourceReadBinding = async (file?: InvestigationSourceFile) => {
+        if (materializedSource?.assertReadBinding === undefined) {
+          await assertSourceBinding();
+          return;
+        }
+        await assertIntegrity();
+        if (binding === null)
+          throw failure("SOURCE_UNAVAILABLE", "This workspace has no verified repository source.");
+        validateBinding(input.task, binding);
+        await guard.assertPath(layout.source, "directory");
+        await materializedSource.assertReadBinding(file);
         await assertIntegrity();
       };
       const readAndValidatePrDiffManifest = async (): Promise<InvestigationPrDiffManifest> => {
@@ -671,6 +758,8 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
             "The trusted source materializer cannot provide the complete PR diff manifest and chunks.",
           );
         }
+        if (materializedSource.assertReadBinding !== undefined && frozenPrDiffManifest !== null)
+          return frozenPrDiffManifest;
         const manifest = structuredClone(await materializedSource.readPrDiffManifest());
         validatePrDiffManifest(
           input.task,
@@ -696,9 +785,9 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
         frozenPrDiffManifest ??= manifest;
       };
       const readPrDiffManifest = async (): Promise<InvestigationPrDiffManifest> => {
-        await assertSourceBinding();
+        await assertSourceReadBinding();
         const manifest = await readAndValidatePrDiffManifest();
-        await assertSourceBinding();
+        await assertSourceReadBinding();
         freezePrDiffManifest(manifest);
         return structuredClone(manifest);
       };
@@ -717,7 +806,7 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
           );
         }
         const requestedIds = [...ids];
-        await assertSourceBinding();
+        await assertSourceReadBinding();
         const manifest = await readAndValidatePrDiffManifest();
         const descriptors = new Map(manifest.chunks.map((chunk) => [chunk.id, chunk]));
         const expected = requestedIds.map((id) => {
@@ -729,12 +818,19 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
             );
           return descriptor;
         });
+        const cacheEnabled = materializedSource?.assertReadBinding !== undefined;
+        const missing = cacheEnabled
+          ? expected.filter((descriptor) => !frozenPrDiffChunks.has(descriptor.id))
+          : expected;
+        const missingIds = missing.map((descriptor) => descriptor.id);
         let chunks: readonly InvestigationPrDiffChunk[];
-        if (materializedSource?.readPrDiffChunks !== undefined) {
-          chunks = structuredClone(await materializedSource.readPrDiffChunks(requestedIds));
+        if (missing.length === 0) {
+          chunks = [];
+        } else if (materializedSource?.readPrDiffChunks !== undefined) {
+          chunks = structuredClone(await materializedSource.readPrDiffChunks(missingIds));
         } else if (materializedSource?.readPrDiffChunk !== undefined) {
           const collected: InvestigationPrDiffChunk[] = [];
-          for (const id of requestedIds)
+          for (const id of missingIds)
             collected.push(structuredClone(await materializedSource.readPrDiffChunk(id)));
           chunks = collected;
         } else {
@@ -743,16 +839,20 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
             "The trusted source materializer cannot read complete PR diff chunks.",
           );
         }
-        if (!Array.isArray(chunks) || chunks.length !== expected.length)
+        if (!Array.isArray(chunks) || chunks.length !== missing.length)
           throw failure(
             "SOURCE_BINDING_MISMATCH",
             "The PR source batch does not contain every requested chunk exactly once.",
           );
-        for (let index = 0; index < expected.length; index++)
-          validatePrDiffChunk(chunks[index]!, expected[index]!);
-        await assertSourceBinding();
+        for (let index = 0; index < missing.length; index++)
+          validatePrDiffChunk(chunks[index]!, missing[index]!);
+        await assertSourceReadBinding();
         freezePrDiffManifest(manifest);
-        return chunks;
+        if (!cacheEnabled) return chunks;
+        for (const chunk of chunks) frozenPrDiffChunks.set(chunk.id, chunk);
+        return expected.map((descriptor) =>
+          structuredClone(frozenPrDiffChunks.get(descriptor.id)!),
+        );
       };
       const readPrDiffChunk = async (id: string): Promise<InvestigationPrDiffChunk> => {
         const chunks = await readPrDiffChunks([id]);
@@ -1467,15 +1567,15 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
           return artifact;
         },
         resolveSourcePath: async (relativePath) => {
-          await assertSourceBinding();
+          await assertSourceReadBinding();
           const path = resolveRelativeSourcePath(layout.source, relativePath);
           await guard.assertPath(path);
           return path;
         },
         readSourceFile: async (relativePath) => {
-          await assertSourceBinding();
+          await assertSourceReadBinding();
           const observed = await inspectSourceFile(relativePath);
-          await assertSourceBinding();
+          await assertSourceReadBinding(observed);
           return { path: observed.path, content: observed.content, digest: observed.digest };
         },
         readPrDiffManifest,
@@ -1520,18 +1620,218 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
       try {
         if (ownerWritten) await cleanup();
         else {
+          if (this.#cleanupOwned !== undefined)
+            throw failure(
+              "WORKSPACE_RECOVERY_OWNERSHIP_MISSING",
+              "An unrecorded attempt directory must be retained for trusted recovery.",
+            );
           await guard.assertPath(layout.attempt, "directory");
           await this.#fs.removeEmptyDirectory(layout.attempt);
         }
       } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          "Workspace preparation and owned cleanup failed.",
+        throw Object.assign(
+          new AggregateError(
+            [error, cleanupError],
+            "Workspace preparation and owned cleanup failed.",
+          ),
+          { code: "WORKSPACE_CLEANUP_UNCONFIRMED" },
         );
       }
       throw error;
     }
   }
+}
+
+/** Removes only the exact workspace identities recorded by its original trusted owner. */
+export async function cleanupOwnedInvestigationAttempt(
+  options: CleanupOwnedInvestigationAttemptOptions,
+): Promise<{ readonly state: "removed" | "already-absent" }> {
+  const ownership = options.ownership;
+  if (
+    options.processesStopped !== true ||
+    !hasExactKeys(ownership, [
+      "schemaVersion",
+      "workspaceRootDirectory",
+      "taskId",
+      "attemptId",
+      "leaseVersion",
+      "nonce",
+      "rootIdentity",
+      "attemptIdentity",
+      "ownerIdentity",
+      "ownerDigest",
+    ]) ||
+    ownership.schemaVersion !== "InvestigationWorkspaceOwnershipReceiptV1" ||
+    !isOwnershipText(options.taskId) ||
+    !isOwnershipText(options.attemptId) ||
+    ownership.taskId !== options.taskId ||
+    ownership.attemptId !== options.attemptId ||
+    !Number.isSafeInteger(options.leaseVersion) ||
+    options.leaseVersion < 0 ||
+    ownership.leaseVersion !== options.leaseVersion ||
+    typeof ownership.workspaceRootDirectory !== "string" ||
+    !samePath(ownership.workspaceRootDirectory, options.workspaceRootDirectory) ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(
+      ownership.nonce,
+    ) ||
+    !isOwnershipText(ownership.rootIdentity) ||
+    !isOwnershipText(ownership.attemptIdentity) ||
+    !isOwnershipText(ownership.ownerIdentity) ||
+    !/^[a-f0-9]{64}$/u.test(ownership.ownerDigest)
+  )
+    throw failure(
+      "WORKSPACE_NOT_OWNED",
+      "Workspace recovery requires matching private ownership and confirmed process cleanup.",
+    );
+  assertPath(options.workspaceRootDirectory);
+  const root = win32.normalize(options.workspaceRootDirectory);
+  if (samePath(root, win32.parse(root).root))
+    throw failure("WORKSPACE_PATH_UNSAFE", "A drive root cannot be a recovery workspace root.");
+  const expectedOwnerBytes = Buffer.from(
+    JSON.stringify({
+      taskId: options.taskId,
+      attemptId: options.attemptId,
+      leaseVersion: options.leaseVersion,
+      nonce: ownership.nonce,
+    }),
+    "utf8",
+  );
+  if (digest(expectedOwnerBytes) !== ownership.ownerDigest)
+    throw failure("WORKSPACE_NOT_OWNED", "The recovery ownership receipt is inconsistent.");
+  const fs = options.fileSystem ?? new ProductionInvestigationWorkspaceFileSystem();
+  const layout = ownedWorkspaceLayout(
+    root,
+    options.taskId,
+    options.attemptId,
+    options.leaseVersion,
+  );
+  const identities = new Map([
+    [pathKey(layout.root), ownership.rootIdentity],
+    [pathKey(layout.attempt), ownership.attemptIdentity],
+    [pathKey(layout.owner), ownership.ownerIdentity],
+  ]);
+  const guard = new WorkspaceGuard(
+    fs,
+    layout,
+    identities,
+    positiveLimit(options.maximumTreeEntries ?? 100_000),
+  );
+  await assertRecoveryRoot(fs, root, ownership.rootIdentity);
+  if ((await fs.lstat(layout.attempt)) === null) {
+    await assertRecoveryRoot(fs, root, ownership.rootIdentity);
+    return { state: "already-absent" };
+  }
+  await guard.assertPath(layout.attempt, "directory");
+  if ((await fs.lstat(layout.owner)) === null) {
+    // A crash can occur after deleting the last owner marker and before removing its empty parent.
+    // The journal's retained directory identity permits only this exact, already-empty directory.
+    if ((await fs.readDirectory(layout.attempt)).length !== 0)
+      throw failure("WORKSPACE_NOT_OWNED", "A non-empty recovery workspace has no owner marker.");
+    await assertRecoveryRoot(fs, root, ownership.rootIdentity);
+    await guard.assertPath(layout.attempt, "directory");
+    await fs.removeEmptyDirectory(layout.attempt);
+    return { state: "removed" };
+  }
+  const assertOwned = async (): Promise<void> => {
+    await assertRecoveryRoot(fs, root, ownership.rootIdentity);
+    await guard.assertPath(layout.attempt, "directory");
+    await guard.assertPath(layout.owner, "file");
+    const bytes = await fs.readFile(layout.owner, ownership.ownerIdentity, 4_096);
+    if (!equalBytes(bytes, expectedOwnerBytes))
+      throw failure("WORKSPACE_NOT_OWNED", "The recovery workspace ownership marker changed.");
+  };
+  await assertOwned();
+  await guard.removeOwnedTree(assertOwned);
+  return { state: "removed" };
+}
+
+/** Absence is the only automatic recovery result available without a durable ownership receipt. */
+export async function assertInvestigationAttemptWorkspaceAbsent(
+  options: AssertInvestigationAttemptWorkspaceAbsentOptions,
+): Promise<void> {
+  if (
+    !isOwnershipText(options.taskId) ||
+    !isOwnershipText(options.attemptId) ||
+    !Number.isSafeInteger(options.leaseVersion) ||
+    options.leaseVersion < 0
+  )
+    throw failure(
+      "INVALID_INPUT",
+      "Workspace absence checks require an exact task and lease identity.",
+    );
+  assertPath(options.workspaceRootDirectory);
+  const root = win32.normalize(options.workspaceRootDirectory);
+  if (samePath(root, win32.parse(root).root))
+    throw failure("WORKSPACE_PATH_UNSAFE", "A drive root cannot be a recovery workspace root.");
+  const fs = options.fileSystem ?? new ProductionInvestigationWorkspaceFileSystem();
+  const layout = ownedWorkspaceLayout(
+    root,
+    options.taskId,
+    options.attemptId,
+    options.leaseVersion,
+  );
+  await assertRecoveryRoot(fs, root);
+  if ((await fs.lstat(layout.attempt)) !== null)
+    throw failure(
+      "WORKSPACE_RECOVERY_OWNERSHIP_MISSING",
+      "The attempt workspace exists without its durable ownership receipt and cannot be automatically removed.",
+    );
+  await assertRecoveryRoot(fs, root);
+}
+
+function ownedWorkspaceLayout(
+  root: string,
+  taskId: string,
+  attemptId: string,
+  leaseVersion: number,
+): OwnedLayout {
+  const attemptName = `task-${digest(Buffer.from(taskId)).slice(0, 24)}-attempt-${digest(Buffer.from(attemptId)).slice(0, 24)}-lease-${leaseVersion}`;
+  const attempt = childPath(root, attemptName);
+  return {
+    root,
+    attempt,
+    owner: childPath(attempt, ".owner.json"),
+    modelInput: childPath(attempt, "model-input"),
+    snapshot: childPath(attempt, "model-input", "snapshot.json"),
+    control: childPath(attempt, "control"),
+    temp: childPath(attempt, "temp"),
+    artifacts: childPath(attempt, "artifacts"),
+    source: childPath(attempt, "source"),
+  };
+}
+
+async function assertRecoveryRoot(
+  fs: InvestigationWorkspaceFileSystem,
+  root: string,
+  expectedIdentity?: string,
+): Promise<void> {
+  let current = root;
+  for (;;) {
+    const state = await fs.lstat(current);
+    if (
+      state === null ||
+      state.kind !== "directory" ||
+      state.reparsePoint ||
+      !samePath(await fs.realpath(current), current)
+    )
+      throw failure(
+        "WORKSPACE_PATH_UNSAFE",
+        "A recovery workspace ancestor is missing or redirected.",
+      );
+    if (
+      expectedIdentity !== undefined &&
+      samePath(current, root) &&
+      state.identity !== expectedIdentity
+    )
+      throw failure("WORKSPACE_NOT_OWNED", "The recovery workspace root was replaced.");
+    const parent = win32.dirname(current);
+    if (samePath(parent, current)) return;
+    current = parent;
+  }
+}
+
+function isOwnershipText(value: unknown): value is string {
+  return typeof value === "string" && /^[^\0\r\n]{1,512}$/u.test(value) && value === value.trim();
 }
 
 class WorkspaceGuard {
@@ -1545,6 +1845,8 @@ class WorkspaceGuard {
   public async assertPath(
     path: string,
     expectedKind?: InvestigationWorkspacePathState["kind"],
+    allowTerminalHardlinks = false,
+    cleanupIdentities?: ReadonlyMap<string, string>,
   ): Promise<InvestigationWorkspacePathState> {
     assertPath(path);
     if (!samePath(path, this.layout.root)) assertDescendant(this.layout.root, path);
@@ -1561,7 +1863,7 @@ class WorkspaceGuard {
         state.reparsePoint ||
         state.kind === "other" ||
         (index < paths.length - 1 && state.kind !== "directory") ||
-        (state.kind === "file" && state.linkCount !== 1)
+        (state.kind === "file" && state.linkCount !== 1 && !allowTerminalHardlinks)
       ) {
         throw failure(
           "WORKSPACE_PATH_UNSAFE",
@@ -1575,6 +1877,9 @@ class WorkspaceGuard {
           "A workspace path was replaced after ownership was established.",
         );
       }
+      const cleanupIdentity = cleanupIdentities?.get(pathKey(current));
+      if (cleanupIdentity !== undefined && state.identity !== cleanupIdentity)
+        throw failure("WORKSPACE_NOT_OWNED", "A workspace parent or entry changed during cleanup.");
       if (!samePath(await this.fs.realpath(current), current)) {
         throw failure(
           "WORKSPACE_PATH_UNSAFE",
@@ -1635,13 +1940,14 @@ class WorkspaceGuard {
 
   private async scanTree(
     directory: string,
+    allowTerminalHardlinks = false,
   ): Promise<Array<{ path: string; state: InvestigationWorkspacePathState }>> {
     const entries: Array<{ path: string; state: InvestigationWorkspacePathState }> = [];
     const pending = [directory];
     while (pending.length > 0) {
       const path = pending.pop();
       if (path === undefined) break;
-      const state = await this.assertPath(path);
+      const state = await this.assertPath(path, undefined, allowTerminalHardlinks);
       entries.push({ path, state });
       if (entries.length > this.maximumTreeEntries) {
         throw failure(
@@ -1667,7 +1973,28 @@ class WorkspaceGuard {
   }
 
   public async removeOwnedTree(assertOwned: () => Promise<void>): Promise<void> {
-    const entries = await this.scanTree(this.layout.attempt);
+    const entries = await this.scanTree(this.layout.attempt, true);
+    let groups: ReadonlyMap<string, readonly string[]>;
+    try {
+      groups = validateOwnedHardlinkGroups(entries, (path) => {
+        const relative = win32.relative(this.layout.attempt, path).split("\\");
+        return (
+          (relative[0] === "source" || relative[0] === "temp") &&
+          !relative.some((part) => part.toLowerCase() === ".git") &&
+          !this.identities.has(pathKey(path))
+        );
+      });
+    } catch (error) {
+      if (error instanceof OwnedHardlinkError)
+        throw failure("WORKSPACE_PATH_UNSAFE", error.message);
+      throw error;
+    }
+    const remainingGroups = new Map(
+      [...groups].map(([identity, paths]) => [identity, new Set(paths)]),
+    );
+    const cleanupIdentities = new Map(
+      entries.map((entry) => [pathKey(entry.path), entry.state.identity]),
+    );
     const ownerEntry = entries.find((entry) => samePath(entry.path, this.layout.owner));
     if (ownerEntry === undefined)
       throw failure("WORKSPACE_NOT_OWNED", "The workspace ownership marker is missing.");
@@ -1676,14 +2003,32 @@ class WorkspaceGuard {
       if (samePath(entry.path, this.layout.owner) || samePath(entry.path, this.layout.attempt))
         continue;
       await assertOwned();
-      const state = await this.assertPath(entry.path, entry.state.kind);
+      const remaining = remainingGroups.get(entry.state.identity);
+      if (remaining !== undefined) {
+        for (const path of remaining) {
+          const member = await this.assertPath(path, "file", true, cleanupIdentities);
+          if (member.identity !== entry.state.identity || member.linkCount !== remaining.size)
+            throw failure(
+              "WORKSPACE_PATH_UNSAFE",
+              "A generated hardlink group changed before unlinking an owned entry.",
+            );
+        }
+      }
+      const state = await this.assertPath(
+        entry.path,
+        entry.state.kind,
+        remaining !== undefined,
+        cleanupIdentities,
+      );
       if (state.identity !== entry.state.identity) {
         throw failure("WORKSPACE_NOT_OWNED", "A workspace entry changed during cleanup.");
       }
       if (state.kind === "directory") await this.fs.removeEmptyDirectory(entry.path);
       else {
-        await this.fs.setReadOnly(entry.path, false);
+        // Never change a shared inode's attributes. Removing its checked owned name is sufficient.
+        if (remaining === undefined) await this.fs.setReadOnly(entry.path, false);
         await this.fs.removeFile(entry.path);
+        remaining?.delete(entry.path);
       }
     }
     await assertOwned();

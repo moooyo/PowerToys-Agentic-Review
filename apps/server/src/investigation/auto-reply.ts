@@ -7,6 +7,7 @@ import type {
   InvestigationReportRef,
   InvestigationResultV1,
   InvestigationTaskV1,
+  InvestigationUsageSummary,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import type { InvestigationActions } from "./actions.js";
@@ -14,7 +15,11 @@ import type {
   AutomaticReplyPolicy,
   InvestigationAutomaticReplySettings,
 } from "./auto-reply-settings.js";
-import { automaticReplyTemplateVersion, renderAutomaticReply } from "./auto-reply-template.js";
+import {
+  automaticReplyTemplateVersion,
+  defaultE2eAutomaticReplyTemplate,
+  renderAutomaticReply,
+} from "./auto-reply-template.js";
 import type {
   BeginCommentDeliveryInput,
   InvestigationCommentDeliveries,
@@ -77,6 +82,11 @@ export interface InvestigationAutomaticRepliesOptions {
   >;
   readonly resolveOperator: (id: string) => InvestigationOperatorPrincipal | null;
   readonly resolvePublisherIdentity?: () => Promise<InvestigationGitHubIdentity>;
+  readonly usageSummary?: (taskId: string) => InvestigationUsageSummary;
+  readonly prepareReportMedia?: (
+    report: InvestigationResultV1,
+    task: InvestigationTaskV1,
+  ) => Promise<string>;
   readonly enableExternalWrites: boolean;
   readonly now?: () => Date;
   readonly retryDelayMs?: number;
@@ -94,7 +104,7 @@ const deliveryId = (intentId: string) => `auto-reply-delivery:${intentId}`;
 const maximumPending = 1000;
 const equal = (left: unknown, right: unknown) =>
   investigationContentDigest(left) === investigationContentDigest(right);
-const rootKinds = new Set(["pr-review", "issue-investigate"]);
+const rootKinds = new Set(["pr-review", "pr-e2e", "issue-investigate"]);
 
 function automationActor(
   repositoryId: string,
@@ -179,7 +189,11 @@ export class InvestigationAutomaticReplies {
       authorizedById: policy.authorizedById,
       authorizationEpoch: policy.authorizationEpoch,
       template:
-        task.workItem.kind === "pull_request" ? policy.pullRequestTemplate : policy.issueTemplate,
+        task.kind === "pr-e2e"
+          ? defaultE2eAutomaticReplyTemplate
+          : task.workItem.kind === "pull_request"
+            ? policy.pullRequestTemplate
+            : policy.issueTemplate,
       request: null,
       pendingId,
       attempts: 0,
@@ -776,7 +790,27 @@ export class InvestigationAutomaticReplies {
       "The report must bind one exact original target and frozen template.",
     );
     const subject = subjects[0]!;
-    const body = renderAutomaticReply(report, record.template, githubIdentity);
+    let trustedMediaMarkdown: string | undefined;
+    if (report.context.task.kind === "pr-e2e") {
+      const task = this.options.store.get<InvestigationTaskV1>("tasks", record.taskId);
+      requireCondition(
+        task !== undefined && task.kind === "pr-e2e",
+        409,
+        "auto_reply_report_changed",
+        "The E2E task is unavailable for evidence publication.",
+      );
+      trustedMediaMarkdown =
+        this.options.prepareReportMedia === undefined
+          ? "## E2E evidence\n\nEvidence publication is unavailable. The recorded test outcome is unchanged."
+          : await this.options.prepareReportMedia(report, task);
+      this.#assertWritable(record);
+    }
+    const body = renderAutomaticReply(report, record.template, githubIdentity, {
+      ...(this.options.usageSummary === undefined
+        ? {}
+        : { usage: this.options.usageSummary(record.taskId) }),
+      ...(trustedMediaMarkdown === undefined ? {} : { trustedMediaMarkdown }),
+    });
     const rendered: AutomaticReplyRecord = {
       ...record,
       githubIdentity,

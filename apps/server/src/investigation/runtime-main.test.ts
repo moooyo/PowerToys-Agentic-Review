@@ -1,11 +1,13 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInvestigationPreview } from "@agentic-review/contracts";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { InvestigationPasswordStore } from "../../dist/investigation/password-store.js";
 import { loadInvestigationRuntimeConfig } from "../../dist/investigation/runtime-config.js";
 import { createInvestigationRuntime } from "../../dist/investigation/runtime-main.js";
+import { InvestigationStore } from "../../dist/investigation/store.js";
 
 const applications: FastifyInstance[] = [];
 const directories: string[] = [];
@@ -53,6 +55,47 @@ async function fixture(seedAccount = true) {
 }
 
 describe("production investigation runtime assembly", () => {
+  it("exposes scoped E2E media status without triggering an upload from a Dashboard read", async () => {
+    const config = await fixture();
+    const { result } = createInvestigationPreview("pr", { findingCount: 0 });
+    result.context.repository.id = "repo-1";
+    result.context.task.kind = "pr-e2e";
+    const store = new InvestigationStore(config.databasePath);
+    try {
+      store.insert("reports", result.report.id, result);
+    } finally {
+      store.close();
+    }
+    let uploads = 0;
+    const app = await createInvestigationRuntime(config, {
+      logger: false,
+      mediaUploadFetch: async () => {
+        uploads += 1;
+        throw new Error("A status read must not upload media.");
+      },
+    });
+    applications.push(app);
+    const url = `/api/reports/${result.report.id}/media-publication`;
+    expect((await app.inject({ method: "GET", url, headers: { host } })).statusCode).toBe(401);
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { host, origin },
+      payload: { username: "fixture-admin", password },
+    });
+    const cookie = login.cookies.map((entry) => `${entry.name}=${entry.value}`).join("; ");
+    const status = await app.inject({ method: "GET", url, headers: { host, cookie } });
+    expect(status.statusCode).toBe(200);
+    expect(status.headers["cache-control"]).toBe("no-store");
+    expect(status.json()).toMatchObject({
+      reportId: result.report.id,
+      state: "blocked",
+      blockers: ["media_manifest_missing"],
+      uploads: [],
+    });
+    expect(uploads).toBe(0);
+  });
+
   it("serves the new dashboard and API with persistent scoped authentication across restart", async () => {
     const config = await fixture();
     const first = await createInvestigationRuntime(config, { logger: false });

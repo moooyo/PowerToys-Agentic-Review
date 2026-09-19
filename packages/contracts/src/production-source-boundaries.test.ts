@@ -568,7 +568,10 @@ describe("production source boundaries", () => {
     });
   });
 
-  it("removes the retired Server binding island while preserving reviewed production surfaces", () => {
+  // This integration case starts the native TypeScript API and inspects the entire repository.
+  it("removes the retired Server binding island while preserving reviewed production surfaces", {
+    timeout: 60_000,
+  }, () => {
     const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
     const contractsPackage = JSON.parse(
       readFileSync(join(repositoryRoot, "packages", "contracts", "package.json"), "utf8"),

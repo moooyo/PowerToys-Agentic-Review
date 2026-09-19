@@ -4,6 +4,77 @@ import { createSampleInvestigationApi } from "./sample-adapter";
 import { createHttpTransport } from "./transport";
 
 describe("typed investigation HTTP operations", () => {
+  it("reads production scheduler occupancy and only submits the editable static quota", async () => {
+    const status = {
+      staticConcurrency: 3,
+      e2eConcurrency: 1,
+      occupiedStatic: 2,
+      occupiedE2e: 0,
+      leases: [],
+    };
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => Response.json(status));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    expect(await api.scheduler()).toEqual(status);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/investigation/scheduler",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(await api.updateScheduler({ staticConcurrency: 3 })).toEqual(status);
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/investigation/scheduler",
+      expect.objectContaining({ method: "PUT", body: '{"staticConcurrency":3}' }),
+    );
+    fetcher.mockResolvedValueOnce(Response.json({ ...status, e2eConcurrency: 2 }));
+    await expect(api.scheduler()).rejects.toThrow("invalid structured response");
+  });
+
+  it("validates task usage and progress from the production routes without inventing absent counters", async () => {
+    const sample = createSampleInvestigationApi();
+    const detail = await sample.task("sample-pr-p1-task");
+    const usage = {
+      usage: {
+        inputTokens: 800,
+        cachedReadTokens: 600,
+        outputTokens: 200,
+        reasoningTokens: null,
+        cacheWriteTokens: null,
+        totalTokens: 1000,
+        providerCounters: {},
+      },
+      reportedTokens: 1000,
+      completeness: "partial",
+      invocationCount: 2,
+      activeInvocationCount: 1,
+      unknownInvocationCount: 1,
+      legacyTokens: 0,
+    };
+    const enriched = {
+      ...detail,
+      usage,
+      invocations: [],
+      resourceLeases: [],
+      progress: {
+        stage: "model",
+        stageStartedAt: "2026-09-19T01:00:00Z",
+        lastActivityAt: null,
+        lastMeaningfulProgressAt: null,
+        lastHeartbeatAt: "2026-09-19T01:00:05Z",
+      },
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json(enriched));
+    const api = createInvestigationApi(createHttpTransport(fetcher));
+    expect((await api.task(detail.task.id)).usage?.usage.reasoningTokens).toBeNull();
+    expect(fetcher).toHaveBeenLastCalledWith(`/api/tasks/${detail.task.id}`, expect.anything());
+    fetcher.mockResolvedValueOnce(
+      Response.json({ items: [detail.task], usageByTaskId: { [detail.task.id]: usage } }),
+    );
+    expect((await api.tasks()).usageByTaskId?.[detail.task.id]?.reportedTokens).toBe(1000);
+    fetcher.mockResolvedValueOnce(
+      Response.json({ ...enriched, usage: { ...usage, reportedTokens: -1 } }),
+    );
+    await expect(api.task(detail.task.id)).rejects.toThrow("invalid structured response");
+  });
+
   it("reads paginated delivery attempts and batch comment summaries through shared contracts", async () => {
     const sample = createSampleInvestigationApi();
     const history = await sample.commentDeliveries({ limit: 1 });

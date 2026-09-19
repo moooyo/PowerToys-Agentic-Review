@@ -1,6 +1,14 @@
-import type { InvestigationTaskV1 } from "@agentic-review/contracts";
+import {
+  type InvestigationTaskV1,
+  type InvestigationUsageSummary,
+  projectInvestigationCheckpointPresentation,
+} from "@agentic-review/contracts";
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -31,7 +39,10 @@ import { Section, SubjectPanel, TextList } from "./report-sections";
 import { ReportWorkspace } from "./report-workspace";
 import { useInvestigationRepositoryScope } from "./repository-scope";
 import { ResumeTaskButton } from "./resume-task";
+import { schedulerQueryKey } from "./scheduler-panel";
 import { useInvestigationSession } from "./session";
+import { TaskProgressPanel } from "./task-progress";
+import { TokenUsagePanel, UsageSummaryLabel } from "./usage-panel";
 
 export function StartInvestigationButton({ workItem }: { workItem: WorkItem }) {
   const { session } = useInvestigationSession();
@@ -101,9 +112,9 @@ export function StartInvestigationButton({ workItem }: { workItem: WorkItem }) {
           <Stack spacing={2}>
             <Typography>{workItem.title}</Typography>
             <Alert severity="info">
-              The task will investigate the entire declared scope, revisit every candidate, and
-              deliver a final complete report when all required investigation work is resolved. A
-              budget interruption is reported as partial.
+              Static analysis searches the pinned source and reviews changed behavior. Its prompt
+              prohibits building, running tests, or launching applications. Missing evidence and
+              budget interruptions are reported explicitly.
             </Alert>
             <TextField
               select
@@ -130,8 +141,8 @@ export function StartInvestigationButton({ workItem }: { workItem: WorkItem }) {
               />
             )}
             <Typography variant="body2" color="text.secondary">
-              The server freezes the registered subject, full scope, profile, prompt, and budget.
-              Runtime execution is prepared separately from a saved verification plan.
+              The server records the registered subject, full scope, profile, prompt, and budget.
+              E2E execution runs as a separate task with its own results and comment.
             </Typography>
             <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
               Registered revision: {workItem.subject.revisionKey}
@@ -152,11 +163,44 @@ export function StartInvestigationButton({ workItem }: { workItem: WorkItem }) {
   );
 }
 
-export function TaskList({ tasks }: { tasks: InvestigationTaskV1[] }) {
+export function taskMode(kind: InvestigationTaskV1["kind"]): string {
+  return kind === "pr-review" || kind === "issue-investigate"
+    ? "Static"
+    : kind === "pr-e2e"
+      ? "E2E"
+      : "Execution";
+}
+
+export function TaskList({
+  tasks,
+  usageByTaskId,
+}: {
+  tasks: InvestigationTaskV1[];
+  usageByTaskId?: Record<string, InvestigationUsageSummary>;
+}) {
   const [page, setPage] = useState(1);
   const pageSize = 25;
   const currentPage = Math.min(page, Math.max(1, Math.ceil(tasks.length / pageSize)));
   const visibleTasks = tasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const usageWorkItemId =
+    visibleTasks.length > 0 &&
+    visibleTasks.every((task) => task.workItem.id === visibleTasks[0]?.workItem.id)
+      ? visibleTasks[0]?.workItem.id
+      : undefined;
+  const usageQuery = useQuery({
+    queryKey: ["investigation-tasks", usageWorkItemId ?? "all-usage"],
+    queryFn: () => investigationApi.tasks(usageWorkItemId),
+    enabled: usageByTaskId === undefined && visibleTasks.length > 0,
+    refetchInterval: (current) =>
+      current.state.data?.items.some((task) => ["queued", "running"].includes(task.state)) ||
+      Object.values(current.state.data?.usageByTaskId ?? {}).some(
+        (usage) => usage.activeInvocationCount > 0,
+      )
+        ? 5_000
+        : false,
+    refetchIntervalInBackground: false,
+  });
+  const usage = usageByTaskId ?? usageQuery.data?.usageByTaskId;
   const summaryInput = { taskIds: visibleTasks.map((task) => task.id).sort() };
   const comments = useQuery({
     queryKey: commentSummariesQueryKey(summaryInput),
@@ -195,8 +239,14 @@ export function TaskList({ tasks }: { tasks: InvestigationTaskV1[] }) {
               <Typography variant="caption" component="div" color="text.secondary">
                 {task.repository.fullName} #{task.workItem.number} · {task.kind}
               </Typography>
+              <Chip size="small" variant="outlined" label={taskMode(task.kind)} sx={{ mt: 0.5 }} />
             </Box>
           ),
+        },
+        {
+          id: "usage",
+          label: "Token usage",
+          render: (task) => <UsageSummaryLabel summary={usage?.[task.id]} />,
         },
         {
           id: "state",
@@ -284,12 +334,22 @@ export function TaskDetails({ taskId }: { taskId: string }) {
     queryKey: ["investigation-task", taskId],
     queryFn: () => investigationApi.task(taskId),
     refetchInterval: (current) =>
-      current.state.data && ["queued", "running"].includes(current.state.data.task.state)
+      current.state.data &&
+      (["queued", "running"].includes(current.state.data.task.state) ||
+        (current.state.data.usage?.activeInvocationCount ?? 0) > 0 ||
+        current.state.data.resourceLeases?.some((lease) => lease.state === "needs_cleanup"))
         ? 5000
         : false,
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const scheduler = useQuery({
+    queryKey: schedulerQueryKey,
+    queryFn: investigationApi.scheduler,
+    enabled: query.data?.task.state === "queued",
+    refetchInterval: query.data?.task.state === "queued" ? 5_000 : false,
+    refetchIntervalInBackground: false,
+  });
   if (query.isPending) return <CircularProgress size={28} aria-label="Loading task" />;
   if (query.isError)
     return (
@@ -321,6 +381,7 @@ export function TaskDetails({ taskId }: { taskId: string }) {
         <Typography variant="h4">{task.workItem.title}</Typography>
         <Stack direction="row" useFlexGap spacing={1} sx={{ mt: 2, flexWrap: "wrap" }}>
           <Chip label={task.kind} />
+          <Chip label={taskMode(task.kind)} variant="outlined" />
           <Chip label={`Execution: ${task.state}`} />
           <Chip label={task.executionPolicy.mode} variant="outlined" />
         </Stack>
@@ -362,7 +423,35 @@ export function TaskDetails({ taskId }: { taskId: string }) {
         </Stack>
       </Box>
       {error && <Alert severity="error">{error}</Alert>}
-      <Section title="Attempts and checkpoint">
+      <Section title="Analysis progress">
+        <TaskProgressPanel
+          task={task}
+          progress={query.data.progress}
+          scheduler={scheduler.data}
+          resourceLeases={query.data.resourceLeases}
+          invocations={query.data.invocations}
+        />
+        <Typography variant="subtitle2">
+          {query.data.usage?.invocationCount ?? "Unknown"} model calls · {checkpoint?.round ?? 0}{" "}
+          accepted analysis rounds
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          Model calls and accepted analysis rounds are separate counts. Saving state does not start
+          another model call.
+        </Typography>
+        {checkpoint && (
+          <Typography sx={{ mt: 2 }}>
+            {projectInvestigationCheckpointPresentation(task, checkpoint).summary}
+          </Typography>
+        )}
+      </Section>
+      <TokenUsagePanel
+        summary={query.data.usage}
+        invocations={query.data.invocations}
+        legacyTokens={checkpoint?.consumed.tokens}
+        active={["queued", "running"].includes(task.state)}
+      />
+      <Section title="Attempts">
         <Stack spacing={2}>
           {attempts.map((attempt) => (
             <Box key={attempt.id}>
@@ -377,22 +466,46 @@ export function TaskDetails({ taskId }: { taskId: string }) {
               )}
             </Box>
           ))}
-          {checkpoint && (
-            <Box>
-              <Typography variant="subtitle2">
-                Checkpoint version {checkpoint.version} · Round {checkpoint.round}
-              </Typography>
-              <Typography variant="body2">{checkpoint.analysis.summary}</Typography>
-              <TextList
-                items={checkpoint.analysis.coverage.unresolvedUnitRefs.map(
-                  (id) => `Unresolved scope: ${id}`,
+          {query.data.resourceLeases
+            ?.filter((lease) => lease.state !== "released")
+            .map((lease) => (
+              <Alert
+                key={lease.attemptId}
+                severity={lease.state === "needs_cleanup" ? "warning" : "info"}
+              >
+                {lease.pool === "e2e" ? "E2E desktop" : "Static capacity"}:{" "}
+                {lease.state === "needs_cleanup"
+                  ? "Needs cleanup. The next E2E task cannot start until cleanup is confirmed."
+                  : "Reserved by this attempt."}
+                {lease.reason && (
+                  <Typography variant="caption" component="div">
+                    {lease.reason}
+                  </Typography>
                 )}
-              />
-              <Typography variant="caption">
-                {checkpoint.analysis.candidates.length} candidates retained ·{" "}
-                {checkpoint.analysis.rechecks.length} recheck records
-              </Typography>
-            </Box>
+              </Alert>
+            ))}
+          {checkpoint && (
+            <Accordion disableGutters elevation={0}>
+              <AccordionSummary expandIcon={<ExpandMoreRounded />}>
+                <Typography>Saved state v{checkpoint.version} · Diagnostics</Typography>
+              </AccordionSummary>
+              <AccordionDetails>
+                <Typography variant="body2" color="text.secondary">
+                  A checkpoint is a durable state snapshot used for recovery and duplicate
+                  protection. Its version counts saved updates, including initialization and
+                  cancellation; it does not count model calls.
+                </Typography>
+                <TextList
+                  items={checkpoint.analysis.coverage.unresolvedUnitRefs.map(
+                    (id) => `Unresolved scope: ${id}`,
+                  )}
+                />
+                <Typography variant="caption">
+                  {checkpoint.analysis.candidates.length} candidates retained ·{" "}
+                  {checkpoint.analysis.rechecks.length} recheck records
+                </Typography>
+              </AccordionDetails>
+            </Accordion>
           )}
         </Stack>
       </Section>
@@ -403,8 +516,8 @@ export function TaskDetails({ taskId }: { taskId: string }) {
             severity={task.state === "queued" || task.state === "running" ? "info" : "warning"}
           >
             {task.state === "queued" || task.state === "running"
-              ? "The task has not sealed a report. Progress is recorded in its checkpoint; interim candidates are not a final conclusion."
-              : "No sealed report is available. Inspect the attempt termination and checkpoint before resuming."}
+              ? "The task has not sealed a report. Interim analysis is saved for recovery and is not a final conclusion."
+              : "No sealed report is available. Inspect the termination reason and saved state before resuming."}
           </Alert>
           <SubjectPanel subjects={task.subjects} />
         </>
@@ -430,7 +543,10 @@ export default function TasksPage() {
     queryFn: () => investigationApi.tasks(),
     enabled: !taskId,
     refetchInterval: (current) =>
-      current.state.data?.items.some((task) => ["queued", "running"].includes(task.state))
+      current.state.data?.items.some((task) => ["queued", "running"].includes(task.state)) ||
+      Object.values(current.state.data?.usageByTaskId ?? {}).some(
+        (usage) => usage.activeInvocationCount > 0,
+      )
         ? 5_000
         : false,
     refetchIntervalInBackground: false,
@@ -442,7 +558,7 @@ export default function TasksPage() {
       <Box>
         <Typography variant="h4">Tasks</Typography>
         <Typography color="text.secondary" sx={{ mt: 1 }}>
-          Investigations, saved checkpoints, linked verification, and implementation work.
+          Static analysis and E2E execution, their progress, consumption, and results.
         </Typography>
       </Box>
       {query.isError && <Alert severity="error">{query.error.message}</Alert>}
@@ -450,6 +566,7 @@ export default function TasksPage() {
         <CircularProgress size={28} />
       ) : (
         <TaskList
+          usageByTaskId={query.data?.usageByTaskId}
           tasks={(query.data?.items ?? []).filter(
             (task) => !scope.repositoryId || task.repository.id === scope.repositoryId,
           )}

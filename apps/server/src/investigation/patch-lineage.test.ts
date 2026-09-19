@@ -187,7 +187,7 @@ async function harness() {
     expect(response.statusCode, response.body).toBe(200);
   }
 
-  function saveReport(
+  async function saveReport(
     claim: InvestigationClaim,
     options: {
       artifacts?: InvestigationArtifactV1[];
@@ -208,19 +208,41 @@ async function harness() {
       task: claim.task,
       attempt: claim.attempt,
       checkpoint,
-      reportId: `lineage-report-${claim.task.id}`,
+      reportId: claim.reportId,
       outcome: "blocked",
     });
     const input = { task: claim.task, attempt: claim.attempt, checkpoint, ...submission };
     const result = assembleInvestigationReport(input);
     const validation = validateInvestigationResult(result);
     expect(validation.errors).toEqual([]);
-    store.insert("reports", result.id, result);
-    store.put("tasks", claim.task.id, {
-      ...claim.task,
-      state: "blocked",
-      latestReportRef: reportRef(result),
-    });
+    // Supply the isolated synthetic checkpoint, then follow the production terminal lifecycle.
+    // Writing only Task/Report records would leave its Attempt and resource lease running.
+    store.put("checkpoints", claim.task.id, checkpoint);
+    for (const part of submission.parts) {
+      const uploaded = await post(
+        app,
+        `/api/worker/tasks/${claim.task.id}/report-parts`,
+        { lease: claim.lease, part },
+        "worker",
+      );
+      expect(uploaded.statusCode, uploaded.body).toBe(200);
+    }
+    const finalized = await post(
+      app,
+      `/api/worker/tasks/${claim.task.id}/finalize`,
+      { lease: claim.lease, header: submission.header, manifest: submission.manifest },
+      "worker",
+    );
+    expect(finalized.statusCode, finalized.body).toBe(200);
+    expect(finalized.json()).toEqual({ reportRef: reportRef(result) });
+    const cleanup = await post(
+      app,
+      `/api/worker/tasks/${claim.task.id}/cleanup`,
+      { lease: claim.lease, ownedProcessesStopped: true, desktopRestored: true },
+      "worker",
+    );
+    expect(cleanup.statusCode, cleanup.body).toBe(200);
+    expect(cleanup.json()).toEqual({ released: true, attemptId: claim.attempt.id });
     return { result, input };
   }
 
@@ -279,7 +301,7 @@ async function lineage() {
   };
   for (const patch of patches) await fixture.upload(origin, patch.artifact, patch.bytes);
   await fixture.upload(origin, log, logBytes);
-  const originReport = fixture.saveReport(origin, {
+  const originReport = await fixture.saveReport(origin, {
     subjects: patches.map((patch) => patch.subject),
     artifacts: [...patches.map((patch) => patch.artifact), log],
   });
@@ -312,7 +334,7 @@ async function lineage() {
     ],
     acceptanceCriteria: ["Only the selected patch can be read through the inherited lineage."],
   };
-  const childReport = fixture.saveReport(child, { plans: [plan] });
+  const childReport = await fixture.saveReport(child, { plans: [plan] });
   const savedPlan = childReport.result.plans[0]!;
   const grandchild = await fixture.createAndClaim({
     kind: "pr-verify",

@@ -45,7 +45,129 @@ describe("native investigation Worker configuration", () => {
       ]),
     ).not.toMatch(/ambient-github-secret|old-token|synthetic_worker_token/);
     expect(config.supportedKinds).toContain("pr-review");
+    expect(config.supportedKinds).toContain("pr-e2e");
+    expect(config.maximumConcurrentStaticTasks).toBe(1);
+    expect(config.maximumConcurrentTasks).toBe(1);
+    expect(config.role).toBe("all");
     expect(config.workspaceRootDirectory).toBe("D:\\InvestigationData\\attempts");
+  });
+
+  it("preserves the legacy capacity as a static pool alias", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      INVESTIGATION_WORKER_MAX_CONCURRENT_TASKS: "3",
+    });
+    expect(config.maximumConcurrentStaticTasks).toBe(3);
+    expect(config.maximumConcurrentTasks).toBe(3);
+  });
+
+  it("shares the machine execution lock across Worker roles and data directories", () => {
+    const first = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      ProgramData: "C:\\SharedProgramData",
+      INVESTIGATION_WORKER_ROLE: "static",
+    });
+    const second = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      ProgramData: "C:\\SharedProgramData",
+      INVESTIGATION_WORKER_ROLE: "e2e",
+      INVESTIGATION_WORKER_DATA_DIRECTORY: "E:\\AnotherWorker",
+    });
+    expect(first.desktopLockDirectory).toBe(
+      "C:\\SharedProgramData\\PowerToysAgenticReview\\desktop-locks",
+    );
+    expect(second.desktopLockDirectory).toBe(first.desktopLockDirectory);
+  });
+
+  it("uses the Windows system drive when ProgramData is absent", () => {
+    const config = loadInvestigationWorkerRuntimeConfig(environment());
+    expect(config.desktopLockDirectory).toBe(
+      "C:\\ProgramData\\PowerToysAgenticReview\\desktop-locks",
+    );
+  });
+
+  it("accepts an explicitly shared deployment execution lock directory", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      INVESTIGATION_WORKER_DESKTOP_LOCK_DIRECTORY: "D:\\SharedExecutionLocks",
+    });
+    expect(config.desktopLockDirectory).toBe("D:\\SharedExecutionLocks");
+  });
+
+  it.each([
+    "D:\\InvestigationData",
+    "D:\\InvestigationData\\attempts\\locks",
+    "D:\\TrustedTools\\locks",
+    "D:\\",
+    "relative\\locks",
+    "\\\\server\\locks",
+  ])("rejects unsafe or Worker-specific execution lock roots: %s", (path) => {
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...environment(),
+        INVESTIGATION_WORKER_DESKTOP_LOCK_DIRECTORY: path,
+      }),
+    ).toThrow();
+  });
+
+  it("prefers the explicit static capacity when both capacity settings are present", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      INVESTIGATION_WORKER_MAX_CONCURRENT_TASKS: "3",
+      INVESTIGATION_WORKER_MAX_CONCURRENT_STATIC_TASKS: "5",
+    });
+    expect(config.maximumConcurrentStaticTasks).toBe(5);
+    expect(config.maximumConcurrentTasks).toBe(5);
+  });
+
+  it.each(["0", "17", "1.5", "invalid"])("rejects an invalid static capacity: %s", (value) => {
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...environment(),
+        INVESTIGATION_WORKER_MAX_CONCURRENT_STATIC_TASKS: value,
+      }),
+    ).toThrow(/MAX_CONCURRENT_STATIC_TASKS/);
+  });
+
+  it("filters supported kinds by the static Worker role", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      INVESTIGATION_WORKER_ROLE: "static",
+    });
+    expect(config.role).toBe("static");
+    expect(config.supportedKinds).toEqual(["pr-review", "issue-investigate"]);
+  });
+
+  it("puts every execution kind in the E2E Worker role", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      INVESTIGATION_WORKER_ROLE: "e2e",
+    });
+    expect(config.role).toBe("e2e");
+    expect(config.supportedKinds).toEqual([
+      "pr-e2e",
+      "pr-verify",
+      "issue-verify",
+      "reproduction-setup",
+      "issue-fix",
+      "feature-implement",
+    ]);
+  });
+
+  it("rejects an unknown role or an empty role and kind intersection", () => {
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...environment(),
+        INVESTIGATION_WORKER_ROLE: "other",
+      }),
+    ).toThrow(/ROLE/);
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...environment(),
+        INVESTIGATION_WORKER_ROLE: "e2e",
+        INVESTIGATION_WORKER_SUPPORTED_KINDS_JSON: JSON.stringify(["pr-review"]),
+      }),
+    ).toThrow(/matching the Worker role/);
   });
 
   it("uses the same credential bounds as the Server worker registration", () => {
@@ -129,6 +251,87 @@ describe("native investigation Worker configuration", () => {
         }),
       }),
     ).toThrow(/unsupported/);
+  });
+  it("normalizes explicit Windows x86 program directories without changing their distinct values", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      INVESTIGATION_WORKER_PLAN_ENVIRONMENT_JSON: JSON.stringify({
+        ProgramFiles: "C:\\Program Files",
+        "ProgramFiles(x86)": "C:\\Program Files (x86)",
+        "cOmMoNpRoGrAmFiLeS(X86)": "C:\\Program Files (x86)\\Common Files",
+      }),
+    });
+    expect(config.planEnvironment).toEqual({
+      PROGRAMFILES: "C:\\Program Files",
+      "PROGRAMFILES(X86)": "C:\\Program Files (x86)",
+      "COMMONPROGRAMFILES(X86)": "C:\\Program Files (x86)\\Common Files",
+    });
+  });
+  it.each(["ProgramFiles(x86)", "CommonProgramFiles(x86)"])(
+    "rejects case-folded duplicate %s values",
+    (name) => {
+      expect(() =>
+        loadInvestigationWorkerRuntimeConfig({
+          ...environment(),
+          INVESTIGATION_WORKER_PLAN_ENVIRONMENT_JSON: JSON.stringify({
+            [name]: "C:\\One",
+            [name.toUpperCase()]: "C:\\Two",
+          }),
+        }),
+      ).toThrow(/invalid or reserved/u);
+    },
+  );
+  it("does not inherit ambient x86 directory variables into the plan environment", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      "ProgramFiles(x86)": "C:\\Ambient Programs",
+      "COMMONPROGRAMFILES(X86)": "C:\\Ambient Common",
+    });
+    expect(config.planEnvironment).not.toHaveProperty("PROGRAMFILES(X86)");
+    expect(config.planEnvironment).not.toHaveProperty("COMMONPROGRAMFILES(X86)");
+  });
+  it.each(["PROGRAMFILES(X86)", "COMMONPROGRAMFILES(X86)"])(
+    "preserves model-variable restrictions for %s",
+    (name) => {
+      expect(() =>
+        loadInvestigationWorkerRuntimeConfig({
+          ...environment(),
+          INVESTIGATION_WORKER_MODEL_ENVIRONMENT_JSON: JSON.stringify({
+            USERPROFILE: "C:\\DedicatedAccount",
+            CODEX_HOME: "C:\\DedicatedAccount\\.codex",
+            [name]: "C:\\Program Files (x86)",
+          }),
+        }),
+      ).toThrow(/unsupported variable/u);
+    },
+  );
+  it.each([
+    "PROGRAMFILES(X64)",
+    "OTHER(X86)",
+    "PROGRAMFILES(X86)\n",
+    "PATH\n",
+    "BAD\0NAME",
+    "BAD\u0085NAME",
+    "BAD=NAME",
+    "INVESTIGATION_CUSTOM",
+  ])("rejects invalid or reserved explicit environment name %j", (name) => {
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...environment(),
+        INVESTIGATION_WORKER_PLAN_ENVIRONMENT_JSON: JSON.stringify({ [name]: "C:\\Directory" }),
+      }),
+    ).toThrow(/invalid or reserved/u);
+  });
+  it("does not let an accepted x86 directory name disclose the Worker credential", () => {
+    const input = environment();
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...input,
+        INVESTIGATION_WORKER_PLAN_ENVIRONMENT_JSON: JSON.stringify({
+          "PROGRAMFILES(X86)": `C:\\${input.INVESTIGATION_WORKER_TOKEN}`,
+        }),
+      }),
+    ).toThrow(/credential/u);
   });
 
   it("requires explicit HTTP opt-in and a strict canonical Server origin", () => {

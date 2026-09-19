@@ -134,6 +134,18 @@ describe("repository assignment webhook settings", () => {
 });
 
 describe("webhook settings input and conflict recovery", () => {
+  it("preserves independent E2E authorization using the existing trusted identity fields", () => {
+    const form = webhookSettingsFormValues({ ...settings, enabled: false, e2eEnabled: true });
+    expect(webhookSettingsInput(form, settings.version)).toMatchObject({
+      enabled: false,
+      e2eEnabled: true,
+      reviewerUserId: settings.reviewerUserId,
+      allowedActorUserIds: settings.allowedActorUserIds,
+    });
+    expect(() => webhookSettingsInput({ ...form, allowedActorUserIdsText: "" }, 0)).toThrow(
+      "trusted user",
+    );
+  });
   it("accepts numeric IDs separated by commas or new lines and deduplicates stable identity", () => {
     expect(parseGitHubUserIds("2001, 2002\n2001\n 02003 ")).toEqual([2001, 2002, 2003]);
     expect(parseGitHubUserIds(" \n")).toEqual([]);

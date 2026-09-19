@@ -29,6 +29,7 @@ const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).
 
 class MemoryFileSystem implements InvestigationWorkspaceFileSystem {
   readonly reads: string[] = [];
+  readonly directoryReads: string[] = [];
   readonly entries = new Map<
     string,
     { state: InvestigationWorkspacePathState; bytes: Uint8Array }
@@ -56,6 +57,7 @@ class MemoryFileSystem implements InvestigationWorkspaceFileSystem {
     return path;
   }
   async readDirectory(path: string) {
+    this.directoryReads.push(path);
     return [...this.entries.keys()]
       .filter((entry) => entry !== path && win32.dirname(entry) === path)
       .map((entry) => win32.basename(entry));
@@ -106,6 +108,7 @@ function fixture() {
     [`${sha}:src/value.ts`, "export const value = 1;\n"],
   ]);
   const rawBlobs = new Map<string, Uint8Array>();
+  const filteredBlobs = new Map<string, Uint8Array>();
   const grepResults: Array<{ exitCode: number; stdout: string }> = [];
   let listing = `100644 blob ${"f".repeat(40)}\tsrc/value.ts\0`;
   const revisionListings = new Map<string, string>();
@@ -153,6 +156,12 @@ function fixture() {
               `diff --git a/${argumentsList.at(-1)} b/${argumentsList.at(-1)}\ncommitted source diff\n`)
             : patch;
       else if (command === "cat-file") {
+        if (argumentsList[1] === "--filters") {
+          if (spec.environment.GIT_ATTR_SOURCE !== sha)
+            throw new Error("Checkout filtering must use the pinned attribute source.");
+          const filtered = filteredBlobs.get(argumentsList.at(-1)!);
+          if (filtered !== undefined) return { exitCode: 0, stdout: filtered };
+        }
         const raw = rawBlobs.get(argumentsList.at(-1)!);
         const content = blobs.get(argumentsList.at(-1)!);
         if (raw === undefined && content === undefined)
@@ -202,6 +211,7 @@ function fixture() {
     options,
     blobs,
     rawBlobs,
+    filteredBlobs,
     grepResults,
     diffContents,
     setPatch: (value: string) => {
@@ -268,42 +278,54 @@ describe("managed native Git source materialization", () => {
     }
   });
 
-  it("retains repository symlinks as exact inert text without reading their targets", async () => {
-    const f = fixture();
-    const links = new Map([
-      [".claude/CLAUDE.md", "../AGENTS.md"],
-      [".claude/agents", "../../outside"],
-      [".claude/commands", "C:\\private\\credentials.txt"],
-      [".claude/rules", "\\\\server\\private"],
-      [".claude/skills", "../.claude/skills"],
-    ]);
-    f.setListing(
-      `100644 blob ${sha}\tsrc/value.ts\0` +
-        [...links.keys()].map((path) => `120000 blob ${sha}\t${path}\0`).join(""),
-    );
-    for (const [path, target] of links) f.blobs.set(`${sha}:${path}`, target);
-    const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
-      f.input,
-      f.context,
-    );
-    expect(result.binding.inertSymlinks).toEqual(
-      [sha, baseSha].flatMap((revisionSha) =>
-        [...links.keys()].map((path) => ({ path, revisionSha })),
-      ),
-    );
-    for (const [path, target] of links) {
-      const absolutePath = win32.join(source, ...path.split("/"));
-      expect(f.fs.entries.get(absolutePath)).toMatchObject({
-        state: { kind: "file", reparsePoint: false, linkCount: 1 },
-        bytes: Buffer.from(target),
-      });
-    }
-    expect(f.fs.reads.every((path) => path.startsWith(`${source}\\`))).toBe(true);
-    expect(f.calls.every((call) => call.arguments.includes("core.symlinks=false"))).toBe(true);
-    const manifest = await result.readPrDiffManifest!();
-    expect(manifest.files.map((file) => file.path)).toEqual(["src/value.ts"]);
-    expect(manifest.chunks.map((chunk) => chunk.kind)).toEqual(["diff", "base", "head"]);
-  });
+  it.each(["source_read", "execute"] as const)(
+    "retains repository symlinks as exact inert text without reading their targets for %s",
+    async (mode) => {
+      const f = fixture();
+      if (mode === "execute") {
+        f.input.task.kind = "pr-e2e";
+        f.input.task.executionPolicy = {
+          ...f.input.task.executionPolicy,
+          mode,
+          allowRepositoryExecution: true,
+          authorizationRef: "synthetic-e2e-authorization",
+        };
+      }
+      const links = new Map([
+        [".claude/CLAUDE.md", "../AGENTS.md"],
+        [".claude/agents", "../../outside"],
+        [".claude/commands", "C:\\private\\credentials.txt"],
+        [".claude/rules", "\\\\server\\private"],
+        [".claude/skills", "../.claude/skills"],
+      ]);
+      f.setListing(
+        `100644 blob ${sha}\tsrc/value.ts\0` +
+          [...links.keys()].map((path) => `120000 blob ${sha}\t${path}\0`).join(""),
+      );
+      for (const [path, target] of links) f.blobs.set(`${sha}:${path}`, target);
+      const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+        f.input,
+        f.context,
+      );
+      expect(result.binding.inertSymlinks).toEqual(
+        [sha, baseSha].flatMap((revisionSha) =>
+          [...links.keys()].map((path) => ({ path, revisionSha })),
+        ),
+      );
+      for (const [path, target] of links) {
+        const absolutePath = win32.join(source, ...path.split("/"));
+        expect(f.fs.entries.get(absolutePath)).toMatchObject({
+          state: { kind: "file", reparsePoint: false, linkCount: 1 },
+          bytes: Buffer.from(target),
+        });
+      }
+      expect(f.fs.reads.every((path) => path.startsWith(`${source}\\`))).toBe(true);
+      expect(f.calls.every((call) => call.arguments.includes("core.symlinks=false"))).toBe(true);
+      const manifest = await result.readPrDiffManifest!();
+      expect(manifest.files.map((file) => file.path)).toEqual(["src/value.ts"]);
+      expect(manifest.chunks.map((chunk) => chunk.kind)).toEqual(["diff", "base", "head"]);
+    },
+  );
 
   it("keeps added, deleted, modified, and type-changed symlink bytes in complete PR coverage", async () => {
     const f = fixture();
@@ -370,12 +392,54 @@ describe("managed native Git source materialization", () => {
     expect(digest).toBe(hash(investigationCanonicalJson(content)));
   });
 
-  it("still rejects symlinks for repository execution before checkout", async () => {
+  it("keeps tracked source identity and discovery restrictions after preparing inert execution metadata", async () => {
     const f = fixture();
+    f.input.task.kind = "pr-e2e";
     f.input.task.executionPolicy.mode = "execute";
     f.input.task.executionPolicy.allowRepositoryExecution = true;
     f.input.task.executionPolicy.authorizationRef = "synthetic-execution-authorization";
-    f.setListing(`120000 blob ${sha}\tlink\0`);
+    const target = "../shared/tool-instructions.md";
+    const blobId = createHash("sha1")
+      .update(`blob ${Buffer.byteLength(target)}\0`)
+      .update(target)
+      .digest("hex");
+    f.setListing(`120000 blob ${blobId}\ttooling/instructions\0`);
+    f.blobs.set(`${sha}:tooling/instructions`, target);
+    const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+      f.input,
+      f.context,
+    );
+    await expect(
+      result.assertReadBinding!({
+        path: "tooling/instructions",
+        content: target,
+        digest: hash(target),
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      result.assertReadBinding!({
+        path: "tooling/instructions",
+        content: "changed target",
+        digest: hash("changed target"),
+      }),
+    ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+    await expect(result.readSourceDependencies!(["tooling/instructions"])).rejects.toMatchObject({
+      code: "SOURCE_DEPENDENCY_UNAVAILABLE",
+    });
+    f.setPatch("a tracked product source change");
+    await expect(result.assertBinding()).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+  });
+
+  it("continues to reject submodules before an E2E checkout", async () => {
+    const f = fixture();
+    f.input.task.kind = "pr-e2e";
+    f.input.task.executionPolicy = {
+      ...f.input.task.executionPolicy,
+      mode: "execute",
+      allowRepositoryExecution: true,
+      authorizationRef: "synthetic-e2e-authorization",
+    };
+    f.setListing(`160000 commit ${sha}\ttooling/submodule\0`);
     await expect(
       new ProductionInvestigationGitSourceMaterializer(f.options).materialize(f.input, f.context),
     ).rejects.toMatchObject({ code: "SOURCE_TREE_UNSUPPORTED" });
@@ -406,31 +470,48 @@ describe("managed native Git source materialization", () => {
     expect(f.calls.some((call) => call.arguments.includes("checkout"))).toBe(false);
   });
 
-  it("rejects a checkout that creates a real link or replaces inert target text", async () => {
-    for (const corruption of ["reparse", "hard-link", "target-content"] as const) {
-      const f = fixture();
-      f.setListing(`120000 blob ${sha}\tlink\0`);
-      f.blobs.set(`${sha}:link`, "../../outside");
-      const runner = f.options.runner;
-      f.options.runner = {
-        async run(spec, context) {
-          const result = await runner.run(spec, context);
-          if (spec.arguments.includes("checkout")) {
-            const entry = f.fs.entries.get(win32.join(source, "link"))!;
-            if (corruption === "reparse") entry.state = { ...entry.state, reparsePoint: true };
-            else if (corruption === "hard-link") entry.state = { ...entry.state, linkCount: 2 };
-            else entry.bytes = Buffer.from("unexpected resolved target contents");
-          }
-          return result;
-        },
-      };
-      await expect(
-        new ProductionInvestigationGitSourceMaterializer(f.options).materialize(f.input, f.context),
-      ).rejects.toMatchObject({
-        code: corruption === "target-content" ? "SOURCE_BINDING_MISMATCH" : "SOURCE_PATH_UNSAFE",
-      });
-    }
-  });
+  it.each(["source_read", "execute"] as const)(
+    "rejects real links and changed inert target text for %s",
+    async (mode) => {
+      for (const corruption of ["reparse", "junction", "hard-link", "target-content"] as const) {
+        const f = fixture();
+        if (mode === "execute") {
+          f.input.task.kind = "pr-e2e";
+          f.input.task.executionPolicy = {
+            ...f.input.task.executionPolicy,
+            mode,
+            allowRepositoryExecution: true,
+            authorizationRef: "synthetic-e2e-authorization",
+          };
+        }
+        f.setListing(`120000 blob ${sha}\tlink\0`);
+        f.blobs.set(`${sha}:link`, "../../outside");
+        const runner = f.options.runner;
+        f.options.runner = {
+          async run(spec, context) {
+            const result = await runner.run(spec, context);
+            if (spec.arguments.includes("checkout")) {
+              const entry = f.fs.entries.get(win32.join(source, "link"))!;
+              if (corruption === "reparse") entry.state = { ...entry.state, reparsePoint: true };
+              else if (corruption === "junction")
+                entry.state = { ...entry.state, kind: "directory", reparsePoint: true };
+              else if (corruption === "hard-link") entry.state = { ...entry.state, linkCount: 2 };
+              else entry.bytes = Buffer.from("unexpected resolved target contents");
+            }
+            return result;
+          },
+        };
+        await expect(
+          new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+            f.input,
+            f.context,
+          ),
+        ).rejects.toMatchObject({
+          code: corruption === "target-content" ? "SOURCE_BINDING_MISMATCH" : "SOURCE_PATH_UNSAFE",
+        });
+      }
+    },
+  );
 
   it("rejects reparse points and original-source modifications", async () => {
     const f = fixture();
@@ -449,6 +530,83 @@ describe("managed native Git source materialization", () => {
     };
     await expect(result.assertBinding()).rejects.toMatchObject({ code: "SOURCE_PATH_UNSAFE" });
   });
+
+  it.each(["source_read", "execute"] as const)(
+    "accepts closed generated hardlinks only for execution source binding: %s",
+    async (mode) => {
+      const f = fixture();
+      f.input.task.executionPolicy.mode = mode;
+      if (mode === "execute") {
+        f.input.task.kind = "pr-e2e";
+        f.input.task.executionPolicy.allowRepositoryExecution = true;
+        f.input.task.executionPolicy.authorizationRef = "execution";
+      }
+      const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+        f.input,
+        f.context,
+      );
+      const generated = win32.join(source, "generated");
+      f.fs.put(generated, "directory");
+      const first = win32.join(generated, "one.dat"),
+        second = win32.join(generated, "two.dat");
+      f.fs.put(first, "file", "generated");
+      f.fs.put(second, "file", "generated");
+      const identity = f.fs.entries.get(first)!.state.identity;
+      for (const path of [first, second])
+        f.fs.entries.get(path)!.state = {
+          ...f.fs.entries.get(path)!.state,
+          identity,
+          linkCount: 2,
+        };
+      if (mode === "execute") await expect(result.assertBinding()).resolves.toBeUndefined();
+      else
+        await expect(result.assertBinding()).rejects.toMatchObject({ code: "SOURCE_PATH_UNSAFE" });
+    },
+  );
+
+  it.each(["tracked", "metadata", "outside", "reparse"] as const)(
+    "rejects protected or unaccounted execution hardlinks: %s",
+    async (kind) => {
+      const f = fixture();
+      f.input.task.kind = "pr-e2e";
+      f.input.task.executionPolicy = {
+        ...f.input.task.executionPolicy,
+        mode: "execute",
+        allowRepositoryExecution: true,
+        authorizationRef: "execution",
+      };
+      const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+        f.input,
+        f.context,
+      );
+      const generated = win32.join(source, "generated");
+      f.fs.put(generated, "directory");
+      const first =
+        kind === "tracked"
+          ? win32.join(source, "src", "value.ts")
+          : kind === "metadata"
+            ? win32.join(gitDirectory, "config")
+            : win32.join(generated, "one.dat");
+      if (!f.fs.entries.has(first)) f.fs.put(first, "file", "generated");
+      const second =
+        kind === "outside" ? "D:\\outside-sentinel.dat" : win32.join(generated, "two.dat");
+      f.fs.put(second, "file", "unchanged");
+      const identity = f.fs.entries.get(first)!.state.identity;
+      for (const path of [first, second])
+        f.fs.entries.get(path)!.state = {
+          ...f.fs.entries.get(path)!.state,
+          identity,
+          linkCount: 2,
+        };
+      if (kind === "reparse")
+        f.fs.entries.get(second)!.state = {
+          ...f.fs.entries.get(second)!.state,
+          reparsePoint: true,
+        };
+      await expect(result.assertBinding()).rejects.toMatchObject({ code: "SOURCE_PATH_UNSAFE" });
+      expect(Buffer.from(f.fs.entries.get(second)!.bytes).toString("utf8")).toBe("unchanged");
+    },
+  );
 
   it("captures implementation changes using a private index without replacing frozen Git metadata", async () => {
     const f = fixture();
@@ -601,7 +759,7 @@ describe("managed native Git source materialization", () => {
     });
   });
 
-  it("reads every requested cached chunk with two binding checks for the whole batch", async () => {
+  it("reads cached manifest and chunks without rescanning the tree or launching Git", async () => {
     const f = fixture();
     const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
       f.input,
@@ -609,38 +767,249 @@ describe("managed native Git source materialization", () => {
     );
     const manifest = await result.readPrDiffManifest!();
     f.calls.length = 0;
+    f.fs.directoryReads.length = 0;
     const ids = manifest.chunks.map((chunk) => chunk.id);
     const chunks = await result.readPrDiffChunks!(ids);
     expect(chunks.map((chunk) => chunk.id)).toEqual(ids);
     expect(chunks.every((chunk) => hash(chunk.content) === chunk.contentDigest)).toBe(true);
-    expect(f.calls.filter((call) => call.arguments.includes("rev-parse"))).toHaveLength(2);
-    expect(f.calls.filter((call) => call.arguments.includes("cat-file"))).toHaveLength(0);
-    expect(f.calls.filter((call) => call.arguments.includes("merge-base"))).toHaveLength(2);
+    expect(await result.readPrDiffManifest!()).toEqual(manifest);
+    expect(f.calls).toHaveLength(0);
+    expect(f.fs.directoryReads).toHaveLength(0);
+    await result.assertBinding();
+    expect(f.fs.directoryReads.filter((path) => path === source)).toHaveLength(1);
   });
 
-  it("rejects tracked source drift observed after the batch was read", async () => {
+  it("retains pinned cached chunks and rejects worktree drift at the complete boundary", async () => {
     const f = fixture();
-    let driftAfterFirstCheck = false;
+    const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+      f.input,
+      f.context,
+    );
+    const manifest = await result.readPrDiffManifest!();
+    f.setPatch("A tracked source change after the immutable manifest was cached");
+    const chunks = await result.readPrDiffChunks!(manifest.chunks.map((chunk) => chunk.id));
+    expect(chunks.find((chunk) => chunk.kind === "head")?.content).toBe(
+      "export const value = 1;\n",
+    );
+    await expect(result.assertBinding()).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+  });
+
+  it("rejects changed control metadata even when all requested chunks are cached", async () => {
+    const f = fixture();
+    const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+      f.input,
+      f.context,
+    );
+    const manifest = await result.readPrDiffManifest!();
+    f.fs.put(win32.join(gitDirectory, "HEAD"), "file", `${"c".repeat(40)}\n`);
+    await expect(
+      result.readPrDiffChunks!(manifest.chunks.map((chunk) => chunk.id)),
+    ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+  });
+
+  it("binds individual source reads to their original blob without a tree scan or Git process", async () => {
+    const f = fixture();
+    const content = "export const value = 1;\n";
+    const blobId = createHash("sha1")
+      .update(`blob ${Buffer.byteLength(content)}\0${content}`)
+      .digest("hex");
+    f.setListing(`100644 blob ${blobId}\tsrc/value.ts\0`);
+    const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+      f.input,
+      f.context,
+    );
+    f.calls.length = 0;
+    f.fs.directoryReads.length = 0;
+    await result.assertReadBinding!({ path: "src/value.ts", content, digest: hash(content) });
+    await result.assertReadBinding!({ path: "missing.ts", content: null, digest: null });
+    for (const file of [
+      { path: "src/value.ts", content: "changed", digest: hash("changed") },
+      { path: "src/value.ts", content, digest: hash("wrong digest") },
+      { path: "src/value.ts", content: null, digest: null },
+      { path: "untracked.ts", content, digest: hash(content) },
+    ])
+      await expect(result.assertReadBinding!(file)).rejects.toMatchObject({
+        code: "SOURCE_BINDING_MISMATCH",
+      });
+    expect(f.calls).toHaveLength(0);
+    expect(f.fs.directoryReads).toHaveLength(0);
+  });
+  it.each(["text=auto", "text eol=crlf"])(
+    "accepts the exact Git checkout representation for %s without changing source bytes",
+    async (_attributes) => {
+      const f = fixture();
+      const canonical = "<Project>\n  <PropertyGroup />\n</Project>\n";
+      const checkout = canonical.replaceAll("\n", "\r\n");
+      const blobId = createHash("sha1")
+        .update(`blob ${Buffer.byteLength(canonical)}\0${canonical}`)
+        .digest("hex");
+      f.setListing(`100644 blob ${blobId}\tsrc/value.ts\0`);
+      f.blobs.set(`${sha}:src/value.ts`, canonical);
+      f.filteredBlobs.set(`${sha}:src/value.ts`, Buffer.from(checkout));
+      const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+        f.input,
+        f.context,
+      );
+      f.calls.length = 0;
+      await result.assertReadBinding!({
+        path: "src/value.ts",
+        content: checkout,
+        digest: hash(checkout),
+      });
+      await result.assertReadBinding!({
+        path: "src/value.ts",
+        content: checkout,
+        digest: hash(checkout),
+      });
+      const filtering = f.calls.filter((call) => call.arguments.includes("--filters"));
+      expect(filtering).toHaveLength(1);
+      expect(filtering[0]?.arguments.slice(-3)).toEqual([
+        "cat-file",
+        "--filters",
+        `${sha}:src/value.ts`,
+      ]);
+      expect(filtering[0]?.environment.GIT_ATTR_SOURCE).toBe(sha);
+      const changed = checkout.replace("PropertyGroup", "ChangedContent");
+      await expect(
+        result.assertReadBinding!({
+          path: "src/value.ts",
+          content: changed,
+          digest: hash(changed),
+        }),
+      ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+      await expect(
+        result.assertReadBinding!({
+          path: "src/value.ts",
+          content: checkout,
+          digest: hash(canonical),
+        }),
+      ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+    },
+  );
+  it.each(["-text", "binary", "eol=lf"])(
+    "does not treat arbitrary CR insertion as valid checkout bytes for %s",
+    async (_attributes) => {
+      const f = fixture();
+      const canonical = "literal data\nsecond line\n";
+      const blobId = createHash("sha1")
+        .update(`blob ${Buffer.byteLength(canonical)}\0${canonical}`)
+        .digest("hex");
+      f.setListing(`100644 blob ${blobId}\tsrc/value.ts\0`);
+      f.blobs.set(`${sha}:src/value.ts`, canonical);
+      f.filteredBlobs.set(`${sha}:src/value.ts`, Buffer.from(canonical));
+      const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+        f.input,
+        f.context,
+      );
+      const modified = canonical.replaceAll("\n", "\r\n");
+      await expect(
+        result.assertReadBinding!({
+          path: "src/value.ts",
+          content: modified,
+          digest: hash(modified),
+        }),
+      ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+    },
+  );
+  it("keeps checkout filtering pinned when working-tree attributes are changed", async () => {
+    const f = fixture();
+    const canonical = "source\n";
+    const blobId = createHash("sha1")
+      .update(`blob ${Buffer.byteLength(canonical)}\0${canonical}`)
+      .digest("hex");
+    f.setListing(`100644 blob ${blobId}\tsrc/value.ts\0`);
+    f.blobs.set(`${sha}:src/value.ts`, canonical);
+    // The pinned revision says binary: mutable worktree attributes must not enable conversion.
+    f.filteredBlobs.set(`${sha}:src/value.ts`, Buffer.from(canonical));
+    const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+      f.input,
+      f.context,
+    );
+    f.fs.put(win32.join(source, ".gitattributes"), "file", "* text eol=crlf\n");
+    await expect(
+      result.assertReadBinding!({
+        path: "src/value.ts",
+        content: "source\r\n",
+        digest: hash("source\r\n"),
+      }),
+    ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+    expect(
+      f.calls.find((call) => call.arguments.includes("--filters"))?.environment.GIT_ATTR_SOURCE,
+    ).toBe(sha);
+  });
+  it("does not reuse an EOL conversion after Git control metadata changes", async () => {
+    const f = fixture();
+    const canonical = "source\n";
+    const checkout = "source\r\n";
+    const blobId = createHash("sha1")
+      .update(`blob ${Buffer.byteLength(canonical)}\0${canonical}`)
+      .digest("hex");
+    f.setListing(`100644 blob ${blobId}\tsrc/value.ts\0`);
+    f.blobs.set(`${sha}:src/value.ts`, canonical);
+    f.filteredBlobs.set(`${sha}:src/value.ts`, Buffer.from(checkout));
+    const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+      f.input,
+      f.context,
+    );
+    await result.assertReadBinding!({
+      path: "src/value.ts",
+      content: checkout,
+      digest: hash(checkout),
+    });
+    f.fs.put(
+      win32.join(gitDirectory, "config"),
+      "file",
+      '[core]\nrepositoryformatversion = 0\n[filter "unexpected"]\nsmudge=untrusted\n',
+    );
+    await expect(
+      result.assertReadBinding!({
+        path: "src/value.ts",
+        content: checkout,
+        digest: hash(checkout),
+      }),
+    ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+  });
+  it("never applies text conversion to an inert Git symlink blob", async () => {
+    const f = fixture();
+    const target = "target.txt\n";
+    const blobId = createHash("sha1")
+      .update(`blob ${Buffer.byteLength(target)}\0${target}`)
+      .digest("hex");
+    f.setListing(`120000 blob ${blobId}\tlink.txt\0`);
+    f.blobs.set(`${sha}:link.txt`, target);
+    f.blobs.set(`${baseSha}:link.txt`, target);
+    const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
+      f.input,
+      f.context,
+    );
+    f.calls.length = 0;
+    await expect(
+      result.assertReadBinding!({
+        path: "link.txt",
+        content: "target.txt\r\n",
+        digest: hash("target.txt\r\n"),
+      }),
+    ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+    expect(f.calls.some((call) => call.arguments.includes("--filters"))).toBe(false);
+  });
+
+  it("rejects untracked immutable source files at the complete boundary", async () => {
+    const f = fixture();
+    let untracked = false;
     const runner = f.options.runner;
     f.options.runner = {
       async run(spec, context) {
-        const result = await runner.run(spec, context);
-        if (driftAfterFirstCheck && spec.arguments.includes("diff")) {
-          driftAfterFirstCheck = false;
-          f.setPatch("A tracked source change after the initial batch binding check");
-        }
-        return result;
+        if (untracked && spec.arguments.includes("ls-files"))
+          return { exitCode: 0, stdout: Buffer.from("untracked.ts\0") };
+        return runner.run(spec, context);
       },
     };
     const result = await new ProductionInvestigationGitSourceMaterializer(f.options).materialize(
       f.input,
       f.context,
     );
-    const manifest = await result.readPrDiffManifest!();
-    driftAfterFirstCheck = true;
-    await expect(
-      result.readPrDiffChunks!(manifest.chunks.map((chunk) => chunk.id)),
-    ).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
+    untracked = true;
+    await expect(result.assertBinding()).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
   });
 
   it("rejects duplicate or unavailable batch IDs without exposing partial chunks", async () => {

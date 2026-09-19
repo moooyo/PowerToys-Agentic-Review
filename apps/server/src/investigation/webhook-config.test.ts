@@ -6,6 +6,26 @@ const maximumPayloadBytes = 2 * 1_024 * 1_024;
 const binding = { repositoryId: "repo-1", reviewerUserId: 200, allowedActorUserIds: [100, 101] };
 
 describe("investigation webhook configuration", () => {
+  it("supports an explicit repository E2E opt-in without enabling it implicitly", () => {
+    expect(
+      parseInvestigationWebhookConfig(secret, [binding], maximumPayloadBytes)?.bindings[0]
+        ?.e2eEnabled,
+    ).toBeUndefined();
+    expect(
+      parseInvestigationWebhookConfig(
+        secret,
+        [{ ...binding, e2eEnabled: true }],
+        maximumPayloadBytes,
+      )?.bindings[0]?.e2eEnabled,
+    ).toBe(true);
+    expect(() =>
+      parseInvestigationWebhookConfig(
+        secret,
+        [{ ...binding, e2eEnabled: "yes" }],
+        maximumPayloadBytes,
+      ),
+    ).toThrow("e2eEnabled");
+  });
   it("enables an empty receiver with its secret while requiring a secret for bindings", () => {
     expect(
       parseInvestigationWebhookConfig(undefined, undefined, maximumPayloadBytes),

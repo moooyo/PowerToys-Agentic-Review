@@ -32,7 +32,7 @@ export function commentHistoryFilters(
     ...(number && /^[1-9][0-9]*$/u.test(number) && Number.isSafeInteger(Number(number))
       ? { workItemNumber: Number(number) }
       : {}),
-    ...(["sending", "succeeded", "failed", "unknown"].includes(state ?? "")
+    ...(["sending", "succeeded", "failed", "cancelled", "unknown"].includes(state ?? "")
       ? { state: state as InvestigationCommentDeliveryQuery["state"] }
       : {}),
   };
@@ -160,6 +160,7 @@ export default function CommentsPage() {
             <MenuItem value="sending">Sending</MenuItem>
             <MenuItem value="succeeded">Delivered</MenuItem>
             <MenuItem value="failed">Failed</MenuItem>
+            <MenuItem value="cancelled">Cancelled</MenuItem>
             <MenuItem value="unknown">Unconfirmed</MenuItem>
           </TextField>
           <Button type="submit" variant="outlined">

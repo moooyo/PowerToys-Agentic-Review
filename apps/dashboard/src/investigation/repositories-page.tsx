@@ -5,6 +5,7 @@ import { investigationApi } from "./api";
 import { RepositoryAutoReplySettingsPanel } from "./auto-reply-settings";
 import { ImportWorkItemButton } from "./import-work-item";
 import { Section } from "./report-sections";
+import { SchedulerPanel } from "./scheduler-panel";
 import { RepositoryWebhookSettingsPanel } from "./webhook-settings";
 
 export default function RepositoriesPage() {
@@ -21,6 +22,7 @@ export default function RepositoriesPage() {
           snapshots.
         </Typography>
       </Box>
+      <SchedulerPanel />
       {query.isPending && <CircularProgress size={28} />}
       {query.isError && (
         <Alert severity="error">

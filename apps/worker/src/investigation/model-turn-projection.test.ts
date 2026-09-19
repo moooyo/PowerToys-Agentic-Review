@@ -65,6 +65,7 @@ function fixture(findingCount = 4) {
     leaseVersion: synthetic.attempt.leaseVersion,
     recordedAt: task.updatedAt,
   });
+  delete checkpoint.runtime.reviewMode;
   checkpoint.analysis = normalizeInvestigationAnalysisPlanReferences(analysis);
   checkpoint.round = 1;
   checkpoint.lastPhase = "discovery";
@@ -215,6 +216,7 @@ function seal(checkpoint: InvestigationLoopCheckpointV1): InvestigationLoopCheck
 
 function snapshotProjection(): ModelTurnProjection {
   const { task, attempt } = createInvestigationFixture("bug", { findingCount: 0 });
+  task.executionPolicy.mode = "snapshot_only";
   task.scope.includedUnits = task.scope.includedUnits.map((unit) => ({
     ...unit,
     status: "pending" as const,
@@ -288,6 +290,47 @@ function recheckDelta(projection: ModelTurnProjection): InvestigationModelTurnDe
 }
 
 describe("bounded investigation model context", () => {
+  it("lets a fresh snapshot-only investigation finish without an empty finalize batch", () => {
+    const projection = snapshotProjection();
+    expect(projection.autonomousReview).toBe(true);
+    expect(projection.localSourceReview).toBe(false);
+    const delta = emptyDelta(projection);
+    delta.analysis.coverageUnits = projection.context.analysis.coverageUnits.map((unit) => ({
+      ...unit,
+      status: "completed",
+    }));
+    expect(mergeModelTurnDelta(projection, delta).continue).toBe(false);
+    expect(projection.context.task.primarySubject.kind).toBe("issue_snapshot");
+  });
+
+  it("does not force another invocation after local source coverage is complete", () => {
+    const f = fixture(0);
+    f.checkpoint.runtime.reviewMode = "local_checkout";
+    f.checkpoint.round = 0;
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    const delta = emptyDelta(projection);
+    delta.analysis.coverageUnits = projection.context.analysis.coverageUnits.map((unit) => ({
+      ...unit,
+      status: "completed",
+    }));
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.phase).toBe("discovery");
+    expect(round.continue).toBe(false);
+  });
+
+  it("preserves an honest local-source blocker instead of forcing unchanged analysis", () => {
+    const f = fixture(0);
+    f.checkpoint.runtime.reviewMode = "local_checkout";
+    f.checkpoint.analysis.coverage.includedUnits.forEach((unit) => {
+      unit.status = "blocked";
+    });
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    const delta = emptyDelta(projection);
+    delta.continuationReason =
+      "The required dependency is absent after searching the pinned checkout.";
+    expect(mergeModelTurnDelta(projection, delta).continue).toBe(false);
+  });
+
   it.each(["confirmed", "unresolved"] as const)(
     "requires concrete finding links for a model %s disposition before merging",
     (status) => {
@@ -465,7 +508,7 @@ describe("bounded investigation model context", () => {
     expect(f.checkpoint.analysis).toEqual(initial);
   });
 
-  it("keeps an appended recheck pending until the updated finding and its owners link to that version", () => {
+  it("stops an unlinked recheck without progress while accepting a correctly linked recheck", () => {
     const f = fixture(1);
     const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
     expect(projection.phase).toBe("recheck");
@@ -491,9 +534,10 @@ describe("bounded investigation model context", () => {
     expect(checkpoint.analysis.rechecks).toContainEqual(unlinkedDelta.analysis.rechecks[0]);
     expect(checkpoint.analysis.findings[0]).toEqual(finding);
     expect(checkpoint.analysis.findings[0]!.confirmation.recheckRef).toBeNull();
+    expect(checkpoint.stopReason).toBe("blocked");
     const retryProjection = prepareModelTurnProjection({
       ...f,
-      checkpoint,
+      checkpoint: f.checkpoint,
       maximumContextBytes: 100 * 1024,
     });
     expect(retryProjection.phase).toBe("recheck");
@@ -513,7 +557,7 @@ describe("bounded investigation model context", () => {
       expect(candidate.findingVersion).toBe(updatedFinding.version);
     }
     checkpoint = applyInvestigationLoopRound(
-      checkpoint,
+      f.checkpoint,
       mergeModelTurnDelta(retryProjection, linkedDelta),
       {
         recordedAt: checkpoint.recordedAt,
@@ -550,6 +594,8 @@ describe("bounded investigation model context", () => {
       leaseVersion: 1,
       recordedAt: f.task.updatedAt,
     });
+    delete checkpoint.runtime.reviewMode;
+    checkpoint = seal(checkpoint);
     const seen: string[] = [];
     for (let turn = 0; turn < 20; turn += 1) {
       const projection = prepareModelTurnProjection({
@@ -972,6 +1018,7 @@ describe("bounded investigation model context", () => {
         recordedAt: checkpoint.recordedAt,
         usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
       });
+      expect(checkpoint.stopReason).toBe("continuing");
     }
     expect(observationBatches).toBeGreaterThan(1);
     expect(seen).toEqual(f.checkpoint.runtime.evidence.map((entry) => entry.id));

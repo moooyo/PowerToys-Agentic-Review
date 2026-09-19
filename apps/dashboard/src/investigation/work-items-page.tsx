@@ -49,7 +49,7 @@ function WorkItemDetails({ id }: { id: string }) {
         ) : tasks.isPending ? (
           <CircularProgress size={24} />
         ) : (
-          <TaskList tasks={tasks.data.items} />
+          <TaskList tasks={tasks.data.items} usageByTaskId={tasks.data.usageByTaskId} />
         )}
       </Section>
       <SubjectPanel subjects={[item.data.subject]} />

@@ -64,6 +64,10 @@ import {
 } from "./execution/validation-runtime-config.js";
 import { ValidationSummaryExecutor } from "./execution/validation-summary-executor.js";
 import { ProductionWorkspaceDiskBudget } from "./execution/workspace-disk-budget.js";
+import {
+  parseCleanupRecoveryCommand,
+  runCleanupRecoveryCommand,
+} from "./investigation/cleanup-recovery-cli.js";
 import { createInvestigationExecutionRuntime } from "./investigation/runtime.js";
 import { loadInvestigationWorkerRuntimeConfig } from "./investigation/runtime-config.js";
 import { ConsoleJsonLogger } from "./logging/logger.js";
@@ -79,6 +83,11 @@ export async function main(): Promise<void> {
   const logger = new ConsoleJsonLogger(config.logLevel, {
     component: "investigation-worker",
   });
+  const cleanupCommand = parseCleanupRecoveryCommand(process.argv.slice(2));
+  if (cleanupCommand !== null) {
+    if (!(await runCleanupRecoveryCommand(config, cleanupCommand, logger))) process.exitCode = 1;
+    return;
+  }
   const runtime = await createInvestigationExecutionRuntime(config, logger);
   let shutdownRequested = false;
 

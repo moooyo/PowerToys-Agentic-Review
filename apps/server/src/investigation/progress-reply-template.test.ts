@@ -8,6 +8,7 @@ import {
   renderAutomaticReplySummaryParts,
 } from "../../dist/investigation/auto-reply-template.js";
 import {
+  defaultE2eProgressReplyTemplates,
   defaultProgressReplyTemplates,
   type InvestigationProgressTrigger,
   type ProgressReplyStage,
@@ -47,6 +48,236 @@ const render = (stage: ProgressReplyStage) =>
   });
 
 describe("assignment progress reply templates", () => {
+  it("bounds and sanitizes partial E2E records without relaxing completed-report publication", () => {
+    const report = createInvestigationPreview("pr", {
+      findingCount: 0,
+      outcome: "interrupted",
+    }).result;
+    report.context.task.kind = "pr-e2e";
+    report.report.loop.completedRounds = 0;
+    report.report.loop.stopReason = "budget_exhausted";
+    report.report.summary = "Investigation has not started.";
+    report.context.e2e = {
+      headSha: "b".repeat(40),
+      buildIdentity: "Synthetic pinned build",
+      cleanup: { confirmed: true, recordedAt: timestamp, summary: "Owned processes exited." },
+      features: Array.from({ length: 20 }, (_, index) => ({
+        id: `feature-${index}`,
+        title: `Preview ${index} <script> @everyone ghp_abcdefghijklmnopqrstuvwxyz ${"\u754c".repeat(16_000)}`,
+        paths: [],
+        scenario: "Operate preview.",
+        userVisible: true,
+        outcome: "passed" as const,
+        artifactRefs: [],
+        limitations: [
+          "token=private-value C:\\private\\worker.log",
+          "\u754c".repeat(16_000),
+          "Additional limitation",
+        ],
+        assertions: [
+          {
+            id: `assertion-${index}`,
+            expected: "Preview opens.",
+            observed: "Preview opened.",
+            outcome: "passed" as const,
+            evidenceRefs: [],
+          },
+        ],
+      })),
+    };
+    const before = structuredClone(report);
+    const input = {
+      stage: "failed" as const,
+      template: defaultE2eProgressReplyTemplates.failed,
+      trigger: { ...trigger, eventName: "issue_comment" as const, commandCommentId: 903 },
+      updatedAt: timestamp,
+      report,
+      failure: "The task exhausted its budget.",
+      context: { mode: "e2e" as const, status: "interrupted" as const },
+    };
+    const body = renderProgressReply(input);
+    expect(body).toContain("Task interrupted; partial E2E report");
+    expect(body).toContain("Final analysis was not adopted");
+    expect(body).toContain("Recorded features: 20 passed, 0 failed, 0 blocked, 0 not run");
+    expect(body).toContain("Summary only: showing 8 of 20 recorded features");
+    expect(body).toContain("Full assertions and limitations remain in the Dashboard report");
+    expect(body).toContain("&lt;script&gt;");
+    expect(body).toContain("credential omitted");
+    expect(body).not.toMatch(/@everyone|<script>|ghp_|private-value|worker\.log/u);
+    expect(body).not.toContain("Investigation has not started");
+    expect(body).not.toContain("E2E runtime verification: Passed");
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThan(20_000);
+    expect(() =>
+      renderAutomaticReplyParts(report, defaultAutomaticReplyTemplates.pullRequest, publisher),
+    ).toThrow("completed, final, complete root");
+    expect(() => renderAutomaticReplySummaryParts(report, publisher)).toThrow(
+      "completed, final, complete root",
+    );
+    report.context.task.kind = "pr-review";
+    const staticBody = renderProgressReply({
+      ...input,
+      report,
+      trigger,
+      context: { mode: "static", status: "interrupted" },
+    });
+    expect(staticBody).not.toContain("Recorded E2E results");
+    report.context.task.kind = "pr-e2e";
+    expect(report).toEqual(before);
+  });
+
+  it.each(["blocked", "failed"] as const)(
+    "requests a new E2E run for a recorded %s execution",
+    (state) => {
+      const report = createInvestigationPreview("pr", { findingCount: 0 }).result;
+      report.context.task.kind = "pr-e2e";
+      report.outcome = state;
+      report.context.e2e = {
+        headSha: "b".repeat(40),
+        buildIdentity: "Synthetic pinned build",
+        features: [
+          {
+            id: "feature-runtime",
+            title: "Preview",
+            paths: [],
+            scenario: "Open preview",
+            userVisible: true,
+            outcome: state,
+            artifactRefs: [],
+            limitations: ["Runtime prerequisite or behavior requires repair."],
+            assertions: [
+              {
+                id: "assertion-runtime",
+                expected: "Preview opens",
+                observed: "Preview could not be verified",
+                outcome: state,
+                evidenceRefs: [],
+              },
+            ],
+          },
+        ],
+        cleanup: { confirmed: true, recordedAt: timestamp, summary: "Owned processes exited." },
+      };
+      const input = {
+        stage: "failed" as const,
+        template: defaultE2eProgressReplyTemplates.failed,
+        trigger: { ...trigger, eventName: "issue_comment" as const, commandCommentId: 901 },
+        updatedAt: timestamp,
+        report,
+        failure: "The E2E task stopped before verification succeeded.",
+        context: {
+          mode: "e2e" as const,
+          status: state,
+          nextStep: "Resolve prerequisites and explicitly resume the task.",
+        },
+      };
+      const before = structuredClone(report);
+      const body = renderProgressReply(input);
+      expect(body).toContain("request a new E2E run in a new PR comment");
+      expect(body).toContain("mentioning the configured reviewer followed by the e2e command");
+      expect(body).toContain(
+        "Resuming this task only recovers and republishes its recorded result",
+      );
+      expect(body).not.toContain("explicitly resume the task");
+      expect(report).toEqual(before);
+      delete report.context.e2e;
+      const beforeExecution = renderProgressReply(input);
+      expect(beforeExecution).toContain("Resolve prerequisites and explicitly resume the task.");
+      expect(beforeExecution).not.toContain("request a new E2E run");
+    },
+  );
+
+  it("keeps result-delivery recovery distinct from rerunning a failed E2E test", () => {
+    const report = createInvestigationPreview("pr", { findingCount: 0 }).result;
+    report.context.task.kind = "pr-e2e";
+    report.outcome = "failed";
+    report.context.e2e = {
+      headSha: "b".repeat(40),
+      buildIdentity: "Synthetic pinned build",
+      features: [
+        {
+          id: "feature-runtime",
+          title: "Preview",
+          paths: [],
+          scenario: "Open preview",
+          userVisible: true,
+          outcome: "passed",
+          artifactRefs: [],
+          limitations: [],
+          assertions: [
+            {
+              id: "assertion-runtime",
+              expected: "Preview opens",
+              observed: "Preview opened",
+              outcome: "passed",
+              evidenceRefs: [],
+            },
+          ],
+        },
+      ],
+      cleanup: { confirmed: true, recordedAt: timestamp, summary: "Owned processes exited." },
+    };
+    const recovery = "Explicitly resume the task to recover report delivery.";
+    const body = renderProgressReply({
+      stage: "failed",
+      template: defaultE2eProgressReplyTemplates.failed,
+      trigger: { ...trigger, eventName: "issue_comment", commandCommentId: 902 },
+      updatedAt: timestamp,
+      report,
+      failure: "Report delivery needs recovery.",
+      context: { mode: "e2e", status: "failed", nextStep: recovery },
+    });
+    expect(body).toContain(recovery);
+    expect(body).not.toContain("request a new E2E run");
+  });
+
+  it.each([
+    ["pull_request", "Static review"],
+    ["issues", "Static investigation"],
+    ["issue_comment", "E2E verification"],
+  ] as const)(
+    "uses the task activity for %s status and saved default headings",
+    (eventName, activity) => {
+      const savedTemplate = JSON.parse(
+        JSON.stringify(defaultProgressReplyTemplates.completed),
+      ) as string;
+      const legacyTemplate =
+        "## Investigation completed\n\n{{trigger}}\n\nLast updated: {{updated_at}}\n\n{{result}}\n";
+      for (const template of [savedTemplate, legacyTemplate]) {
+        const body = renderProgressReply({
+          stage: "completed",
+          template,
+          trigger: {
+            ...trigger,
+            eventName,
+            ...(eventName === "issue_comment" ? { commandCommentId: 123 } : {}),
+          },
+          updatedAt: timestamp,
+          result: reportContent("The recorded task is complete."),
+        });
+        expect(body).toContain(`**Status:** ${activity} completed`);
+        expect(body).toContain(`## ${activity} completed`);
+        expect(body).not.toContain("## Investigation completed");
+      }
+      expect(savedTemplate).toBe(defaultProgressReplyTemplates.completed);
+      expect(legacyTemplate).toContain("## Investigation completed");
+    },
+  );
+
+  it("preserves custom narrative headings while naming the system status by task activity", () => {
+    const custom =
+      "## Investigation completed by our custom workflow\n\n{{trigger}}\n\nUpdated: {{updated_at}}\n\n{{result}}";
+    expect(validateProgressReplyTemplate(custom, "completed")).toBe(custom);
+    const body = renderProgressReply({
+      stage: "completed",
+      template: custom,
+      trigger,
+      updatedAt: timestamp,
+      result: reportContent("The recorded task is complete."),
+    });
+    expect(body).toContain("**Status:** Static review completed");
+    expect(body).toContain("## Investigation completed by our custom workflow");
+  });
+
   it("provides four frozen English templates with the required placeholders in order", () => {
     expect(Object.isFrozen(defaultProgressReplyTemplates)).toBe(true);
     expect(progressReplyTemplateTokens).toEqual({
@@ -55,12 +286,12 @@ describe("assignment progress reply templates", () => {
       failed: ["trigger", "updated_at", "failure"],
       completed: ["trigger", "updated_at", "result"],
     });
-    expect(progressReplyOptionalTemplateTokens).toEqual(["status"]);
+    expect(progressReplyOptionalTemplateTokens).toEqual(["status", "usage"]);
     for (const stage of stages) {
       const template = defaultProgressReplyTemplates[stage];
       expect(validateProgressReplyTemplate(template, stage)).toBe(template);
       expect(render(stage)).toContain(
-        `## ${stage === "received" ? "Investigation received — preparing" : stage === "started" ? "Investigation running" : `Investigation ${stage}`}`,
+        `## Static review ${stage === "received" ? "received — preparing" : stage === "started" ? "running" : stage}`,
       );
       expect(
         readFileSync(
@@ -155,8 +386,58 @@ describe("assignment progress reply templates", () => {
           trigger: { ...trigger, ...invalid } as InvestigationProgressTrigger,
           updatedAt: timestamp,
         }),
-      ).toThrow("exact assignment trigger identity");
+      ).toThrow("exact assignment or E2E command trigger identity");
     }
+  });
+
+  it("renders a separate E2E command identity and pinned pull request scope", () => {
+    const e2eTrigger: InvestigationProgressTrigger = {
+      ...trigger,
+      eventName: "issue_comment",
+      commandCommentId: 987,
+    };
+    const body = renderProgressReply({
+      stage: "received",
+      template: defaultE2eProgressReplyTemplates.received,
+      trigger: e2eTrigger,
+      updatedAt: timestamp,
+      context: {
+        mode: "e2e",
+        status: "preparing",
+        scope: { kind: "pull_request", headSha: "a".repeat(40) },
+      },
+    });
+    expect(body).toContain("E2E verification received — preparing");
+    expect(body).toContain("pull request comment 987");
+    expect(body).toContain("Requested pull request revision");
+    expect(body).toContain("separate comment tracks runtime verification");
+    expect(body).not.toContain("assigned the");
+    expect(body).not.toContain("Issue text");
+    expect(() =>
+      renderProgressReply({
+        stage: "received",
+        template: defaultE2eProgressReplyTemplates.received,
+        trigger: { ...e2eTrigger, commandCommentId: 0 },
+        updatedAt: timestamp,
+      }),
+    ).toThrow("exact assignment or E2E command trigger identity");
+  });
+
+  it("allows an optional usage placeholder without duplicating server accounting", () => {
+    const template = `${defaultProgressReplyTemplates.failed}\n{{usage}}`;
+    const body = renderProgressReply({
+      stage: "failed",
+      template,
+      trigger,
+      updatedAt: timestamp,
+      context: { status: "cancelled" },
+      failure: "The investigation was cancelled.",
+    });
+    expect(body.match(/\*\*Token usage:\*\*/gu)).toHaveLength(1);
+    expect(body).toContain("Unavailable");
+    expect(() => validateProgressReplyTemplate(`${template}\n{{usage}}`, "failed")).toThrow(
+      "only once",
+    );
   });
 
   it("keeps identity, status, scope, and next action outside editable narrative templates", () => {
@@ -168,7 +449,7 @@ describe("assignment progress reply templates", () => {
       context: { status: "running", attemptNumber: 2, phase: "investigation" },
     });
     expect(body.startsWith(renderAutomaticReplyIdentity(undefined, publisher))).toBe(true);
-    expect(body).toContain("**Status:** Investigation running");
+    expect(body).toContain("**Status:** Static review running");
     expect(body).toContain("**Source scope:**");
     expect(body).toContain("**Next action:**");
     expect(body).toContain("**Attempt:** 2");
@@ -203,10 +484,10 @@ describe("assignment progress reply templates", () => {
   });
 
   it.each([
-    ["blocked", "Investigation waiting for action", "resolve its recorded prerequisite"],
-    ["interrupted", "Investigation interrupted", "will not resume automatically"],
-    ["cancelled", "Investigation cancelled", "No automatic continuation"],
-    ["failed", "Investigation failed", "No automatic task retry is promised"],
+    ["blocked", "Static review waiting for action", "resolve its recorded prerequisite"],
+    ["interrupted", "Static review interrupted", "will not resume automatically"],
+    ["cancelled", "Static review cancelled", "No automatic continuation"],
+    ["failed", "Static review failed", "No automatic task retry is promised"],
   ] as const)("renders the attention layout truthfully for %s", (status, heading, nextAction) => {
     const body = renderProgressReply({
       stage: "failed",
@@ -218,7 +499,7 @@ describe("assignment progress reply templates", () => {
     });
     expect(body).toContain(`## ${heading}`);
     expect(body).toContain(nextAction);
-    if (status !== "failed") expect(body).not.toContain("Investigation failed");
+    if (status !== "failed") expect(body).not.toContain("Static review failed");
   });
 
   it("normalizes only exact legacy built-in wording before preparing a new body", () => {
@@ -241,7 +522,7 @@ describe("assignment progress reply templates", () => {
       context: { status: "cancelled" },
     });
     expect(body).not.toContain("Investigation failed");
-    expect(body).toContain("Investigation cancelled");
+    expect(body).toContain("Static review cancelled");
     const custom = "Custom received wording\n\n{{trigger}}\n\n{{updated_at}}";
     expect(validateProgressReplyTemplate(custom, "received")).toBe(custom);
   });
@@ -263,7 +544,7 @@ describe("assignment progress reply templates", () => {
         scope: { kind: "pull_request", headSha, currentHeadSha },
       },
     });
-    expect(body).toContain("Investigation queued for resume");
+    expect(body).toContain("Static review queued for resume");
     expect(body).toContain("**Attempt:** 1");
     expect(body).not.toContain("**Attempt:** 2");
     expect(body).toContain(headSha);
@@ -324,7 +605,7 @@ describe("assignment progress reply templates", () => {
       });
       expect(body.startsWith(parts.identity)).toBe(true);
       expect(body.split(parts.identity)).toHaveLength(2);
-      expect(body).toContain("Investigation completed");
+      expect(body).toContain("Static review completed");
     }
     const anotherPublisher = renderAutomaticReplyParts(
       report,

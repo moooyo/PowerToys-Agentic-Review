@@ -83,6 +83,14 @@ type ReadyCapabilities struct {
 	MaximumFrameBytes         int                           `json:"maximumFrameBytes"`
 	MaximumConcurrentRequests int                           `json:"maximumConcurrentRequests"`
 	InteractiveStdin          *InteractiveStdinCapabilities `json:"interactiveStdin,omitempty"`
+	NamedJobRecovery          *NamedJobRecoveryCapability   `json:"namedJobRecovery,omitempty"`
+}
+
+type NamedJobRecoveryCapability struct {
+	Capability          string `json:"capability"`
+	InstanceKey         string `json:"instanceKey"`
+	Generation          string `json:"generation"`
+	PreviousTreeDrained bool   `json:"previousTreeDrained"`
 }
 
 type ReadyEvent struct {
