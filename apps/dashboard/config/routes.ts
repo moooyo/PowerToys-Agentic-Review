@@ -7,7 +7,7 @@ export default [
   { path: "/comments", name: "Comments", component: "./InvestigationComments" },
   { path: "/webhooks", name: "Webhook events", component: "./InvestigationWebhooks" },
   { path: "/workers", name: "Workers", component: "./InvestigationWorkers", adminOnly: true },
-  { path: "/reports", name: "Report", hideInMenu: true, component: "./InvestigationReport" },
+  { path: "/reports", name: "Reports", component: "./InvestigationReport" },
   { path: "/repositories", name: "Repositories", component: "./InvestigationRepositories" },
   { path: "/account", name: "My account", component: "./MyAccount" },
   { path: "/accounts", name: "Accounts", component: "./Accounts", adminOnly: true },

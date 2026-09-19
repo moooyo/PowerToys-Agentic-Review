@@ -1,21 +1,7 @@
-import {
-  INVESTIGATION_PASSWORD_MAX_LENGTH,
-  normalizeInvestigationUsername,
-} from "@agentic-review/contracts";
-import {
-  Alert,
-  Box,
-  Button,
-  CircularProgress,
-  Snackbar,
-  Stack,
-  TextField,
-  Typography,
-} from "@mui/material";
+import { Alert, Box, CircularProgress, Snackbar, Typography } from "@mui/material";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
-  type FormEvent,
   type ReactNode,
   useCallback,
   useContext,
@@ -31,6 +17,7 @@ import {
   type PasswordChangeInput,
   type PasswordLoginInput,
 } from "./auth-api";
+import { PasswordSignInForm } from "./sign-in-form";
 import {
   resumeInvestigationRequests,
   subscribeInvestigationSessionExpired,
@@ -39,6 +26,7 @@ import {
 
 export type { InvestigationSession } from "./auth-api";
 export { decodeSession } from "./auth-api";
+export { PasswordSignInForm } from "./sign-in-form";
 
 const signedOut = (): InvestigationSession => ({
   authenticated: false,
@@ -77,116 +65,6 @@ export function useInvestigationSession() {
   const context = useContext(SessionContext);
   if (!context) throw new Error("The investigation session provider is missing.");
   return context;
-}
-
-export function PasswordSignInForm({
-  onLogin,
-  onRetry,
-  busy,
-  message,
-  severity = "info",
-}: {
-  onLogin: (input: PasswordLoginInput) => Promise<void>;
-  onRetry: () => Promise<void>;
-  busy: boolean;
-  message?: string;
-  severity?: "info" | "error" | "success";
-}) {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [validationError, setValidationError] = useState<string>();
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (busy) return;
-    const input = { username: normalizeInvestigationUsername(username), password };
-    setPassword("");
-    setValidationError(undefined);
-    if (!/^[a-z0-9][a-z0-9._-]{2,63}$/u.test(input.username) || !input.password) {
-      setValidationError("Enter a valid username and password.");
-      return;
-    }
-    await onLogin(input);
-  };
-  return (
-    <Box sx={{ maxWidth: 480, mx: "auto", pt: { xs: 6, sm: 12 }, px: 3, pb: 4 }}>
-      <Typography variant="h4" sx={{ mb: 1 }}>
-        Agentic Review
-      </Typography>
-      <Typography color="text.secondary" sx={{ mb: 3 }}>
-        Sign in with your workspace account.
-      </Typography>
-      {(message || validationError) && (
-        <Alert severity={validationError ? "error" : severity} sx={{ mb: 2 }}>
-          {validationError ?? message}
-        </Alert>
-      )}
-      <Box
-        component="form"
-        onSubmit={(event: FormEvent<HTMLFormElement>) => void submit(event)}
-        aria-label="Sign in"
-        noValidate
-      >
-        <Stack spacing={2}>
-          <TextField
-            label="Username"
-            name="username"
-            autoComplete="username"
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            disabled={busy}
-            required
-            fullWidth
-            slotProps={{ htmlInput: { autoCapitalize: "none", spellCheck: false, maxLength: 128 } }}
-          />
-          <TextField
-            label="Password"
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            disabled={busy}
-            required
-            fullWidth
-            slotProps={{ htmlInput: { maxLength: INVESTIGATION_PASSWORD_MAX_LENGTH * 2 } }}
-          />
-          <Button
-            type="submit"
-            variant="contained"
-            disabled={busy || !username.trim() || !password}
-          >
-            {busy ? "Signing in…" : "Sign in"}
-          </Button>
-          <Button disabled={busy} onClick={() => void onRetry()}>
-            Retry connection
-          </Button>
-        </Stack>
-      </Box>
-      {process.env.NODE_ENV === "development" && (
-        <Alert severity="info" sx={{ mt: 3 }}>
-          <Typography variant="subtitle2">Development sample only</Typography>
-          <Typography variant="body2">
-            Public demo account: <strong>demo</strong>
-            <br />
-            Demo password: <code>Demo-password-2026!</code>
-          </Typography>
-          <Typography variant="body2" sx={{ mt: 1 }}>
-            Accounts and PowerToys reports are held in memory. This preview does not access GitHub
-            or start a Worker.
-          </Typography>
-          <Button
-            disabled={busy}
-            onClick={() => {
-              setUsername("demo");
-              setPassword("Demo-password-2026!");
-            }}
-          >
-            Fill demo credentials
-          </Button>
-        </Alert>
-      )}
-    </Box>
-  );
 }
 
 export function InvestigationSessionProvider({

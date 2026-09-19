@@ -29,9 +29,24 @@ export function assertReportBindings(
     header.report.id !== result.report.id ||
     header.report.version !== result.report.version ||
     header.report.logicalContentDigest !== result.report.logicalContentDigest ||
+    header.id !== result.id ||
+    header.version !== result.version ||
+    header.context.repository.id !== result.context.repository.id ||
     header.context.task.id !== result.context.task.id ||
     header.context.workItem.id !== result.context.workItem.id ||
-    header.report.collections.findings !== result.findings.length
+    header.context.workItem.kind !== result.context.workItem.kind ||
+    header.context.workItem.number !== result.context.workItem.number ||
+    header.outcome !== result.outcome ||
+    header.report.delivery !== result.report.delivery ||
+    header.report.completeness !== result.report.completeness ||
+    JSON.stringify(header.report.usage) !== JSON.stringify(result.report.usage) ||
+    header.report.collections.findings !== result.findings.length ||
+    header.report.collections.verificationEvidence !== result.verificationEvidence.length ||
+    header.report.collections.artifacts !== result.artifacts.length ||
+    header.report.collections.plans !== result.plans.length ||
+    header.report.collections.nextActions !== result.nextActions.length ||
+    header.report.collections.candidates !== result.report.loop.candidates.length ||
+    header.report.collections.rechecks !== result.report.recheck.records.length
   ) {
     throw new Error(
       "The report details do not match the immutable report header. Refresh before preparing any action.",

@@ -53,6 +53,40 @@ export function accountFormValues(account?: Account): AccountFormValues {
   };
 }
 
+export function accountFormIsDirty(form: AccountFormValues, account?: Account): boolean {
+  const saved = accountFormValues(account);
+  return (
+    form.username !== saved.username ||
+    form.displayName !== saved.displayName ||
+    form.password !== "" ||
+    form.enabled !== saved.enabled ||
+    form.isAdmin !== saved.isAdmin ||
+    form.repositoryIdsText !== saved.repositoryIdsText ||
+    form.allowRepositoryExecution !== saved.allowRepositoryExecution ||
+    form.permissions.length !== saved.permissions.length ||
+    form.permissions.some((permission) => !saved.permissions.includes(permission)) ||
+    form.actionCapabilities.length !== saved.actionCapabilities.length ||
+    form.actionCapabilities.some((action) => !saved.actionCapabilities.includes(action))
+  );
+}
+
+export type AccountDirectoryFilter = "all" | "enabled" | "disabled";
+
+export function filterAccounts(
+  accounts: Account[],
+  search: string,
+  filter: AccountDirectoryFilter,
+): Account[] {
+  const query = search.trim().toLocaleLowerCase();
+  return accounts.filter(
+    (account) =>
+      (filter === "all" || (filter === "enabled" ? account.enabled : !account.enabled)) &&
+      `${account.displayName} ${account.username} ${account.id} ${account.repositoryIds.join(" ")}`
+        .toLocaleLowerCase()
+        .includes(query),
+  );
+}
+
 export function parseRepositoryIds(value: string): string[] {
   const ids = [...new Set(value.split(/[\s,]+/u).filter(Boolean))];
   if (!Value.Check(InvestigationAccountSchema.properties.repositoryIds, ids)) {
@@ -71,6 +105,22 @@ export function assertNewPassword(password: string): void {
       "Use a password between 15 and 128 characters, including a non-whitespace character.",
     );
   }
+}
+
+export function accountPasswordResetProblems(
+  password: string,
+  confirmation: string,
+  acknowledged: boolean,
+) {
+  const errors: { password?: string; confirmation?: string; acknowledged?: string } = {};
+  try {
+    assertNewPassword(password);
+  } catch (cause) {
+    errors.password = cause instanceof Error ? cause.message : "Enter a valid new password.";
+  }
+  if (password !== confirmation) errors.confirmation = "The new passwords do not match.";
+  if (!acknowledged) errors.acknowledged = "Confirm the session consequence to continue.";
+  return errors;
 }
 
 function accountAccessInput(form: AccountFormValues) {

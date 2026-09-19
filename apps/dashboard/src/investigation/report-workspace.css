@@ -1,0 +1,192 @@
+.report-workspace {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.report-workspace .report-directory-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(150px, 1fr));
+  gap: 16px;
+}
+.report-workspace .report-directory-mobile-filter,
+.report-workspace .report-directory-clear-filters {
+  display: none;
+}
+.report-workspace .report-directory-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.report-workspace .report-directory-icon,
+.report-workspace .report-directory-arrow {
+  flex-shrink: 0;
+}
+.report-workspace .report-directory-status {
+  max-width: 220px;
+}
+.report-workspace .report-tabs-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.report-workspace .report-tabs-row > .MuiTabs-root {
+  min-width: 0;
+}
+.report-workspace .report-findings-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 310px) minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+.report-workspace .report-finding-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-right-width: 1px;
+  border-right-style: solid;
+  padding-right: 24px;
+  min-width: 0;
+}
+.report-workspace .report-finding-nav-item {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  text-align: left;
+}
+.report-workspace .report-finding-detail {
+  min-width: 0;
+  border-radius: 12px;
+  scroll-margin-top: 24px;
+}
+.report-workspace .report-finding-detail:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 4px;
+}
+.report-workspace .report-selected-finding {
+  border: 0;
+  box-shadow: none;
+  padding-top: 0;
+}
+.report-workspace .report-details-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(260px, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+.report-workspace .report-details-layout > * {
+  min-width: 0;
+}
+.report-workspace .report-identity {
+  margin: 0 0 16px;
+  overflow-wrap: anywhere;
+}
+.report-workspace .report-identity dt {
+  font-size: 12px;
+  margin-top: 16px;
+}
+.report-workspace .report-identity dd {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+.report-workspace details > summary {
+  min-height: 44px;
+}
+.report-workspace pre {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1200px) {
+  .report-workspace .report-directory-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .report-workspace .report-directory-filters > :first-child {
+    grid-column: 1 / -1;
+  }
+  .report-workspace .report-findings-layout {
+    grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+    gap: 24px;
+  }
+}
+@media (max-width: 900px) {
+  .report-workspace .report-findings-layout,
+  .report-workspace .report-details-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+  .report-workspace .report-finding-nav {
+    border-right: 0;
+    padding-right: 0;
+  }
+  .report-workspace .report-finding-detail {
+    border-top-width: 1px;
+    border-top-style: solid;
+    padding-top: 24px;
+  }
+  .report-workspace .report-directory-row {
+    gap: 16px;
+  }
+}
+@media (max-width: 600px) {
+  .report-workspace .report-directory-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .report-workspace .report-directory-row {
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr);
+    gap: 12px;
+  }
+  .report-workspace .report-directory-icon {
+    width: 40px;
+    height: 40px;
+    align-self: start;
+  }
+  .report-workspace .report-directory-status {
+    grid-column: 2;
+    max-width: none;
+  }
+  .report-workspace .report-directory-arrow {
+    display: none;
+  }
+  .report-workspace .report-tabs-row {
+    flex-wrap: wrap;
+    gap: 0;
+  }
+  .report-workspace .report-tabs-row > .MuiTabs-root {
+    flex: 1 1 100%;
+  }
+  .report-workspace .report-tabs-row > button {
+    margin-left: auto;
+  }
+  .report-workspace .report-selected-finding {
+    padding-left: 0;
+    padding-right: 0;
+  }
+}
+@media (max-width: 599px) {
+  .report-directory > .workspace-page-heading .workspace-page-action {
+    display: none;
+  }
+  .report-workspace .report-directory-filters {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+  .report-workspace .report-directory-filters > :first-child {
+    grid-column: auto;
+    min-width: 0;
+  }
+  .report-workspace .report-directory-desktop-filter {
+    display: none;
+  }
+  .report-workspace .report-directory-mobile-filter,
+  .report-workspace .report-directory-clear-filters {
+    display: inline-flex;
+    min-height: 48px;
+  }
+  .report-workspace .report-directory-clear-filters {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
+}

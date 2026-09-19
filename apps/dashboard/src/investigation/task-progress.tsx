@@ -83,6 +83,7 @@ export function TaskProgressPanel({
   scheduler,
   resourceLeases,
   invocations,
+  compact = false,
   now = Date.now(),
 }: {
   task: Pick<InvestigationTaskV1, "kind" | "state" | "updatedAt"> &
@@ -91,6 +92,7 @@ export function TaskProgressPanel({
   scheduler?: InvestigationSchedulerStatus;
   resourceLeases?: TaskDetail["resourceLeases"];
   invocations?: InvestigationModelInvocationReceipt[];
+  compact?: boolean;
   now?: number;
 }) {
   const queueReason = taskQueueReason(task, scheduler);
@@ -118,6 +120,57 @@ export function TaskProgressPanel({
     const duration = progress?.stageDurationsMs?.[name];
     return duration === undefined ? [] : [{ name, duration }];
   });
+  if (compact)
+    return (
+      <Stack spacing={1.5}>
+        {queueReason && <Alert severity="info">{queueReason}</Alert>}
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: { xs: "flex-start", sm: "center" },
+            justifyContent: "space-between",
+            flexDirection: { xs: "column", sm: "row" },
+            gap: 1,
+            px: 0.5,
+          }}
+        >
+          <Box>
+            <Typography variant="caption" color="text.secondary">
+              {task.state === "queued"
+                ? "Waiting to start"
+                : active
+                  ? "Last reported activity"
+                  : task.state === "completed"
+                    ? "Result"
+                    : "Saved progress"}
+            </Typography>
+            <Typography variant="h6" sx={{ mt: 0.5 }}>
+              {progress?.stage
+                ? stage
+                : task.state === "queued"
+                  ? "Waiting for resources"
+                  : task.state === "completed"
+                    ? "Task complete"
+                    : task.state === "blocked"
+                      ? "Task blocked"
+                      : "Stage not reported"}
+            </Typography>
+          </Box>
+          {progress?.stageStartedAt && (
+            <Typography variant="caption" color="text.secondary">
+              {active ? "Current stage" : "Stage duration at stop"}:{" "}
+              {elapsedTime(progress.stageStartedAt, observedUntil)}
+            </Typography>
+          )}
+        </Box>
+        {task.state === "running" && invocations?.length === 0 && (
+          <Typography variant="body2" color="text.secondary">
+            No model call has been registered. Source preparation can take place before model
+            execution.
+          </Typography>
+        )}
+      </Stack>
+    );
   return (
     <Stack spacing={2}>
       {queueReason && <Alert severity="info">{queueReason}</Alert>}

@@ -15,39 +15,61 @@ function materialTheme(mode: PaletteMode) {
   const dark = mode === "dark";
   const colors = dark
     ? {
-        primary: "#90CAF9",
-        onPrimary: "#003258",
-        primaryContainer: "#084B83",
-        onPrimaryContainer: "#D6EAFF",
-        secondary: "#BCCBDC",
-        secondaryContainer: "#30445A",
-        onSecondaryContainer: "#DBE8F8",
-        surface: "#101820",
-        canvas: "#151F2B",
-        container: "#1C2938",
-        containerHigh: "#253447",
-        onSurface: "#E2E8F0",
-        onSurfaceVariant: "#BDC8D6",
-        outline: "#8899AB",
-        outlineVariant: "#3D4C5E",
+        primary: "#B2C7FF",
+        onPrimary: "#002E6D",
+        primaryContainer: "#24467E",
+        onPrimaryContainer: "#DBE5FF",
+        secondary: "#B8BFCE",
+        secondaryContainer: "#303A50",
+        onSecondaryContainer: "#DBE5FF",
+        surface: "#181C24",
+        canvas: "#10141B",
+        container: "#20252F",
+        containerHigh: "#2B313D",
+        onSurface: "#E3E5ED",
+        onSurfaceVariant: "#B8BFCE",
+        outline: "#7D8594",
+        outlineVariant: "#38404E",
       }
     : {
-        primary: "#1565C0",
+        primary: "#345EAD",
         onPrimary: "#FFFFFF",
-        primaryContainer: "#E3F2FD",
-        onPrimaryContainer: "#0D47A1",
-        secondary: "#526779",
-        secondaryContainer: "#DFEDFB",
-        onSecondaryContainer: "#164A7B",
+        primaryContainer: "#DEE8FF",
+        onPrimaryContainer: "#173D79",
+        secondary: "#565E6B",
+        secondaryContainer: "#DEE8FF",
+        onSecondaryContainer: "#173D79",
         surface: "#FFFFFF",
-        canvas: "#F5F8FC",
-        container: "#EDF3FA",
-        containerHigh: "#E4ECF5",
-        onSurface: "#172B3A",
-        onSurfaceVariant: "#465C70",
-        outline: "#738497",
-        outlineVariant: "#CFD9E4",
+        canvas: "#F8F9FC",
+        container: "#F0F3F9",
+        containerHigh: "#E7EBF3",
+        onSurface: "#1B1D22",
+        onSurfaceVariant: "#565E6B",
+        outline: "#7B8494",
+        outlineVariant: "#E0E3EB",
       };
+  const semanticColors = {
+    error: dark ? "#F2B8B5" : "#B3261E",
+    success: dark ? "#91D4B4" : "#286A53",
+    warning: dark ? "#EDC274" : "#8A5700",
+    info: dark ? "#A8C7FA" : "#365E9D",
+  };
+  const semanticContainers = dark
+    ? { error: "#4A2527", success: "#1D372E", warning: "#3C3020", info: "#20364F" }
+    : { error: "#FCEAE9", success: "#E6F1EA", warning: "#FFF0D4", info: "#E4ECF9" };
+  const chipTones = {
+    primary: { color: colors.onPrimaryContainer, backgroundColor: colors.primaryContainer },
+    secondary: { color: colors.onSecondaryContainer, backgroundColor: colors.secondaryContainer },
+    ...Object.fromEntries(
+      Object.entries(semanticColors).map(([name, color]) => [
+        name,
+        {
+          color,
+          backgroundColor: semanticContainers[name as keyof typeof semanticContainers],
+        },
+      ]),
+    ),
+  } as Record<string, { color: string; backgroundColor: string }>;
   return createTheme({
     cssVariables: true,
     palette: {
@@ -57,26 +79,27 @@ function materialTheme(mode: PaletteMode) {
       background: { default: colors.canvas, paper: colors.surface },
       text: { primary: colors.onSurface, secondary: colors.onSurfaceVariant },
       divider: colors.outlineVariant,
-      error: { main: dark ? "#F2B8B5" : "#B3261E" },
-      success: { main: dark ? "#9CD49A" : "#386A38" },
-      warning: { main: dark ? "#F5BD6F" : "#825500" },
-      info: { main: dark ? "#A8C7FA" : "#365E9D" },
+      error: { main: semanticColors.error },
+      success: { main: semanticColors.success },
+      warning: { main: semanticColors.warning },
+      info: { main: semanticColors.info },
       action: {
         hover: alpha(colors.onSurface, 0.08),
         selected: alpha(colors.primary, 0.12),
         focus: alpha(colors.primary, 0.12),
       },
     },
-    shape: { borderRadius: 12 },
+    // Numeric sx radii multiply this unit; component surface radii are explicit below.
+    shape: { borderRadius: 4 },
     typography: {
       fontFamily: '"Roboto", "Segoe UI", sans-serif',
       fontSize: 14,
       fontWeightRegular: 400,
       fontWeightMedium: 500,
       fontWeightBold: 700,
-      h1: { fontSize: "2rem", lineHeight: 1.25, fontWeight: 400, letterSpacing: 0 },
-      h2: { fontSize: "1.75rem", lineHeight: 1.2857, fontWeight: 400, letterSpacing: 0 },
-      h3: { fontSize: "1.5rem", lineHeight: 1.3333, fontWeight: 400, letterSpacing: 0 },
+      h1: { fontSize: "2rem", lineHeight: 1.25, fontWeight: 400, letterSpacing: "-.5px" },
+      h2: { fontSize: "1.375rem", lineHeight: 1.36, fontWeight: 500, letterSpacing: "-.2px" },
+      h3: { fontSize: "1.125rem", lineHeight: 1.44, fontWeight: 500, letterSpacing: 0 },
       h4: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
       h5: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
       h6: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
@@ -134,8 +157,8 @@ function materialTheme(mode: PaletteMode) {
       MuiButton: {
         defaultProps: { size: "medium", disableElevation: true },
         styleOverrides: {
-          root: { borderRadius: 100, minHeight: 40, padding: "10px 24px", fontWeight: 500 },
-          sizeSmall: { minHeight: 40, padding: "10px 16px" },
+          root: { borderRadius: 100, minHeight: 44, padding: "10px 24px", fontWeight: 500 },
+          sizeSmall: { minHeight: 44, padding: "10px 16px" },
           text: { paddingInline: 16 },
           outlined: { borderColor: colors.outline },
           startIcon: { marginRight: 8 },
@@ -143,7 +166,7 @@ function materialTheme(mode: PaletteMode) {
       },
       MuiIconButton: {
         defaultProps: { size: "medium" },
-        styleOverrides: { root: { width: 40, height: 40, borderRadius: "50%", flexShrink: 0 } },
+        styleOverrides: { root: { width: 44, height: 44, borderRadius: "50%", flexShrink: 0 } },
       },
       MuiAvatar: {
         styleOverrides: {
@@ -157,7 +180,7 @@ function materialTheme(mode: PaletteMode) {
       MuiPaper: {
         defaultProps: { elevation: 0 },
         styleOverrides: {
-          root: { backgroundImage: "none" },
+          root: { backgroundImage: "none", borderRadius: 16 },
           outlined: { borderColor: colors.outlineVariant },
         },
       },
@@ -174,7 +197,7 @@ function materialTheme(mode: PaletteMode) {
       MuiInputBase: { styleOverrides: { root: { fontSize: "1rem", lineHeight: 1.5 } } },
       MuiOutlinedInput: {
         styleOverrides: {
-          root: { borderRadius: 4 },
+          root: { borderRadius: 10 },
           notchedOutline: { borderColor: colors.outline },
         },
       },
@@ -186,13 +209,26 @@ function materialTheme(mode: PaletteMode) {
       MuiChip: {
         defaultProps: { size: "medium" },
         styleOverrides: {
-          root: {
+          root: ({ ownerState }) => ({
             borderRadius: 8,
             height: 32,
             fontSize: ".875rem",
             lineHeight: 1.4286,
             fontWeight: 500,
-          },
+            ...(ownerState.variant !== "outlined" && ownerState.color && chipTones[ownerState.color]
+              ? {
+                  ...chipTones[ownerState.color],
+                  "&.MuiChip-clickable:hover": {
+                    ...chipTones[ownerState.color],
+                    boxShadow: `inset 0 0 0 999px ${alpha(colors.onSurface, 0.04)}`,
+                  },
+                  "&.Mui-focusVisible": {
+                    ...chipTones[ownerState.color],
+                    boxShadow: `inset 0 0 0 999px ${alpha(colors.onSurface, 0.08)}`,
+                  },
+                }
+              : {}),
+          }),
           sizeSmall: { height: 32, fontSize: ".875rem" },
           outlined: { borderColor: colors.outline },
           label: { paddingInline: 12 },
@@ -244,7 +280,7 @@ function materialTheme(mode: PaletteMode) {
       MuiListItemButton: { styleOverrides: { root: { minHeight: 48 } } },
       MuiDialog: {
         defaultProps: { fullWidth: true, container: overlayContainer },
-        styleOverrides: { paper: { borderRadius: 28, backgroundColor: colors.canvas } },
+        styleOverrides: { paper: { borderRadius: 28, backgroundColor: colors.surface } },
       },
       MuiDialogTitle: {
         styleOverrides: {

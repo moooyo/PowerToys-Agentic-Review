@@ -1,8 +1,11 @@
 import type { InvestigationActionKind } from "@agentic-review/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import { isActionAllowed, materializeFeedback } from "./action-panel";
 import { createFeedbackSelection, feedbackSelectionReducer } from "./feedback-selection";
+import { ReportDetails } from "./report-detail-panels";
+import { ReportDirectoryRow } from "./report-directory";
 import { AssessmentPanel, CoveragePanel, FindingCard } from "./report-sections";
 import {
   assertActionContext,
@@ -10,6 +13,7 @@ import {
   assertReportBindings,
   selectionContext,
 } from "./report-state";
+import { reportTab } from "./report-workspace";
 import { createSampleInvestigationApi } from "./sample-adapter";
 
 describe("structured investigation result UI", () => {
@@ -164,5 +168,124 @@ describe("structured investigation result UI", () => {
     const coverage = renderToStaticMarkup(<CoveragePanel report={result.report} />);
     expect(coverage).toContain("Unresolved scope");
     expect(result.report.completeness).toBe("partial");
+  });
+
+  it("keeps directory delivery, completeness, execution, and full finding counts independent", async () => {
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-pr-p0-report");
+    const checkpoint = {
+      ...header,
+      outcome: "completed" as const,
+      report: {
+        ...header.report,
+        delivery: "checkpoint" as const,
+        completeness: "partial" as const,
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <MemoryRouter>
+        <ReportDirectoryRow header={checkpoint} to="/reports?reportId=saved-report" />
+      </MemoryRouter>,
+    );
+    expect(markup).toContain("Checkpoint");
+    expect(markup).toContain("partial report");
+    expect(markup).toContain("Execution: completed");
+    expect(markup).toContain("26 findings");
+    expect(markup).not.toContain("Evidence ready");
+  });
+
+  it("opens a non-first selected finding with its complete detail immediately", async () => {
+    const api = createSampleInvestigationApi();
+    const result = await api.exportReport("sample-pr-p0-report");
+    const finding = result.findings.at(-1)!;
+    const markup = renderToStaticMarkup(
+      <FindingCard
+        detail
+        finding={finding}
+        evidence={result.verificationEvidence}
+        selected={false}
+        draftBody={finding.feedbackDraft.body}
+        suggestionValid={false}
+        onSelect={() => {}}
+        onDraftChange={() => {}}
+      />,
+    );
+    expect(markup).toContain(finding.title);
+    expect(markup).toContain("Trigger conditions");
+    expect(markup).toContain("Exact finding and evidence provenance");
+    expect(markup).not.toContain("Show finding details");
+    expect(markup).toContain("The sealed report stays unchanged");
+  });
+
+  it("retains saved plans, exact source context, and sealed accounting in Details", async () => {
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-bug-report");
+    const result = await api.exportReport(header.report.id);
+    const markup = renderToStaticMarkup(
+      <MemoryRouter>
+        <ReportDetails value={header} result={result} />
+      </MemoryRouter>,
+    );
+    expect(markup).toContain("Saved plans");
+    expect(markup).toContain("Exact context and report metadata");
+    expect(markup).toContain(header.report.logicalContentDigest);
+    expect(markup).toContain(header.context.task.id);
+    for (const plan of result.plans)
+      expect(markup).toContain(
+        plan.title
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#x27;"),
+      );
+    for (const subject of result.context.subjects) expect(markup).toContain(subject.id);
+  });
+
+  it("rejects complete exports with a changed repository, delivery, or omitted collections", async () => {
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-pr-p1-report");
+    const result = await api.exportReport(header.report.id);
+    expect(() =>
+      assertReportBindings(header, {
+        ...result,
+        context: {
+          ...result.context,
+          repository: { ...result.context.repository, id: "other-repository" },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      assertReportBindings(header, {
+        ...result,
+        report: {
+          ...result.report,
+          delivery: result.report.delivery === "final" ? "checkpoint" : "final",
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      assertReportBindings(
+        {
+          ...header,
+          report: {
+            ...header.report,
+            collections: {
+              ...header.report.collections,
+              artifacts: header.report.collections.artifacts + 1,
+            },
+          },
+        },
+        result,
+      ),
+    ).toThrow();
+  });
+
+  it("maps legacy report deep links into the three main sections", () => {
+    expect(reportTab("validation")).toBe("evidence");
+    expect(reportTab("changes")).toBe("evidence");
+    expect(reportTab("coverage")).toBe("details");
+    expect(reportTab("plans")).toBe("details");
+    expect(reportTab("next-steps")).toBe("findings");
   });
 });

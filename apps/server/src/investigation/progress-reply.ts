@@ -1058,6 +1058,14 @@ export class InvestigationProgressReplies {
     record: CommentPublication,
   ): InvestigationCommentPublicationSummary {
     const externalId = record.confirmed?.externalId ?? record.operation?.request.externalId ?? null;
+    const producer =
+      record.taskId === null
+        ? undefined
+        : this.options.store.get<InvestigationTaskV1>("tasks", record.taskId);
+    const boundProducer =
+      producer?.repository.id === record.repository.id && producer.workItem.id === record.workItemId
+        ? producer
+        : undefined;
     return {
       id: record.id,
       version: this.#version(record),
@@ -1068,6 +1076,8 @@ export class InvestigationProgressReplies {
       workItemKind: record.target.kind,
       workItemNumber: record.target.number,
       taskId: record.taskId,
+      producerTaskKind: boundProducer?.kind ?? record.taskKind,
+      workItemTitle: boundProducer?.workItem.title ?? null,
       reportId: record.desired.reportRef?.id ?? null,
       state: record.state,
       reasonCode: record.reasonCode,

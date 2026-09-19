@@ -1,6 +1,7 @@
 import type { InvestigationSession } from "@agentic-review/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Repository, RepositoryWebhookSettings } from "./api";
 import { InvestigationHttpError } from "./transport";
@@ -13,6 +14,7 @@ import {
 import {
   parseGitHubUserIds,
   submitWebhookSettings,
+  webhookSettingsFieldErrors,
   webhookSettingsFormValues,
   webhookSettingsInput,
 } from "./webhook-settings-form";
@@ -45,9 +47,11 @@ function client() {
 
 function renderPanel(queryClient: QueryClient) {
   return renderToStaticMarkup(
-    <QueryClientProvider client={queryClient}>
-      <RepositoryWebhookSettingsPanel repository={repository} />
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <RepositoryWebhookSettingsPanel repository={repository} />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 
@@ -121,19 +125,48 @@ describe("repository assignment webhook settings", () => {
 
   it("does not show an unavailable-receiver warning when the receiver is configured", () => {
     const html = renderToStaticMarkup(
-      <QueryClientProvider client={client()}>
-        <WebhookSettingsForm
-          repository={repository}
-          settings={{ ...settings, receiverConfigured: true }}
-          canManage
-        />
-      </QueryClientProvider>,
+      <MemoryRouter>
+        <QueryClientProvider client={client()}>
+          <WebhookSettingsForm
+            repository={repository}
+            settings={{ ...settings, receiverConfigured: true }}
+            canManage
+          />
+        </QueryClientProvider>
+      </MemoryRouter>,
     );
     expect(html).not.toContain("receiver is not configured yet");
   });
 });
 
 describe("webhook settings input and conflict recovery", () => {
+  it("identifies the exact field to focus while keeping trusted E2E intake independent", () => {
+    const draft = {
+      enabled: false,
+      e2eEnabled: true,
+      reviewerUserIdText: "octocat",
+      allowedActorUserIdsText: "",
+    };
+    expect(webhookSettingsFieldErrors(draft)).toEqual({
+      reviewerUserIdText: "Enter positive numeric GitHub user IDs, not usernames.",
+      allowedActorUserIdsText: "Add at least one trusted user before enabling intake.",
+    });
+    expect(
+      webhookSettingsFieldErrors({
+        ...draft,
+        reviewerUserIdText: "1001",
+        allowedActorUserIdsText: "2001,2002",
+      }),
+    ).toEqual({});
+    expect(
+      webhookSettingsFieldErrors({
+        ...draft,
+        e2eEnabled: false,
+        reviewerUserIdText: "",
+        allowedActorUserIdsText: "",
+      }),
+    ).toEqual({});
+  });
   it("preserves independent E2E authorization using the existing trusted identity fields", () => {
     const form = webhookSettingsFormValues({ ...settings, enabled: false, e2eEnabled: true });
     expect(webhookSettingsInput(form, settings.version)).toMatchObject({

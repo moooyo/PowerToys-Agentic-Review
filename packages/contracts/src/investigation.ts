@@ -1235,6 +1235,7 @@ export const InvestigationCreateTaskRequestV1Schema = object({
   parentReportRef: Type.Optional(InvestigationReportRefSchema),
   planRef: Type.Optional(InvestigationVersionRefSchema),
   sourceCommit: Type.Optional(GitObjectIdSchema),
+  expectedSubjectRevisionKey: Type.Optional(Sha256Schema),
 });
 export type InvestigationCreateTaskRequestV1 = Static<
   typeof InvestigationCreateTaskRequestV1Schema

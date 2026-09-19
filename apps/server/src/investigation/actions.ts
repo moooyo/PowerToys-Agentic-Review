@@ -2,6 +2,7 @@ import {
   type ActionContextV1,
   type InvestigationActionGuard,
   type InvestigationActionIntentV1,
+  InvestigationActionIntentV1Schema,
   type InvestigationActionKind,
   type InvestigationActionPayload,
   type InvestigationConfirmActionIntentRequest,
@@ -18,6 +19,7 @@ import {
   type InvestigationTaskV1,
 } from "@agentic-review/contracts";
 import { evaluateInvestigationActions, investigationContentDigest } from "@agentic-review/domain";
+import { FormatRegistry } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
 import type { InvestigationStore } from "./store.js";
@@ -137,6 +139,43 @@ function bindingId(intentId: string): string {
 
 function guard(code: string, satisfied: boolean, message: string): InvestigationActionGuard {
   return { code, satisfied, message };
+}
+
+/** Preserve stored history while projecting the exact former external-reconciliation spread bug. */
+function storedIntentReadView(intent: InvestigationActionIntentV1): InvestigationActionIntentV1 {
+  if (!FormatRegistry.Has("date-time"))
+    FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
+  const retained: unknown = intent;
+  if (Value.Check(InvestigationActionIntentV1Schema, retained)) return retained;
+  const result: unknown = intent.result;
+  if (
+    externalActions.has(intent.action) &&
+    (intent.state === "succeeded" || intent.state === "failed" || intent.state === "unknown") &&
+    typeof result === "object" &&
+    result !== null &&
+    !Array.isArray(result) &&
+    Object.keys(result).length === 4 &&
+    Object.keys(result).every((key) =>
+      ["state", "message", "externalId", "taskId"].includes(key),
+    ) &&
+    "state" in result &&
+    "message" in result &&
+    "externalId" in result &&
+    "taskId" in result &&
+    result.state === intent.state &&
+    result.taskId === null
+  ) {
+    const projected = {
+      ...intent,
+      result: { message: result.message, externalId: result.externalId, taskId: result.taskId },
+    };
+    if (Value.Check(InvestigationActionIntentV1Schema, projected)) return projected;
+  }
+  throw new InvestigationRequestError(
+    500,
+    "invalid_saved_action_intent",
+    "The stored action intent does not match its durable contract.",
+  );
 }
 
 /** Intent preparation is read-only; confirmation is the sole mutation boundary. */
@@ -415,7 +454,7 @@ export class InvestigationActions {
       "action_intent_forbidden",
       "This actor cannot access this action intent.",
     );
-    return intent;
+    return storedIntentReadView(intent);
   }
 
   findIntentByIdempotencyKey(
@@ -569,7 +608,11 @@ export class InvestigationActions {
         data.workItem,
         actor,
       );
-      return this.finish(intent, result.state, { ...result, taskId: null });
+      return this.finish(intent, result.state, {
+        message: result.message,
+        externalId: result.externalId,
+        taskId: null,
+      });
     } catch {
       return this.finish(intent, "unknown", {
         message: "Receipt reconciliation failed. No operation was resubmitted.",
@@ -1525,16 +1568,17 @@ export class InvestigationActions {
     result: NonNullable<InvestigationActionIntentV1["result"]>,
   ): InvestigationActionIntentV1 {
     return this.dependencies.store.transaction(() => {
-      const current = this.dependencies.store.get<InvestigationActionIntentV1>(
+      const stored = this.dependencies.store.get<InvestigationActionIntentV1>(
         "actionIntents",
         previous.id,
       );
       requireCondition(
-        current !== undefined,
+        stored !== undefined,
         404,
         "action_intent_not_found",
         "The action intent does not exist.",
       );
+      const current = storedIntentReadView(stored);
       if (
         current.version !== previous.version ||
         current.state === "succeeded" ||
@@ -1545,7 +1589,11 @@ export class InvestigationActions {
         ...current,
         state,
         version: current.version + 1,
-        result,
+        result: {
+          message: result.message,
+          externalId: result.externalId,
+          taskId: result.taskId,
+        },
       };
       this.dependencies.store.put("actionIntents", finished.id, finished);
       return finished;

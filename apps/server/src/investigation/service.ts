@@ -15,20 +15,26 @@ import type {
   InvestigationInputSnapshotV1,
   InvestigationLoopCheckpointV1,
   InvestigationModelInvocationReceipt,
+  InvestigationOutputBatchRequest,
+  InvestigationOutputQuery,
   InvestigationPlanExecutionBinding,
   InvestigationPlanV1,
   InvestigationProgressRequest,
+  InvestigationReportDirectoryQuery,
   InvestigationReportPartRequest,
   InvestigationReportPartV1,
   InvestigationResultV1,
   InvestigationSchedulerSettingsRequest,
   InvestigationSchedulerStatus,
   InvestigationSubjectV1,
+  InvestigationTaskArtifactsQuery,
   InvestigationTaskV1,
   InvestigationUsageSummary,
   InvestigationWorkerControlUpdate,
   InvestigationWorkerLease,
   InvestigationWorkerPolicyRequest,
+  InvestigationWorkItemDiscussionQuery,
+  InvestigationWorkspaceSearchQuery,
 } from "@agentic-review/contracts";
 import {
   EntityIdSchema,
@@ -75,6 +81,7 @@ import {
 import { assembleInvestigationReport, reportHeader } from "./report.js";
 import { InvestigationResourceScheduler, investigationResourcePool } from "./resource-scheduler.js";
 import type { InvestigationStore } from "./store.js";
+import { InvestigationTaskOutput } from "./task-output.js";
 import {
   beginInvestigationProgress,
   investigationTaskProgress,
@@ -93,11 +100,13 @@ import type {
 } from "./types.js";
 import {
   InvestigationUsageLedgerError,
+  investigationUsageInvocation,
   investigationUsageInvocations,
   investigationUsageSummary,
   recordInvestigationUsage,
 } from "./usage-ledger.js";
 import { InvestigationWorkerControls } from "./worker-controls.js";
+import { InvestigationWorkspaceReads } from "./workspace-reads.js";
 
 interface AttemptRecord {
   attempt: InvestigationAttemptV1;
@@ -186,6 +195,8 @@ export class InvestigationService {
   readonly actions: InvestigationActions;
   readonly evidence: InvestigationEvidenceStore;
   readonly workerControls: InvestigationWorkerControls;
+  readonly output: InvestigationTaskOutput;
+  readonly workspace: InvestigationWorkspaceReads;
   private readonly store: InvestigationStore;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
@@ -200,6 +211,9 @@ export class InvestigationService {
     this.workerControls =
       options.workerControls ?? new InvestigationWorkerControls(this.store, this.now);
     this.evidence = new InvestigationEvidenceStore(this.store, options.evidencePolicy, this.now);
+    this.output = new InvestigationTaskOutput(this.store, this.now);
+    this.workspace = new InvestigationWorkspaceReads(this.store, this.evidence);
+    this.workspace.initializeReports();
     this.idFactory = options.idFactory ?? randomUUID;
     this.leaseDurationMs = options.leaseDurationMs ?? 120_000;
     this.resourceScheduler = new InvestigationResourceScheduler(
@@ -405,6 +419,46 @@ export class InvestigationService {
     this.scope(actor, item.repositoryId);
     return item;
   }
+  taskDefaults() {
+    return { budget: { ...this.defaultTaskBudget } };
+  }
+  workItemDiscussion(
+    actor: InvestigationOperatorPrincipal,
+    id: string,
+    query: InvestigationWorkItemDiscussionQuery,
+  ) {
+    return this.workspace.discussion(this.getWorkItem(actor, id), query);
+  }
+  listReports(actor: InvestigationOperatorPrincipal, query: InvestigationReportDirectoryQuery) {
+    return this.workspace.reports(actor, query);
+  }
+  workspaceSearch(actor: InvestigationOperatorPrincipal, query: InvestigationWorkspaceSearchQuery) {
+    return this.workspace.search(actor, query);
+  }
+  taskArtifacts(
+    actor: InvestigationOperatorPrincipal,
+    id: string,
+    query: InvestigationTaskArtifactsQuery,
+  ) {
+    const task = this.task(actor, id);
+    if (query.attemptId !== undefined) this.requireTaskAttempt(id, query.attemptId);
+    return this.workspace.artifacts(actor, task, query);
+  }
+  taskOutput(actor: InvestigationOperatorPrincipal, id: string, query: InvestigationOutputQuery) {
+    this.task(actor, id);
+    this.requireTaskAttempt(id, query.attemptId);
+    return this.output.read(id, query);
+  }
+  private requireTaskAttempt(taskId: string, attemptId: string): AttemptRecord {
+    const record = this.required<AttemptRecord>("attempts", attemptId);
+    requireCondition(
+      record.attempt.taskId === taskId,
+      404,
+      "attempt_not_found",
+      "The attempt does not belong to this task.",
+    );
+    return record;
+  }
   listTasks(actor: InvestigationOperatorPrincipal, query: InvestigationDirectoryQuery) {
     this.reapExpiredLeases();
     if (query.repositoryId !== undefined) this.scope(actor, query.repositoryId);
@@ -480,17 +534,6 @@ export class InvestigationService {
     onPersisted?: (task: InvestigationTaskV1) => void,
   ): Promise<InvestigationTaskV1> {
     this.permit(actor, "task:create");
-    const registeredItem = this.getWorkItem(actor, request.workItemId);
-    const repository = this.required<InvestigationRepositoryRecord>(
-      "repositories",
-      registeredItem.repositoryId,
-    );
-    requireCondition(
-      request.budget === undefined || request.budget.maxReportBytes <= this.maxReportBytes,
-      400,
-      "report_budget_exceeds_server_limit",
-      `The report budget exceeds the configured ${this.maxReportBytes}-byte server limit.`,
-    );
     const key = `task:${actor.id}:${request.idempotencyKey}`;
     const digest = investigationContentDigest(request);
     const previous = this.store.get<IdempotencyRecord>("idempotency", key);
@@ -503,6 +546,24 @@ export class InvestigationService {
       );
       return this.task(actor, previous.entityId);
     }
+    const registeredItem = this.getWorkItem(actor, request.workItemId);
+    requireCondition(
+      request.expectedSubjectRevisionKey === undefined ||
+        registeredItem.subject.revisionKey === request.expectedSubjectRevisionKey,
+      409,
+      "stale_subject",
+      "The source changed after it was reviewed. Reload the current source before creating a new investigation.",
+    );
+    const repository = this.required<InvestigationRepositoryRecord>(
+      "repositories",
+      registeredItem.repositoryId,
+    );
+    requireCondition(
+      request.budget === undefined || request.budget.maxReportBytes <= this.maxReportBytes,
+      400,
+      "report_budget_exceeds_server_limit",
+      `The report budget exceeds the configured ${this.maxReportBytes}-byte server limit.`,
+    );
     const importedInput =
       importedSource === undefined
         ? undefined
@@ -910,6 +971,15 @@ export class InvestigationService {
       if (importedSource !== undefined) this.requireImportedSourceCurrent(repository, item);
       this.evidence.requireTaskSources(task, parent ?? null);
       beforePersist?.();
+      if (request.expectedSubjectRevisionKey !== undefined) {
+        const currentItem = this.getWorkItem(actor, item.id);
+        requireCondition(
+          currentItem.subject.revisionKey === request.expectedSubjectRevisionKey,
+          409,
+          "stale_subject",
+          "The source changed while task input was being prepared. Reload it before creating a new investigation.",
+        );
+      }
       this.store.insert("tasks", task.id, task);
       this.evidence.pinParent(task);
       this.store.insert("idempotency", `input:${task.id}`, input);
@@ -1241,6 +1311,67 @@ export class InvestigationService {
       const snapshot = { summary: this.usageSummary(taskId) };
       this.store.insert("idempotency", key, snapshot);
       return structuredClone(snapshot);
+    });
+  }
+
+  /** A bounded terminal drain may only append to an already established original attempt. */
+  workerOutput(
+    worker: InvestigationWorkerPrincipal,
+    taskId: string,
+    request: InvestigationOutputBatchRequest,
+  ) {
+    return this.store.transaction(() => {
+      const task = this.task(worker, taskId);
+      const record = this.requireTaskAttempt(taskId, request.lease.attemptId);
+      requireCondition(
+        record.attempt.workerId === worker.id &&
+          record.attempt.leaseVersion === request.lease.fence &&
+          constantTimeEqual(
+            record.leaseTokenDigest,
+            investigationContentDigest(request.lease.leaseToken),
+          ),
+        409,
+        "output_lease_mismatch",
+        "Output must retain the authenticated Worker's original task and attempt lease.",
+      );
+      const duplicate = this.output.duplicate(taskId, request);
+      if (duplicate !== undefined) return duplicate;
+      const checkpoint = this.store.get<InvestigationLoopCheckpointV1>("checkpoints", taskId);
+      const current =
+        task.state === "running" &&
+        record.attempt.state === "running" &&
+        checkpoint?.attemptId === record.attempt.id &&
+        checkpoint.leaseVersion === request.lease.fence &&
+        Date.parse(record.leaseExpiresAt) > this.now().getTime();
+      // Delayed expiry reaping must never reopen an already elapsed output drain window.
+      const drainAnchor = Math.min(
+        Date.parse(record.leaseExpiresAt),
+        Date.parse(record.attempt.finishedAt ?? record.leaseExpiresAt),
+      );
+      const drainEnd = drainAnchor + 24 * 60 * 60 * 1_000;
+      requireCondition(
+        current || (this.output.established(record.attempt.id) && this.now().getTime() <= drainEnd),
+        409,
+        "output_lease_lost",
+        "New output requires a live lease or a bounded drain of its established original stream.",
+      );
+      for (const event of request.events) {
+        if (event.invocationId === null) continue;
+        const invocation = investigationUsageInvocation(this.store, event.invocationId);
+        const admission = this.store.get<{ executionAllowed: boolean }>(
+          "idempotency",
+          `model-usage-admission:${event.invocationId}`,
+        );
+        requireCondition(
+          invocation?.taskId === taskId &&
+            invocation.attemptId === record.attempt.id &&
+            admission?.executionAllowed === true,
+          409,
+          "output_invocation_mismatch",
+          "Visible model output requires an admitted registered invocation from this exact attempt.",
+        );
+      }
+      return this.output.append(taskId, request);
     });
   }
   async resumeTask(
@@ -2334,6 +2465,7 @@ export class InvestigationService {
         "The report must seal the current accepted checkpoint.",
       );
       this.store.insert("reports", result.report.id, result);
+      this.store.insert("reportDirectory", result.report.id, reportHeader(result));
       this.store.insert("idempotency", `finalize:${record.attempt.id}`, {
         digest: investigationContentDigest(request),
       });

@@ -11,6 +11,7 @@ import type {
 import { InvestigationWebhookRetryRequestSchema } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import type { InvestigationApi, RepositoryAutoReplySettings } from "./api";
+import type { InvestigationReadApi } from "./read-api";
 import { InvestigationHttpError } from "./transport";
 
 type User = NonNullable<InvestigationSession["user"]>;
@@ -263,7 +264,123 @@ export function createSessionScopedSampleApi(
     return { ...value, availableActions: allowed ? value.availableActions : [] };
   }
 
+  const publications: InvestigationReadApi["publications"] = async (query = {}, signal) => {
+    signal?.throwIfAborted();
+    const snapshot = structuredClone(query);
+    const user = await currentUser();
+    if (snapshot.repositoryId !== undefined) authorize(user, snapshot.repositoryId);
+    if (snapshot.workItemId !== undefined) await workItem(user, snapshot.workItemId);
+    if (snapshot.taskId !== undefined) {
+      const detail = await api.task(snapshot.taskId);
+      await currentAccess(user, detail.task.repository.id);
+    }
+    const value = await api.publications(snapshot, signal);
+    const current = await currentUser(user.id);
+    if (snapshot.repositoryId !== undefined) authorize(current, snapshot.repositoryId);
+    signal?.throwIfAborted();
+    return structuredClone({
+      ...value,
+      items: value.items
+        .filter((item) => current.repositoryIds.includes(item.repositoryId))
+        .map((item) => scopeComment(item, current)),
+    });
+  };
+
+  const workItemSnapshot: InvestigationReadApi["workItemSnapshot"] = async (
+    id,
+    query = {},
+    signal,
+  ) => {
+    signal?.throwIfAborted();
+    const snapshot = structuredClone(query);
+    const user = await currentUser();
+    const item = await workItem(user, id);
+    const value = await api.workItemSnapshot(id, snapshot, signal);
+    const scoped = await result(user, value, item.repositoryId);
+    signal?.throwIfAborted();
+    return scoped;
+  };
+
   return {
+    async taskDefaults(signal) {
+      signal?.throwIfAborted();
+      const user = await currentUser();
+      const value = await api.taskDefaults(signal);
+      await currentUser(user.id);
+      signal?.throwIfAborted();
+      return structuredClone(value);
+    },
+    async taskOutput(id, query, signal) {
+      signal?.throwIfAborted();
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      const detail = await api.task(id);
+      await currentAccess(user, detail.task.repository.id);
+      const value = await api.taskOutput(id, snapshot, signal);
+      const scoped = await result(user, value, detail.task.repository.id);
+      signal?.throwIfAborted();
+      return scoped;
+    },
+    async taskArtifacts(id, query = {}, signal) {
+      signal?.throwIfAborted();
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      const detail = await api.task(id);
+      await currentAccess(user, detail.task.repository.id);
+      const value = await api.taskArtifacts(id, snapshot, signal);
+      const scoped = await result(user, value, detail.task.repository.id);
+      signal?.throwIfAborted();
+      return scoped;
+    },
+    async reports(query = {}, signal) {
+      signal?.throwIfAborted();
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      if (snapshot.repositoryId !== undefined) authorize(user, snapshot.repositoryId);
+      if (snapshot.workItemId !== undefined) await workItem(user, snapshot.workItemId);
+      if (snapshot.taskId !== undefined) {
+        const detail = await api.task(snapshot.taskId);
+        await currentAccess(user, detail.task.repository.id);
+      }
+      const value = await api.reports(snapshot, signal);
+      const current = await currentUser(user.id);
+      if (snapshot.repositoryId !== undefined) authorize(current, snapshot.repositoryId);
+      signal?.throwIfAborted();
+      return structuredClone({
+        ...value,
+        items: value.items.filter((item) =>
+          current.repositoryIds.includes(item.context.repository.id),
+        ),
+      });
+    },
+    publications,
+    publicationDirectory: publications,
+    workItemSnapshot,
+    workItemDiscussion: workItemSnapshot,
+    async workspaceSearch(query, signal) {
+      signal?.throwIfAborted();
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      if (snapshot.repositoryId !== undefined) authorize(user, snapshot.repositoryId);
+      const value = await api.workspaceSearch(snapshot, signal);
+      const current = await currentUser(user.id);
+      if (snapshot.repositoryId !== undefined) authorize(current, snapshot.repositoryId);
+      signal?.throwIfAborted();
+      return structuredClone({
+        ...value,
+        items: value.items.filter((item) => current.repositoryIds.includes(item.repositoryId)),
+        truncated: current.repositoryIds.length > 0 && value.truncated,
+      });
+    },
+    async reportMediaPublication(id, signal) {
+      signal?.throwIfAborted();
+      const user = await currentUser();
+      const header = await report(user, id);
+      const value = await api.reportMediaPublication(id, signal);
+      const scoped = await result(user, value, header.context.repository.id);
+      signal?.throwIfAborted();
+      return scoped;
+    },
     async workers() {
       const user = await currentUser();
       if (!user.isAdmin) forbidden();
@@ -502,10 +619,12 @@ export function createSessionScopedSampleApi(
       })();
     },
 
-    async tasks(workItemId) {
+    async tasks(workItemId, signal) {
+      signal?.throwIfAborted();
       const user = await currentUser();
-      const values = await api.tasks(workItemId);
+      const values = await api.tasks(workItemId, signal);
       const current = await currentUser(user.id);
+      signal?.throwIfAborted();
       const items = values.items.filter((item) =>
         current.repositoryIds.includes(item.repository.id),
       );
@@ -522,10 +641,12 @@ export function createSessionScopedSampleApi(
       });
     },
 
-    async task(id) {
+    async task(id, signal) {
+      signal?.throwIfAborted();
       const user = await currentUser();
-      const detail = await api.task(id);
+      const detail = await api.task(id, signal);
       const current = await currentAccess(user, detail.task.repository.id);
+      signal?.throwIfAborted();
       return structuredClone({
         ...detail,
         children: detail.children.filter((child) =>

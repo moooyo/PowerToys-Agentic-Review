@@ -34,6 +34,60 @@ export type AutoReplySettingsFormValues = Pick<
   "enabled" | "pullRequestTemplate" | "issueTemplate" | "progressEnabled" | "progressTemplates"
 >;
 
+export type AutoReplyTemplateKey = "pullRequest" | "issue" | AutoReplyProgressStage;
+
+export interface AutoReplyAuthorization {
+  renew: boolean;
+  saved: RepositoryAutoReplySettings;
+  form: AutoReplySettingsFormValues;
+}
+
+export function autoReplyAuthorizationSnapshot(
+  form: AutoReplySettingsFormValues,
+  saved: RepositoryAutoReplySettings,
+  renew: boolean,
+): AutoReplyAuthorization {
+  return {
+    renew,
+    saved: { ...saved, progressTemplates: { ...saved.progressTemplates } },
+    form: { ...form, progressTemplates: { ...form.progressTemplates } },
+  };
+}
+
+export function autoReplyTemplateValue(
+  form: AutoReplySettingsFormValues,
+  key: AutoReplyTemplateKey,
+): string {
+  return key === "pullRequest"
+    ? form.pullRequestTemplate
+    : key === "issue"
+      ? form.issueTemplate
+      : form.progressTemplates[key];
+}
+
+export function autoReplySettingsFieldErrors(
+  form: AutoReplySettingsFormValues,
+): Partial<Record<AutoReplyTemplateKey | "progressEnabled", string>> {
+  const errors: Partial<Record<AutoReplyTemplateKey | "progressEnabled", string>> = {};
+  if (form.progressEnabled && !form.enabled)
+    errors.progressEnabled =
+      "Assignment progress comments require automatic replies to be enabled.";
+  for (const key of ["pullRequest", "issue", ...autoReplyProgressStages] as const) {
+    try {
+      if (key === "pullRequest" || key === "issue")
+        validateAutoReplyTemplate(
+          autoReplyTemplateValue(form, key),
+          key === "issue" ? "Issue reply template" : "PR reply template",
+          key,
+        );
+      else validateAutoReplyProgressTemplate(form.progressTemplates[key], key);
+    } catch (cause) {
+      errors[key] = cause instanceof Error ? cause.message : "Review this template.";
+    }
+  }
+  return errors;
+}
+
 export function autoReplySettingsFormValues(
   settings: RepositoryAutoReplySettings,
 ): AutoReplySettingsFormValues {

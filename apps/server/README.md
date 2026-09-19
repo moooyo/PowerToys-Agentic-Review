@@ -18,11 +18,33 @@ load a dotenv file. `.env.example` lists the supported settings. Keep both datab
 restricted to the service account and administrators, outside the dashboard static directory.
 Relative database paths resolve against the process working directory.
 
-Investigation data uses schema identity `investigation-v4`. Startup accepts exact, complete
-`investigation-v2` and `investigation-v3` databases and adds the missing comment history and scheduler
-storage in one transaction. Existing entities are preserved. Unrelated, partial, or otherwise incompatible schemas
+Investigation data uses schema identity `investigation-v5`. Startup accepts exact, complete
+`investigation-v2`, `investigation-v3`, and `investigation-v4` databases and adds the missing comment
+history, scheduler, normalized output, and directory storage in one transaction. Existing entities are preserved. Unrelated, partial, or otherwise incompatible schemas
 are rejected without deletion or reset. The separate password-account database retains its own
 schema identity and initialization rules.
+
+The authenticated Dashboard read API includes bounded report and publication directories,
+`GET /api/workspace/search`, frozen `GET /api/work-items/:id/discussion` snapshots, and uploaded
+`GET /api/tasks/:id/artifacts` metadata. Directory cursors are bound to the selected filters and
+the operator's exact repository grants. Artifact lists never read stored content bytes. Report
+directory headers preserve every sealed report and its original usage snapshot.
+
+Workers append only normalized visible events through `POST /api/worker/tasks/:id/output-events`.
+Each batch contains at most 64 events and 256 KiB, preserves one stable batch identity, and continues
+the attempt's producer sequence. Model events require an already admitted invocation. The original
+Worker, task, attempt, fence, and lease token are checked on every delivery. A terminal attempt can
+drain an already established stream for 24 hours; this exception does not permit other stale task
+mutations. Identical committed batches remain safe to retry after that drain window.
+
+`GET /api/tasks/:id/output-events?attemptId=...` replays durable normalized events. Pages contain at
+most 200 events. `nextCursor` continues a page; after the page is drained, `highWaterCursor` polls for
+new output. A cursor from pruned history returns `cursorExpired: true` together with the earliest
+retained page. Each attempt retains at most 10,000 events and 8 MiB. Aggregate retained output is
+limited to 128 MiB; the oldest retained stream entries are removed when this limit is reached,
+with gaps disclosed through the same replay metadata. At most 100,000 immutable batch receipts are
+retained; exhaustion rejects a whole batch without advancing its sequence. Output never establishes accepted analysis, token usage, evidence,
+or process cleanup. Raw provider envelopes and private reasoning are outside this protocol.
 
 ## Initialize the first administrator
 
@@ -514,7 +536,7 @@ original receipt after delivery, without queuing another attempt.
 
 The independent spool database uses schema version 2 and additively upgrades its version 1 records
 to retain retry/version metadata. This migration does not change the application's
-`investigation-v4` database. Relay retry receipts and intake retry receipts are separate records and
+`investigation-v5` database. Relay retry receipts and intake retry receipts are separate records and
 use separate command contracts.
 
 Relay retry only covers events already received and persisted by that relay. A failure before receipt

@@ -1,0 +1,1163 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' file: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Dashboard production capture review</title>
+<style>
+:root{font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:#18212c;background:#f4f5f7;color-scheme:light}*{box-sizing:border-box}body{margin:0}main{max-width:1600px;margin:auto;padding:32px 24px 60px}header{max-width:1000px;margin-bottom:24px}.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;color:#42536a}h1{font-size:clamp(26px,4vw,40px);line-height:1.15;margin:8px 0 16px}p{margin:8px 0;color:#526071}a{color:#154f9e;text-underline-offset:3px}.identities{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;margin:20px 0;font-size:13px}.identities dt{font-weight:700}.identities dd{margin:0}code{font:12px/1.5 ui-monospace,Consolas,monospace;overflow-wrap:anywhere}.filters{display:flex;flex-wrap:wrap;align-items:end;gap:12px;padding:16px;background:white;border:1px solid #d9dee6;border-radius:10px;margin:20px 0}.filters label{display:grid;gap:5px;font-weight:600;font-size:13px}.search{flex:1;min-width:200px}input,select,button{font:inherit;color:inherit;min-height:48px;border:1px solid #aeb8c5;border-radius:6px;background:white;padding:8px 10px}button{cursor:pointer}input:focus-visible,select:focus-visible,button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #3970b7;outline-offset:3px}.count{font-size:13px;margin:12px 0 18px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,310px),1fr));gap:20px}.capture{background:white;border:1px solid #d9dee6;border-radius:10px;overflow:hidden}.preview{display:block;aspect-ratio:16/10;background:#e9edf2;overflow:hidden}.preview img{display:block;width:100%;height:100%;object-fit:cover;object-position:top}.caption{padding:14px}h2{font-size:15px;line-height:1.4;margin:0;overflow-wrap:anywhere}.caption p{font-size:12px}.small{color:#657387}details{margin-top:10px;font-size:12px}summary{cursor:pointer}details code{display:block;margin-top:6px}footer{font-size:12px;border-top:1px solid #d9dee6;padding-top:16px;margin-top:28px;color:#657387}[hidden]{display:none!important}@media(max-width:500px){main{padding:22px 14px 40px}.filters{gap:10px}.search{flex-basis:100%}.identities{grid-template-columns:1fr;gap:3px}.identities dd{margin-bottom:8px}}
+</style></head><body><main>
+<header><div class="eyebrow">Production captures / synthetic fixtures</div><h1>Dashboard production capture review</h1>
+<p>Actual browser screenshots of the production Dashboard using isolated synthetic fixtures. This offline board is documentation, not the application. Screenshots do not certify interactions or states that were not captured.</p>
+<details><summary>Verified build and capture provenance</summary><dl class="identities"><dt>Candidate SHA</dt><dd><code>c3dbfa272e96f4d2218fb82043c4a42151b8fcbb6ae8d165d04ed1e8123dedb0</code></dd><dt>Source SHA</dt><dd><code>a9a0dfdc3be9542bdec73e8cfb2dddf75dc2c24f96ccfa94413f736db816b492</code></dd><dt>Source receipt</dt><dd>Passed &middot; <code>e35d0f69a67e11497d45379d6b52ffe10e0c8caca9a235ebc5e2f18db3a2282f</code></dd></dl></details>
+<p class="small">Card previews are cropped. Open the PNG to inspect the complete capture at its original dimensions. Theme is unknown unless the receipt explicitly records it. No prototype images are included.</p>
+<a href="capture-manifest.json" download>Download capture manifest</a></header>
+<section class="filters" aria-label="Filter production captures"><label>Viewport width<select id="width"><option value="">All widths</option></select></label><label>Recorded theme<select id="theme"><option value="">All themes</option><option value="light">Light</option><option value="dark">Dark</option><option value="not-recorded">Not recorded</option></select></label><label class="search">Search capture labels<input id="search" type="search" autocomplete="off" placeholder="For example: tasks or dark"></label><button id="clear" type="button">Clear filters</button></section>
+<p id="count" class="count" role="status" aria-live="polite">143 captures</p><p id="empty" hidden>No captures match these filters.</p>
+<section class="grid" aria-label="Production screenshots"><article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-sign-in">
+  <a class="preview" href="captures/capture-0001.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-sign-in">
+    <img src="captures/capture-0001.png" alt="Production capture: 1440-sign-in" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-sign-in</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0001.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>f2f7c00d3754502cbed948040674560da62e0b128500b8dd66612912bd0dbe51</code></details></div>
+</article>
+<article class="capture" data-width="900" data-theme="not-recorded" data-label="900-sign-in">
+  <a class="preview" href="captures/capture-0002.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 900-sign-in">
+    <img src="captures/capture-0002.png" alt="Production capture: 900-sign-in" width="900" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>900-sign-in</h2><p>Viewport 900 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 900 x 1000 &middot; <a href="captures/capture-0002.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>101899de883197dda27f4cce49fee8435c2eafa0cf984eb3f501fce5c57759b1</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-sign-in">
+  <a class="preview" href="captures/capture-0003.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-sign-in">
+    <img src="captures/capture-0003.png" alt="Production capture: 390-sign-in" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-sign-in</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0003.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>0ea5ac13b0636370146cee9a2bad6a26fc33356ffdf739fe1282bfea223409e4</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-sign-in">
+  <a class="preview" href="captures/capture-0004.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-sign-in">
+    <img src="captures/capture-0004.png" alt="Production capture: 320-sign-in" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-sign-in</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0004.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>1b0a7fd09fe273aa551f5b30c433a05976e849cb602210f8202dff70929a12e1</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-pull-requests">
+  <a class="preview" href="captures/capture-0005.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-pull-requests">
+    <img src="captures/capture-0005.png" alt="Production capture: 1440-pull-requests" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-pull-requests</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0005.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>3207ca70612a78f68cda9391e84c55ffe4cd56a5ed5b7372d4f023f5783de4be</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-issues">
+  <a class="preview" href="captures/capture-0006.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-issues">
+    <img src="captures/capture-0006.png" alt="Production capture: 1440-issues" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-issues</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0006.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>16254fa9b5ff7e5f2833a7e9a77ec6eb5bfcabca07e8c6148fad0f6b416e0096</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-issues-bottom">
+  <a class="preview" href="captures/capture-0007.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-issues-bottom">
+    <img src="captures/capture-0007.png" alt="Production capture: 1440-issues-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-issues-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0007.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>4e6d2fb5e61bad1a418f1f18af9f162f7b98333382dec609ecf1e5843b46b1f9</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-tasks">
+  <a class="preview" href="captures/capture-0008.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-tasks">
+    <img src="captures/capture-0008.png" alt="Production capture: 1440-tasks" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-tasks</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0008.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>9fad04ee31156d5b8633cc63b8ddb0fcab7243b2e081253237efbc4f733bc26e</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-tasks-bottom">
+  <a class="preview" href="captures/capture-0009.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-tasks-bottom">
+    <img src="captures/capture-0009.png" alt="Production capture: 1440-tasks-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-tasks-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0009.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>9ae2ff1dbdba93b2515617ac803e80ff2921fc6d8565e3e20eebbbfb8bfa15cb</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-reports">
+  <a class="preview" href="captures/capture-0010.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-reports">
+    <img src="captures/capture-0010.png" alt="Production capture: 1440-reports" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-reports</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0010.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>ef497d76e9338303c8b0b6e2ef11d7542c117a51531260445b73587301e3f455</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-reports-bottom">
+  <a class="preview" href="captures/capture-0011.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-reports-bottom">
+    <img src="captures/capture-0011.png" alt="Production capture: 1440-reports-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-reports-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0011.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>8c7b1eb48351958a863b5ce1edf465f39a3cce8cb4fec608dab45287aed37553</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-comments">
+  <a class="preview" href="captures/capture-0012.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-comments">
+    <img src="captures/capture-0012.png" alt="Production capture: 1440-comments" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-comments</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0012.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>5327d5f10b289790d9808e54d35e42941d9783ec786593bc3f651d0ddd4a209b</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-comments-bottom">
+  <a class="preview" href="captures/capture-0013.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-comments-bottom">
+    <img src="captures/capture-0013.png" alt="Production capture: 1440-comments-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-comments-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0013.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>0115e1e6e19a258abd6c091fb270728e38983ac5e46e7f86c38610f3051a3ed3</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-webhooks">
+  <a class="preview" href="captures/capture-0014.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-webhooks">
+    <img src="captures/capture-0014.png" alt="Production capture: 1440-webhooks" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-webhooks</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0014.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>4f11d780850d503ec54ec1f022c384c779da004522b5ec69306d82353aede1dc</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-webhooks-bottom">
+  <a class="preview" href="captures/capture-0015.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-webhooks-bottom">
+    <img src="captures/capture-0015.png" alt="Production capture: 1440-webhooks-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-webhooks-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0015.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>24967404fc3bdcacd2f937a2eea46ac0f100049fafed34204296ec4009b2b92e</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-workers">
+  <a class="preview" href="captures/capture-0016.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-workers">
+    <img src="captures/capture-0016.png" alt="Production capture: 1440-workers" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-workers</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0016.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>7c17c91fcc4769002e746c9096af4206efce68e6d282f22d6da67fc6fb670d90</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-workers-bottom">
+  <a class="preview" href="captures/capture-0017.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-workers-bottom">
+    <img src="captures/capture-0017.png" alt="Production capture: 1440-workers-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-workers-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0017.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>7efee4bf78530a6898dd519c5710ce3fc338e13863fca0ebb82ef6d5dbe31fc4</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-repositories">
+  <a class="preview" href="captures/capture-0018.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-repositories">
+    <img src="captures/capture-0018.png" alt="Production capture: 1440-repositories" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-repositories</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0018.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>5a5b86938b24a2d0cde0011c59621ff2afd3bd70efa8d894191048e7ae8224d2</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-account">
+  <a class="preview" href="captures/capture-0019.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-account">
+    <img src="captures/capture-0019.png" alt="Production capture: 1440-account" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-account</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0019.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>97a0f13288b08ff96885af16a0d558bbedaa1faa161bd7743c189ef093d6fc7e</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-account-bottom">
+  <a class="preview" href="captures/capture-0020.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-account-bottom">
+    <img src="captures/capture-0020.png" alt="Production capture: 1440-account-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-account-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0020.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>4112578f47dacb7715947a86d78af717178c331da626503693a3d452319a5158</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-accounts">
+  <a class="preview" href="captures/capture-0021.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-accounts">
+    <img src="captures/capture-0021.png" alt="Production capture: 1440-accounts" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-accounts</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0021.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>950b8c6e8953d95b8988cd4c97257e7f68c7ce2e392ef1696477a19a0286c5aa</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-pr-detail">
+  <a class="preview" href="captures/capture-0022.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-pr-detail">
+    <img src="captures/capture-0022.png" alt="Production capture: 1440-pr-detail" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-pr-detail</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0022.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>8db40ace2bd28aaf95f5509a5f03c6cc6018e1ae642f208d39fe9ac4469683ba</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-pr-detail-bottom">
+  <a class="preview" href="captures/capture-0023.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-pr-detail-bottom">
+    <img src="captures/capture-0023.png" alt="Production capture: 1440-pr-detail-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-pr-detail-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0023.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>a43706bf2ea311e09f8552922c0c15d5952beee627354052b216c83c06d9ef1f</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-pr-discussion">
+  <a class="preview" href="captures/capture-0024.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-pr-discussion">
+    <img src="captures/capture-0024.png" alt="Production capture: 1440-pr-discussion" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-pr-discussion</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0024.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>88e6a3ad73497c3ea1918233e49a6ce9af09b98efb39cdc534184b2f974c330b</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-pr-discussion-bottom">
+  <a class="preview" href="captures/capture-0025.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-pr-discussion-bottom">
+    <img src="captures/capture-0025.png" alt="Production capture: 1440-pr-discussion-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-pr-discussion-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0025.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>f921c0aaec20cc2b012cda340d43cf829d6e13748ebe38ab85442161b8ff5145</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-issue-detail">
+  <a class="preview" href="captures/capture-0026.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-issue-detail">
+    <img src="captures/capture-0026.png" alt="Production capture: 1440-issue-detail" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-issue-detail</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0026.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>e72b7e1c8c7d6b431b89066aa2a4bbd1ed78216590548bb4c76405210f700d08</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-issue-detail-bottom">
+  <a class="preview" href="captures/capture-0027.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-issue-detail-bottom">
+    <img src="captures/capture-0027.png" alt="Production capture: 1440-issue-detail-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-issue-detail-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0027.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>2d18f4750c24393a27a0b443e78f923ff2a1ccfd4d762db183fdf3c4c26db541</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-codex-output">
+  <a class="preview" href="captures/capture-0028.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-codex-output">
+    <img src="captures/capture-0028.png" alt="Production capture: 1440-task-codex-output" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-codex-output</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0028.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>1ba6c2a3cda3e5802a1ae87336f6dc8afe09f8e2754420ddce0ff955e075057a</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-codex-output-bottom">
+  <a class="preview" href="captures/capture-0029.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-codex-output-bottom">
+    <img src="captures/capture-0029.png" alt="Production capture: 1440-task-codex-output-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-codex-output-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0029.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>47f04d6847323ebc15e38f70cc3438e019264b3b4c3062e79791ffe3a691677b</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-copilot-output">
+  <a class="preview" href="captures/capture-0030.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-copilot-output">
+    <img src="captures/capture-0030.png" alt="Production capture: 1440-task-copilot-output" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-copilot-output</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0030.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c5dab8844819fc3b9f66d5c97ccb8f9944d76a10603f826e1036d65145bb69de</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-copilot-output-bottom">
+  <a class="preview" href="captures/capture-0031.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-copilot-output-bottom">
+    <img src="captures/capture-0031.png" alt="Production capture: 1440-task-copilot-output-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-copilot-output-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0031.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>f7360002e0ada0a352334634d91207ff6b60dca88cb10651d7d28e588857988e</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-static-evidence">
+  <a class="preview" href="captures/capture-0032.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-static-evidence">
+    <img src="captures/capture-0032.png" alt="Production capture: 1440-task-static-evidence" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-static-evidence</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0032.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>8cea948c30ccc13cb0b7096bec33fe20cdbc348947f42ae3b0836dbdcc3a46c4</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-e2e-evidence">
+  <a class="preview" href="captures/capture-0033.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-e2e-evidence">
+    <img src="captures/capture-0033.png" alt="Production capture: 1440-task-e2e-evidence" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-e2e-evidence</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0033.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c6f4ac338114e8647e77718bf121d241bc419f08677904f469ed2bcf172dc6fd</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-e2e-evidence-bottom">
+  <a class="preview" href="captures/capture-0034.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-e2e-evidence-bottom">
+    <img src="captures/capture-0034.png" alt="Production capture: 1440-task-e2e-evidence-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-e2e-evidence-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0034.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>652489b43b904fddfe9f460461d0c3ce01748ddd9f84c3dc8d68bfde3d02480f</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-running-evidence">
+  <a class="preview" href="captures/capture-0035.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-running-evidence">
+    <img src="captures/capture-0035.png" alt="Production capture: 1440-task-running-evidence" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-running-evidence</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0035.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>3fe48128cf0c39292b3f7f82eaffde7dd0b3c7ff5bb61b3654bfcbb00e33413d</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-blocked-evidence">
+  <a class="preview" href="captures/capture-0036.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-blocked-evidence">
+    <img src="captures/capture-0036.png" alt="Production capture: 1440-task-blocked-evidence" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-blocked-evidence</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0036.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>7a0a7d33461c5c83ec70edb67a06d5833684c17bba9e953731d80c84d727c34a</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-details">
+  <a class="preview" href="captures/capture-0037.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-details">
+    <img src="captures/capture-0037.png" alt="Production capture: 1440-task-details" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-details</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0037.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>d4dc04241477120134d3504c4aade40389514641301abd7d251c28f3950c0ef3</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-details-bottom">
+  <a class="preview" href="captures/capture-0038.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-details-bottom">
+    <img src="captures/capture-0038.png" alt="Production capture: 1440-task-details-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-details-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0038.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>2d2a37f90b48114ea967915839b3402676bec42e9adb84b85b57eb06736eda4f</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-blocked">
+  <a class="preview" href="captures/capture-0039.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-blocked">
+    <img src="captures/capture-0039.png" alt="Production capture: 1440-task-blocked" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-blocked</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0039.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>3efe30c50edc774859ea93efd932bba2294337a8cb419df157b4744c5d2719ce</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-blocked-bottom">
+  <a class="preview" href="captures/capture-0040.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-blocked-bottom">
+    <img src="captures/capture-0040.png" alt="Production capture: 1440-task-blocked-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-blocked-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0040.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c8386fc6570dfe87b13422f97fc6df9335c26914ddb33f19723200dd771bb0cd</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-running">
+  <a class="preview" href="captures/capture-0041.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-running">
+    <img src="captures/capture-0041.png" alt="Production capture: 1440-task-running" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-running</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0041.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>3b0d240d8fec7987eb0061846b999a280c9048f4d0ce8b5cfacf37814f3c6504</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-task-running-bottom">
+  <a class="preview" href="captures/capture-0042.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-task-running-bottom">
+    <img src="captures/capture-0042.png" alt="Production capture: 1440-task-running-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-task-running-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0042.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>16fd1115f7e659d168cf894cad48c0156db5d27d0279e9d5ff5762374b54abd3</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-report-detail">
+  <a class="preview" href="captures/capture-0043.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-report-detail">
+    <img src="captures/capture-0043.png" alt="Production capture: 1440-report-detail" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-report-detail</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0043.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>81e079ae675d94ca0fbec882d336e15591b36aee4e25ff72e4d3b7f4db79c620</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-report-detail-bottom">
+  <a class="preview" href="captures/capture-0044.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-report-detail-bottom">
+    <img src="captures/capture-0044.png" alt="Production capture: 1440-report-detail-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-report-detail-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0044.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>7543f28985a454a95a0db45243b8415ecb2d59b4d4c1c5f8bbb8da4bf0702950</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-report-evidence">
+  <a class="preview" href="captures/capture-0045.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-report-evidence">
+    <img src="captures/capture-0045.png" alt="Production capture: 1440-report-evidence" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-report-evidence</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0045.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>531821cd89a0a5a8c203c70235e7e6c7a84b0f9309d5336988674320cbf26ee9</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-report-evidence-bottom">
+  <a class="preview" href="captures/capture-0046.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-report-evidence-bottom">
+    <img src="captures/capture-0046.png" alt="Production capture: 1440-report-evidence-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-report-evidence-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0046.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>eda792504727669864b04903d1dbbc268c3ff3b9da99d1b1ef6eccd058ba1965</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-report-details">
+  <a class="preview" href="captures/capture-0047.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-report-details">
+    <img src="captures/capture-0047.png" alt="Production capture: 1440-report-details" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-report-details</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0047.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>a1e3064bc595a0a166dd7e30fb38159536cc2940ef4e5f70395c3cac6542eb84</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-report-details-bottom">
+  <a class="preview" href="captures/capture-0048.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-report-details-bottom">
+    <img src="captures/capture-0048.png" alt="Production capture: 1440-report-details-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-report-details-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0048.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>ca85f57287f761189ad33c127cee189ae7b75b4b6e0bb349b8c7fc71a7302f11</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-report-large">
+  <a class="preview" href="captures/capture-0049.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-report-large">
+    <img src="captures/capture-0049.png" alt="Production capture: 1440-report-large" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-report-large</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0049.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>1e9a0574576a309b2515ac78bdfc91eb883329c9075b32b06031446163dff35c</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-report-large-bottom">
+  <a class="preview" href="captures/capture-0050.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-report-large-bottom">
+    <img src="captures/capture-0050.png" alt="Production capture: 1440-report-large-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-report-large-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0050.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>584aad9397682ca85caf8907ebf102eada584ab73eef841519ce0f1746dd370e</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-webhook-failed">
+  <a class="preview" href="captures/capture-0051.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-webhook-failed">
+    <img src="captures/capture-0051.png" alt="Production capture: 1440-webhook-failed" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-webhook-failed</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0051.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>94ff41eb69843d79b512a6202c1a80b11a0583e6480e127e7935ff6601c45d93</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-webhook-failed-bottom">
+  <a class="preview" href="captures/capture-0052.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-webhook-failed-bottom">
+    <img src="captures/capture-0052.png" alt="Production capture: 1440-webhook-failed-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-webhook-failed-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0052.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>06c537788b7f7589c56c198d7311a1add2c6dc694211b78db9cb2709ce87a7fd</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-repository-settings">
+  <a class="preview" href="captures/capture-0053.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-repository-settings">
+    <img src="captures/capture-0053.png" alt="Production capture: 1440-repository-settings" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-repository-settings</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0053.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>0ef134240c6b431e733cccd1c0200d65c4908fbb826b69c5ff44d5df1c01c954</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="1440-repository-settings-bottom">
+  <a class="preview" href="captures/capture-0054.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 1440-repository-settings-bottom">
+    <img src="captures/capture-0054.png" alt="Production capture: 1440-repository-settings-bottom" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>1440-repository-settings-bottom</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0054.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>7cd64ffe99ac2f7f98925bd639a350dda06bfc2cd591d9e4c5bab0727cafa8fc</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-pull-requests">
+  <a class="preview" href="captures/capture-0055.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-pull-requests">
+    <img src="captures/capture-0055.png" alt="Production capture: 390-pull-requests" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-pull-requests</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0055.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>27e7d6646e75f05adeeb95910cfef0d3ec0d3b1769676f8c5337d12fae12982c</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-pull-requests-bottom">
+  <a class="preview" href="captures/capture-0056.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-pull-requests-bottom">
+    <img src="captures/capture-0056.png" alt="Production capture: 390-pull-requests-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-pull-requests-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0056.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>482479302f79db19e549b77fc4106e5223d3f4ffa4669176365d9ea074f4584c</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-issues">
+  <a class="preview" href="captures/capture-0057.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-issues">
+    <img src="captures/capture-0057.png" alt="Production capture: 390-issues" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-issues</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0057.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>d6e93c78c32d1dbccb3f0e889b572345bda1faa7186ead62af5e071730b4b443</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-issues-bottom">
+  <a class="preview" href="captures/capture-0058.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-issues-bottom">
+    <img src="captures/capture-0058.png" alt="Production capture: 390-issues-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-issues-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0058.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>febd1eea93f19f1b6740f506e1dbe86fc4c6247b39a0dc05ae508829a8f000a3</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-tasks">
+  <a class="preview" href="captures/capture-0059.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-tasks">
+    <img src="captures/capture-0059.png" alt="Production capture: 390-tasks" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-tasks</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0059.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>008ac4ef9ab9babdc95e304346ada6352f847b2775f282bd7b1fbc971fa53246</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-tasks-bottom">
+  <a class="preview" href="captures/capture-0060.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-tasks-bottom">
+    <img src="captures/capture-0060.png" alt="Production capture: 390-tasks-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-tasks-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0060.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>a5d9481127d6c5cdb20835c07f9449bd14f38f3b5bb3e8f4b02d301a552ed1a0</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-reports">
+  <a class="preview" href="captures/capture-0061.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-reports">
+    <img src="captures/capture-0061.png" alt="Production capture: 390-reports" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-reports</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0061.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>d80dae3e4dc72325ea9d922ab97181d4d46c3ce14bd18ecc9fcc08371db7415d</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-reports-bottom">
+  <a class="preview" href="captures/capture-0062.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-reports-bottom">
+    <img src="captures/capture-0062.png" alt="Production capture: 390-reports-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-reports-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0062.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>9f379b2ad0609904d0bafe7a7520549f978451e8444848da32af86bf6765c0a9</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-comments">
+  <a class="preview" href="captures/capture-0063.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-comments">
+    <img src="captures/capture-0063.png" alt="Production capture: 390-comments" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-comments</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0063.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>85a71359ad3006e61e79d7b5be44a5cdd3c4830ec98d7362bf222e386ae42cb6</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-comments-bottom">
+  <a class="preview" href="captures/capture-0064.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-comments-bottom">
+    <img src="captures/capture-0064.png" alt="Production capture: 390-comments-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-comments-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0064.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>6aeb069651475d8473f8dceca70fdc23cfb611e3b71f69b4009f29c81e225eed</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-webhooks">
+  <a class="preview" href="captures/capture-0065.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-webhooks">
+    <img src="captures/capture-0065.png" alt="Production capture: 390-webhooks" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-webhooks</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0065.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>cbad98bf2c629ba41cbd4af0fec3accbda7e6303d0b5ff3118084d6d58a537db</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-webhooks-bottom">
+  <a class="preview" href="captures/capture-0066.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-webhooks-bottom">
+    <img src="captures/capture-0066.png" alt="Production capture: 390-webhooks-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-webhooks-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0066.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>38ffba4cbc9527f61e17389ad5360d8300b37d8f4285ea22081ba44c5665e5a8</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-workers">
+  <a class="preview" href="captures/capture-0067.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-workers">
+    <img src="captures/capture-0067.png" alt="Production capture: 390-workers" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-workers</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0067.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>685ecf4d2271a8209466f4a56d096423ac5d097124b6711d3b8ed63f63bf1b87</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-workers-bottom">
+  <a class="preview" href="captures/capture-0068.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-workers-bottom">
+    <img src="captures/capture-0068.png" alt="Production capture: 390-workers-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-workers-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0068.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>80d6dba07278116ac0de95a96ff2df7d3c5254b8cd03bd52c3b9e227a0a61a32</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-repositories">
+  <a class="preview" href="captures/capture-0069.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-repositories">
+    <img src="captures/capture-0069.png" alt="Production capture: 390-repositories" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-repositories</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0069.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>2c771943959b3665a45ffb292fccababa1754c0356c82c74a52fa78058ec3f1f</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-account">
+  <a class="preview" href="captures/capture-0070.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-account">
+    <img src="captures/capture-0070.png" alt="Production capture: 390-account" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-account</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0070.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>8137143ba15c98d93d43189256091c5cf278cbbfb7d64fa01e152835fd9c2b94</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-account-bottom">
+  <a class="preview" href="captures/capture-0071.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-account-bottom">
+    <img src="captures/capture-0071.png" alt="Production capture: 390-account-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-account-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0071.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>5364426b62f445ef77457458caa50f68b214f3a16ae7ca9bd5182da223d98693</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-accounts">
+  <a class="preview" href="captures/capture-0072.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-accounts">
+    <img src="captures/capture-0072.png" alt="Production capture: 390-accounts" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-accounts</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0072.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>5953648018f0a367244b3c5bd1fd4c7d439ae9c61f6b8ed7f4a02c85c49ac988</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-accounts-bottom">
+  <a class="preview" href="captures/capture-0073.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-accounts-bottom">
+    <img src="captures/capture-0073.png" alt="Production capture: 390-accounts-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-accounts-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0073.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>5b861ae1aca316dffb9a113fb5884e88fa9dfa87fdd4af774c52fe934a9f38fd</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-pr-detail">
+  <a class="preview" href="captures/capture-0074.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-pr-detail">
+    <img src="captures/capture-0074.png" alt="Production capture: 390-pr-detail" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-pr-detail</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0074.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>f84db0dded055996dfa54125e944a685c9c1afbe9d310af298d250bddf33931c</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-pr-detail-bottom">
+  <a class="preview" href="captures/capture-0075.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-pr-detail-bottom">
+    <img src="captures/capture-0075.png" alt="Production capture: 390-pr-detail-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-pr-detail-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0075.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>4f9ecccbb52e3ebdacf5c1c9b46876b5d1556d1bed8e63313e1e5438d64b3592</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-pr-discussion">
+  <a class="preview" href="captures/capture-0076.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-pr-discussion">
+    <img src="captures/capture-0076.png" alt="Production capture: 390-pr-discussion" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-pr-discussion</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0076.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>f9c597165cef8b3d28da04534c196e7f5d2d1118fa4291b5434eec4b00bc5002</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-pr-discussion-bottom">
+  <a class="preview" href="captures/capture-0077.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-pr-discussion-bottom">
+    <img src="captures/capture-0077.png" alt="Production capture: 390-pr-discussion-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-pr-discussion-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0077.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>4c4eb5f41e34cda9cdf0b234302d1a197851cc14f6b0d4a67f82dd77ab944d78</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-issue-detail">
+  <a class="preview" href="captures/capture-0078.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-issue-detail">
+    <img src="captures/capture-0078.png" alt="Production capture: 390-issue-detail" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-issue-detail</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0078.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>4581d7daa8570be98b801424d2890746652848f3e9e586b7716cb9e38c42cbdc</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-issue-detail-bottom">
+  <a class="preview" href="captures/capture-0079.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-issue-detail-bottom">
+    <img src="captures/capture-0079.png" alt="Production capture: 390-issue-detail-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-issue-detail-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0079.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>62550b95e398e888f0adafbf7d34c595b125f0ba7232715566afd41631a9f1b5</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-codex-output">
+  <a class="preview" href="captures/capture-0080.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-codex-output">
+    <img src="captures/capture-0080.png" alt="Production capture: 390-task-codex-output" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-codex-output</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0080.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c7b5bebf912ea0201ddd8904dd866b66eee55a4c952d80db1755461d2536f933</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-codex-output-bottom">
+  <a class="preview" href="captures/capture-0081.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-codex-output-bottom">
+    <img src="captures/capture-0081.png" alt="Production capture: 390-task-codex-output-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-codex-output-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0081.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>31fcd764d0e91cc1f4b94d4f8a9e65a68ff0f5f182c123de955bf8fa389d2177</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-copilot-output">
+  <a class="preview" href="captures/capture-0082.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-copilot-output">
+    <img src="captures/capture-0082.png" alt="Production capture: 390-task-copilot-output" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-copilot-output</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0082.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>60f8c48a010359b81b0c9226bd0a09ce48c641746d1a048807a14df0d6058f82</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-copilot-output-bottom">
+  <a class="preview" href="captures/capture-0083.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-copilot-output-bottom">
+    <img src="captures/capture-0083.png" alt="Production capture: 390-task-copilot-output-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-copilot-output-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0083.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>dda45aaed2c6e6e047811b77676776fe839b50eef8d84ae38559d1557dba3447</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-static-evidence">
+  <a class="preview" href="captures/capture-0084.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-static-evidence">
+    <img src="captures/capture-0084.png" alt="Production capture: 390-task-static-evidence" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-static-evidence</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0084.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>1c88479275831d1352df1aac51182996f99be6f0981688d57db542743bed9e59</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-static-evidence-bottom">
+  <a class="preview" href="captures/capture-0085.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-static-evidence-bottom">
+    <img src="captures/capture-0085.png" alt="Production capture: 390-task-static-evidence-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-static-evidence-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0085.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>b459a5dda155314d13821bf0293d137ff8158c76d04db1cb46c78e82363eb522</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-e2e-evidence">
+  <a class="preview" href="captures/capture-0086.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-e2e-evidence">
+    <img src="captures/capture-0086.png" alt="Production capture: 390-task-e2e-evidence" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-e2e-evidence</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0086.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c5fa7c136a02a354bda43d50a3e3ed261eab56e6e8c98257873f78f9eff3dd18</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-e2e-evidence-bottom">
+  <a class="preview" href="captures/capture-0087.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-e2e-evidence-bottom">
+    <img src="captures/capture-0087.png" alt="Production capture: 390-task-e2e-evidence-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-e2e-evidence-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0087.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>cbcc225ee19b06512badfe05b205a7a1275b6003c4db140dd62c3bb9c112aa87</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-running-evidence">
+  <a class="preview" href="captures/capture-0088.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-running-evidence">
+    <img src="captures/capture-0088.png" alt="Production capture: 390-task-running-evidence" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-running-evidence</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0088.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>031e4cfa159c5f9f3a261c8e0884cb690456d372ed8f1dc611367e5af2bceb2d</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-running-evidence-bottom">
+  <a class="preview" href="captures/capture-0089.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-running-evidence-bottom">
+    <img src="captures/capture-0089.png" alt="Production capture: 390-task-running-evidence-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-running-evidence-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0089.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>565dbee27b40b446d00280e7a165d922da58e1adcb7c211360c6475ae9071ee1</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-blocked-evidence">
+  <a class="preview" href="captures/capture-0090.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-blocked-evidence">
+    <img src="captures/capture-0090.png" alt="Production capture: 390-task-blocked-evidence" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-blocked-evidence</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0090.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>9545c62e825013f4e189f5e8829f3e1f42f626681bb946ad76ef12dc394ab238</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-blocked-evidence-bottom">
+  <a class="preview" href="captures/capture-0091.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-blocked-evidence-bottom">
+    <img src="captures/capture-0091.png" alt="Production capture: 390-task-blocked-evidence-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-blocked-evidence-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0091.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>1b82bee6b2ff5f60441ac38cf11db0b5396d5fc3b6e8370f7c37f69638668e20</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-details">
+  <a class="preview" href="captures/capture-0092.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-details">
+    <img src="captures/capture-0092.png" alt="Production capture: 390-task-details" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-details</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0092.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>1e3c89c4f723c681c6ad959c95f14df12c5f5f984c564dac2ba7dc03cb145c7d</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-details-bottom">
+  <a class="preview" href="captures/capture-0093.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-details-bottom">
+    <img src="captures/capture-0093.png" alt="Production capture: 390-task-details-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-details-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0093.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>cac0e09bf05f9f2971e99877b2eec37050bf93c52d5ee0fdc8b2cd078bc8aaa0</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-blocked">
+  <a class="preview" href="captures/capture-0094.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-blocked">
+    <img src="captures/capture-0094.png" alt="Production capture: 390-task-blocked" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-blocked</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0094.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>7295a9ec997c67c6d1349c55316ba38f5e5340f40068e304fddf36ff62812b93</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-blocked-bottom">
+  <a class="preview" href="captures/capture-0095.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-blocked-bottom">
+    <img src="captures/capture-0095.png" alt="Production capture: 390-task-blocked-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-blocked-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0095.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>1d6f52571752a29c3f33d02760505774bba4685296eaf155a1f8ed21a25b5c78</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-running">
+  <a class="preview" href="captures/capture-0096.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-running">
+    <img src="captures/capture-0096.png" alt="Production capture: 390-task-running" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-running</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0096.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>94c743f663c84e6a0be806cbbf4c76f7e7b7814b8b73ce117e7330857e1eacc6</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-task-running-bottom">
+  <a class="preview" href="captures/capture-0097.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-task-running-bottom">
+    <img src="captures/capture-0097.png" alt="Production capture: 390-task-running-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-task-running-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0097.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>3a827b262b89d9e4622e1ca2e6ab04fbe2ea958dea04d3ca980c2177afcf6e83</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-report-detail">
+  <a class="preview" href="captures/capture-0098.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-report-detail">
+    <img src="captures/capture-0098.png" alt="Production capture: 390-report-detail" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-report-detail</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0098.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c4c9b6d6c6b0529becb87816b8803566ae4f9cecc91bc5f43ba92f191895d99e</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-report-detail-bottom">
+  <a class="preview" href="captures/capture-0099.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-report-detail-bottom">
+    <img src="captures/capture-0099.png" alt="Production capture: 390-report-detail-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-report-detail-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0099.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c598059e93f589a977973bdc58a8e5aab5cb7447c7a3a0bd971b3811aa00d4af</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-report-evidence">
+  <a class="preview" href="captures/capture-0100.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-report-evidence">
+    <img src="captures/capture-0100.png" alt="Production capture: 390-report-evidence" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-report-evidence</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0100.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>947cf303970ba92a82296de213551013d42767aea558a70ee5f67d4e8a1b169b</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-report-evidence-bottom">
+  <a class="preview" href="captures/capture-0101.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-report-evidence-bottom">
+    <img src="captures/capture-0101.png" alt="Production capture: 390-report-evidence-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-report-evidence-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0101.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>3cb98011459b64d94e015007ad3cb0a8dd28860ea0903395b415c6abbd39e473</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-report-details">
+  <a class="preview" href="captures/capture-0102.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-report-details">
+    <img src="captures/capture-0102.png" alt="Production capture: 390-report-details" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-report-details</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0102.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>beec7ad34e2dc38881636e72761829dedb9daf6429246dd8380d55e8a08ab2df</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-report-details-bottom">
+  <a class="preview" href="captures/capture-0103.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-report-details-bottom">
+    <img src="captures/capture-0103.png" alt="Production capture: 390-report-details-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-report-details-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0103.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>f38fc42f220e0f2ac1d12d9a6291866943e4ae901c39812834a25db749d9da4e</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-report-large">
+  <a class="preview" href="captures/capture-0104.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-report-large">
+    <img src="captures/capture-0104.png" alt="Production capture: 390-report-large" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-report-large</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0104.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>cdd99351cd5c4620e6cce5b3e0feb1145c4be2d8d9f316217b75e94e4b342743</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-report-large-bottom">
+  <a class="preview" href="captures/capture-0105.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-report-large-bottom">
+    <img src="captures/capture-0105.png" alt="Production capture: 390-report-large-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-report-large-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0105.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>16de599699200c1babdaf4059adba1382b53e125c0820fb00debec277516e3f3</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-webhook-failed">
+  <a class="preview" href="captures/capture-0106.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-webhook-failed">
+    <img src="captures/capture-0106.png" alt="Production capture: 390-webhook-failed" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-webhook-failed</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0106.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>6f3c42321b1f64cd461aa5fdfacb85d5dba1e54964b17cdd99adbfa82a95ca21</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-webhook-failed-bottom">
+  <a class="preview" href="captures/capture-0107.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-webhook-failed-bottom">
+    <img src="captures/capture-0107.png" alt="Production capture: 390-webhook-failed-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-webhook-failed-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0107.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>89d1eb846a8de9346d1b3bf4992ae45d08bb09bf520bf34f1e6e1e618dbfc438</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-repository-settings">
+  <a class="preview" href="captures/capture-0108.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-repository-settings">
+    <img src="captures/capture-0108.png" alt="Production capture: 390-repository-settings" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-repository-settings</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0108.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>21df9ae38e2a991c61e96fb81958b9d01c08c1dd9a212e01f6512e50b40f3dec</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="390-repository-settings-bottom">
+  <a class="preview" href="captures/capture-0109.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 390-repository-settings-bottom">
+    <img src="captures/capture-0109.png" alt="Production capture: 390-repository-settings-bottom" width="390" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>390-repository-settings-bottom</h2><p>Viewport 390 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 1000 &middot; <a href="captures/capture-0109.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>8e22288db1c1b2b4b3d885ebddacaaa2a61ed7407dcfa27969d50818fc070a60</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-tasks">
+  <a class="preview" href="captures/capture-0110.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-tasks">
+    <img src="captures/capture-0110.png" alt="Production capture: 320-tasks" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-tasks</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0110.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>b80b08915c40c24696b69fac0253250099692cbe08bd1a11c796d808869bad83</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-tasks-bottom">
+  <a class="preview" href="captures/capture-0111.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-tasks-bottom">
+    <img src="captures/capture-0111.png" alt="Production capture: 320-tasks-bottom" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-tasks-bottom</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0111.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>fe01e2268c1551cf8b61a0e21bc50ddb8a8b0adc01ca2baeb926997df7d4efbe</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-accounts">
+  <a class="preview" href="captures/capture-0112.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-accounts">
+    <img src="captures/capture-0112.png" alt="Production capture: 320-accounts" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-accounts</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0112.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>5f0c1b3d3d6534d0ed4afefd4364cb660e59bff6b1413016983ccf8cdad8b9ba</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-accounts-bottom">
+  <a class="preview" href="captures/capture-0113.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-accounts-bottom">
+    <img src="captures/capture-0113.png" alt="Production capture: 320-accounts-bottom" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-accounts-bottom</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0113.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c021a0e21c88dd3dd4ffd1e850782ba88ef4461150aa0af255e2b4035180fc1b</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-task-codex-output">
+  <a class="preview" href="captures/capture-0114.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-task-codex-output">
+    <img src="captures/capture-0114.png" alt="Production capture: 320-task-codex-output" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-task-codex-output</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0114.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>c3cef6abb906c540ed169bdebd24729585dd403cf69b6de4a843ecd9bf88b393</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-task-codex-output-bottom">
+  <a class="preview" href="captures/capture-0115.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-task-codex-output-bottom">
+    <img src="captures/capture-0115.png" alt="Production capture: 320-task-codex-output-bottom" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-task-codex-output-bottom</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0115.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>e1fdf481602eb9e9cb38d7dcffb9864ddf7a4da2b54b0aec13d77ee3e4dd0dd0</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-report-detail">
+  <a class="preview" href="captures/capture-0116.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-report-detail">
+    <img src="captures/capture-0116.png" alt="Production capture: 320-report-detail" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-report-detail</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0116.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>8f63d78bc494703e8d5a1081f5fca1447fd12dbcaae2813910f8c053a3a5b480</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-report-detail-bottom">
+  <a class="preview" href="captures/capture-0117.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-report-detail-bottom">
+    <img src="captures/capture-0117.png" alt="Production capture: 320-report-detail-bottom" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-report-detail-bottom</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0117.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>3800c65b973be09b68cc57d952717586297cfbf3c4c86082511b4d272c0d2ab3</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-webhook-failed">
+  <a class="preview" href="captures/capture-0118.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-webhook-failed">
+    <img src="captures/capture-0118.png" alt="Production capture: 320-webhook-failed" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-webhook-failed</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0118.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>55073e8bb331f9cf97a2b72267e212ad223694bad213ed88d321db166c6f77d1</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-webhook-failed-bottom">
+  <a class="preview" href="captures/capture-0119.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-webhook-failed-bottom">
+    <img src="captures/capture-0119.png" alt="Production capture: 320-webhook-failed-bottom" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-webhook-failed-bottom</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0119.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>ee2c2909f1ffec797458034fb7417c94510e69c9bacef5c32f509cb9da9af70c</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-repository-settings">
+  <a class="preview" href="captures/capture-0120.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-repository-settings">
+    <img src="captures/capture-0120.png" alt="Production capture: 320-repository-settings" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-repository-settings</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0120.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>60e820ce95cd5fcfce76638b1f89c7d2ca17c4d133f0f8dda00ec74a678c8e9d</code></details></div>
+</article>
+<article class="capture" data-width="320" data-theme="not-recorded" data-label="320-repository-settings-bottom">
+  <a class="preview" href="captures/capture-0121.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: 320-repository-settings-bottom">
+    <img src="captures/capture-0121.png" alt="Production capture: 320-repository-settings-bottom" width="320" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>320-repository-settings-bottom</h2><p>Viewport 320 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 320 x 1000 &middot; <a href="captures/capture-0121.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>b9579513be7669cb5f66db47ecb9cd054085f689c5f1afce79bf6b464acc73c6</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="output-readable-codex">
+  <a class="preview" href="captures/capture-0122.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: output-readable-codex">
+    <img src="captures/capture-0122.png" alt="Production capture: output-readable-codex" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>output-readable-codex</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0122.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>1ba6c2a3cda3e5802a1ae87336f6dc8afe09f8e2754420ddce0ff955e075057a</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="output-readable-copilot">
+  <a class="preview" href="captures/capture-0123.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: output-readable-copilot">
+    <img src="captures/capture-0123.png" alt="Production capture: output-readable-copilot" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>output-readable-copilot</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0123.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>fd239434f50d60c14c147dc851852be9d47b23a0755979557d3993d95f35c65e</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="coarse-pull-requests">
+  <a class="preview" href="captures/capture-0124.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: coarse-pull-requests">
+    <img src="captures/capture-0124.png" alt="Production capture: coarse-pull-requests" width="390" height="844" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>coarse-pull-requests</h2><p>Viewport 390 x 844 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 844 &middot; <a href="captures/capture-0124.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>6d36dc553e794526334bf4f3f076acbd76bdb95cbe0d210a0055bd87daa3af65</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="coarse-source-filters">
+  <a class="preview" href="captures/capture-0125.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: coarse-source-filters">
+    <img src="captures/capture-0125.png" alt="Production capture: coarse-source-filters" width="390" height="844" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>coarse-source-filters</h2><p>Viewport 390 x 844 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 844 &middot; <a href="captures/capture-0125.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>d560053aa060787c40d73d5ee58bc43d925088705c98931505d0c2a177380b1a</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="coarse-tasks">
+  <a class="preview" href="captures/capture-0126.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: coarse-tasks">
+    <img src="captures/capture-0126.png" alt="Production capture: coarse-tasks" width="390" height="844" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>coarse-tasks</h2><p>Viewport 390 x 844 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 844 &middot; <a href="captures/capture-0126.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>4b043dd9038b4965d29d2349c11ae818c7a799fba8813e490af027400e9b9d68</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="coarse-task-codex-output">
+  <a class="preview" href="captures/capture-0127.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: coarse-task-codex-output">
+    <img src="captures/capture-0127.png" alt="Production capture: coarse-task-codex-output" width="390" height="844" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>coarse-task-codex-output</h2><p>Viewport 390 x 844 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 844 &middot; <a href="captures/capture-0127.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>87de41e457e89c6c7ffdfed544365d9f7cb69ea2e1c931b73b22e0437ac04701</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="coarse-task-e2e-evidence">
+  <a class="preview" href="captures/capture-0128.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: coarse-task-e2e-evidence">
+    <img src="captures/capture-0128.png" alt="Production capture: coarse-task-e2e-evidence" width="390" height="844" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>coarse-task-e2e-evidence</h2><p>Viewport 390 x 844 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 844 &middot; <a href="captures/capture-0128.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>805b93a8e8237ec47fdf0bcfaff2cf114988a177ce2ed62f1544bfea6660a04d</code></details></div>
+</article>
+<article class="capture" data-width="390" data-theme="not-recorded" data-label="coarse-repository-settings">
+  <a class="preview" href="captures/capture-0129.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: coarse-repository-settings">
+    <img src="captures/capture-0129.png" alt="Production capture: coarse-repository-settings" width="390" height="844" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>coarse-repository-settings</h2><p>Viewport 390 x 844 &middot; Theme not recorded</p>
+  <p class="small">PNG 390 x 844 &middot; <a href="captures/capture-0129.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>911a201e59117cd3a681141f6b21fa856fe9b1db0df1366bc8e021cef8132e76</code></details></div>
+</article>
+<article class="capture" data-width="900" data-theme="not-recorded" data-label="coarse-wide-source-filters">
+  <a class="preview" href="captures/capture-0130.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: coarse-wide-source-filters">
+    <img src="captures/capture-0130.png" alt="Production capture: coarse-wide-source-filters" width="900" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>coarse-wide-source-filters</h2><p>Viewport 900 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 900 x 1000 &middot; <a href="captures/capture-0130.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>bb6e32266527266dea8c3e9141071751b7c42b07273170fab1ef989084cf0555</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-pull-requests">
+  <a class="preview" href="captures/capture-0131.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-pull-requests">
+    <img src="captures/capture-0131.png" alt="Production capture: dark-pull-requests" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-pull-requests</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0131.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>358653311e45950d24b57d7a0d4c66c1a6777385f57b04da2ee65e712fa952ed</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-issues">
+  <a class="preview" href="captures/capture-0132.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-issues">
+    <img src="captures/capture-0132.png" alt="Production capture: dark-issues" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-issues</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0132.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>bbf4f7708c9ab3e41c83f6dddbd009d053c9158a03ba1b22fd2afeafd7f63086</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-tasks">
+  <a class="preview" href="captures/capture-0133.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-tasks">
+    <img src="captures/capture-0133.png" alt="Production capture: dark-tasks" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-tasks</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0133.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>963e6b9e8286e90ef0fc4ac323629b2a3bd1acfb1c28e180aaf7bb3e54c465d0</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-reports">
+  <a class="preview" href="captures/capture-0134.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-reports">
+    <img src="captures/capture-0134.png" alt="Production capture: dark-reports" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-reports</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0134.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>02f32f8dc4751c1d4a561bc782b39e5891625956387205710f27fcb7756b3b3e</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-comments">
+  <a class="preview" href="captures/capture-0135.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-comments">
+    <img src="captures/capture-0135.png" alt="Production capture: dark-comments" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-comments</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0135.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>764a1787d38d3c634d61b14ed31750a9997cd9ecda89593585b0fe887b66d7f6</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-webhooks">
+  <a class="preview" href="captures/capture-0136.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-webhooks">
+    <img src="captures/capture-0136.png" alt="Production capture: dark-webhooks" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-webhooks</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0136.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>6234aaa8fb076180e9454e8b4929097fb4271f4cdfcb24f31445824df1fdf34f</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-workers">
+  <a class="preview" href="captures/capture-0137.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-workers">
+    <img src="captures/capture-0137.png" alt="Production capture: dark-workers" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-workers</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0137.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>7bd2fe3aecdd8e7e2403b8d4ef8d9b92fad2aa209e68106caedf17c9939ea5e8</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-repositories">
+  <a class="preview" href="captures/capture-0138.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-repositories">
+    <img src="captures/capture-0138.png" alt="Production capture: dark-repositories" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-repositories</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0138.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>597e285a974fd6b59304d71c47e67e4224c34157fd4ad2d003096630182c3b73</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-account">
+  <a class="preview" href="captures/capture-0139.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-account">
+    <img src="captures/capture-0139.png" alt="Production capture: dark-account" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-account</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0139.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>cc28f62230b9adfbe913064d47fa4b00f53164db6a3c91a5477c8e438836fcb1</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-accounts">
+  <a class="preview" href="captures/capture-0140.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-accounts">
+    <img src="captures/capture-0140.png" alt="Production capture: dark-accounts" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-accounts</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0140.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>5346152e14acb666c65f6ca71a7f899c88a5f8f58a70fcdc638ea1ceaff9391b</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-task-e2e-evidence">
+  <a class="preview" href="captures/capture-0141.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-task-e2e-evidence">
+    <img src="captures/capture-0141.png" alt="Production capture: dark-task-e2e-evidence" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-task-e2e-evidence</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0141.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>a15a77cfef049a2c76deff7aec51af01cc5871a493f4e7da45bc96f5790cdab0</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-report-evidence">
+  <a class="preview" href="captures/capture-0142.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-report-evidence">
+    <img src="captures/capture-0142.png" alt="Production capture: dark-report-evidence" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-report-evidence</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0142.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>e663a40cfcb4e1101baa11325d7f46859a8a0a4fc13495bea44e411a908c1788</code></details></div>
+</article>
+<article class="capture" data-width="1440" data-theme="not-recorded" data-label="dark-sign-in">
+  <a class="preview" href="captures/capture-0143.png" target="_blank" rel="noopener noreferrer" aria-label="Open full-size PNG: dark-sign-in">
+    <img src="captures/capture-0143.png" alt="Production capture: dark-sign-in" width="1440" height="1000" loading="lazy" decoding="async">
+  </a>
+  <div class="caption"><h2>dark-sign-in</h2><p>Viewport 1440 x 1000 &middot; Theme not recorded</p>
+  <p class="small">PNG 1440 x 1000 &middot; <a href="captures/capture-0143.png" target="_blank" rel="noopener noreferrer">Open complete image</a></p>
+  <details><summary>Capture identity</summary><code>dde3df64f3c2574d4ec4a102359327f28f7230faf51853fb542eda919d98928b</code></details></div>
+</article>
+</section>
+<footer>PNG files are copied unchanged and SHA-256 identities are recorded in the manifest. The source receipt, browser origins, private paths, and authentication material are not included. Filtering changes this gallery only.</footer>
+</main><script>
+(()=>{"use strict";const cards=[...document.querySelectorAll('.capture')],width=document.getElementById('width'),theme=document.getElementById('theme'),search=document.getElementById('search'),count=document.getElementById('count');[...new Set(cards.map(card=>card.dataset.width))].sort((a,b)=>Number(a)-Number(b)).forEach(value=>{const option=document.createElement('option');option.value=value;option.textContent=value+' px';width.append(option)});function filter(){const text=search.value.trim().toLowerCase();let shown=0;cards.forEach(card=>{const match=(!width.value||card.dataset.width===width.value)&&(!theme.value||card.dataset.theme===theme.value)&&(!text||card.dataset.label.toLowerCase().includes(text));card.hidden=!match;if(match)shown++});count.textContent=shown+' of '+cards.length+' captures';document.getElementById('empty').hidden=shown!==0}width.addEventListener('change',filter);theme.addEventListener('change',filter);search.addEventListener('input',filter);document.getElementById('clear').addEventListener('click',()=>{width.value='';theme.value='';search.value='';filter();search.focus()});filter()})();
+</script></body></html>

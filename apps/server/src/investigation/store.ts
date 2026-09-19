@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { legacySupersededCommentDeliveryReason } from "./comment-delivery-state.js";
 
-export const investigationSchemaVersion = "investigation-v4";
+export const investigationSchemaVersion = "investigation-v5";
 
 const investigationV2Collections = [
   "repositories",
@@ -25,10 +25,18 @@ const investigationV2Collections = [
 
 const investigationV3Collections = [...investigationV2Collections, "commentDeliveries"] as const;
 
-export const investigationCollections = [
+const investigationV4Collections = [
   ...investigationV3Collections,
   "resourceLeases",
   "schedulerSettings",
+] as const;
+
+export const investigationCollections = [
+  ...investigationV4Collections,
+  "outputEvents",
+  "outputStreams",
+  "outputBatches",
+  "reportDirectory",
 ] as const;
 
 export type InvestigationCollection = (typeof investigationCollections)[number];
@@ -68,6 +76,50 @@ const deliveryIndexes = new Map([
     `CREATE INDEX "comment_deliveries_${field}" ON "commentDeliveries" (json_extract("value", '$.${field}'), json_extract("value", '$.startedAt') DESC, "id" DESC)`,
   ]),
 ]);
+
+const workspaceIndexes = new Map<string, string>([
+  [
+    "output_events_attempt_sequence",
+    `CREATE UNIQUE INDEX "output_events_attempt_sequence" ON "outputEvents" (json_extract("value", '$.attemptId'), json_extract("value", '$.producerSequence'))`,
+  ],
+  [
+    "output_events_retention",
+    `CREATE INDEX "output_events_retention" ON "outputEvents" (json_extract("value", '$.receivedAt'), "id")`,
+  ],
+  [
+    "evidence_metadata_task",
+    `CREATE INDEX "evidence_metadata_task" ON "evidenceMetadata" (json_extract("value", '$.artifact.taskId'), "id")`,
+  ],
+  [
+    "report_directory_repository",
+    `CREATE INDEX "report_directory_repository" ON "reportDirectory" (json_extract("value", '$.context.repository.id'), "id")`,
+  ],
+  [
+    "work_items_repository",
+    `CREATE INDEX "work_items_repository" ON "workItems" (json_extract("value", '$.repositoryId'), "id")`,
+  ],
+  [
+    "tasks_repository",
+    `CREATE INDEX "tasks_repository" ON "tasks" (json_extract("value", '$.repository.id'), "id")`,
+  ],
+  [
+    "publications_repository",
+    `CREATE INDEX "publications_repository" ON "idempotency" (json_extract("value", '$.repository.id'), "id") WHERE ("id" GLOB 'auto-reply:report:*' OR "id" GLOB 'progress-reply:assignment:*' OR "id" GLOB 'progress-reply:task:*')`,
+  ],
+]);
+
+export interface InvestigationWorkspacePage {
+  readonly repositoryIds: readonly string[];
+  readonly afterId?: string;
+  readonly limit: number;
+  readonly workItemId?: string;
+  readonly taskId?: string;
+  readonly attemptId?: string;
+  readonly kind?: string;
+  readonly search?: string;
+  readonly delivery?: string;
+  readonly completeness?: string;
+}
 
 export interface InvestigationCommentDeliveryPage {
   readonly repositoryIds?: readonly string[];
@@ -273,6 +325,119 @@ export class InvestigationStore {
     );
   }
 
+  /** Directory projections filter in SQLite and return only a bounded authorized page. */
+  pageWorkspace<T>(
+    collection:
+      | "reportDirectory"
+      | "evidenceMetadata"
+      | "workItems"
+      | "tasks"
+      | "repositories"
+      | "idempotency",
+    query: InvestigationWorkspacePage,
+  ): T[] {
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 1_000)
+      throw new InvestigationStoreError("invalid_value", "Page size must be between 1 and 1,000.");
+    if (query.repositoryIds.length === 0) return [];
+    const path =
+      collection === "reportDirectory"
+        ? "context.repository.id"
+        : collection === "workItems"
+          ? "repositoryId"
+          : collection === "repositories"
+            ? "id"
+            : "repository.id";
+    const predicates = [
+      collection === "evidenceMetadata"
+        ? `json_extract("value", '$.artifact.taskId') = ?`
+        : `json_extract("value", '$.${path}') IN (${query.repositoryIds.map(() => "?").join(", ")})`,
+    ];
+    const values: (string | number)[] =
+      collection === "evidenceMetadata" ? [query.taskId ?? ""] : [...query.repositoryIds];
+    if (collection === "idempotency")
+      predicates.push(
+        `("id" GLOB 'auto-reply:report:*' OR "id" GLOB 'progress-reply:assignment:*' OR "id" GLOB 'progress-reply:task:*')`,
+      );
+    const fields =
+      collection === "reportDirectory"
+        ? {
+            taskId: "context.task.id",
+            workItemId: "context.workItem.id",
+            kind: "context.task.kind",
+            delivery: "report.delivery",
+            completeness: "report.completeness",
+          }
+        : collection === "evidenceMetadata"
+          ? { attemptId: "artifact.attemptId" }
+          : collection === "tasks"
+            ? { workItemId: "workItem.id", kind: "kind" }
+            : collection === "idempotency"
+              ? { taskId: "taskId", workItemId: "workItemId" }
+              : { kind: "kind" };
+    for (const [field, jsonPath] of Object.entries(fields)) {
+      const value = query[field as keyof InvestigationWorkspacePage];
+      if (typeof value === "string") {
+        predicates.push(`json_extract("value", '$.${jsonPath}') = ?`);
+        values.push(value);
+      }
+    }
+    if (query.afterId !== undefined) {
+      predicates.push('"id" > ?');
+      values.push(query.afterId);
+    }
+    if (query.search !== undefined) {
+      const searchFields =
+        collection === "reportDirectory"
+          ? ["context.workItem.title", "context.workItem.number", "report.summary", "id"]
+          : collection === "tasks"
+            ? ["workItem.title", "workItem.number", "id"]
+            : collection === "repositories"
+              ? ["fullName", "id"]
+              : ["title", "number", "id"];
+      predicates.push(
+        `(${searchFields.map((field) => `instr(lower(CAST(json_extract("value", '$.${field}') AS TEXT)), lower(?)) > 0`).join(" OR ")})`,
+      );
+      values.push(...searchFields.map(() => query.search!));
+    }
+    values.push(query.limit);
+    return this.database
+      .prepare(
+        `SELECT "value" FROM ${collectionName(collection)} WHERE ${predicates.join(" AND ")} ORDER BY "id" LIMIT ?`,
+      )
+      .all(...values)
+      .map((row) => JSON.parse(row.value as string) as T);
+  }
+
+  pageOutput<T>(attemptId: string, afterSequence: number, limit: number): T[] {
+    if (
+      !Number.isSafeInteger(afterSequence) ||
+      afterSequence < 0 ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 1_000
+    )
+      throw new InvestigationStoreError(
+        "invalid_value",
+        "Output pagination requires bounded safe integers.",
+      );
+    return this.database
+      .prepare(
+        `SELECT "value" FROM "outputEvents" WHERE json_extract("value", '$.attemptId') = ? AND json_extract("value", '$.producerSequence') > ? ORDER BY json_extract("value", '$.producerSequence') LIMIT ?`,
+      )
+      .all(attemptId, afterSequence, limit)
+      .map((row) => JSON.parse(row.value as string) as T);
+  }
+
+  /** Eviction only removes the first retained event of a stream, preserving contiguous replay. */
+  oldestOutput<T>(): T | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT e."value" FROM "outputEvents" e JOIN "outputStreams" s ON s."id" = 'attempt:' || json_extract(e."value", '$.attemptId') WHERE json_extract(e."value", '$.producerSequence') = json_extract(s."value", '$.earliestSequence') ORDER BY json_extract(e."value", '$.receivedAt'), e."id" LIMIT 1`,
+      )
+      .get();
+    return row === undefined ? undefined : (JSON.parse(row.value as string) as T);
+  }
+
   /** Filters inside SQLite and keyset-pages actual delivery attempts without loading other rows. */
   pageCommentDeliveries<T>(query: InvestigationCommentDeliveryPage): T[] {
     if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 1_000)
@@ -376,10 +541,15 @@ export class InvestigationStore {
         this.database.exec(collectionDefinition(collection));
       }
       for (const definition of deliveryIndexes.values()) this.database.exec(definition);
+      for (const definition of workspaceIndexes.values()) this.database.exec(definition);
       return;
     }
 
-    const definitions = (names: readonly InvestigationCollection[], indexes = false) =>
+    const definitions = (
+      names: readonly InvestigationCollection[],
+      indexes = false,
+      workspace = false,
+    ) =>
       new Map<string, { type: string; sql: string }>([
         [metadataTable, { type: "table", sql: metadataDefinition }],
         ...names.map((collection): [string, { type: string; sql: string }] => [
@@ -388,6 +558,12 @@ export class InvestigationStore {
         ]),
         ...(indexes
           ? [...deliveryIndexes].map(([name, sql]): [string, { type: string; sql: string }] => [
+              name,
+              { type: "index", sql },
+            ])
+          : []),
+        ...(workspace
+          ? [...workspaceIndexes].map(([name, sql]): [string, { type: string; sql: string }] => [
               name,
               { type: "index", sql },
             ])
@@ -407,10 +583,11 @@ export class InvestigationStore {
             : normalizeDefinition(object.sql) === normalizeDefinition(definition.sql))
         );
       });
-    const current = matches(definitions(investigationCollections, true));
+    const current = matches(definitions(investigationCollections, true, true));
+    const previousV4 = matches(definitions(investigationV4Collections, true));
     const previousV3 = matches(definitions(investigationV3Collections, true));
     const previousV2 = matches(definitions(investigationV2Collections));
-    if (!current && !previousV3 && !previousV2) {
+    if (!current && !previousV4 && !previousV3 && !previousV2) {
       throw new InvestigationStoreError(
         "incompatible_schema",
         "The investigation database has an unrecognized schema; no migration was applied.",
@@ -421,14 +598,25 @@ export class InvestigationStore {
       .get("schema_version");
     if (
       (previousV2 && version?.value === "investigation-v2") ||
-      (previousV3 && version?.value === "investigation-v3")
+      (previousV3 && version?.value === "investigation-v3") ||
+      (previousV4 && version?.value === "investigation-v4")
     ) {
       if (previousV2) {
         this.database.exec(collectionDefinition("commentDeliveries"));
         for (const definition of deliveryIndexes.values()) this.database.exec(definition);
       }
-      this.database.exec(collectionDefinition("resourceLeases"));
-      this.database.exec(collectionDefinition("schedulerSettings"));
+      if (!previousV4) {
+        this.database.exec(collectionDefinition("resourceLeases"));
+        this.database.exec(collectionDefinition("schedulerSettings"));
+      }
+      for (const collection of [
+        "outputEvents",
+        "outputStreams",
+        "outputBatches",
+        "reportDirectory",
+      ] as const)
+        this.database.exec(collectionDefinition(collection));
+      for (const definition of workspaceIndexes.values()) this.database.exec(definition);
       this.database
         .prepare(`UPDATE "${metadataTable}" SET "value" = ? WHERE "key" = ?`)
         .run(investigationSchemaVersion, "schema_version");

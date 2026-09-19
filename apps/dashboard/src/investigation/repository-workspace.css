@@ -1,0 +1,193 @@
+.repository-workspace {
+  min-width: 0;
+}
+.repository-directory-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.repository-directory-tools > :first-child {
+  width: min(380px, 100%);
+}
+.repository-directory-entry.MuiButtonBase-root {
+  width: 100%;
+  display: flex;
+  justify-content: flex-start;
+  gap: 20px;
+  padding: 26px 28px;
+  text-align: left;
+  border-bottom: 1px solid var(--app-line);
+}
+.repository-directory-entry:last-child {
+  border-bottom: 0;
+}
+.repository-directory-entry:hover {
+  background: var(--app-hover);
+}
+.repository-directory-entry.Mui-focusVisible {
+  outline: 2px solid currentColor;
+  outline-offset: -3px;
+}
+.repository-directory-icon {
+  flex: 0 0 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  background: var(--app-primary-container, #dee8ff);
+}
+.repository-directory-name {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+  overflow-wrap: anywhere;
+}
+.repository-directory-status {
+  display: grid;
+  gap: 5px;
+  font-size: 13px;
+}
+.repository-directory-mobile-status.MuiTypography-root {
+  display: none;
+}
+.repository-settings-body {
+  max-width: 1120px;
+  min-width: 0;
+}
+.repository-shortcuts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 24px;
+}
+.repository-shortcut.MuiButton-root {
+  justify-content: space-between;
+  text-align: left;
+  min-height: 80px;
+  padding: 12px;
+}
+.repository-shortcut span:not(.MuiButton-endIcon) {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.repository-shortcut strong {
+  font-size: 16px;
+  font-weight: 500;
+}
+.repository-shortcut small {
+  color: var(--app-muted);
+  font-size: 14px;
+  font-weight: 400;
+}
+.repository-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--app-line);
+}
+.repository-summary-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+.repository-summary-row > :first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.repository-summary-row > button {
+  flex-shrink: 0;
+}
+.repository-overview-footer {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  justify-content: space-between;
+}
+.repository-form {
+  max-width: 920px;
+  min-width: 0;
+}
+.repository-form .MuiFormControlLabel-root {
+  margin-left: 0;
+  margin-right: 0;
+  min-height: 48px;
+  align-items: center;
+}
+.repository-form .MuiFormControlLabel-label {
+  flex: 1;
+}
+.repository-form-width {
+  max-width: 640px;
+}
+.repository-form-actions {
+  position: sticky;
+  bottom: 16px;
+  z-index: 1;
+  padding: 16px;
+  border: 1px solid var(--app-line);
+  border-radius: 16px;
+  background: var(--app-surface);
+}
+.repository-template-preview {
+  border: 1px solid var(--app-line);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.repository-template-preview-body {
+  padding: 24px;
+  overflow-wrap: anywhere;
+}
+.repository-template-preview-body p {
+  white-space: pre-wrap;
+  margin: 0 0 16px;
+}
+.repository-template-preview-body summary {
+  min-height: 48px;
+  padding: 12px 0;
+  cursor: pointer;
+}
+@media (max-width: 700px) {
+  .repository-directory-tools {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .repository-directory-tools > :first-child {
+    width: 100%;
+  }
+  .repository-directory-entry.MuiButtonBase-root {
+    gap: 12px;
+    padding: 20px 16px;
+  }
+  .repository-directory-icon {
+    flex-basis: 40px;
+    height: 40px;
+    border-radius: 12px;
+  }
+  .repository-directory-status {
+    display: none;
+  }
+  .repository-directory-mobile-status.MuiTypography-root {
+    display: block;
+  }
+  .repository-shortcuts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .repository-summary-row {
+    align-items: flex-start;
+    gap: 8px;
+    flex-direction: column;
+  }
+  .repository-overview-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .repository-form-actions {
+    position: static;
+    padding: 12px;
+  }
+}

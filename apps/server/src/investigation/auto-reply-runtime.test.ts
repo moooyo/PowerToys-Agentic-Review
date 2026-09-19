@@ -868,6 +868,48 @@ describe("automatic reply production runtime", () => {
     expect(maximum.json()).toEqual({ items: [], nextCursor: null });
   });
 
+  it("keeps publication states separate from legacy delivery states when parsing numeric filters", async () => {
+    const context = await fixture({ publisher: false });
+    const { app, cookie } = context;
+    for (const state of [
+      "pending",
+      "synced",
+      "paused",
+      "unconfirmed",
+      "needs_attention",
+      "conflict",
+      "retrying",
+      "sending",
+    ]) {
+      const response = await get(
+        app,
+        `/api/publications?state=${state}&workItemNumber=7&limit=1`,
+        cookie,
+      );
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json()).toEqual({ items: [], nextCursor: null });
+    }
+    for (const state of ["cancelled", "failed", "succeeded", "unknown"]) {
+      const publication = await get(
+        app,
+        `/api/publications?state=${state}&workItemNumber=7&limit=1`,
+        cookie,
+      );
+      expect(publication.statusCode).toBe(400);
+      const delivery = await get(
+        app,
+        `/api/comment-deliveries?state=${state}&workItemNumber=7&limit=1`,
+        cookie,
+      );
+      expect(delivery.statusCode, delivery.body).toBe(200);
+      expect(delivery.json()).toEqual({ items: [], nextCursor: null });
+    }
+    expect((await get(app, "/api/publications?state=pending&limit=51", cookie)).statusCode).toBe(
+      400,
+    );
+    expect(context.execute).not.toHaveBeenCalled();
+  });
+
   it.each([
     { kind: "issue", outcome: "completed" },
     { kind: "pull_request", outcome: "completed" },

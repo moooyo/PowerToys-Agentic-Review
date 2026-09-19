@@ -329,6 +329,11 @@ export class InvestigationAutomaticReplies {
   }
 
   #summary(record: AutomaticReplyRecord): InvestigationCommentPublicationSummary {
+    const producer = this.options.store.get<InvestigationTaskV1>("tasks", record.taskId);
+    const boundProducer =
+      producer?.repository.id === record.repository.id && producer.workItem.id === record.workItemId
+        ? producer
+        : undefined;
     const latest = this.options.store.pageCommentDeliveries<InvestigationCommentDelivery>({
       commentId: record.id,
       limit: 1,
@@ -373,6 +378,8 @@ export class InvestigationAutomaticReplies {
       workItemKind: record.workItemKind,
       workItemNumber: record.workItemNumber,
       taskId: record.taskId,
+      producerTaskKind: boundProducer?.kind ?? null,
+      workItemTitle: boundProducer?.workItem.title ?? null,
       reportId: record.reportId,
       state,
       reasonCode,

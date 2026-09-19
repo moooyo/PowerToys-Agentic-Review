@@ -13,9 +13,18 @@ import {
   InvestigationFinalizeRequestSchema,
   InvestigationHeartbeatRequestSchema,
   InvestigationModelInvocationReceiptSchema,
+  InvestigationOutputBatchRequestSchema,
+  InvestigationOutputBatchResponseSchema,
+  InvestigationOutputPageSchema,
+  InvestigationOutputQuerySchema,
   InvestigationProgressRequestSchema,
+  InvestigationReportDirectoryPageSchema,
+  InvestigationReportDirectoryQuerySchema,
   InvestigationReportPartRequestSchema,
   InvestigationSchedulerSettingsRequestSchema,
+  InvestigationTaskArtifactsPageSchema,
+  InvestigationTaskArtifactsQuerySchema,
+  InvestigationTaskDefaultsSchema,
   InvestigationTaskKindSchema,
   InvestigationWorkerControlListSchema,
   InvestigationWorkerControlSchema,
@@ -23,9 +32,14 @@ import {
   InvestigationWorkerLeaseSchema,
   InvestigationWorkerPolicyRequestSchema,
   InvestigationWorkerPolicySchema,
+  InvestigationWorkItemDiscussionQuerySchema,
+  InvestigationWorkItemDiscussionSchema,
+  InvestigationWorkspaceSearchQuerySchema,
+  InvestigationWorkspaceSearchResultSchema,
+  maximumInvestigationOutputBatchBytes,
 } from "@agentic-review/contracts";
 import { InvestigationLoopError } from "@agentic-review/domain";
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, type TObject, Type } from "@sinclair/typebox";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -137,6 +151,22 @@ const actionContextQuerySchema = Type.Object(
   { reportId: Type.Optional(EntityIdSchema) },
   { additionalProperties: false },
 );
+
+type HttpPageQuery<T> = Omit<T, "limit"> & { limit?: string };
+const httpPageQuerySchema = (schema: TObject) =>
+  Type.Object(
+    {
+      ...Type.Omit(schema, ["limit"]).properties,
+      limit: Type.Optional(Type.String({ pattern: "^[1-9][0-9]{0,2}$" })),
+    },
+    { additionalProperties: false },
+  );
+function numericPageQuery<T extends { limit?: string }>(
+  query: T,
+): Omit<T, "limit"> & { limit?: number } {
+  const { limit, ...rest } = query;
+  return { ...rest, ...(limit === undefined ? {} : { limit: Number(limit) }) };
+}
 
 type BodyOf<Method extends (...args: never[]) => unknown> = Parameters<Method>[1];
 type LastBodyOf<Method extends (...args: never[]) => unknown> = Parameters<Method>[2];
@@ -312,6 +342,40 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
     { preHandler: authenticateOperator, schema: { params: idParamsSchema } },
     async (request) => await service.getWorkItem(actor(request), request.params.id),
   );
+  app.get<{
+    Params: IdParams;
+    Querystring: Static<typeof InvestigationWorkItemDiscussionQuerySchema>;
+  }>(
+    "/api/work-items/:id/discussion",
+    {
+      preHandler: authenticateOperator,
+      schema: {
+        params: idParamsSchema,
+        querystring: InvestigationWorkItemDiscussionQuerySchema,
+        response: { 200: InvestigationWorkItemDiscussionSchema },
+      },
+    },
+    async (request) => service.workItemDiscussion(actor(request), request.params.id, request.query),
+  );
+  app.get(
+    "/api/investigation/task-defaults",
+    {
+      preHandler: authenticateOperator,
+      schema: { response: { 200: InvestigationTaskDefaultsSchema } },
+    },
+    async () => service.taskDefaults(),
+  );
+  app.get<{ Querystring: HttpPageQuery<Static<typeof InvestigationWorkspaceSearchQuerySchema>> }>(
+    "/api/workspace/search",
+    {
+      preHandler: authenticateOperator,
+      schema: {
+        querystring: httpPageQuerySchema(InvestigationWorkspaceSearchQuerySchema),
+        response: { 200: InvestigationWorkspaceSearchResultSchema },
+      },
+    },
+    async (request) => service.workspaceSearch(actor(request), numericPageQuery(request.query)),
+  );
 
   app.get<{ Querystring: InvestigationDirectoryQuery }>(
     "/api/tasks",
@@ -344,12 +408,55 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
     { preHandler: authenticateOperator, schema: { params: idParamsSchema } },
     async (request) => service.getTaskUsage(actor(request), request.params.id),
   );
+  app.get<{
+    Params: IdParams;
+    Querystring: HttpPageQuery<Static<typeof InvestigationOutputQuerySchema>>;
+  }>(
+    "/api/tasks/:id/output-events",
+    {
+      preHandler: authenticateOperator,
+      schema: {
+        params: idParamsSchema,
+        querystring: httpPageQuerySchema(InvestigationOutputQuerySchema),
+        response: { 200: InvestigationOutputPageSchema },
+      },
+    },
+    async (request) =>
+      service.taskOutput(actor(request), request.params.id, numericPageQuery(request.query)),
+  );
+  app.get<{
+    Params: IdParams;
+    Querystring: HttpPageQuery<Static<typeof InvestigationTaskArtifactsQuerySchema>>;
+  }>(
+    "/api/tasks/:id/artifacts",
+    {
+      preHandler: authenticateOperator,
+      schema: {
+        params: idParamsSchema,
+        querystring: httpPageQuerySchema(InvestigationTaskArtifactsQuerySchema),
+        response: { 200: InvestigationTaskArtifactsPageSchema },
+      },
+    },
+    async (request) =>
+      service.taskArtifacts(actor(request), request.params.id, numericPageQuery(request.query)),
+  );
   app.post<{ Params: IdParams }>(
     "/api/tasks/:id/cancel",
     { preHandler: authenticateOperator, schema: { params: idParamsSchema, body: emptyBodySchema } },
     async (request) => await service.cancelTask(actor(request), request.params.id),
   );
 
+  app.get<{ Querystring: HttpPageQuery<Static<typeof InvestigationReportDirectoryQuerySchema>> }>(
+    "/api/reports",
+    {
+      preHandler: authenticateOperator,
+      schema: {
+        querystring: httpPageQuerySchema(InvestigationReportDirectoryQuerySchema),
+        response: { 200: InvestigationReportDirectoryPageSchema },
+      },
+    },
+    async (request) => service.listReports(actor(request), numericPageQuery(request.query)),
+  );
   app.get<{ Params: IdParams }>(
     "/api/reports/:id",
     { preHandler: authenticateOperator, schema: { params: idParamsSchema } },
@@ -517,6 +624,19 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
       schema: { params: idParamsSchema, body: modelUsageBodySchema },
     },
     async (request) => service.workerModelUsage(worker(request), request.params.id, request.body),
+  );
+  app.post<{ Params: IdParams; Body: LastBodyOf<InvestigationService["workerOutput"]> }>(
+    "/api/worker/tasks/:id/output-events",
+    {
+      preHandler: authenticateWorker,
+      bodyLimit: maximumInvestigationOutputBatchBytes,
+      schema: {
+        params: idParamsSchema,
+        body: InvestigationOutputBatchRequestSchema,
+        response: { 200: InvestigationOutputBatchResponseSchema },
+      },
+    },
+    async (request) => service.workerOutput(worker(request), request.params.id, request.body),
   );
   app.post<{ Params: IdParams; Body: LastBodyOf<InvestigationService["workerReportUsage"]> }>(
     "/api/worker/tasks/:id/report-usage",

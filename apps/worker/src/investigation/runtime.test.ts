@@ -20,6 +20,10 @@ import type {
   InvestigationModelUsageJournal,
   ModelUsageJournalOptions,
 } from "./model-usage-journal.js";
+import type {
+  InvestigationOutputJournal,
+  InvestigationOutputJournalOptions,
+} from "./output-journal.js";
 import {
   createInvestigationExecutionRuntime,
   type InvestigationRuntimeDependencies,
@@ -97,8 +101,17 @@ function fixture() {
     modelEdit?: ModelTurnRunnerOptions;
     e2e?: E2eAgentRunnerOptions;
     cleanupJournal?: AttemptCleanupJournalOptions;
+    outputJournal?: InvestigationOutputJournalOptions;
   } = {};
   const replayUsage = vi.fn(async () => {});
+  const outputJournal: InvestigationOutputJournal = {
+    openAttempt: vi.fn(async () => {}),
+    append: vi.fn(),
+    closeAttempt: vi.fn(),
+    replay: vi.fn(async () => {}),
+    flush: vi.fn(async () => true),
+    stop: vi.fn(async () => true),
+  };
   const usageJournal = {
     begin: never,
     update: never,
@@ -172,6 +185,10 @@ function fixture() {
       captured.usageJournal = options;
       return usageJournal;
     },
+    createOutputJournal: (options) => {
+      captured.outputJournal = options;
+      return outputJournal;
+    },
     createProcessHost: async (options) => {
       captured.host = options;
       return host;
@@ -215,6 +232,7 @@ function fixture() {
     usageJournal,
     replayUsage,
     cleanupJournal,
+    outputJournal,
   };
 }
 
@@ -328,6 +346,50 @@ describe("production investigation runtime composition", () => {
     expect(f.cleanupJournal.recover).toHaveBeenCalledTimes(2);
     expect(f.replayUsage).toHaveBeenCalledTimes(2);
     await runtime.stop();
+  });
+
+  it("coalesces stalled output replay across policy, claim and heartbeat polling without delaying cancellation or shutdown", async () => {
+    const f = fixture();
+    const firstReplay = Promise.withResolvers<void>();
+    const secondReplay = Promise.withResolvers<void>();
+    vi.mocked(f.outputJournal.replay)
+      .mockImplementationOnce(() => firstReplay.promise)
+      .mockImplementationOnce(() => secondReplay.promise);
+    f.client.claim = vi.fn(async () => null);
+    f.client.heartbeat = vi.fn(async () => ({
+      cancelRequested: true,
+      serverTime: "2026-09-20T00:00:00.000Z",
+      leaseExpiresAt: "2026-09-20T00:02:00.000Z",
+    }));
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, f.dependencies);
+    const client = f.captured.service!.client;
+    const claim = claimFixture();
+    for (let index = 0; index < 100; index++) {
+      await client.workerPolicy!({ supportedKinds: ["pr-review"] });
+      expect(await client.claim({ supportedKinds: ["pr-review"] })).toBeNull();
+      expect((await client.heartbeat(claim.task.id, { lease: claim.lease })).cancelRequested).toBe(
+        true,
+      );
+    }
+    expect(f.outputJournal.replay).toHaveBeenCalledTimes(1);
+    expect(f.client.claim).toHaveBeenCalledTimes(100);
+    expect(f.client.heartbeat).toHaveBeenCalledTimes(100);
+
+    firstReplay.resolve();
+    await firstReplay.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    await client.workerPolicy!({ supportedKinds: ["pr-review"] });
+    expect(f.outputJournal.replay).toHaveBeenCalledTimes(2);
+    await runtime.stop();
+    expect(f.outputJournal.stop).toHaveBeenCalledTimes(1);
+    expect(f.events).toContain("host.close");
+    // A late storage completion after shutdown cannot schedule another replay.
+    secondReplay.resolve();
+    await secondReplay.promise;
+    await Promise.resolve();
+    await client.workerPolicy!({ supportedKinds: ["pr-review"] });
+    expect(f.outputJournal.replay).toHaveBeenCalledTimes(2);
   });
 
   it("rejects forged static execution authority at the runtime boundary", async () => {
@@ -460,6 +522,116 @@ describe("production investigation runtime composition", () => {
     expect(f.captured.modelEdit?.usageJournal).toBe(f.usageJournal);
     expect(f.replayUsage).toHaveBeenCalledTimes(1);
     expect(f.coordinator.execute).not.toHaveBeenCalled();
+    await runtime.stop();
+  });
+
+  it("shares isolated visible output across analysis, E2E and saved model edits and closes it on shutdown", async () => {
+    const f = fixture();
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, f.dependencies);
+    expect(f.captured.outputJournal?.directory).toBe("D:\\WorkerData\\visible-output");
+    expect(f.captured.outputJournal?.protectedValues).toEqual([f.config.workerToken]);
+    expect(f.captured.model?.outputJournal).toBe(f.outputJournal);
+    expect(f.captured.modelEdit?.outputJournal).toBe(f.outputJournal);
+    expect(f.captured.e2e?.modelOptions.outputJournal).toBe(f.outputJournal);
+    expect(f.outputJournal.replay).toHaveBeenCalled();
+    const claim = claimFixture();
+    await f.captured.service!.executor.execute(claim, new AbortController().signal);
+    expect(f.outputJournal.openAttempt).toHaveBeenCalledWith(
+      claim.task.id,
+      claim.lease,
+      expect.any(AbortSignal),
+    );
+    expect(f.outputJournal.append).toHaveBeenCalledWith(
+      claim.task.id,
+      claim.attempt.id,
+      null,
+      expect.objectContaining({ kind: "system", text: "The Worker started this claimed attempt." }),
+    );
+    expect(f.outputJournal.closeAttempt).toHaveBeenCalledWith(claim.task.id, claim.attempt.id);
+    await runtime.stop();
+    expect(f.outputJournal.stop).toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "executes after output initialization times out and ignores late settlement: reject=%s",
+    async (reject) => {
+      const f = fixture();
+      const opening = Promise.withResolvers<void>();
+      vi.mocked(f.outputJournal.openAttempt).mockImplementation(() => opening.promise);
+      const runtime = await createInvestigationExecutionRuntime(f.config, logger, {
+        ...f.dependencies,
+        outputInitializationTimeoutMs: 5,
+      });
+      const claim = claimFixture();
+      await f.captured.service!.executor.execute(claim, new AbortController().signal);
+      expect(f.coordinator.execute).toHaveBeenCalledTimes(1);
+      expect(f.captured.model?.outputInitializationTimeoutMs).toBe(5);
+      expect(f.captured.modelEdit?.outputInitializationTimeoutMs).toBe(5);
+      expect(f.captured.e2e?.modelOptions.outputInitializationTimeoutMs).toBe(5);
+      expect(vi.mocked(f.outputJournal.openAttempt).mock.calls[0]?.[2]?.aborted).toBe(true);
+      expect(f.outputJournal.closeAttempt).toHaveBeenCalledWith(claim.task.id, claim.attempt.id);
+      if (reject) opening.reject(new Error("Late synthetic output initialization failure"));
+      else opening.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(f.outputJournal.append).not.toHaveBeenCalled();
+      expect(f.outputJournal.flush).not.toHaveBeenCalled();
+      await runtime.stop();
+      expect(f.events).toContain("host.close");
+    },
+  );
+
+  it("cancels pending output initialization before coordinator dispatch and still closes the attempt", async () => {
+    const f = fixture();
+    const entered = Promise.withResolvers<void>();
+    const opening = Promise.withResolvers<void>();
+    vi.mocked(f.outputJournal.openAttempt).mockImplementation(() => {
+      entered.resolve();
+      return opening.promise;
+    });
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, f.dependencies);
+    const claim = claimFixture();
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation during visible output initialization");
+    const execution = f.captured.service!.executor.execute(claim, controller.signal);
+    const cancelled = expect(execution).rejects.toBe(reason);
+    await entered.promise;
+    controller.abort(reason);
+    await cancelled;
+    expect(f.coordinator.execute).not.toHaveBeenCalled();
+    expect(vi.mocked(f.outputJournal.openAttempt).mock.calls[0]?.[2]?.aborted).toBe(true);
+    expect(f.outputJournal.closeAttempt).toHaveBeenCalledWith(claim.task.id, claim.attempt.id);
+    expect(f.outputJournal.append).not.toHaveBeenCalled();
+    expect(f.outputJournal.flush).not.toHaveBeenCalled();
+    opening.resolve();
+    await Promise.resolve();
+    await runtime.stop();
+    expect(f.events).toContain("host.close");
+  });
+
+  it("reports permanent output delivery failures using only the journal's bounded diagnostic", async () => {
+    const f = fixture();
+    const error = vi.fn();
+    const runtime = await createInvestigationExecutionRuntime(
+      f.config,
+      { ...logger, error },
+      f.dependencies,
+    );
+    const claim = claimFixture();
+    for (const code of ["output_lease_lost", "output_archive_capacity"] as const)
+      f.captured.outputJournal?.onTerminalFailure?.({
+        taskId: claim.task.id,
+        attemptId: claim.attempt.id,
+        code,
+      });
+    expect(error.mock.calls).toEqual(
+      ["output_lease_lost", "output_archive_capacity"].map((code) => [
+        "Visible output delivery permanently stopped for this attempt.",
+        { taskId: claim.task.id, attemptId: claim.attempt.id, code },
+      ]),
+    );
+    expect(JSON.stringify(error.mock.calls)).not.toContain(f.config.workerToken);
+    expect(JSON.stringify(error.mock.calls)).not.toContain(claim.lease.leaseToken);
     await runtime.stop();
   });
 

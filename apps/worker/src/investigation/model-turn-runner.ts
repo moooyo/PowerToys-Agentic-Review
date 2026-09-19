@@ -34,6 +34,11 @@ import {
   ProcessHostProtocolError,
   type ProcessLaunchSpec,
 } from "../execution/process-host-protocol.js";
+import {
+  createModelOutputObserver,
+  type ModelOutputObservation,
+  type ModelOutputObserver,
+} from "./model-output-observer.js";
 import { createInvestigationModelOutputSchema } from "./model-output-schema.js";
 import {
   createModelActivityObserver,
@@ -50,6 +55,8 @@ import {
   type ModelInvocationContext,
 } from "./model-usage-journal.js";
 import { parseCliModelUsage } from "./model-usage-parser.js";
+import type { InvestigationOutputJournal } from "./output-journal.js";
+import { openInvestigationOutputAttempt } from "./output-reporter.js";
 import {
   assertInvestigationSourceContext,
   type InvestigationPrDiffChunk,
@@ -95,6 +102,8 @@ export interface ModelTurnRunner {
 }
 
 export interface StaticModelJsonInput {
+  /** Private runtime capabilities may be present in an authorized prompt, but never in visible output. */
+  readonly outputProtectedValues?: readonly string[];
   /** Saved-plan edits remain passive proposals; static review and E2E use native tools. */
   readonly toolPolicy?: "native" | "passive_proposal";
   readonly usageContext?: Pick<ModelInvocationContext, "taskId" | "attemptId" | "purpose">;
@@ -148,6 +157,9 @@ export interface ModelTurnFileIO {
 }
 
 export interface ModelTurnRunnerOptions {
+  readonly outputJournal?: InvestigationOutputJournal;
+  /** Optional visible output must not hold process dispatch or cancellation indefinitely. */
+  readonly outputInitializationTimeoutMs?: number;
   readonly usageJournal?: InvestigationModelUsageJournal;
   readonly engine: CliEngine;
   readonly cliExecutablePath: string;
@@ -346,6 +358,7 @@ export function createStaticModelJsonRunner(
   const io = options.fileIO ?? defaultFileIO;
   const inputLimit = options.maximumInputBytes ?? maximumTransportInputBytes;
   const teardownTimeoutMs = options.teardownTimeoutMs ?? 5_000;
+  const outputInitializationTimeoutMs = options.outputInitializationTimeoutMs ?? 1_000;
   if (
     !Number.isSafeInteger(inputLimit) ||
     inputLimit < 1 ||
@@ -358,6 +371,12 @@ export function createStaticModelJsonRunner(
     teardownTimeoutMs > 60_000
   )
     throw new TypeError("teardownTimeoutMs must be from 1 through 60000.");
+  if (
+    !Number.isSafeInteger(outputInitializationTimeoutMs) ||
+    outputInitializationTimeoutMs < 1 ||
+    outputInitializationTimeoutMs > 30_000
+  )
+    throw new TypeError("outputInitializationTimeoutMs must be from 1 through 30000.");
   for (const [name, bounds] of Object.entries(cliProcessResourceLimitBounds)) {
     const value = options.limits[name as keyof CliProcessResourceLimits];
     if (!Number.isSafeInteger(value) || value < bounds.minimum || value > bounds.maximum)
@@ -403,6 +422,22 @@ export function createStaticModelJsonRunner(
       let invocationCompleted = false;
       let processStartAttempted = false;
       let invocationUsage: ReturnType<typeof parseCliModelUsage> | undefined;
+      let visibleOutput: ModelOutputObserver | undefined;
+      let captureEnabled = false;
+      const recordOutput = (observation: ModelOutputObservation): void => {
+        if (!captureEnabled || input.usageContext === undefined || invocationId === undefined)
+          return;
+        try {
+          options.outputJournal?.append(
+            input.usageContext.taskId,
+            input.usageContext.attemptId,
+            invocationId,
+            observation,
+          );
+        } catch {
+          /* Visible output cannot change invocation accounting or process ownership. */
+        }
+      };
       let executionFailed = false;
       let executionError: unknown;
       try {
@@ -477,6 +512,36 @@ export function createStaticModelJsonRunner(
           invocationId = registered.invocationId;
           await options.usageJournal.update(invocationId, { state: "running" });
         }
+        if (
+          options.outputJournal !== undefined &&
+          input.usageContext !== undefined &&
+          input.usageLease !== undefined &&
+          invocationId !== undefined
+        ) {
+          try {
+            const initialized = await openInvestigationOutputAttempt({
+              journal: options.outputJournal,
+              taskId: input.usageContext.taskId,
+              lease: input.usageLease,
+              signal: input.signal,
+              initializationTimeoutMs: Math.min(outputInitializationTimeoutMs, hardTimeoutMs),
+            });
+            input.signal.throwIfAborted();
+            if (initialized) {
+              visibleOutput = createModelOutputObserver(options.engine, recordOutput, {
+                protectedValues: [
+                  ...options.protectedValues,
+                  input.usageLease.leaseToken,
+                  ...(input.outputProtectedValues ?? []),
+                ],
+              });
+              captureEnabled = true;
+            }
+          } catch {
+            // Output availability cannot weaken accounting admission or process ownership.
+            input.signal.throwIfAborted();
+          }
+        }
         input.signal.throwIfAborted();
         let managed: ManagedProcess;
         // The worker deadline starts before dispatch; the native deadline reserves teardown time.
@@ -494,6 +559,13 @@ export function createStaticModelJsonRunner(
           if (dispatched) return;
           dispatched = true;
           activity.dispatched();
+          recordOutput({
+            itemId: "model-dispatched",
+            kind: "system",
+            operation: "append",
+            status: "started",
+            text: "The registered model invocation was dispatched.",
+          });
           // A dispatched start can consume tokens even if its acknowledgement or final usage is lost.
           input.onUsage?.({
             tokens: null,
@@ -588,6 +660,7 @@ export function createStaticModelJsonRunner(
                 input.onUsage?.({ tokens: observedTokens, source: "cli" });
             },
             activity,
+            visibleOutput,
           );
           signal.throwIfAborted();
           const roundOutputLimit = Math.min(
@@ -669,6 +742,20 @@ export function createStaticModelJsonRunner(
         executionError = error;
         throw error;
       } finally {
+        visibleOutput?.finish();
+        if (!processDrained) visibleOutput?.incomplete();
+        recordOutput({
+          itemId: "model-settled",
+          kind: "system",
+          operation: "append",
+          status: invocationCompleted ? "completed" : input.signal.aborted ? "cancelled" : "failed",
+          text: !processStartAttempted
+            ? "The registered model invocation ended before process dispatch."
+            : processDrained
+              ? "The model invocation ended and its owned process output streams were drained."
+              : "The model invocation ended without confirmed owned process cleanup.",
+        });
+        captureEnabled = false;
         const finalErrors: unknown[] = [];
         try {
           if (options.usageJournal !== undefined && invocationId !== undefined) {
@@ -1968,6 +2055,7 @@ async function collectManagedProcess(
   protectedValues: readonly string[],
   onCompleteOutput: (stdout: string, completeTransport: boolean) => Promise<void>,
   activity: ModelActivityObserver,
+  output?: ModelOutputObserver,
 ): Promise<{ stdout: string }> {
   let totalBytes = 0;
   let stdoutBytes = 0;
@@ -1983,13 +2071,17 @@ async function collectManagedProcess(
       if (capture) {
         stdoutBytes += chunk.byteLength;
         activity.push(chunk);
+        output?.push(chunk);
       } else stderrBytes += chunk.byteLength;
       if (totalBytes > maximumBytes) {
         exceeded = true;
       }
       if (capture && remainingBytes > 0) capturedStdout.push(chunk.subarray(0, remainingBytes));
     }
-    if (capture) activity.finish();
+    if (capture) {
+      activity.finish();
+      output?.finish();
+    }
     return capture ? Buffer.concat(capturedStdout) : Buffer.alloc(0);
   };
   const account = async (bytes: Buffer, completeTransport: boolean): Promise<void> => {
@@ -2052,6 +2144,12 @@ async function collectManagedProcess(
       exit.value.requestId === managed.requestId;
     const cleanupConfirmed =
       exitConfirmed && stdout.status === "fulfilled" && stderr.status === "fulfilled";
+    if (
+      !cleanupConfirmed ||
+      exceeded ||
+      (exit.status === "fulfilled" && exit.value.outputTruncated)
+    )
+      output?.incomplete();
     const completionConfirmed =
       completion.status === "fulfilled" &&
       Value.Check(ProcessExitedEventSchema, completion.value) &&

@@ -3,10 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  accountFormIsDirty,
   accountFormValues,
+  accountPasswordResetProblems,
   accountWriteVersion,
   assertNewPassword,
   createAccountInput,
+  filterAccounts,
   parseRepositoryIds,
   submitAccountForm,
   submitAccountPassword,
@@ -111,8 +114,12 @@ describe("account administration access", () => {
     expect(html).toContain("Workspace Administrator");
     expect(html).toContain("Edit account workspace.admin");
     expect(html).toContain("Reset password for workspace.admin");
-    expect(html).toContain("Repositories: None");
-    expect(html).toContain("Permissions: None");
+    expect(html).toContain("No repositories");
+    expect(html).toContain("Search accounts");
+    expect(html).toContain('aria-label="Account status"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain("1 of 1 accounts");
+    expect(html).not.toContain("Permissions: None");
   });
 
   it("shows loading, an actionable error, and an empty directory", async () => {
@@ -147,6 +154,39 @@ describe("account administration access", () => {
 });
 
 describe("typed account forms", () => {
+  it("filters the directory by identity, exact stored repository text, and enabled state", () => {
+    const disabled = {
+      ...account,
+      id: "disabled-account",
+      username: "scoped.viewer",
+      displayName: "Scoped Viewer",
+      enabled: false,
+      repositoryIds: ["repo:outside-scope"],
+    };
+    const items = [account, disabled];
+    expect(filterAccounts(items, "  WORKSPACE  ", "all")).toEqual([account]);
+    expect(filterAccounts(items, "repo:outside-scope", "disabled")).toEqual([disabled]);
+    expect(filterAccounts(items, "viewer", "enabled")).toEqual([]);
+    expect(filterAccounts(items, "", "all")).toEqual(items);
+  });
+
+  it("guards independent account grants and password drafts without treating reordered grants as edits", () => {
+    const saved = {
+      ...account,
+      permissions: ["task:create", "task:cancel"] as Account["permissions"],
+    };
+    const form = accountFormValues(saved);
+    expect(accountFormIsDirty(form, saved)).toBe(false);
+    expect(
+      accountFormIsDirty({ ...form, permissions: ["task:cancel", "task:create"] }, saved),
+    ).toBe(false);
+    expect(accountFormIsDirty({ ...form, repositoryIdsText: "repo-outside" }, saved)).toBe(true);
+    expect(accountFormIsDirty({ ...form, actionCapabilities: ["approve"] }, saved)).toBe(true);
+    expect(accountFormIsDirty({ ...form, allowRepositoryExecution: true }, saved)).toBe(true);
+    expect(accountFormIsDirty({ ...form, isAdmin: false }, saved)).toBe(true);
+    expect(accountFormIsDirty({ ...form, password: "Unsaved password" }, saved)).toBe(true);
+  });
+
   it("starts with no access and does not infer business grants from administrator status", () => {
     const form = accountFormValues();
     expect(form.isAdmin).toBe(false);
@@ -242,6 +282,23 @@ describe("typed account forms", () => {
 });
 
 describe("password handling and account conflict recovery", () => {
+  it("requires an exact password confirmation and acknowledgement before a reset", () => {
+    expect(
+      accountPasswordResetProblems("  Correct password  ", "  Correct password  ", true),
+    ).toEqual({});
+    expect(
+      accountPasswordResetProblems("  Correct password  ", "Correct password", true),
+    ).toHaveProperty("confirmation");
+    expect(
+      accountPasswordResetProblems("Correct password", "Correct password", false),
+    ).toHaveProperty("acknowledged");
+    expect(accountPasswordResetProblems("short", "short", true)).toHaveProperty("password");
+    expect(accountPasswordResetProblems("😀".repeat(128), "😀".repeat(128), true)).toEqual({});
+    expect(accountPasswordResetProblems("😀".repeat(129), "😀".repeat(129), true)).toHaveProperty(
+      "password",
+    );
+  });
+
   it("clears a create password after success, an API failure, and client validation failure", async () => {
     const form = { ...accountFormValues(account), password: "New account password" };
     const clearPassword = vi.fn();

@@ -35,6 +35,10 @@ import {
   type InvestigationHeartbeatResponse,
   InvestigationHeartbeatResponseSchema,
   InvestigationModelInvocationReceiptSchema,
+  type InvestigationOutputBatchRequest,
+  InvestigationOutputBatchRequestSchema,
+  type InvestigationOutputBatchResponse,
+  InvestigationOutputBatchResponseSchema,
   type InvestigationProgressRequest,
   InvestigationProgressRequestSchema,
   type InvestigationProgressResponse,
@@ -50,6 +54,7 @@ import {
   InvestigationWorkerPolicyRequestSchema,
   InvestigationWorkerPolicySchema,
   isInvestigationStaticTaskKind,
+  maximumInvestigationOutputBatchBytes,
   PositiveIntegerSchema,
   validateInvestigationTokenUsage,
 } from "@agentic-review/contracts";
@@ -123,6 +128,12 @@ export interface InvestigationHttpClientDependencies {
 }
 
 export interface InvestigationWorkerClient {
+  /** Durable normalized output, independently retried with the original attempt lease. */
+  outputEvents?(
+    taskId: string,
+    request: InvestigationOutputBatchRequest,
+    signal?: AbortSignal,
+  ): Promise<InvestigationOutputBatchResponse>;
   /** Execution admission fails closed when an older embedded client lacks this operation. */
   workerPolicy?(
     request: InvestigationWorkerPolicyRequest,
@@ -194,6 +205,34 @@ export function createInvestigationHttpClient(
 ): InvestigationWorkerClient {
   const transport = new InvestigationJsonTransport(options, dependencies);
   return {
+    async outputEvents(taskId, request, signal) {
+      request = snapshotRequest(InvestigationOutputBatchRequestSchema, request, signal);
+      if (
+        request.events.some((event) => event.attemptId !== request.lease.attemptId) ||
+        request.events.some(
+          (event, index) =>
+            index > 0 && event.producerSequence !== request.events[index - 1]!.producerSequence + 1,
+        ) ||
+        Buffer.byteLength(JSON.stringify(request)) > maximumInvestigationOutputBatchBytes
+      )
+        throw new InvestigationWorkerClientError("invalid_request", false);
+      const response = requireResponse(
+        await transport.request(
+          taskPath(taskId, "output-events"),
+          request,
+          InvestigationOutputBatchResponseSchema,
+          signal,
+        ),
+      );
+      if (
+        response.taskId !== taskId ||
+        response.attemptId !== request.lease.attemptId ||
+        response.batchId !== request.batchId ||
+        response.lastAcceptedProducerSequence !== request.events.at(-1)!.producerSequence
+      )
+        throw new InvestigationWorkerClientError("invalid_response", false, 200);
+      return response;
+    },
     async workerPolicy(request, signal) {
       request = snapshotRequest(InvestigationWorkerPolicyRequestSchema, request, signal);
       const response = requireResponse(

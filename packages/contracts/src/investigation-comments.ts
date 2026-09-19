@@ -6,6 +6,7 @@ import {
   NonNegativeIntegerSchema,
   PositiveIntegerSchema,
 } from "./common.js";
+import { InvestigationTaskKindSchema } from "./investigation.js";
 
 const object = <T extends TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -109,6 +110,8 @@ export const InvestigationCommentPublicationSummarySchema = object({
   workItemKind: Type.Union([Type.Literal("pull_request"), Type.Literal("issue")]),
   workItemNumber: PositiveIntegerSchema,
   taskId: nullableId,
+  producerTaskKind: Type.Optional(Type.Union([InvestigationTaskKindSchema, Type.Null()])),
+  workItemTitle: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   reportId: nullableId,
   state: InvestigationCommentPublicationStateSchema,
   reasonCode: Type.Union([Type.String({ minLength: 1, maxLength: 128 }), Type.Null()]),

@@ -423,6 +423,10 @@ describe("sample comment publications", () => {
     const command = { version: before.version, idempotencyKey: "retry-publication" };
     const synced = await api.syncComment(before.id, command);
     expectSchema(InvestigationCommentPublicationSummarySchema, synced);
+    expect(synced).toMatchObject({
+      producerTaskKind: taskBefore.task.kind,
+      workItemTitle: taskBefore.task.workItem.title,
+    });
     expect(synced).toMatchObject({ state: "synced", availableActions: [], nextAttemptAt: null });
     expect(synced.version).not.toBe(before.version);
     const attempts = await api.commentAttempts(before.id);
@@ -456,6 +460,10 @@ describe("sample comment publications", () => {
     const command = { version: before.version, idempotencyKey: "read-back" };
     const reconciled = await api.reconcileComment(before.id, command);
     expect(reconciled.state).toBe("synced");
+    expect(reconciled).toMatchObject({
+      producerTaskKind: before.producerTaskKind,
+      workItemTitle: before.workItemTitle,
+    });
     const attempts = await api.commentAttempts(before.id);
     expect(attempts.items).toHaveLength(oldAttempts.items.length);
     const observed = required(attempts.items.find((attempt) => attempt.id === oldUnknown.id));
@@ -1202,6 +1210,49 @@ describe("sample action preparation and confirmation", () => {
     expectSchema(TaskDetailSchema, resumedDetail);
     expect(resumedDetail.attempts).toEqual(stopped.attempts);
     expect(resumedDetail.checkpoint).toEqual(stopped.checkpoint);
+  });
+
+  it("rejects a stale reviewed source without consuming the sample task request key", async () => {
+    const api = createSampleInvestigationApi();
+    const item = await api.workItem("sample-feature-work-item");
+    const before = await api.tasks(item.id);
+    const input = {
+      idempotencyKey: "reviewed-source-create",
+      workItemId: item.id,
+      kind: "issue-investigate" as const,
+      expectedSubjectRevisionKey: "0".repeat(64),
+    };
+    expect(input.expectedSubjectRevisionKey).not.toBe(item.subject.revisionKey);
+    await expect(api.createTask(input)).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("source revision changed"),
+    });
+    expect(await api.tasks(item.id)).toEqual(before);
+    const reviewed = { ...input, expectedSubjectRevisionKey: item.subject.revisionKey };
+    const created = await api.createTask(reviewed);
+    expect(created.subjects.find((subject) => subject.id === created.subjectRef)?.revisionKey).toBe(
+      item.subject.revisionKey,
+    );
+    expect(await api.createTask(reviewed)).toEqual(created);
+    expect((await api.tasks(item.id)).items).toHaveLength(before.items.length + 1);
+  });
+
+  it("preserves legacy request replay and checks idempotency before a new source guard", async () => {
+    const api = createSampleInvestigationApi();
+    const input = {
+      idempotencyKey: "legacy-source-create",
+      workItemId: "sample-feature-work-item",
+      kind: "issue-investigate" as const,
+    };
+    const created = await api.createTask(input);
+    await expect(
+      api.createTask({ ...input, expectedSubjectRevisionKey: "0".repeat(64) }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("idempotency key was reused with different content"),
+    });
+    expect(await api.createTask(input)).toEqual(created);
+    expect((await api.tasks()).items).toHaveLength(seeds.length + 1);
   });
 });
 

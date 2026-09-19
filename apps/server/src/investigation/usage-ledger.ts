@@ -210,6 +210,14 @@ export function investigationUsageInvocations(
   }
 }
 
+/** Exact registered identity lookup for other observational channels. */
+export function investigationUsageInvocation(
+  store: InvestigationStore,
+  invocationId: string,
+): InvestigationModelInvocationReceipt | undefined {
+  return store.get("idempotency", `${namespace}invocation:${encode(invocationId)}`);
+}
+
 function assertReceipt(receipt: InvestigationModelInvocationReceipt): void {
   // The usage endpoint can be the first TypeBox value check in a fresh Server.
   // Fastify's JSON schema formats do not initialize TypeBox's separate registry.

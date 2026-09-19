@@ -16,6 +16,7 @@ import {
 } from "@mui/material";
 import { useState } from "react";
 import { investigationApi } from "./api";
+import { useGuardedAction, useUnsavedChanges } from "./navigation-guard";
 
 type BudgetInputs = Record<keyof InvestigationBudget, string>;
 const fields: {
@@ -81,15 +82,30 @@ export function ResumeTaskButton({
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const guard = useGuardedAction();
+  const dirty = open && JSON.stringify(inputs) !== JSON.stringify(budgetInputs(task.budget));
+  useUnsavedChanges(dirty, {
+    busy: open && busy,
+    description:
+      "Your unsaved resume budget will be discarded. The saved task budget remains available.",
+    onDiscard: () => setOpen(false),
+  });
+  const close = () => {
+    if (!busy) guard(() => setOpen(false));
+  };
   const consumed = checkpoint?.consumed;
   const exhausted = fields.filter(
     (field) => consumed && consumed[field.consumed] >= task.budget[field.key],
   );
   const resume = async () => {
+    if (disabled || busy) return;
     setBusy(true);
     setError(undefined);
     try {
       const budget = resumeBudget(inputs, task.budget);
+      if (fields.some((field) => consumed && consumed[field.consumed] >= budget[field.key])) {
+        throw new Error("Increase each exhausted limit beyond its recorded usage before resuming.");
+      }
       await investigationApi.resumeTask(task.id, idempotencyKey, budget);
       await onResumed();
       setOpen(false);
@@ -112,19 +128,20 @@ export function ResumeTaskButton({
           setOpen(true);
         }}
       >
-        Resume investigation
+        {checkpoint ? "Resume investigation" : "Restart task"}
       </Button>
-      <Dialog
-        open={open}
-        onClose={() => {
-          if (!busy) setOpen(false);
-        }}
-        fullWidth
-        maxWidth="sm"
-      >
-        <DialogTitle>Resume from the saved checkpoint</DialogTitle>
+      <Dialog open={open} onClose={close} fullWidth maxWidth="sm">
+        <DialogTitle>
+          {checkpoint ? "Resume from the saved checkpoint" : "Restart this task"}
+        </DialogTitle>
         <DialogContent dividers>
           <Stack spacing={2}>
+            {task.state === "blocked" && (
+              <Alert severity="warning">
+                Resolve the recorded prerequisite before restarting. A new attempt uses the saved
+                source; it does not repair the dependency.
+              </Alert>
+            )}
             <Typography variant="body2">
               The source, scope, profile, and prompt remain unchanged. You can increase the budget
               to continue unfinished work.
@@ -133,6 +150,7 @@ export function ResumeTaskButton({
               <Alert severity="warning">
                 A saved budget limit has been reached. Increase the exhausted limit before resuming.
                 <Button
+                  disabled={busy}
                   onClick={() => {
                     setInputs((previous) => {
                       const next = { ...previous };
@@ -158,8 +176,10 @@ export function ResumeTaskButton({
               <TextField
                 key={field.key}
                 type="number"
+                disabled={busy}
                 label={field.label}
                 value={inputs[field.key]}
+                slotProps={{ htmlInput: { min: task.budget[field.key] / field.unit } }}
                 onChange={(event) => {
                   setInputs((previous) => ({ ...previous, [field.key]: event.target.value }));
                   setIdempotencyKey(crypto.randomUUID());
@@ -175,10 +195,10 @@ export function ResumeTaskButton({
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button disabled={busy} onClick={() => setOpen(false)}>
+          <Button disabled={busy} onClick={close}>
             Cancel
           </Button>
-          <Button variant="contained" disabled={busy} onClick={() => void resume()}>
+          <Button variant="contained" disabled={busy || disabled} onClick={() => void resume()}>
             {busy ? "Resuming…" : "Resume with this budget"}
           </Button>
         </DialogActions>

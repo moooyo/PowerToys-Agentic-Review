@@ -15,6 +15,7 @@ import type {
   InvestigationLoopCheckpointV1,
   InvestigationLoopRoundV1,
   InvestigationModelInvocationReceipt,
+  InvestigationOutputBatchRequest,
   InvestigationPrDiffManifestV1,
   InvestigationReportPartRequest,
   InvestigationUsageSummary,
@@ -31,6 +32,23 @@ const taskId = "task:1";
 const attemptId = "attempt-1";
 const workerToken = "arw1_fixture-worker-token";
 const lease = { attemptId, fence: 4, leaseToken: "fixture-lease-token" };
+const outputRequest = (): InvestigationOutputBatchRequest => ({
+  lease,
+  batchId: "output-batch-1",
+  events: [
+    {
+      schemaVersion: "InvestigationOutputEventV1",
+      attemptId,
+      invocationId: "invocation-1",
+      producerSequence: 4,
+      itemId: "visible-item-1",
+      kind: "assistant",
+      operation: "replace",
+      text: "Visible fixture message.",
+      observedAt: serverTime,
+    },
+  ],
+});
 const digest = "a".repeat(64);
 const claimRequest: InvestigationClaimRequest = { supportedKinds: ["issue-investigate"] };
 const heartbeatRequest: InvestigationHeartbeatRequest = { lease };
@@ -533,6 +551,59 @@ describe("Investigation HTTP client requests", () => {
     };
     captured.request.respondJson(response);
     await expect(pending).resolves.toEqual(response);
+  });
+
+  it("delivers normalized output under the retained attempt lease and matches its immutable batch acknowledgement", async () => {
+    const fixture = createFixture();
+    const request = outputRequest();
+    const pending = fixture.client.outputEvents!(taskId, request);
+    const captured = fixture.lastRequest();
+    expect(captured.url.pathname).toBe("/api/worker/tasks/task%3A1/output-events");
+    expect(JSON.parse(Buffer.concat(captured.request.chunks).toString("utf8"))).toEqual(request);
+    const response = {
+      taskId,
+      attemptId,
+      batchId: request.batchId,
+      lastAcceptedProducerSequence: 4,
+      cursor: "retained-cursor",
+      duplicate: false,
+    };
+    captured.request.respondJson(response);
+    await expect(pending).resolves.toEqual(response);
+  });
+
+  it.each(["task", "attempt", "batch", "sequence"])(
+    "rejects output acknowledgement with changed %s identity",
+    async (field) => {
+      const fixture = createFixture();
+      const request = outputRequest();
+      const pending = fixture.client.outputEvents!(taskId, request);
+      fixture.lastRequest().request.respondJson({
+        taskId: field === "task" ? "other" : taskId,
+        attemptId: field === "attempt" ? "other" : attemptId,
+        batchId: field === "batch" ? "other" : request.batchId,
+        lastAcceptedProducerSequence: field === "sequence" ? 5 : 4,
+        cursor: "cursor",
+        duplicate: true,
+      });
+      expect((await rejectionOf(pending)).code).toBe("invalid_response");
+    },
+  );
+
+  it("rejects cross-attempt output and noncontiguous sequences before opening a request", async () => {
+    for (const request of [
+      { ...outputRequest(), lease: { ...lease, attemptId: "other" } },
+      {
+        ...outputRequest(),
+        events: [...outputRequest().events, { ...outputRequest().events[0]!, producerSequence: 6 }],
+      },
+    ]) {
+      const fixture = createFixture();
+      expect((await rejectionOf(fixture.client.outputEvents!(taskId, request))).code).toBe(
+        "invalid_request",
+      );
+      expect(fixture.httpsRequest).not.toHaveBeenCalled();
+    }
   });
 
   it.each([true, false])(

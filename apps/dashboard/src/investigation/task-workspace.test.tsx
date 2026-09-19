@@ -8,10 +8,29 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { TaskDetail } from "./api";
 import { createSampleInvestigationApi } from "./sample-adapter";
-import { TaskDetails, TaskList } from "./task-workspace";
+import { sessionIdentity } from "./session";
+import { TaskDetails, TaskList, taskDetailQueryKey, taskDetailTab } from "./task-workspace";
 
-vi.mock("./session", () => ({
-  useInvestigationSession: () => ({ session: { user: { isAdmin: false, permissions: [] } } }),
+const session = vi.hoisted(() => ({
+  authenticated: true as const,
+  authMode: "password" as const,
+  loginPath: "/api/auth/login" as const,
+  expiresAt: "2099-01-01T00:00:00Z",
+  user: {
+    id: "viewer",
+    username: "viewer",
+    displayName: "Viewer",
+    email: null,
+    isAdmin: false,
+    permissions: [],
+    repositoryIds: ["repo-powertoys-fork"],
+    actionCapabilities: [],
+    allowRepositoryExecution: false,
+  },
+}));
+vi.mock("./session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./session")>()),
+  useInvestigationSession: () => ({ session }),
 }));
 
 const usage: InvestigationUsageSummary = {
@@ -79,7 +98,10 @@ describe("task workspace runtime information", () => {
             ];
       const before = structuredClone(checkpoint);
       const queryClient = client();
-      queryClient.setQueryData(["investigation-task", detail.task.id], detail);
+      queryClient.setQueryData(
+        taskDetailQueryKey(sessionIdentity(session), detail.task.id),
+        detail,
+      );
       const html = renderToStaticMarkup(
         <QueryClientProvider client={queryClient}>
           <MemoryRouter>
@@ -132,7 +154,10 @@ describe("task workspace runtime information", () => {
         lastHeartbeatAt: "2026-09-19T01:00:00Z",
       },
     };
-    queryClient.setQueryData(["investigation-task", detail.task.id], cancelledDetail);
+    queryClient.setQueryData(
+      taskDetailQueryKey(sessionIdentity(session), detail.task.id),
+      cancelledDetail,
+    );
     const html = renderToStaticMarkup(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter>
@@ -144,9 +169,45 @@ describe("task workspace runtime information", () => {
     expect(html).toContain("3 accepted analysis rounds");
     expect(html).toContain("Saved state v6");
     expect(html).not.toContain("Checkpoint version 6");
-    expect(html).toContain("including initialization and cancellation");
-    expect(html).toContain("700 tokens");
-    expect(html).toContain("Worker heartbeat");
-    expect(html).toContain("Latest meaningful progress");
+    expect(html).toContain("Agent output");
+    expect(html).toContain("Task tokens");
+    expect(html).toContain("700");
+    expect(html).not.toContain("Recorded stage totals");
+    const detailsHtml = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[`/tasks?taskId=${detail.task.id}&tab=details`]}>
+          <TaskDetails taskId={detail.task.id} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(detailsHtml).toContain("including initialization and cancellation");
+    expect(detailsHtml).toContain("700 tokens");
+    expect(detailsHtml).toContain("Worker heartbeat");
+    expect(detailsHtml).toContain("Latest meaningful progress");
+    expect(detailsHtml).not.toContain("Task output events");
+  });
+
+  it("resolves old detail links and keeps progress, evidence, and details as separate route panels", async () => {
+    expect(taskDetailTab(null)).toBe("progress");
+    expect(taskDetailTab("usage")).toBe("details");
+    expect(taskDetailTab("comments")).toBe("details");
+    expect(taskDetailTab("evidence")).toBe("evidence");
+    const detail = await createSampleInvestigationApi().task("sample-pr-partial-task");
+    const queryClient = client();
+    queryClient.setQueryData(taskDetailQueryKey(sessionIdentity(session), detail.task.id), detail);
+    for (const tab of ["progress", "evidence", "details"]) {
+      const html = renderToStaticMarkup(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[`/tasks?taskId=${detail.task.id}&tab=${tab}`]}>
+            <TaskDetails taskId={detail.task.id} />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      expect(html).toContain(`id="task-${tab}-panel"`);
+      expect(html.includes("Task output events")).toBe(tab === "progress");
+      expect(html.includes("Stored in workspace")).toBe(tab === "evidence");
+      expect(html.includes("Run details")).toBe(tab === "details");
+      expect(html).not.toContain("Complete report");
+    }
   });
 });

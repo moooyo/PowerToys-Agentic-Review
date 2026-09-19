@@ -13,16 +13,20 @@ import {
   AutoReplyDeliveryList,
   AutoReplySettingsConflictNotice,
   AutoReplySettingsForm,
+  AutoReplyTemplatePreview,
   autoRepliesQueryKey,
   autoReplyCommentUrl,
+  autoReplyPreviewBlocks,
   autoReplySettingsQueryKey,
   ProgressReplyDeliveryList,
   progressRepliesQueryKey,
   RepositoryAutoReplySettingsPanel,
 } from "./auto-reply-settings";
 import {
+  autoReplyAuthorizationSnapshot,
   autoReplyProgressStages,
   autoReplyProgressTemplateTokens,
+  autoReplySettingsFieldErrors,
   autoReplySettingsFormValues,
   autoReplySettingsInput,
   autoReplySettingsPermissions,
@@ -173,28 +177,14 @@ describe("repository automatic reply configuration", () => {
     );
     expect(html).toContain("does not rewrite existing comments");
     expect(html).toContain("English reply templates");
-    expect(html).toContain("AI identity");
-    expect(html).toContain("verified GitHub publishing user");
-    expect(html).toContain("AI-generated content may contain errors");
-    expect(html).toContain("collapsed by default");
-    expect(html).toContain("PR reply template");
-    expect(html).toContain("Issue reply template");
-    expect(html).toContain("Issue placeholders");
-    expect(html).toContain("summary is included in Triage result");
-    expect(html).toContain("without a separate Summary section");
-    expect(html).toContain("Bug triage shows Runtime reproduction separately");
-    expect(html).toContain("Next steps appear before collapsed Investigation details");
-    expect(html).toContain("{{next_steps}}");
+    expect(html).toContain("Conclusion templates");
+    expect(html).toContain("Progress templates");
+    expect(html).toContain("Edit templates");
+    expect(html).not.toContain("<textarea");
     expect(html).toContain("Publish assignment task progress");
     expect(html).toContain("updates that same comment when work starts, stops, or completes");
     expect(html).toContain("also authorizes these comment updates");
-    expect(html).toContain("inserts the full PR or Issue reply");
-    expect(html).toContain("Received progress template");
-    expect(html).toContain("Started progress template");
-    expect(html).toContain("Stopped progress template");
-    expect(html).toContain("Completed progress template");
-    expect(html).toContain("{{trigger}}");
-    expect(html).toContain("{{result}}");
+    expect(html).not.toContain("Received progress template</textarea>");
     expect(html).toContain("publisher is not configured yet");
     expect(html).toContain("Save automatic reply settings");
     expect(html).toContain("View comment deliveries");
@@ -284,6 +274,88 @@ describe("repository automatic reply configuration", () => {
 });
 
 describe("automatic reply input and authorization", () => {
+  it("binds an authorization confirmation to the reviewed draft and numeric settings version", async () => {
+    const saved = structuredClone({ ...settings, enabled: true });
+    const draft = autoReplySettingsFormValues(saved);
+    const confirmation = autoReplyAuthorizationSnapshot(draft, saved, true);
+    saved.version = 4;
+    draft.pullRequestTemplate = draft.pullRequestTemplate.replace(
+      "{{summary}}",
+      "Unreviewed wording\n{{summary}}",
+    );
+    draft.progressTemplates.received += "\nUnreviewed progress wording";
+    const update = vi
+      .fn()
+      .mockRejectedValue(new InvestigationHttpError(409, "The saved settings changed."));
+    await expect(
+      submitAutoReplySettings(
+        repository.id,
+        confirmation.form,
+        confirmation.saved,
+        false,
+        { canManage: true, canAuthorize: true },
+        update,
+        confirmation.renew,
+      ),
+    ).rejects.toThrow("The saved settings changed.");
+    expect(update).toHaveBeenCalledExactlyOnceWith(repository.id, {
+      ...autoReplySettingsInput(autoReplySettingsFormValues({ ...settings, enabled: true }), 3),
+      reauthorize: true,
+    });
+    expect(draft.pullRequestTemplate).toContain("Unreviewed wording");
+    expect(confirmation.form.progressTemplates.received).not.toContain(
+      "Unreviewed progress wording",
+    );
+  });
+  it("reports invalid hidden templates by their exact selector key without altering a draft", () => {
+    const draft = autoReplySettingsFormValues(settings);
+    draft.issueTemplate = draft.issueTemplate.replace("{{next_steps}}", "");
+    draft.progressTemplates.failed = draft.progressTemplates.failed.replace("{{failure}}", "");
+    const errors = autoReplySettingsFieldErrors(draft);
+    expect(Object.keys(errors)).toEqual(["issue", "failed"]);
+    expect(errors.issue).toContain("{{next_steps}}");
+    expect(errors.failed).toContain("{{failure}}");
+    expect(draft.issueTemplate).not.toContain("{{next_steps}}");
+    expect(autoReplySettingsFieldErrors(autoReplySettingsFormValues(settings))).toEqual({});
+  });
+
+  it("retains distinct source locations for repeated paragraphs, details tokens, and CRLF headings", () => {
+    const value = "Repeat\r\n\r\nRepeat\r\n\r\n{{details}}\r\n\r\n## Summary\r\n{{summary}}";
+    const blocks = autoReplyPreviewBlocks(value);
+    expect(blocks.map((block) => block.kind)).toEqual(["text", "text", "details", "text"]);
+    expect(blocks.map((block) => block.sourceOffset)).toEqual([
+      0,
+      value.indexOf("Repeat", 1),
+      value.indexOf("{{details}}"),
+      value.indexOf("## Summary"),
+    ]);
+    expect(new Set(blocks.map((block) => block.sourceOffset)).size).toBe(blocks.length);
+    for (const block of blocks) {
+      expect(value.slice(block.sourceOffset, block.sourceOffset + block.value.length)).toBe(
+        block.value,
+      );
+    }
+    const html = renderToStaticMarkup(
+      <AutoReplyTemplatePreview template="pullRequest" value={value} />,
+    );
+    expect(html).toContain("[Investigation summary]");
+    expect(html).toContain("Summary</h3>");
+  });
+
+  it("previews escaped placeholders and collapsed details without inventing real investigation data", () => {
+    const html = renderToStaticMarkup(
+      <AutoReplyTemplatePreview
+        template="issue"
+        value={"{{identity}}\n<script>alert(1)</script>\n{{next_steps}}\n{{details}}"}
+      />,
+    );
+    expect(html).toContain("Illustrative placeholders only");
+    expect(html).toContain("[Recommended next steps]");
+    expect(html).toContain("Investigation details");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("task-1041");
+  });
   it("renews publication authorization only through an explicit request", async () => {
     const update = vi.fn().mockResolvedValue(settings);
     await submitAutoReplySettings(

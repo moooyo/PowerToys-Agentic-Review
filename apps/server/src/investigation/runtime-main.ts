@@ -1,6 +1,10 @@
 import { mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
-import type { InvestigationResultV1, InvestigationTaskV1 } from "@agentic-review/contracts";
+import {
+  InvestigationMediaPublicationSchema,
+  type InvestigationResultV1,
+  type InvestigationTaskV1,
+} from "@agentic-review/contracts";
 import fastifyStatic from "@fastify/static";
 import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
@@ -265,10 +269,11 @@ export async function createInvestigationRuntime(
           deliveries,
           progress,
           automaticReplies: publisher,
+          workspace: service.workspace,
         });
         ingressApp.get<{ Params: { id: string } }>(
           "/api/reports/:id/media-publication",
-          { schema: { params } },
+          { schema: { params, response: { 200: InvestigationMediaPublicationSchema } } },
           async (request, reply) => {
             const actor = runtimeAuth.authenticateOperator(request);
             requireCondition(

@@ -51,6 +51,22 @@ describe("model token usage presentation", () => {
     expect(usageTotal(summary({ reportedTokens: 0 }))).toBe("0");
   });
 
+  it("keeps compact list usage truthful without repeating the breakdown label", () => {
+    const unavailable = renderToStaticMarkup(<UsageSummaryLabel compact />);
+    expect(unavailable).toContain("Usage unavailable");
+    expect(unavailable).not.toContain("0 tokens");
+    expect(unavailable).not.toContain("Breakdown unavailable");
+    const partial = renderToStaticMarkup(
+      <UsageSummaryLabel compact summary={summary({ completeness: "partial" })} />,
+    );
+    expect(partial).toContain("1,400+ tokens");
+    const zero = renderToStaticMarkup(
+      <UsageSummaryLabel compact summary={summary({ reportedTokens: 0 })} />,
+    );
+    expect(zero).toContain("0 tokens");
+    expect(zero).not.toContain("Usage unavailable");
+  });
+
   it("retains historical totals without inventing their breakdown", () => {
     const html = renderToStaticMarkup(<TokenUsagePanel legacyTokens={77004} scope="report" />);
     expect(html).toContain("77,004 tokens");
@@ -94,5 +110,7 @@ describe("model token usage presentation", () => {
     expect(html).toContain("rejected");
     expect(html).toContain("Unknown");
     expect(html).toContain("cancelled calls");
+    expect(html).toContain("CLI default");
+    expect(html).toContain("(requested)");
   });
 });

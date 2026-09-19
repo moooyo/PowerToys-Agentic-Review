@@ -2,14 +2,17 @@ import {
   type ActionContextV1,
   createInvestigationPreview as createInvestigationFixture,
   type InvestigationActionIntentV1,
+  InvestigationActionIntentV1Schema,
   type InvestigationActionKind,
   type InvestigationCreateActionIntentRequest,
   type InvestigationCreateTaskRequestV1,
   type InvestigationTaskV1,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
+import { Value } from "@sinclair/typebox/value";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationActions, type InvestigationActionsDependencies } from "./actions.js";
+import { buildInvestigationApp } from "./app.js";
 import { InvestigationRequestError } from "./errors.js";
 import { InvestigationStore } from "./store.js";
 import type {
@@ -540,6 +543,215 @@ describe("investigation action preparation and confirmation", () => {
     expect(h.reconcile).toHaveBeenCalledTimes(1);
     expect(h.execute).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["succeeded", "failed", "unknown"] as const)(
+    "returns and persists a strict %s reconciliation receipt through HTTP without redispatch",
+    async (state) => {
+      const h = harness();
+      h.execute.mockResolvedValue({
+        state: "unknown",
+        message: "The dispatch response was lost.",
+        externalId: null,
+      });
+      h.reconcile.mockResolvedValue({
+        state,
+        message: "Read-only synthetic receipt observation.",
+        externalId: state === "succeeded" ? "receipt-found" : null,
+      });
+      const intent = await h.actions.createIntent(h.actor, h.request());
+      const confirmation = { version: intent.version, payloadDigest: intent.payloadDigest };
+      await h.actions.confirmIntent(h.actor, intent.id, confirmation);
+      const app = buildInvestigationApp({
+        store: h.store,
+        actionTransport: h.transport,
+        enableExternalWrites: true,
+        authenticateOperator: (request) =>
+          request.headers.authorization === "synthetic-operator" ? h.actor : null,
+      });
+      try {
+        const reconciled = await app.inject({
+          method: "POST",
+          url: `/api/action-intents/${intent.id}/reconcile`,
+          headers: { authorization: "synthetic-operator" },
+          payload: {},
+        });
+        expect(reconciled.statusCode, reconciled.body).toBe(200);
+        const body = reconciled.json<InvestigationActionIntentV1>();
+        expect(Value.Check(InvestigationActionIntentV1Schema, body)).toBe(true);
+        expect(body.state).toBe(state);
+        expect(body.result).toEqual({
+          message: "Read-only synthetic receipt observation.",
+          externalId: state === "succeeded" ? "receipt-found" : null,
+          taskId: null,
+        });
+        const read = await app.inject({
+          method: "GET",
+          url: `/api/action-intents/${intent.id}`,
+          headers: { authorization: "synthetic-operator" },
+        });
+        expect(read.statusCode).toBe(200);
+        expect(Value.Check(InvestigationActionIntentV1Schema, read.json())).toBe(true);
+        expect(read.json()).toEqual(body);
+        expect(h.store.get("actionIntents", intent.id)).toEqual(body);
+        expect(await h.actions.confirmIntent(h.actor, intent.id, confirmation)).toEqual(body);
+        expect(h.execute).toHaveBeenCalledTimes(1);
+        expect(h.reconcile).toHaveBeenCalledTimes(1);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each(["succeeded", "failed", "unknown"] as const)(
+    "reads only the exact legacy %s reconciliation shape without rewriting history or redispatching",
+    async (state) => {
+      const h = harness();
+      h.execute.mockResolvedValue({
+        state,
+        message: "Original immutable observation.",
+        externalId: state === "succeeded" ? "original-receipt" : null,
+      });
+      const request = h.request();
+      const prepared = await h.actions.createIntent(h.actor, request);
+      const confirmation = { version: prepared.version, payloadDigest: prepared.payloadDigest };
+      const original = await h.actions.confirmIntent(h.actor, prepared.id, confirmation);
+      const legacy = { ...original, result: { ...original.result!, state } };
+      h.store.put("actionIntents", original.id, legacy);
+      const historicalDigest = investigationContentDigest(legacy);
+      const app = buildInvestigationApp({
+        store: h.store,
+        actionTransport: h.transport,
+        enableExternalWrites: true,
+        authenticateOperator: () => h.actor,
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: `/api/action-intents/${original.id}`,
+        });
+        expect(response.statusCode).toBe(200);
+        expect(Value.Check(InvestigationActionIntentV1Schema, response.json())).toBe(true);
+        expect(response.json()).toEqual(original);
+        expect(h.actions.findIntentByIdempotencyKey(h.actor, request.idempotencyKey)).toEqual(
+          original,
+        );
+        expect(await h.actions.confirmIntent(h.actor, original.id, confirmation)).toEqual(original);
+        if (state !== "unknown")
+          expect(await h.actions.reconcileIntent(h.actor, original.id)).toEqual(original);
+        expect(investigationContentDigest(h.store.get("actionIntents", original.id))).toBe(
+          historicalDigest,
+        );
+        expect(h.store.get("actionIntents", original.id)).toEqual(legacy);
+        expect(h.execute).toHaveBeenCalledTimes(1);
+        expect(h.reconcile).not.toHaveBeenCalled();
+        expect(() =>
+          h.actions.getIntent({ ...h.actor, id: "another-operator" }, original.id),
+        ).toThrow(expect.objectContaining({ code: "action_intent_forbidden" }));
+        expect(() => h.actions.getIntent({ ...h.actor, repositoryIds: [] }, original.id)).toThrow(
+          expect.objectContaining({ code: "action_intent_forbidden" }),
+        );
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it("projects a concurrently retained legacy terminal receipt on the finish compare-and-swap return", async () => {
+    const h = harness();
+    h.execute.mockResolvedValue({
+      state: "unknown",
+      message: "The dispatch response was lost.",
+      externalId: null,
+    });
+    const prepared = await h.actions.createIntent(h.actor, h.request());
+    const unknown = await h.actions.confirmIntent(h.actor, prepared.id, {
+      version: prepared.version,
+      payloadDigest: prepared.payloadDigest,
+    });
+    const terminal = {
+      ...unknown,
+      version: unknown.version + 1,
+      state: "succeeded" as const,
+      result: {
+        message: "An earlier reconciler found the original receipt.",
+        externalId: "original-receipt",
+        taskId: null,
+      },
+    };
+    const legacy = { ...terminal, result: { ...terminal.result, state: "succeeded" } };
+    h.reconcile.mockImplementation(async () => {
+      h.store.put("actionIntents", unknown.id, legacy);
+      return { state: "unknown", message: "A later lookup was inconclusive.", externalId: null };
+    });
+    const reconciled = await h.actions.reconcileIntent(h.actor, unknown.id);
+    expect(Value.Check(InvestigationActionIntentV1Schema, reconciled)).toBe(true);
+    expect(reconciled).toEqual(terminal);
+    expect(h.store.get("actionIntents", unknown.id)).toEqual(legacy);
+    expect(h.execute).toHaveBeenCalledTimes(1);
+    expect(h.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "additional result key",
+    "additional key without legacy state",
+    "additional intent key",
+    "conflicting result state",
+    "executing state",
+    "internal task action",
+    "external task reference",
+    "missing result message",
+    "invalid result field type",
+  ])(
+    "rejects %s instead of treating it as the exact legacy reconciliation bug",
+    async (variant) => {
+      const h = harness();
+      const prepared = await h.actions.createIntent(h.actor, h.request());
+      const original = await h.actions.confirmIntent(h.actor, prepared.id, {
+        version: prepared.version,
+        payloadDigest: prepared.payloadDigest,
+      });
+      const legacyResult = { ...original.result!, state: original.state };
+      let invalid: unknown = { ...original, result: legacyResult };
+      if (variant === "additional result key")
+        invalid = { ...original, result: { ...legacyResult, unsupported: true } };
+      if (variant === "additional key without legacy state")
+        invalid = { ...original, result: { ...original.result!, unsupported: true } };
+      if (variant === "additional intent key")
+        invalid = { ...original, result: legacyResult, unsupported: true };
+      if (variant === "conflicting result state")
+        invalid = { ...original, result: { ...legacyResult, state: "failed" } };
+      if (variant === "executing state")
+        invalid = {
+          ...original,
+          state: "executing",
+          result: { ...legacyResult, state: "executing" },
+        };
+      if (variant === "internal task action")
+        invalid = { ...original, action: "start-task", result: legacyResult };
+      if (variant === "external task reference")
+        invalid = { ...original, result: { ...legacyResult, taskId: "unrelated-task" } };
+      if (variant === "missing result message")
+        invalid = {
+          ...original,
+          result: { state: original.state, externalId: null, taskId: null },
+        };
+      if (variant === "invalid result field type")
+        invalid = { ...original, result: { ...legacyResult, externalId: 42 } };
+      h.store.put("actionIntents", original.id, invalid);
+      expect(() =>
+        h.actions.getIntent({ ...h.actor, id: "another-operator" }, original.id),
+      ).toThrow(expect.objectContaining({ code: "action_intent_forbidden" }));
+      expect(() => h.actions.getIntent(h.actor, original.id)).toThrow(
+        expect.objectContaining({ statusCode: 500, code: "invalid_saved_action_intent" }),
+      );
+      await expect(h.actions.reconcileIntent(h.actor, original.id)).rejects.toMatchObject({
+        code: "invalid_saved_action_intent",
+      });
+      expect(h.store.get("actionIntents", original.id)).toEqual(invalid);
+      expect(h.execute).toHaveBeenCalledTimes(1);
+      expect(h.reconcile).not.toHaveBeenCalled();
+    },
+  );
 
   it("restricts feedback drafts to the exact selected findings", async () => {
     const h = harness({ findingCount: 2 });

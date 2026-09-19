@@ -20,7 +20,7 @@ body,
   margin: 0;
 }
 body {
-  min-width: 360px;
+  min-width: 320px;
 }
 * {
   box-sizing: border-box;

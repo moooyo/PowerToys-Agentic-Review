@@ -1,0 +1,283 @@
+.workspace-shell {
+  display: flex;
+  height: 100dvh;
+  min-width: 320px;
+  overflow: hidden;
+  background: var(--app-canvas);
+}
+.workspace-rail {
+  width: 88px;
+  flex: 0 0 88px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--app-surface-container);
+  padding: 20px 8px;
+  gap: 28px;
+}
+.workspace-brand-mark.MuiIconButton-root {
+  color: var(--app-accent);
+  width: 48px;
+  height: 48px;
+}
+.workspace-brand-mark svg {
+  width: 30px;
+  height: 30px;
+}
+.workspace-rail-nav {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  gap: 14px;
+}
+.workspace-nav-link {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 68px;
+  width: 100%;
+  border-radius: 16px;
+  color: var(--app-muted);
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+.workspace-nav-symbol {
+  width: 64px;
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 24px;
+  transition: background-color 120ms ease;
+}
+.workspace-nav-symbol svg {
+  width: 24px;
+  height: 24px;
+}
+.workspace-nav-link:hover .workspace-nav-symbol {
+  background: var(--app-hover);
+}
+.workspace-nav-link.selected {
+  color: var(--app-on-primary-container);
+}
+.workspace-nav-link.selected .workspace-nav-symbol {
+  background: var(--app-primary-container);
+}
+.workspace-rail .workspace-theme-button {
+  margin-top: auto;
+  color: var(--app-muted);
+}
+.workspace-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.workspace-app-bar {
+  height: 64px;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 36px;
+}
+.workspace-brand {
+  color: var(--app-text);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.workspace-app-bar .workspace-mobile-menu {
+  display: none;
+}
+.workspace-main {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 40px 48px;
+  scroll-padding-top: 24px;
+  scroll-padding-bottom: 32px;
+}
+.workspace-page-content {
+  max-width: 1760px;
+  margin-inline: auto;
+  min-width: 0;
+}
+.workspace-page-content > * {
+  min-width: 0;
+}
+.workspace-group-tabs {
+  display: flex;
+  gap: 12px;
+  max-width: 1760px;
+  margin: 0 auto 28px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding: 0 0 4px;
+}
+.workspace-group-tabs .MuiButton-root {
+  flex-shrink: 0;
+  min-height: 44px;
+  border-radius: 14px;
+  color: var(--app-muted);
+  padding-inline: 20px;
+}
+.workspace-group-tabs .MuiButton-root.selected {
+  color: var(--app-on-primary-container);
+  background: var(--app-primary-container);
+}
+.workspace-page-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.workspace-page-action {
+  flex-shrink: 0;
+  max-width: 100%;
+}
+.workspace-page-heading {
+  min-width: 0;
+}
+.workspace-bottom-nav {
+  display: none;
+}
+.workspace-skip {
+  position: fixed;
+  top: -100px;
+  left: 16px;
+  z-index: 1600;
+  padding: 12px 20px;
+  min-height: 48px;
+  background: var(--app-accent);
+  color: var(--mui-palette-primary-contrastText, #fff);
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  border-radius: 12px;
+  text-decoration: none;
+}
+.workspace-skip:focus {
+  top: 12px;
+}
+.workspace-main:focus:not(:focus-visible) {
+  outline: none;
+}
+.workspace-page-content a {
+  text-underline-offset: 3px;
+}
+@media (max-width: 1100px) {
+  .workspace-main {
+    padding-inline: 28px;
+  }
+  .workspace-app-bar {
+    padding-inline: 24px;
+  }
+}
+@media (max-width: 839px) {
+  .workspace-rail {
+    display: none;
+  }
+  .workspace-app-bar {
+    padding: 8px 16px;
+    gap: 8px;
+  }
+  .workspace-app-bar .workspace-mobile-menu {
+    display: inline-flex;
+  }
+  .workspace-main {
+    padding: 20px 24px calc(110px + env(safe-area-inset-bottom));
+    scroll-padding-bottom: 110px;
+  }
+  .workspace-bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 1100;
+    padding: 6px 8px max(8px, env(safe-area-inset-bottom));
+    background: var(--app-surface-container);
+    border-top: 1px solid var(--app-line);
+  }
+  .workspace-bottom-nav .workspace-nav-link {
+    flex: 1;
+    min-height: 58px;
+    font-size: 11px;
+    gap: 2px;
+  }
+  .workspace-bottom-nav .workspace-nav-symbol {
+    min-height: 32px;
+    width: 56px;
+  }
+  .workspace-group-tabs {
+    margin-bottom: 24px;
+    gap: 4px;
+  }
+  .workspace-group-tabs .MuiButton-root {
+    padding-inline: 16px;
+  }
+}
+@media (max-width: 599px) {
+  .workspace-main {
+    padding-inline: 16px;
+  }
+  .workspace-brand {
+    font-size: 18px;
+    line-height: 24px;
+  }
+  .workspace-app-bar {
+    padding-inline: 12px;
+    gap: 4px;
+  }
+  .workspace-page-title-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 18px;
+  }
+  .workspace-page-action {
+    width: 100%;
+  }
+  .workspace-page-action > .MuiButton-root {
+    width: 100%;
+  }
+  .workspace-page-heading h1 {
+    font-size: 28px;
+    line-height: 36px;
+  }
+  .workspace-group-tabs .MuiButton-root {
+    padding-inline: 14px;
+  }
+  .MuiDialog-paper {
+    max-width: calc(100% - 24px);
+    margin: 12px;
+  }
+}
+@media (pointer: coarse) {
+  /* Keep touch targets above later MUI and sx rules, including scoped portals. */
+  #root .MuiButton-root,
+  #root .MuiToggleButton-root,
+  #root .MuiIconButton-root,
+  #root .MuiTab-root,
+  #root .MuiTabScrollButton-root,
+  #root .MuiMenuItem-root,
+  #root button.MuiChip-root,
+  #root .MuiChip-root[role="button"],
+  #root .MuiFormControlLabel-root {
+    min-height: 48px;
+  }
+  #root .MuiButton-root,
+  #root .MuiToggleButton-root,
+  #root .MuiIconButton-root,
+  #root .MuiTabScrollButton-root,
+  #root button.MuiChip-root,
+  #root .MuiChip-root[role="button"] {
+    min-width: 48px;
+  }
+}

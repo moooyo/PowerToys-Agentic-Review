@@ -58,6 +58,12 @@ import {
   type ModelUsageJournalOptions,
 } from "./model-usage-journal.js";
 import {
+  DurableInvestigationOutputJournal,
+  type InvestigationOutputJournal,
+  type InvestigationOutputJournalOptions,
+} from "./output-journal.js";
+import { createInvestigationOutputReporter } from "./output-reporter.js";
+import {
   type InvestigationModelEditAdapter,
   type InvestigationPlanExecutor,
   type InvestigationUiPlanAdapter,
@@ -100,6 +106,10 @@ export interface InvestigationVerifiedDeployment {
 }
 
 export interface InvestigationRuntimeDependencies {
+  readonly outputInitializationTimeoutMs?: number;
+  readonly createOutputJournal?: (
+    options: InvestigationOutputJournalOptions,
+  ) => InvestigationOutputJournal;
   readonly prepareDirectories?: (config: InvestigationWorkerRuntimeConfig) => Promise<void>;
   readonly verifyDeployment?: (
     config: InvestigationWorkerRuntimeConfig,
@@ -174,7 +184,13 @@ export async function createInvestigationExecutionRuntime(
       "The deployment must verify its isolated static CLI configuration before starting the investigation Worker.",
     );
   const usageJournalDirectory = win32.join(config.dataDirectory, "model-usage");
+  const outputJournalDirectory = win32.join(config.dataDirectory, "visible-output");
   const cleanupJournalDirectory = win32.join(config.dataDirectory, "attempt-cleanup");
+  if (
+    key(outputJournalDirectory) === key(config.workspaceRootDirectory) ||
+    key(outputJournalDirectory).startsWith(`${key(config.workspaceRootDirectory)}\\`)
+  )
+    throw new Error("The visible output journal must remain outside disposable workspaces.");
   if (
     key(usageJournalDirectory) === key(config.workspaceRootDirectory) ||
     key(usageJournalDirectory).startsWith(`${key(config.workspaceRootDirectory)}\\`)
@@ -200,6 +216,40 @@ export async function createInvestigationExecutionRuntime(
     requestTimeoutMs: config.requestTimeoutMs,
   });
   const usageDeliveryLifetime = new AbortController();
+  const outputJournal = (
+    dependencies.createOutputJournal ??
+    ((options) => new DurableInvestigationOutputJournal(options))
+  )({
+    directory: outputJournalDirectory,
+    protectedValues: [config.workerToken],
+    requestTimeoutMs: Math.min(5_000, config.requestTimeoutMs),
+    onFailure: () =>
+      logger.warn(
+        "Visible output delivery is unavailable; bounded sanitized records remain retained.",
+      ),
+    onTerminalFailure: (diagnostic) =>
+      logger.error("Visible output delivery permanently stopped for this attempt.", {
+        ...diagnostic,
+      }),
+    deliver: async (taskId, request, signal) => {
+      if (transportClient.outputEvents === undefined)
+        throw new Error("The Worker visible output transport is unavailable.");
+      return transportClient.outputEvents(taskId, request, signal);
+    },
+  });
+  let outputReplay: Promise<void> | undefined;
+  const replayOutput = (): void => {
+    if (usageDeliveryLifetime.signal.aborted || outputReplay !== undefined) return;
+    // Avoid attaching another rejection/finally observer to a permanently stalled shared replay.
+    outputReplay = outputJournal
+      .replay()
+      .catch(() => logger.warn("Retained visible output could not be replayed."))
+      .finally(() => {
+        outputReplay = undefined;
+      });
+  };
+  const outputReporters = new Map<string, ReturnType<typeof createInvestigationOutputReporter>>();
+  const cancellationObserved = new Set<string>();
   const usageJournal = (
     dependencies.createUsageJournal ?? ((options) => new InvestigationModelUsageJournal(options))
   )({
@@ -239,6 +289,7 @@ export async function createInvestigationExecutionRuntime(
             } finally {
               // A disabled execution-only Worker still needs to deliver retained receipts.
               void replayUsage();
+              replayOutput();
               void replayCleanup().catch(() =>
                 logger.warn("Pending execution cleanup remains retained for recovery."),
               );
@@ -249,6 +300,7 @@ export async function createInvestigationExecutionRuntime(
       const response = await transportClient.claim(request, signal);
       // Idle polling also retries terminal receipts after the last attempt ends.
       void replayUsage();
+      replayOutput();
       void replayCleanup().catch(() =>
         logger.warn("Pending execution cleanup remains retained for recovery."),
       );
@@ -258,14 +310,44 @@ export async function createInvestigationExecutionRuntime(
       const response = await transportClient.heartbeat(taskId, request, signal);
       // Accounting retries must not delay lease renewal or change execution authority.
       void replayUsage();
+      replayOutput();
+      if (response.cancelRequested && !cancellationObserved.has(request.lease.attemptId)) {
+        cancellationObserved.add(request.lease.attemptId);
+        outputReporters
+          .get(request.lease.attemptId)
+          ?.system(
+            "The Server requested task cancellation. Owned process cleanup has not yet been confirmed.",
+          );
+      }
       // Server admission is checked in this same renewal response before execution proceeds.
       return response;
     },
+    async checkpoint(taskId, request, signal) {
+      const response = await transportClient.checkpoint(taskId, request, signal);
+      outputReporters
+        .get(request.lease.attemptId)
+        ?.system("The Server accepted a checkpoint for this attempt.");
+      return response;
+    },
+    ...(transportClient.progress === undefined
+      ? {}
+      : ({
+          async progress(taskId, request, signal) {
+            if (request.kind === "stage")
+              outputReporters
+                .get(request.lease.attemptId)
+                ?.system(`Worker stage: ${request.stage}.`);
+            return transportClient.progress!(taskId, request, signal);
+          },
+        } satisfies Pick<InvestigationWorkerClient, "progress">)),
     ...(transportClient.cleanup === undefined
       ? {}
       : ({
           async cleanup(taskId, request, signal) {
             const response = await transportClient.cleanup!(taskId, request, signal);
+            outputReporters
+              .get(request.lease.attemptId)
+              ?.system("The Server acknowledged owned process cleanup and desktop restoration.");
             if (activeCleanupAttempts.has(request.lease.attemptId))
               await cleanupJournal.acknowledged(request.lease.attemptId);
             return response;
@@ -364,12 +446,14 @@ export async function createInvestigationExecutionRuntime(
       try {
         await withShutdownDeadline(stopped, config.shutdownTimeoutMs);
       } catch {
+        await outputJournal.stop(1_000).catch(() => false);
         usageDeliveryLifetime.abort();
         // A broken child stream must not prevent the native host from closing its owned trees.
         await closeHost();
         await withShutdownDeadline(stopped, config.shutdownTimeoutMs);
         return;
       }
+      await outputJournal.stop(2_000).catch(() => false);
       usageDeliveryLifetime.abort();
       await usageReplay;
       await closeHost();
@@ -377,6 +461,7 @@ export async function createInvestigationExecutionRuntime(
     return stopPromise;
   };
   try {
+    replayOutput();
     const recoveredOwnership = processHost.recovery?.();
     if (recoveredOwnership !== undefined) {
       await usageJournal.closeInterruptedInvocations(recoveredOwnership);
@@ -411,6 +496,10 @@ export async function createInvestigationExecutionRuntime(
       staticConfiguration: config.modelStaticConfiguration,
       protectedValues: [config.workerToken],
       usageJournal,
+      outputJournal,
+      ...(dependencies.outputInitializationTimeoutMs === undefined
+        ? {}
+        : { outputInitializationTimeoutMs: dependencies.outputInitializationTimeoutMs }),
       onProcessDiagnostic: (observation) => {
         logger.info("Investigation model process lifecycle observed.", { ...observation });
       },
@@ -479,196 +568,221 @@ export async function createInvestigationExecutionRuntime(
           (config.role !== undefined && config.role !== "all" && config.role !== pool)
         )
           throw new Error("The investigation claim is outside this Worker's configured task role.");
-        let cleanupIdentity: AttemptCleanupIdentity | undefined;
-        const executeAttempt = async (
-          cleanupHooks: Partial<AttemptDesktopCleanupHooks> = {},
-        ): Promise<void> => {
-          const completedSteps = claim.checkpoint?.runtime.completedSteps ?? [];
-          const uncertainStep =
-            claim.checkpoint?.runtime.startedSteps.some(
-              (step) => !completedSteps.some((completed) => completed.stepId === step.stepId),
-            ) === true;
-          const previousSubject = completedSteps.at(-1)?.subjects.at(-1);
-          const restorePatchSubject =
-            !uncertainStep &&
-            (claim.task.kind === "issue-fix" || claim.task.kind === "feature-implement") &&
-            previousSubject?.kind === "local_patch"
-              ? previousSubject
-              : undefined;
-          // The artifact reader closes over this exact claim lease, never a mutable current-task map.
-          const materializer = (
-            dependencies.createSourceMaterializer ??
-            ((options) => new ProductionInvestigationGitSourceMaterializer(options))
-          )({
-            gitExecutablePath: binaries.gitPath,
-            allowedRepositories: config.allowedRepositories,
-            environment: config.operatingSystemEnvironment,
-            limits: config.gitLimits,
-            ...(restorePatchSubject === undefined ? {} : { restorePatchSubject }),
-            readPatchArtifact: async (input, artifactId, artifactSignal) => {
-              if (
-                input.task.id !== claim.task.id ||
-                input.attempt.id !== claim.attempt.id ||
-                input.attempt.leaseVersion !== claim.lease.fence
-              )
-                throw new Error(
-                  "The source artifact request does not belong to this frozen claim.",
-                );
-              const response = await client.readArtifact(
-                claim.task.id,
-                { lease: claim.lease, artifactId },
-                artifactSignal,
-              );
-              const primary = input.task.subjects.find((item) => item.id === input.task.subjectRef);
-              const subject = primary?.kind === "local_patch" ? primary : restorePatchSubject;
-              const bytes = Buffer.from(response.contentBase64, "base64");
-              if (
-                subject?.kind !== "local_patch" ||
-                subject.artifactRef !== artifactId ||
-                response.artifact.id !== artifactId ||
-                response.artifact.subjectRef !== subject.id ||
-                response.artifact.kind !== "patch" ||
-                response.artifact.availability !== "available" ||
-                response.artifact.digest !== subject.patchDigest ||
-                response.artifact.byteLength !== bytes.byteLength ||
-                bytes.toString("base64") !== response.contentBase64 ||
-                hash(bytes) !== subject.patchDigest
-              )
-                throw new Error(
-                  "The trusted patch response does not match its exact frozen source subject.",
-                );
-              return bytes;
-            },
-          });
-          const workspaceProvider = (
-            dependencies.createWorkspaceProvider ??
-            ((options) => new ProductionInvestigationWorkspaceProvider(options))
-          )({
-            workspaceRootDirectory: config.workspaceRootDirectory,
-            sourceMaterializer: materializer,
-            maximumTreeEntries: 250_000,
-            ...(investigationTaskPool(claim.task.kind) === "static"
-              ? {}
-              : ({
-                  onOwnershipEstablished: (receipt) =>
-                    cleanupJournal.workspaceOwned(claim.attempt.id, receipt),
-                  cleanupOwned: async (receipt) => {
-                    if (cleanupIdentity === undefined)
-                      throw new Error("Execution cleanup has no durable owner.");
-                    await cleanupOperations.cleanupWorkspace(cleanupIdentity, receipt);
-                  },
-                } satisfies Pick<
-                  ProductionInvestigationWorkspaceProviderOptions,
-                  "onOwnershipEstablished" | "cleanupOwned"
-                >)),
-          });
-          const coordinator = (
-            dependencies.createCoordinator ??
-            ((options) => new InvestigationLoopCoordinator(options))
-          )({
-            client,
-            processHost,
-            modelTurnRunner,
-            e2eAgentRunner,
-            workspaceProvider,
-            planExecutor,
-            logger,
-            terminalTimeoutMs: config.shutdownTimeoutMs,
-            ...cleanupHooks,
-            onNodeFault: (code) => {
-              nodeFault ??= new Error(
-                `The investigation Worker encountered an execution lifecycle fault (${code}).`,
-              );
-              logger.error(
-                "The investigation Worker is draining after an execution lifecycle fault.",
-                { code },
-              );
-              service?.requestDrain();
-            },
-          });
-          await coordinator.execute(claim, signal);
-        };
-        if (investigationTaskPool(claim.task.kind) === "static") {
-          await executeAttempt();
-          return;
-        }
-        activeCleanupAttempts.add(claim.attempt.id);
+        const outputReporter = createInvestigationOutputReporter({
+          journal: outputJournal,
+          taskId: claim.task.id,
+          lease: claim.lease,
+          initializationTimeoutMs: Math.min(
+            dependencies.outputInitializationTimeoutMs ?? 1_000,
+            Math.max(
+              1,
+              claim.task.budget.maxDurationMs - (claim.checkpoint?.consumed.durationMs ?? 0),
+            ),
+          ),
+          onFailure: () =>
+            logger.warn("Visible output collection could not initialize for this attempt."),
+        });
+        outputReporters.set(claim.attempt.id, outputReporter);
         try {
-          const identity = await cleanupJournal.register({
-            taskId: claim.task.id,
-            attemptId: claim.attempt.id,
-            workerId: claim.attempt.workerId ?? "unidentified-worker",
-            serverOrigin: config.serverUrl,
-            lease: claim.lease,
-            guardOwnerId: `${claim.attempt.id}:${claim.lease.fence}`,
-            workspaceRootDirectory: config.workspaceRootDirectory,
-            desktopLockDirectory: config.desktopLockDirectory,
-            processHostInstanceKey: deriveWorkerProcessHostInstanceKey({
-              dataDirectory: config.dataDirectory,
-            }),
-            processHostRecovery: processHost.recovery?.() ?? null,
-          });
-          cleanupIdentity = identity;
-          let physicalGuard: AttemptDesktopGuard;
-          if (dependencies.acquireDesktopGuard !== undefined) {
-            physicalGuard = await dependencies.acquireDesktopGuard({
-              lockDirectory: config.desktopLockDirectory,
-              ownerId: identity.guardOwnerId,
-              ownerToken: identity.guardOwnerToken,
+          await outputReporter.start(signal);
+          signal.throwIfAborted();
+          let cleanupIdentity: AttemptCleanupIdentity | undefined;
+          const executeAttempt = async (
+            cleanupHooks: Partial<AttemptDesktopCleanupHooks> = {},
+          ): Promise<void> => {
+            const completedSteps = claim.checkpoint?.runtime.completedSteps ?? [];
+            const uncertainStep =
+              claim.checkpoint?.runtime.startedSteps.some(
+                (step) => !completedSteps.some((completed) => completed.stepId === step.stepId),
+              ) === true;
+            const previousSubject = completedSteps.at(-1)?.subjects.at(-1);
+            const restorePatchSubject =
+              !uncertainStep &&
+              (claim.task.kind === "issue-fix" || claim.task.kind === "feature-implement") &&
+              previousSubject?.kind === "local_patch"
+                ? previousSubject
+                : undefined;
+            // The artifact reader closes over this exact claim lease, never a mutable current-task map.
+            const materializer = (
+              dependencies.createSourceMaterializer ??
+              ((options) => new ProductionInvestigationGitSourceMaterializer(options))
+            )({
+              gitExecutablePath: binaries.gitPath,
+              allowedRepositories: config.allowedRepositories,
+              environment: config.operatingSystemEnvironment,
+              limits: config.gitLimits,
+              ...(restorePatchSubject === undefined ? {} : { restorePatchSubject }),
+              readPatchArtifact: async (input, artifactId, artifactSignal) => {
+                if (
+                  input.task.id !== claim.task.id ||
+                  input.attempt.id !== claim.attempt.id ||
+                  input.attempt.leaseVersion !== claim.lease.fence
+                )
+                  throw new Error(
+                    "The source artifact request does not belong to this frozen claim.",
+                  );
+                const response = await client.readArtifact(
+                  claim.task.id,
+                  { lease: claim.lease, artifactId },
+                  artifactSignal,
+                );
+                const primary = input.task.subjects.find(
+                  (item) => item.id === input.task.subjectRef,
+                );
+                const subject = primary?.kind === "local_patch" ? primary : restorePatchSubject;
+                const bytes = Buffer.from(response.contentBase64, "base64");
+                if (
+                  subject?.kind !== "local_patch" ||
+                  subject.artifactRef !== artifactId ||
+                  response.artifact.id !== artifactId ||
+                  response.artifact.subjectRef !== subject.id ||
+                  response.artifact.kind !== "patch" ||
+                  response.artifact.availability !== "available" ||
+                  response.artifact.digest !== subject.patchDigest ||
+                  response.artifact.byteLength !== bytes.byteLength ||
+                  bytes.toString("base64") !== response.contentBase64 ||
+                  hash(bytes) !== subject.patchDigest
+                )
+                  throw new Error(
+                    "The trusted patch response does not match its exact frozen source subject.",
+                  );
+                return bytes;
+              },
             });
-          } else {
-            await cleanupOperations.acquireGuard(identity);
-            // The helper closed its handle while retaining the durable marker. This parent-side
-            // object contains only logical state and cannot create, replace, or delete any file.
-            let state: AttemptDesktopGuard["state"] = "held";
-            physicalGuard = {
-              ownerToken: identity.guardOwnerToken,
+            const workspaceProvider = (
+              dependencies.createWorkspaceProvider ??
+              ((options) => new ProductionInvestigationWorkspaceProvider(options))
+            )({
+              workspaceRootDirectory: config.workspaceRootDirectory,
+              sourceMaterializer: materializer,
+              maximumTreeEntries: 250_000,
+              ...(investigationTaskPool(claim.task.kind) === "static"
+                ? {}
+                : ({
+                    onOwnershipEstablished: (receipt) =>
+                      cleanupJournal.workspaceOwned(claim.attempt.id, receipt),
+                    cleanupOwned: async (receipt) => {
+                      if (cleanupIdentity === undefined)
+                        throw new Error("Execution cleanup has no durable owner.");
+                      await cleanupOperations.cleanupWorkspace(cleanupIdentity, receipt);
+                    },
+                  } satisfies Pick<
+                    ProductionInvestigationWorkspaceProviderOptions,
+                    "onOwnershipEstablished" | "cleanupOwned"
+                  >)),
+            });
+            const coordinator = (
+              dependencies.createCoordinator ??
+              ((options) => new InvestigationLoopCoordinator(options))
+            )({
+              client,
+              processHost,
+              modelTurnRunner,
+              e2eAgentRunner,
+              workspaceProvider,
+              planExecutor,
+              logger,
+              terminalTimeoutMs: config.shutdownTimeoutMs,
+              ...cleanupHooks,
+              onNodeFault: (code) => {
+                nodeFault ??= new Error(
+                  `The investigation Worker encountered an execution lifecycle fault (${code}).`,
+                );
+                logger.error(
+                  "The investigation Worker is draining after an execution lifecycle fault.",
+                  { code },
+                );
+                service?.requestDrain();
+              },
+            });
+            await coordinator.execute(claim, signal);
+          };
+          if (investigationTaskPool(claim.task.kind) === "static") {
+            await executeAttempt();
+            return;
+          }
+          activeCleanupAttempts.add(claim.attempt.id);
+          try {
+            const identity = await cleanupJournal.register({
+              taskId: claim.task.id,
+              attemptId: claim.attempt.id,
+              workerId: claim.attempt.workerId ?? "unidentified-worker",
+              serverOrigin: config.serverUrl,
+              lease: claim.lease,
+              guardOwnerId: `${claim.attempt.id}:${claim.lease.fence}`,
+              workspaceRootDirectory: config.workspaceRootDirectory,
+              desktopLockDirectory: config.desktopLockDirectory,
+              processHostInstanceKey: deriveWorkerProcessHostInstanceKey({
+                dataDirectory: config.dataDirectory,
+              }),
+              processHostRecovery: processHost.recovery?.() ?? null,
+            });
+            cleanupIdentity = identity;
+            let physicalGuard: AttemptDesktopGuard;
+            if (dependencies.acquireDesktopGuard !== undefined) {
+              physicalGuard = await dependencies.acquireDesktopGuard({
+                lockDirectory: config.desktopLockDirectory,
+                ownerId: identity.guardOwnerId,
+                ownerToken: identity.guardOwnerToken,
+              });
+            } else {
+              await cleanupOperations.acquireGuard(identity);
+              // The helper closed its handle while retaining the durable marker. This parent-side
+              // object contains only logical state and cannot create, replace, or delete any file.
+              let state: AttemptDesktopGuard["state"] = "held";
+              physicalGuard = {
+                ownerToken: identity.guardOwnerToken,
+                get state() {
+                  return state;
+                },
+                async releaseRestored() {
+                  throw new Error("A managed guard requires managed release.");
+                },
+                async quarantine() {
+                  if (state === "held") state = "quarantined";
+                },
+                async settleManagedCleanup(next) {
+                  if (state !== "released") state = next;
+                },
+              };
+            }
+            // Filesystem release runs inside a managed helper in the native named Job. The parent
+            // only closes its retained handle, so Host failure cannot leave it unlinking a new owner.
+            const guard: AttemptDesktopGuard = {
+              ownerToken: physicalGuard.ownerToken,
               get state() {
-                return state;
+                return physicalGuard.state;
               },
               async releaseRestored() {
-                throw new Error("A managed guard requires managed release.");
+                await cleanupOperations.releaseGuard(identity);
+                await physicalGuard.settleManagedCleanup("released");
               },
               async quarantine() {
-                if (state === "held") state = "quarantined";
+                await physicalGuard.settleManagedCleanup("quarantined");
               },
-              async settleManagedCleanup(next) {
-                if (state !== "released") state = next;
-              },
+              settleManagedCleanup: (state) => physicalGuard.settleManagedCleanup(state),
             };
-          }
-          // Filesystem release runs inside a managed helper in the native named Job. The parent
-          // only closes its retained handle, so Host failure cannot leave it unlinking a new owner.
-          const guard: AttemptDesktopGuard = {
-            ownerToken: physicalGuard.ownerToken,
-            get state() {
-              return physicalGuard.state;
-            },
-            async releaseRestored() {
-              await cleanupOperations.releaseGuard(identity);
-              await physicalGuard.settleManagedCleanup("released");
-            },
-            async quarantine() {
-              await physicalGuard.settleManagedCleanup("quarantined");
-            },
-            settleManagedCleanup: (state) => physicalGuard.settleManagedCleanup(state),
-          };
-          await executeWithAttemptDesktopGuard(guard, async (hooks) => {
-            await cleanupJournal.executionStarted(claim.attempt.id);
-            await executeAttempt({
-              onAttemptCleanupConfirmed: async () => {
-                await cleanupJournal.localCleanupConfirmed(claim.attempt.id);
-                await hooks.onAttemptCleanupConfirmed();
-                await cleanupJournal.guardReleased(claim.attempt.id);
-              },
-              onAttemptCleanupUnconfirmed: async (code) => {
-                await cleanupJournal.failed(claim.attempt.id, code);
-                await hooks.onAttemptCleanupUnconfirmed(code);
-              },
+            await executeWithAttemptDesktopGuard(guard, async (hooks) => {
+              await cleanupJournal.executionStarted(claim.attempt.id);
+              await executeAttempt({
+                onAttemptCleanupConfirmed: async () => {
+                  await cleanupJournal.localCleanupConfirmed(claim.attempt.id);
+                  await hooks.onAttemptCleanupConfirmed();
+                  await cleanupJournal.guardReleased(claim.attempt.id);
+                },
+                onAttemptCleanupUnconfirmed: async (code) => {
+                  await cleanupJournal.failed(claim.attempt.id, code);
+                  await hooks.onAttemptCleanupUnconfirmed(code);
+                },
+              });
             });
-          });
+          } finally {
+            activeCleanupAttempts.delete(claim.attempt.id);
+          }
         } finally {
-          activeCleanupAttempts.delete(claim.attempt.id);
+          await outputReporter.close();
+          outputReporters.delete(claim.attempt.id);
+          cancellationObserved.delete(claim.attempt.id);
         }
       },
     };
@@ -720,6 +834,7 @@ export async function createInvestigationExecutionRuntime(
       },
     };
   } catch (error) {
+    await outputJournal.stop(1_000).catch(() => false);
     usageDeliveryLifetime.abort();
     await closeHost();
     throw error;
@@ -765,6 +880,7 @@ async function prepareInvestigationDirectories(
   await requireOrdinaryDirectory(config.workspaceRootDirectory, true);
   await requireOrdinaryDirectory(win32.join(config.dataDirectory, "host-temp"), true);
   await requireOrdinaryDirectory(win32.join(config.dataDirectory, "model-usage"), true);
+  await requireOrdinaryDirectory(win32.join(config.dataDirectory, "visible-output"), true);
   await requireOrdinaryDirectory(win32.join(config.dataDirectory, "attempt-cleanup"), true);
   if (
     config.role !== "static" &&

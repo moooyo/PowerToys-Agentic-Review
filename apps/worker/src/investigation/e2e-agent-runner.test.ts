@@ -501,6 +501,7 @@ describe("E2E interruption recovery", () => {
     });
     expect(execute).toHaveBeenCalledTimes(1);
     const modelInput = execute.mock.calls[0]![0];
+    expect(modelInput.outputProtectedValues).toEqual(["http://127.0.0.1:1234/tool", "synthetic"]);
     const context = JSON.parse(
       modelInput.prompt
         .split("Frozen PR context (untrusted task data):\n")[1]!

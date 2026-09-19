@@ -8,6 +8,9 @@ import {
   InvestigationCommentPublicationListSchema,
   type InvestigationCommentPublicationSummary,
   InvestigationCommentPublicationSummarySchema,
+  InvestigationPublicationDirectoryPageSchema,
+  type InvestigationPublicationDirectoryQuery,
+  InvestigationPublicationDirectoryQuerySchema,
 } from "@agentic-review/contracts";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -17,12 +20,14 @@ import type { InvestigationCommentDeliveries } from "./comment-deliveries.js";
 import { requireCondition } from "./errors.js";
 import type { InvestigationProgressReplies } from "./progress-reply.js";
 import type { InvestigationOperatorPrincipal } from "./types.js";
+import type { InvestigationWorkspaceReads } from "./workspace-reads.js";
 
 export interface InvestigationCommentRoutesOptions {
   readonly authenticateOperator: (request: FastifyRequest) => InvestigationOperatorPrincipal | null;
   readonly deliveries: InvestigationCommentDeliveries;
   readonly progress: InvestigationProgressReplies;
   readonly automaticReplies: InvestigationAutomaticReplies;
+  readonly workspace?: InvestigationWorkspaceReads;
 }
 
 const params = Type.Object({ id: EntityIdSchema }, { additionalProperties: false });
@@ -49,7 +54,9 @@ type CommentDeliveryHttpQuery = Omit<
 };
 
 /** Query parameters are strings; keep strict numeric validation local to these HTTP routes. */
-function deliveryQueryInput(query: CommentDeliveryHttpQuery): InvestigationCommentDeliveryQuery {
+function numericCommentQueryInput(
+  query: Pick<CommentDeliveryHttpQuery, "workItemNumber" | "limit">,
+): Pick<InvestigationCommentDeliveryQuery, "workItemNumber" | "limit"> {
   const integer = (value: string, maximum: number): number => {
     const parsed = Number(value);
     requireCondition(
@@ -65,13 +72,23 @@ function deliveryQueryInput(query: CommentDeliveryHttpQuery): InvestigationComme
     );
     return parsed;
   };
-  const { workItemNumber, limit, ...filters } = query;
+  const { workItemNumber, limit } = query;
   return {
-    ...filters,
     ...(workItemNumber === undefined
       ? {}
       : { workItemNumber: integer(workItemNumber, Number.MAX_SAFE_INTEGER) }),
     ...(limit === undefined ? {} : { limit: integer(limit, 50) }),
+  };
+}
+
+function deliveryQueryInput(query: CommentDeliveryHttpQuery): InvestigationCommentDeliveryQuery {
+  const { workItemNumber, limit, ...filters } = query;
+  return {
+    ...filters,
+    ...numericCommentQueryInput({
+      ...(workItemNumber === undefined ? {} : { workItemNumber }),
+      ...(limit === undefined ? {} : { limit }),
+    }),
   };
 }
 
@@ -95,6 +112,43 @@ export function registerInvestigationCommentRoutes(
     id.startsWith("auto-reply:report:")
       ? options.automaticReplies.getComment(principal, id)
       : options.progress.getComment(principal, id);
+
+  if (options.workspace !== undefined)
+    app.get<{
+      Querystring: Omit<InvestigationPublicationDirectoryQuery, "limit" | "workItemNumber"> & {
+        limit?: string;
+        workItemNumber?: string;
+      };
+    }>(
+      "/api/publications",
+      {
+        schema: {
+          querystring: Type.Object(
+            {
+              ...Type.Omit(InvestigationPublicationDirectoryQuerySchema, [
+                "limit",
+                "workItemNumber",
+              ]).properties,
+              limit: Type.Optional(positiveIntegerQuery),
+              workItemNumber: Type.Optional(positiveIntegerQuery),
+            },
+            { additionalProperties: false },
+          ),
+          response: { 200: InvestigationPublicationDirectoryPageSchema },
+        },
+      },
+      async (request, reply) => {
+        const principal = actor(request, reply);
+        const { limit, workItemNumber, ...filters } = request.query;
+        const numeric = numericCommentQueryInput({
+          ...(limit === undefined ? {} : { limit }),
+          ...(workItemNumber === undefined ? {} : { workItemNumber }),
+        });
+        return options.workspace!.publications(principal, { ...filters, ...numeric }, (id) =>
+          comment(principal, id),
+        );
+      },
+    );
 
   app.get<{ Querystring: CommentDeliveryHttpQuery }>(
     "/api/comment-deliveries",

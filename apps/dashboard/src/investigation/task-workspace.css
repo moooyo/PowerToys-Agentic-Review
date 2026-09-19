@@ -1,0 +1,81 @@
+.production-task-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto 40px;
+  gap: 16px;
+  align-items: start;
+  padding: 16px 24px;
+}
+.production-task-symbol {
+  display: grid;
+  place-items: center;
+  align-self: start;
+  padding-top: 2px;
+}
+.production-task-title {
+  display: block;
+  text-decoration: none;
+  font-size: 16px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.production-task-title:hover {
+  text-decoration: underline;
+}
+.production-task-title:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+.production-task-row-status {
+  text-align: right;
+}
+.production-task-row-meta-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 4px;
+  min-height: 24px;
+}
+.production-task-row .production-task-inline-action {
+  min-width: 0;
+  min-height: 24px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 20px;
+  border-radius: 4px;
+}
+.production-task-open {
+  align-self: center;
+}
+@media (pointer: coarse) {
+  .production-task-row .production-task-inline-action {
+    min-height: 48px;
+  }
+}
+@media (max-width: 599px) {
+  .production-task-row {
+    grid-template-columns: 24px minmax(0, 1fr) 40px;
+    gap: 6px 10px;
+    padding: 14px;
+  }
+  .production-task-symbol {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .production-task-row-main {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .production-task-row > a:last-child {
+    grid-column: 3;
+    grid-row: 1;
+    align-self: start;
+  }
+  .production-task-row .production-task-row-status {
+    grid-column: 2 / 4;
+    align-items: center;
+    column-gap: 10px;
+    text-align: left;
+  }
+}

@@ -37,6 +37,7 @@ import {
   samplePullRequestAutoReplyTemplate,
 } from "./sample-auto-reply-templates";
 import { createSampleOperationsApi } from "./sample-operations";
+import { createSampleReadApi } from "./sample-read-api";
 import { InvestigationHttpError } from "./transport";
 
 const repository = {
@@ -252,6 +253,7 @@ function reportHeader(result: InvestigationResultV1): InvestigationReportHeaderV
       },
       loop,
       collections: result.report.collections,
+      ...(result.report.usage ? { usage: result.report.usage } : {}),
     },
   };
 }
@@ -714,6 +716,18 @@ export function createSampleInvestigationApi(): InvestigationApi {
     return structuredClone(updated);
   }
 
+  function commentSummary(
+    comment: InvestigationCommentPublicationSummary,
+  ): InvestigationCommentPublicationSummary {
+    const task = comment.taskId === null ? undefined : tasks.get(comment.taskId)?.task;
+    const item = comment.workItemId === null ? undefined : workItems.get(comment.workItemId);
+    return {
+      ...comment,
+      producerTaskKind: task?.kind ?? null,
+      workItemTitle: item?.title ?? null,
+    };
+  }
+
   function itemReport(workItemId: string, id?: string): InvestigationResultV1 | undefined {
     const report = id
       ? required(reports, id, "report")
@@ -889,7 +903,16 @@ export function createSampleInvestigationApi(): InvestigationApi {
         );
       return required(tasks, previous.taskId, "task").task;
     }
-    required(workItems, input.workItemId, "work item");
+    const workItem = required(workItems, input.workItemId, "work item");
+    if (
+      input.expectedSubjectRevisionKey !== undefined &&
+      input.expectedSubjectRevisionKey !== workItem.subject.revisionKey
+    ) {
+      throw new InvestigationHttpError(
+        409,
+        "The sample source revision changed. Reload it before starting a new task.",
+      );
+    }
     const template = [...tasks.values()].find(
       (item) => item.task.workItem.id === input.workItemId,
     )!.task;
@@ -986,6 +1009,14 @@ export function createSampleInvestigationApi(): InvestigationApi {
 
   const api: InvestigationApi = {
     ...createSampleOperationsApi(),
+    ...createSampleReadApi({
+      repositories: () => [repository],
+      workItems: () => [...workItems.values()],
+      tasks: () => [...tasks.values()],
+      reports: () => [...reports.values()].map(reportHeader),
+      artifacts: () => [...artifacts.values()],
+      publications: () => [...comments.values()],
+    }),
     commentDeliveries: async (query = {}) =>
       sampleCommentPage([...commentDeliveries.values()], structuredClone(query)),
     comments: async (query = {}) => {
@@ -1009,10 +1040,11 @@ export function createSampleInvestigationApi(): InvestigationApi {
                 (comment.taskId !== null && query.taskIds.includes(comment.taskId))) &&
               (query.commentIds === undefined || query.commentIds.includes(comment.id)),
           )
-          .slice(0, 100),
+          .slice(0, 100)
+          .map(commentSummary),
       });
     },
-    comment: async (id) => structuredClone(required(comments, id, "comment")),
+    comment: async (id) => structuredClone(commentSummary(required(comments, id, "comment"))),
     commentAttempts: async (id, query = {}) => {
       required(comments, id, "comment");
       return sampleCommentPage([...commentDeliveries.values()], {
@@ -1020,8 +1052,10 @@ export function createSampleInvestigationApi(): InvestigationApi {
         commentId: id,
       });
     },
-    syncComment: async (id, input) => commentCommand(id, structuredClone(input), "sync"),
-    reconcileComment: async (id, input) => commentCommand(id, structuredClone(input), "reconcile"),
+    syncComment: async (id, input) =>
+      commentSummary(commentCommand(id, structuredClone(input), "sync")),
+    reconcileComment: async (id, input) =>
+      commentSummary(commentCommand(id, structuredClone(input), "reconcile")),
     repositories: async () => ({ items: [structuredClone(repository)] }),
     scheduler: async () => structuredClone(scheduler),
     updateScheduler: async ({ staticConcurrency }) => {
@@ -1173,14 +1207,18 @@ export function createSampleInvestigationApi(): InvestigationApi {
         "Sample mode uses the fixed synthetic directory. Connect the production service to import a real work item.",
       );
     },
-    tasks: async (workItemId) => ({
-      items: structuredClone(
-        [...tasks.values()]
-          .map((item) => item.task)
-          .filter((task) => !workItemId || task.workItem.id === workItemId),
-      ),
-    }),
-    task: async (id) => {
+    tasks: async (workItemId, signal) => {
+      signal?.throwIfAborted();
+      return {
+        items: structuredClone(
+          [...tasks.values()]
+            .map((item) => item.task)
+            .filter((task) => !workItemId || task.workItem.id === workItemId),
+        ),
+      };
+    },
+    task: async (id, signal) => {
+      signal?.throwIfAborted();
       const detail = required(tasks, id, "task");
       return structuredClone({
         ...detail,

@@ -36,6 +36,7 @@ import {
 } from "@agentic-review/contracts";
 import { type Static, Type } from "@sinclair/typebox";
 import { authApi } from "./auth-api";
+import { createInvestigationReadApi } from "./read-api";
 import { createSampleInvestigationApi } from "./sample-adapter";
 import { createSessionScopedSampleApi } from "./sample-workspace-access";
 import {
@@ -44,6 +45,8 @@ import {
   notifyInvestigationSessionExpired,
   queryString,
 } from "./transport";
+
+export type * from "./read-api";
 
 const object = <T extends Parameters<typeof Type.Object>[0]>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -201,6 +204,7 @@ export interface CommentSummaryQuery {
 
 export function createInvestigationApi(transport: InvestigationTransport) {
   return {
+    ...createInvestigationReadApi(transport),
     workers: () => transport("/api/workers", InvestigationWorkerControlListSchema),
     updateWorkerE2e: (id: string, input: InvestigationWorkerControlUpdate) =>
       transport(`/api/workers/${encodeURIComponent(id)}/e2e`, InvestigationWorkerControlSchema, {
@@ -334,9 +338,10 @@ export function createInvestigationApi(transport: InvestigationTransport) {
         }),
         { method: "POST", body: input },
       ),
-    tasks: (workItemId?: string) =>
-      transport(`/api/tasks${queryString({ workItemId })}`, TaskListSchema),
-    task: (id: string) => transport(`/api/tasks/${encodeURIComponent(id)}`, TaskDetailSchema),
+    tasks: (workItemId?: string, signal?: AbortSignal) =>
+      transport(`/api/tasks${queryString({ workItemId })}`, TaskListSchema, { signal }),
+    task: (id: string, signal?: AbortSignal) =>
+      transport(`/api/tasks/${encodeURIComponent(id)}`, TaskDetailSchema, { signal }),
     createTask: (input: CreateTaskInput) =>
       transport("/api/tasks", InvestigationTaskV1Schema, { method: "POST", body: input }),
     resumeTask: (id: string, idempotencyKey: string, budget?: InvestigationBudget) =>

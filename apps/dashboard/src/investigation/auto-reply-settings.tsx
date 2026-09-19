@@ -7,15 +7,21 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Divider,
   FormControlLabel,
+  MenuItem,
   Stack,
   Switch,
   TextField,
   Typography,
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   investigationApi,
@@ -25,14 +31,21 @@ import {
   type RepositoryProgressReply,
 } from "./api";
 import {
+  type AutoReplyAuthorization,
+  type AutoReplySettingsFormValues,
+  type AutoReplyTemplateKey,
+  autoReplyAuthorizationSnapshot,
   autoReplyProgressStages,
   autoReplyProgressTemplateTokens,
+  autoReplySettingsFieldErrors,
   autoReplySettingsFormValues,
   autoReplySettingsPermissions,
   autoReplyTemplateTokens,
+  autoReplyTemplateValue,
   issueAutoReplyTemplateTokens,
   submitAutoReplySettings,
 } from "./auto-reply-settings-form";
+import { useGuardedAction, useUnsavedChanges } from "./navigation-guard";
 import { useInvestigationSession } from "./session";
 import { InvestigationHttpError } from "./transport";
 
@@ -49,12 +62,108 @@ export const progressRepliesQueryKey = (repositoryId: string) => [
   repositoryId,
 ];
 
-const progressTemplateLabels = {
+const templateLabels: Record<AutoReplyTemplateKey, string> = {
+  pullRequest: "PR reply template",
+  issue: "Issue reply template",
   received: "Received progress template",
   started: "Started progress template",
   failed: "Stopped progress template",
   completed: "Completed progress template",
-} as const;
+};
+const templateKeys = ["pullRequest", "issue", ...autoReplyProgressStages] as const;
+const previewTokens: Record<string, string> = {
+  identity: "[AI identity statement, recorded model, and verified GitHub publishing user]",
+  conclusion: "[Investigation conclusion]",
+  summary: "[Investigation summary]",
+  findings: "[Reported findings]",
+  details: "[Scope, evidence, validation, limitations, and full findings]",
+  next_steps: "[Recommended next steps]",
+  status: "[Current investigation status]",
+  trigger: "[Assignment trigger and requester]",
+  updated_at: "[Recorded update time]",
+  failure: "[Reason the investigation stopped]",
+  result: "[Full PR or Issue investigation reply]",
+};
+
+interface AutoReplyPreviewBlock {
+  sourceOffset: number;
+  kind: "text" | "details";
+  value: string;
+}
+
+export function autoReplyPreviewBlocks(value: string): AutoReplyPreviewBlock[] {
+  const blocks: AutoReplyPreviewBlock[] = [];
+  const appendText = (text: string, sourceOffset: number) => {
+    for (const paragraph of text.matchAll(/[^\r\n]+(?:\r?\n(?![ \t]*\r?\n)[^\r\n]+)*/gu)) {
+      if (paragraph[0].trim()) {
+        blocks.push({
+          sourceOffset: sourceOffset + paragraph.index,
+          kind: "text",
+          value: paragraph[0],
+        });
+      }
+    }
+  };
+  let cursor = 0;
+  for (const token of value.matchAll(/\{\{details\}\}/gu)) {
+    appendText(value.slice(cursor, token.index), cursor);
+    blocks.push({ sourceOffset: token.index, kind: "details", value: token[0] });
+    cursor = token.index + token[0].length;
+  }
+  appendText(value.slice(cursor), cursor);
+  return blocks;
+}
+
+export function AutoReplyTemplatePreview({
+  template,
+  value,
+}: {
+  template: AutoReplyTemplateKey;
+  value: string;
+}) {
+  return (
+    <Box className="repository-template-preview">
+      <Box sx={{ p: 2, bgcolor: "action.hover" }}>
+        <Typography sx={{ fontWeight: 500 }}>Template preview</Typography>
+        <Typography variant="caption" color="text.secondary">
+          Illustrative placeholders only. Actual content comes from the investigation and publishing
+          account.
+        </Typography>
+      </Box>
+      <Box className="repository-template-preview-body">
+        {autoReplyPreviewBlocks(value).map((block) => {
+          if (block.kind === "details") {
+            return (
+              <Box component="details" key={block.sourceOffset}>
+                <summary>{template === "issue" ? "Investigation details" : "Details"}</summary>
+                <Typography variant="body2">{previewTokens.details}</Typography>
+              </Box>
+            );
+          }
+          const text = block.value.replace(
+            /\{\{([^{}]*)\}\}/gu,
+            (match, token: string) => previewTokens[token] ?? match,
+          );
+          const [first, ...rest] = text.split(/\r?\n/u);
+          return first?.startsWith("## ") ? (
+            <Box key={block.sourceOffset}>
+              <Typography component="h3" variant="subtitle1" sx={{ mb: 1 }}>
+                {first.slice(3)}
+              </Typography>
+              <Typography component="p" variant="body2">
+                {rest.join("\n")}
+              </Typography>
+            </Box>
+          ) : (
+            <Typography component="p" variant="body2" key={block.sourceOffset}>
+              {text}
+            </Typography>
+          );
+        })}
+      </Box>
+    </Box>
+  );
+}
 
 export function AutoReplySettingsConflictNotice() {
   return (
@@ -77,34 +186,87 @@ export function AutoReplySettingsForm({
   canAuthorize: boolean;
 }) {
   const queryClient = useQueryClient();
+  const guardedAction = useGuardedAction();
   const [saved, setSaved] = useState(settings);
   const [form, setForm] = useState(() => autoReplySettingsFormValues(settings));
   const [busy, setBusy] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
+  const [template, setTemplate] = useState<AutoReplyTemplateKey>("pullRequest");
+  const [editingTemplates, setEditingTemplates] = useState(false);
+  const [preview, setPreview] = useState(false);
+  const [authorization, setAuthorization] = useState<AutoReplyAuthorization | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<ReturnType<typeof autoReplySettingsFieldErrors>>(
+    {},
+  );
+  const templateRef = useRef<HTMLInputElement>(null);
+  const [pendingFocus, setPendingFocus] = useState<AutoReplyTemplateKey | null>(null);
+  const alive = useRef(true);
+  const dirty = JSON.stringify(form) !== JSON.stringify(autoReplySettingsFormValues(saved));
+  useUnsavedChanges(dirty, { busy, description: "Automatic replies have unsaved changes." });
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (pendingFocus === null || !editingTemplates || template !== pendingFocus) return;
+    const input = templateRef.current;
+    if (!input) return;
+    input.focus();
+    setPendingFocus(null);
+  }, [pendingFocus, editingTemplates, template]);
+  useEffect(() => {
+    if (settings.version <= saved.version || busy) return;
+    if (authorization) {
+      setAuthorization(null);
+      setError(
+        "Saved settings changed while you were reviewing publishing authorization. Review the latest settings before authorizing again.",
+      );
+    }
+    if (dirty) setConflict(true);
+    else {
+      setSaved(settings);
+      setForm(autoReplySettingsFormValues(settings));
+      setConflict(false);
+    }
+  }, [settings, saved.version, busy, dirty, authorization]);
+  const patch = (values: Partial<AutoReplySettingsFormValues>) => {
+    const next = { ...form, ...values };
+    setForm(next);
+    setMessage(undefined);
+    if (Object.keys(fieldErrors).length) setFieldErrors(autoReplySettingsFieldErrors(next));
+  };
   const acceptSettings = (value: RepositoryAutoReplySettings) => {
+    if (!alive.current) return;
     setSaved(value);
     setForm(autoReplySettingsFormValues(value));
     setConflict(false);
+    setFieldErrors({});
     queryClient.setQueryData(autoReplySettingsQueryKey(repository.id), value);
   };
-  const save = async (event?: FormEvent, reauthorize = false) => {
-    event?.preventDefault();
-    if (!canManage || busy || conflict || (form.enabled && !canAuthorize)) return;
+  const save = async (reauthorize = false, submittedForm = form, submittedSettings = saved) => {
+    if (!canManage || busy || conflict || (submittedForm.enabled && !canAuthorize)) return;
+    setAuthorization(null);
     setBusy(true);
     setError(undefined);
     setMessage(undefined);
     try {
+      await queryClient.cancelQueries({ queryKey: autoReplySettingsQueryKey(repository.id) });
+      if (!alive.current) return;
       const updated = await submitAutoReplySettings(
         repository.id,
-        form,
-        saved,
+        submittedForm,
+        submittedSettings,
         conflict,
         { canManage, canAuthorize },
         investigationApi.updateRepositoryAutoReplySettings,
         reauthorize,
       );
+      await queryClient.cancelQueries({ queryKey: autoReplySettingsQueryKey(repository.id) });
+      if (!alive.current) return;
       acceptSettings(updated);
       setMessage(
         updated.enabled
@@ -116,60 +278,121 @@ export function AutoReplySettingsForm({
       void queryClient.invalidateQueries({ queryKey: ["investigation-comments"] });
       void queryClient.invalidateQueries({ queryKey: ["investigation-comment"] });
     } catch (cause) {
+      if (!alive.current) return;
       if (cause instanceof InvestigationHttpError && cause.status === 409) setConflict(true);
       setError(
         cause instanceof Error ? cause.message : "Automatic reply settings could not be saved.",
       );
     } finally {
-      setBusy(false);
+      if (alive.current) setBusy(false);
     }
+  };
+  const requestSave = (event?: FormEvent, renew = false) => {
+    event?.preventDefault();
+    if (!canManage || busy || conflict || (form.enabled && !canAuthorize)) return;
+    const errors = autoReplySettingsFieldErrors(form);
+    setFieldErrors(errors);
+    const invalid = templateKeys.find((key) => errors[key]);
+    if (invalid) {
+      setEditingTemplates(true);
+      setTemplate(invalid);
+      setPendingFocus(invalid);
+      return;
+    }
+    if (Object.keys(errors).length) return;
+    if (form.enabled && (dirty || renew))
+      setAuthorization(autoReplyAuthorizationSnapshot(form, saved, renew));
+    else void save(renew);
   };
   const reload = async () => {
     setBusy(true);
     setError(undefined);
     setMessage(undefined);
     try {
-      acceptSettings(await investigationApi.repositoryAutoReplySettings(repository.id));
+      await queryClient.cancelQueries({ queryKey: autoReplySettingsQueryKey(repository.id) });
+      if (!alive.current) return;
+      const latest = await investigationApi.repositoryAutoReplySettings(repository.id);
+      await queryClient.cancelQueries({ queryKey: autoReplySettingsQueryKey(repository.id) });
+      if (!alive.current) return;
+      if (latest.version < saved.version)
+        throw new Error(
+          "The server returned older settings. Your current settings and draft are kept. Try reloading again.",
+        );
+      acceptSettings(latest);
       setMessage("The latest saved settings have been loaded.");
     } catch (cause) {
-      setError(
-        cause instanceof Error ? cause.message : "Automatic reply settings could not be loaded.",
-      );
+      if (alive.current)
+        setError(
+          cause instanceof Error ? cause.message : "Automatic reply settings could not be loaded.",
+        );
     } finally {
-      setBusy(false);
+      if (alive.current) setBusy(false);
     }
   };
+  const reset = () => {
+    setForm(autoReplySettingsFormValues(saved));
+    setFieldErrors({});
+    setError(undefined);
+    setMessage(undefined);
+  };
+  const downloadDraft = () => {
+    const url = URL.createObjectURL(
+      new Blob(
+        [
+          JSON.stringify(
+            { repositoryId: repository.id, baseVersion: saved.version, draft: form },
+            null,
+            2,
+          ),
+        ],
+        { type: "application/json" },
+      ),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "repository-replies-draft.json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const currentTemplate = autoReplyTemplateValue(form, template);
+  const tokens =
+    template === "pullRequest"
+      ? autoReplyTemplateTokens
+      : template === "issue"
+        ? issueAutoReplyTemplateTokens
+        : autoReplyProgressTemplateTokens[template];
+  const progressTemplate = template !== "pullRequest" && template !== "issue";
   return (
-    <Box component="form" onSubmit={(event) => void save(event)}>
-      <Stack spacing={2}>
-        <Stack
-          direction="row"
-          spacing={1}
-          useFlexGap
-          sx={{ alignItems: "center", flexWrap: "wrap" }}
-        >
-          <Typography variant="subtitle1">Automatic investigation replies</Typography>
-          <Chip
-            size="small"
-            variant="outlined"
-            label={saved.enabled ? "Saved: Enabled" : "Saved: Disabled"}
-          />
-        </Stack>
-        <Typography variant="body2" color="text.secondary">
-          Automatically comment on completed PR and Issue investigations. No per-report
-          confirmation. Enabling automatic replies authorizes English conclusion comments in{" "}
-          {repository.fullName} using these templates.
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Assignment progress creates one comment when an assignment is accepted, explains the
-          trigger, and updates that same comment when work starts, stops, or completes. Enabling
-          assignment progress also authorizes these comment updates in {repository.fullName}.
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Template changes apply to the next update, including active investigations. Saving does
-          not rewrite existing comments or add comments to earlier tasks. Retries keep the original
-          prepared body. Disabling replies pauses publication.
-        </Typography>
+    <Box
+      component="form"
+      className="repository-form"
+      onSubmit={(event) => requestSave(event)}
+      noValidate
+    >
+      <Stack spacing={3}>
+        <Box>
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{ alignItems: "center", flexWrap: "wrap" }}
+          >
+            <Typography variant="h6" component="h2">
+              Automatic investigation replies
+            </Typography>
+            <Chip
+              size="small"
+              variant="outlined"
+              label={saved.enabled ? "Saved: Enabled" : "Saved: Disabled"}
+            />
+            {dirty && <Chip size="small" color="warning" label="Unsaved changes" />}
+          </Stack>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Automatically comment on completed PR and Issue investigations. No per-report
+            confirmation. Enabling automatic replies authorizes English conclusion comments in{" "}
+            {repository.fullName} using these templates.
+          </Typography>
+        </Box>
         {!saved.publisherConfigured && (
           <Alert severity="info">
             The server comment publisher is not configured yet. You can save settings now; an
@@ -182,136 +405,193 @@ export function AutoReplySettingsForm({
             comments are published to GitHub.
           </Alert>
         )}
-        <FormControlLabel
-          control={
-            <Switch
-              checked={form.enabled}
-              disabled={!canManage || busy || (!canAuthorize && !form.enabled)}
-              onChange={(_, enabled) => {
-                setForm({ ...form, enabled, progressEnabled: enabled && form.progressEnabled });
-                setMessage(undefined);
-              }}
-            />
-          }
-          label="Automatically publish investigation conclusions"
-        />
-        <FormControlLabel
-          control={
-            <Switch
-              checked={form.progressEnabled}
-              disabled={!form.enabled || !canManage || !canAuthorize || busy}
-              onChange={(_, progressEnabled) => {
-                setForm({ ...form, progressEnabled });
-                setMessage(undefined);
-              }}
-            />
-          }
-          label="Publish assignment task progress"
-        />
-        <Accordion variant="outlined" disableGutters>
-          <AccordionSummary expandIcon={<span aria-hidden="true">+</span>}>
-            <Typography>English reply templates</Typography>
-          </AccordionSummary>
-          <AccordionDetails>
-            <Stack spacing={2}>
-              <Typography variant="body2" color="text.secondary">
-                Keep each placeholder exactly once in the listed order. Start with the AI identity
-                statement. PR replies show the conclusion, summary, and findings; Issue replies show
-                the triage result and next steps. PR replies end with Details; Issue replies end
-                with Investigation details. Both are collapsed by default. Templates may contain up
-                to 12,000 UTF-8 bytes; custom wording should be English.
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                The identity statement names the recorded model and verified GitHub publishing user,
-                and explains that AI-generated content may contain errors. Details includes scope,
-                limitations, validation, supporting evidence, and full findings.
-              </Typography>
-              <Typography variant="body2">PR placeholders</Typography>
-              <Box component="code" sx={{ typography: "body2", overflowWrap: "anywhere" }}>
-                {autoReplyTemplateTokens.map((token) => `{{${token}}}`).join(" · ")}
-              </Box>
-              <TextField
-                label="PR reply template"
-                value={form.pullRequestTemplate}
-                onChange={(event) => {
-                  setForm({ ...form, pullRequestTemplate: event.target.value });
-                  setMessage(undefined);
-                }}
-                disabled={!canManage || busy}
-                fullWidth
-                multiline
-                minRows={8}
-                maxRows={18}
-                helperText="Used for completed PR reviews. The server generates the identity statement and collapsed Details section."
+        <Box className="repository-form-width">
+          <FormControlLabel
+            label="Automatically publish investigation conclusions"
+            labelPlacement="start"
+            control={
+              <Switch
+                checked={form.enabled}
+                disabled={!canManage || busy || (!canAuthorize && !form.enabled)}
+                onChange={(_, enabled) =>
+                  patch({ enabled, progressEnabled: enabled && form.progressEnabled })
+                }
               />
-              <Typography variant="body2">Issue placeholders</Typography>
-              <Box component="code" sx={{ typography: "body2", overflowWrap: "anywhere" }}>
-                {issueAutoReplyTemplateTokens.map((token) => `{{${token}}}`).join(" · ")}
-              </Box>
-              <TextField
-                label="Issue reply template"
-                value={form.issueTemplate}
-                onChange={(event) => {
-                  setForm({ ...form, issueTemplate: event.target.value });
-                  setMessage(undefined);
-                }}
-                disabled={!canManage || busy}
-                fullWidth
-                multiline
-                minRows={8}
-                maxRows={18}
-                helperText="Used for Issue triage. The summary is included in Triage result, without a separate Summary section. Bug triage shows Runtime reproduction separately. Next steps appear before collapsed Investigation details and cover missing information, validation, or relevant duplicate and fix references."
+            }
+            sx={{ width: "100%", justifyContent: "space-between" }}
+          />
+          <FormControlLabel
+            label="Publish assignment task progress"
+            labelPlacement="start"
+            control={
+              <Switch
+                checked={form.progressEnabled}
+                disabled={!form.enabled || !canManage || !canAuthorize || busy}
+                onChange={(_, progressEnabled) => patch({ progressEnabled })}
               />
-              <Divider />
-              <Typography variant="subtitle2">Assignment progress templates</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Keep each listed placeholder exactly once and in order. The optional {"{{status}}"}{" "}
-                may appear once before {"{{trigger}}"}; it distinguishes waiting, interruption,
-                cancellation, and failure. The trigger explains the assignment, updated_at shows the
-                update time, and failure describes why work stopped. The completed template inserts
-                the full PR or Issue reply into result. The server adds the AI identity statement
-                and verified publishing account to every progress comment; do not add an identity
-                placeholder here. Each template may contain up to 12,000 UTF-8 bytes.
-              </Typography>
-              {autoReplyProgressStages.map((stage) => (
-                <Box key={stage}>
-                  <Box component="code" sx={{ typography: "body2", overflowWrap: "anywhere" }}>
-                    {autoReplyProgressTemplateTokens[stage]
-                      .map((token) => `{{${token}}}`)
-                      .join(" · ")}
-                  </Box>
-                  <TextField
-                    label={progressTemplateLabels[stage]}
-                    value={form.progressTemplates[stage]}
-                    onChange={(event) => {
-                      setForm({
-                        ...form,
-                        progressTemplates: {
-                          ...form.progressTemplates,
-                          [stage]: event.target.value,
-                        },
-                      });
-                      setMessage(undefined);
-                    }}
-                    disabled={!canManage || busy}
-                    fullWidth
-                    multiline
-                    minRows={5}
-                    maxRows={14}
-                    sx={{ mt: 1 }}
-                  />
-                </Box>
-              ))}
-            </Stack>
-          </AccordionDetails>
-        </Accordion>
-        {saved.authorizedById && (
-          <Typography variant="caption" color="text.secondary">
-            Authorized by account {saved.authorizedById}. Settings version {saved.version}; template
-            format version {saved.templateVersion}. Last edited by{" "}
-            {saved.updatedById ?? "an unavailable account"}.
+            }
+            sx={{ width: "100%", justifyContent: "space-between" }}
+          />
+          <Typography variant="body2" color="text.secondary">
+            Assignment progress creates one comment when an assignment is accepted, explains the
+            trigger, and updates that same comment when work starts, stops, or completes. Enabling
+            assignment progress also authorizes these comment updates in {repository.fullName}.
           </Typography>
+          {fieldErrors.progressEnabled && (
+            <Alert severity="error">{fieldErrors.progressEnabled}</Alert>
+          )}
+        </Box>
+        <Box>
+          <Typography variant="h6" component="h3">
+            English reply templates
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            Template changes apply to the next update, including active investigations. Saving does
+            not rewrite existing comments or add comments to earlier tasks. Retries keep the
+            original prepared body. Disabling replies pauses publication.
+          </Typography>
+        </Box>
+        <Stack
+          direction="row"
+          useFlexGap
+          spacing={3}
+          sx={{ flexWrap: "wrap", alignItems: "center" }}
+        >
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 500 }}>
+              Conclusion templates
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Pull requests and Issues
+            </Typography>
+          </Box>
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 500 }}>
+              Progress templates
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Received, started, stopped, completed
+            </Typography>
+          </Box>
+          <Button
+            onClick={() => setEditingTemplates(!editingTemplates)}
+            aria-expanded={editingTemplates}
+            aria-controls="repository-template-editor"
+          >
+            {editingTemplates
+              ? "Close template editor"
+              : canManage
+                ? "Edit templates"
+                : "View templates"}
+          </Button>
+        </Stack>
+        {editingTemplates && (
+          <Stack id="repository-template-editor" spacing={2.5}>
+            <TextField
+              select
+              label="Template type and stage"
+              value={template}
+              onChange={(event) => setTemplate(event.target.value as AutoReplyTemplateKey)}
+              sx={{ maxWidth: 360 }}
+            >
+              {templateKeys.map((key) => (
+                <MenuItem key={key} value={key}>
+                  {templateLabels[key]}
+                </MenuItem>
+              ))}
+            </TextField>
+            <Stack spacing={1}>
+              <Typography variant="body2" color="text.secondary">
+                Required placeholders, once each and in this order:
+              </Typography>
+              <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+                {tokens.map((token) => (
+                  <Box
+                    component="code"
+                    key={token}
+                    sx={{ px: 1, py: 0.5, bgcolor: "action.hover", borderRadius: 1, fontSize: 12 }}
+                  >
+                    {"{{" + token + "}}"}
+                  </Box>
+                ))}
+              </Stack>
+              <Typography variant="body2" color="text.secondary">
+                {progressTemplate
+                  ? "The optional {{status}} may appear once before {{trigger}}. The server adds the AI identity statement. The completed template inserts the full PR or Issue reply into {{result}}."
+                  : "Begin with {{identity}} and end with {{details}}. The AI identity names the recorded model and verified GitHub publishing user, and explains that AI-generated content may contain errors. Details are collapsed by default."}
+              </Typography>
+              {template === "issue" && (
+                <Typography variant="body2" color="text.secondary">
+                  The summary is included in Triage result, without a separate Summary section. Bug
+                  triage shows Runtime reproduction separately. Next steps appear before collapsed
+                  Investigation details.
+                </Typography>
+              )}
+            </Stack>
+            <TextField
+              label={templateLabels[template]}
+              value={currentTemplate}
+              inputRef={templateRef}
+              onChange={(event) => {
+                const value = event.target.value;
+                patch(
+                  template === "pullRequest"
+                    ? { pullRequestTemplate: value }
+                    : template === "issue"
+                      ? { issueTemplate: value }
+                      : { progressTemplates: { ...form.progressTemplates, [template]: value } },
+                );
+              }}
+              disabled={!canManage || busy}
+              fullWidth
+              multiline
+              minRows={8}
+              maxRows={18}
+              error={!!fieldErrors[template]}
+              helperText={
+                fieldErrors[template] ??
+                "Custom wording should be English. Keep the exact placeholder syntax."
+              }
+              slotProps={{
+                input: {
+                  sx: { fontFamily: "var(--app-code-font)", fontSize: 13, lineHeight: 1.75 },
+                },
+              }}
+            />
+            <Stack
+              direction="row"
+              spacing={2}
+              useFlexGap
+              sx={{ justifyContent: "space-between", alignItems: "center", flexWrap: "wrap" }}
+            >
+              <Typography
+                variant="caption"
+                color={
+                  new TextEncoder().encode(currentTemplate).byteLength > 12000
+                    ? "error"
+                    : "text.secondary"
+                }
+              >
+                {new TextEncoder().encode(currentTemplate).byteLength.toLocaleString()} / 12,000
+                UTF-8 bytes
+              </Typography>
+              <Button onClick={() => setPreview(true)} aria-haspopup="dialog">
+                Preview template
+              </Button>
+            </Stack>
+          </Stack>
         )}
+        <Box>
+          <Typography sx={{ fontWeight: 500 }}>Publishing authorization</Typography>
+          <Typography variant="body2" color="text.secondary">
+            {saved.authorizedById
+              ? "Authorized by account " + saved.authorizedById + ". "
+              : "No publishing authorization is recorded. "}
+            Settings version {saved.version}; template format version {saved.templateVersion}.
+            {saved.updatedById && " Last edited by " + saved.updatedById + "."}
+            {saved.updatedAt && " Updated " + saved.updatedAt + "."}
+          </Typography>
+        </Box>
         {!canManage && (
           <Alert severity="info">
             Repository management permission is required to change these settings.
@@ -326,7 +606,13 @@ export function AutoReplySettingsForm({
         {conflict && <AutoReplySettingsConflictNotice />}
         {error && <Alert severity="error">{error}</Alert>}
         {message && <Alert severity="success">{message}</Alert>}
-        <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+        <Stack
+          className={dirty ? "repository-form-actions" : undefined}
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ flexWrap: "wrap", bgcolor: dirty ? "background.paper" : undefined }}
+        >
           {canManage && (
             <Button
               type="submit"
@@ -345,16 +631,71 @@ export function AutoReplySettingsForm({
           {saved.enabled && canAuthorize && (
             <Button
               disabled={busy || conflict || !form.enabled}
-              onClick={() => void save(undefined, true)}
+              onClick={() => requestSave(undefined, true)}
             >
               Save and renew publishing authorization
             </Button>
           )}
-          <Button disabled={busy} onClick={() => void reload()}>
+          {dirty && (
+            <Button disabled={busy} onClick={() => guardedAction(reset)}>
+              Discard changes
+            </Button>
+          )}
+          {(dirty || conflict) && <Button onClick={downloadDraft}>Download draft</Button>}
+          <Button disabled={busy} onClick={() => guardedAction(() => void reload())}>
             Reload saved settings
           </Button>
         </Stack>
       </Stack>
+      <Dialog
+        open={preview}
+        onClose={() => setPreview(false)}
+        maxWidth="md"
+        fullWidth
+        aria-labelledby="reply-preview-title"
+      >
+        <DialogTitle id="reply-preview-title">{templateLabels[template]}</DialogTitle>
+        <DialogContent>
+          <AutoReplyTemplatePreview template={template} value={currentTemplate} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPreview(false)}>Back to editor</Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={authorization !== null}
+        onClose={() => setAuthorization(null)}
+        maxWidth="sm"
+        fullWidth
+        aria-labelledby="reply-authorization-title"
+      >
+        <DialogTitle id="reply-authorization-title">
+          {authorization?.renew
+            ? "Renew publishing authorization?"
+            : "Authorize automatic comments?"}
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Save these templates and authorize future conclusion comments
+            {authorization?.form.progressEnabled ? " and assignment progress comment updates" : ""}{" "}
+            in {repository.fullName}. These publications do not ask for per-report confirmation.
+            Existing comments are not rewritten by saving.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAuthorization(null)}>Keep editing</Button>
+          <Button
+            variant="contained"
+            disabled={busy || conflict || !canManage || !canAuthorize}
+            onClick={() => {
+              if (authorization)
+                void save(authorization.renew, authorization.form, authorization.saved);
+            }}
+          >
+            Save and authorize
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
@@ -417,6 +758,7 @@ function ReplyDeliveryList({
   items: (RepositoryAutoReply | RepositoryProgressReply)[];
   progress: boolean;
 }) {
+  const deliveryListId = useId();
   const latest = [...items]
     .sort(
       (left, right) =>
@@ -487,7 +829,11 @@ function ReplyDeliveryList({
               )}
               {reply.body !== null && (
                 <Accordion variant="outlined" disableGutters>
-                  <AccordionSummary expandIcon={<span aria-hidden="true">+</span>}>
+                  <AccordionSummary
+                    id={`${deliveryListId}-${encodeURIComponent(reply.id)}-summary`}
+                    aria-controls={`${deliveryListId}-${encodeURIComponent(reply.id)}-details`}
+                    expandIcon={<span aria-hidden="true">+</span>}
+                  >
                     <Typography variant="body2">View saved comment</Typography>
                   </AccordionSummary>
                   <AccordionDetails>
@@ -547,56 +893,34 @@ function ScopedAutoReplySettingsPanel({
     refetchOnReconnect: false,
   });
   return (
-    <Accordion variant="outlined" disableGutters sx={{ mt: 2 }}>
-      <AccordionSummary expandIcon={<span aria-hidden="true">+</span>}>
-        <Stack
-          direction="row"
-          spacing={1}
-          useFlexGap
-          sx={{ alignItems: "center", flexWrap: "wrap" }}
-        >
-          <Typography>Automatic investigation replies</Typography>
-          {settings.data && (
-            <Chip size="small" label={settings.data.enabled ? "Enabled" : "Disabled"} />
-          )}
-        </Stack>
-      </AccordionSummary>
-      <AccordionDetails>
-        <Stack spacing={2}>
-          {settings.isPending && (
-            <CircularProgress size={20} aria-label="Loading automatic reply settings" />
-          )}
-          {settings.isError && (
-            <Alert severity="error">
-              {settings.error.message}
-              <Button onClick={() => void settings.refetch()}>
-                Retry automatic reply settings
-              </Button>
-            </Alert>
-          )}
-          {settings.data && (
-            <AutoReplySettingsForm
-              key={repository.id}
-              repository={repository}
-              settings={settings.data}
-              canManage={canManage}
-              canAuthorize={canAuthorize}
-            />
-          )}
-          <Divider />
-          <Typography variant="body2" color="text.secondary">
-            Review saved comment bodies, delivery outcomes, and recovery actions in Comments.
-          </Typography>
-          <Box>
-            <Button
-              component={Link}
-              to={`/comments?repositoryId=${encodeURIComponent(repository.id)}`}
-            >
-              View comment deliveries
-            </Button>
-          </Box>
-        </Stack>
-      </AccordionDetails>
-    </Accordion>
+    <Stack spacing={3}>
+      {settings.isPending && (
+        <CircularProgress size={20} aria-label="Loading automatic reply settings" />
+      )}
+      {settings.isError && (
+        <Alert severity="error">
+          {settings.error.message}
+          <Button onClick={() => void settings.refetch()}>Retry automatic reply settings</Button>
+        </Alert>
+      )}
+      {settings.data && (
+        <AutoReplySettingsForm
+          key={repository.id}
+          repository={repository}
+          settings={settings.data}
+          canManage={canManage}
+          canAuthorize={canAuthorize}
+        />
+      )}
+      <Divider />
+      <Typography variant="body2" color="text.secondary">
+        Review saved comment bodies, delivery outcomes, and recovery actions in Comments.
+      </Typography>
+      <Box>
+        <Button component={Link} to={`/comments?repositoryId=${encodeURIComponent(repository.id)}`}>
+          View comment deliveries
+        </Button>
+      </Box>
+    </Stack>
   );
 }

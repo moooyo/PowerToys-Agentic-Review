@@ -12,6 +12,27 @@ const scheduler: InvestigationSchedulerStatus = {
 };
 
 describe("task progress and resource waiting", () => {
+  it("keeps the progress summary compact without promoting a heartbeat to model activity", () => {
+    const html = renderToStaticMarkup(
+      <TaskProgressPanel
+        compact
+        task={{ kind: "pr-review", state: "running", updatedAt: "2026-09-19T01:02:00Z" }}
+        invocations={[]}
+        progress={{
+          stage: "prepare_source",
+          stageStartedAt: null,
+          lastActivityAt: null,
+          lastMeaningfulProgressAt: null,
+          lastHeartbeatAt: "2026-09-19T01:02:00Z",
+        }}
+      />,
+    );
+    expect(html).toContain("Preparing source");
+    expect(html).toContain("No model call has been registered");
+    expect(html).not.toContain("Recorded stage totals");
+    expect(html).not.toContain("Model call running");
+  });
+
   it("distinguishes static capacity from the exclusive desktop", () => {
     expect(taskQueueReason({ kind: "pr-review", state: "queued" }, scheduler)).toContain(
       "Waiting for static task capacity",

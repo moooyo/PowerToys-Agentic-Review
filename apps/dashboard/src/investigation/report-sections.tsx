@@ -24,7 +24,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useId, useState } from "react";
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -236,6 +236,7 @@ export function AssessmentPanel({ assessment }: { assessment: InvestigationAsses
 }
 
 export function CoveragePanel({ report }: { report: InvestigationReportMetadata }) {
+  const candidatesId = useId();
   return (
     <Section title="Investigation coverage and review loop">
       <Stack direction="row" useFlexGap spacing={1} sx={{ mb: 2, flexWrap: "wrap" }}>
@@ -281,7 +282,11 @@ export function CoveragePanel({ report }: { report: InvestigationReportMetadata 
       )}
       {report.loop.candidates.length > 0 && (
         <Accordion disableGutters elevation={0} sx={{ mt: 2 }}>
-          <AccordionSummary expandIcon={<ExpandMoreRounded />}>
+          <AccordionSummary
+            id={`${candidatesId}-summary`}
+            aria-controls={`${candidatesId}-region`}
+            expandIcon={<ExpandMoreRounded />}
+          >
             <Typography>All candidates ({report.loop.candidates.length})</Typography>
           </AccordionSummary>
           <AccordionDetails>
@@ -412,6 +417,7 @@ export function FindingCard({
   draftBody,
   suggestionValid,
   selectionEnabled = true,
+  detail = false,
   onSelect,
   onDraftChange,
 }: {
@@ -421,6 +427,7 @@ export function FindingCard({
   draftBody: string;
   suggestionValid: boolean;
   selectionEnabled?: boolean;
+  detail?: boolean;
   onSelect: (selected: boolean) => void;
   onDraftChange: (body: string) => void;
 }) {
@@ -431,7 +438,11 @@ export function FindingCard({
     ...finding.confirmation.evidenceRefs,
   ]);
   return (
-    <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 3 }}>
+    <Paper
+      variant="outlined"
+      className={detail ? "report-selected-finding" : undefined}
+      sx={{ p: { xs: 2, sm: 2.5 }, borderRadius: 3, minWidth: 0 }}
+    >
       <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
         <Checkbox
           checked={selected}
@@ -439,7 +450,7 @@ export function FindingCard({
           onChange={(event) => onSelect(event.target.checked)}
           slotProps={{ input: { "aria-label": `Select ${finding.title}` } }}
         />
-        <Box sx={{ flex: 1, pt: 0.8 }}>
+        <Box sx={{ flex: 1, minWidth: 0, pt: 0.8, overflowWrap: "anywhere" }}>
           <Stack
             direction="row"
             useFlexGap
@@ -464,15 +475,17 @@ export function FindingCard({
           </Typography>
         </Box>
       </Stack>
-      <Button
-        size="small"
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
-        sx={{ mt: 1 }}
-      >
-        {expanded ? "Hide finding details" : "Show finding details"}
-      </Button>
-      <Collapse in={expanded}>
+      {!detail && (
+        <Button
+          size="small"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          sx={{ mt: 1 }}
+        >
+          {expanded ? "Hide finding details" : "Show finding details"}
+        </Button>
+      )}
+      <Collapse in={detail || expanded}>
         <Stack spacing={2} sx={{ mt: 2 }}>
           <Field label="Trigger conditions">
             <TextList items={finding.trigger.conditions} />
@@ -531,12 +544,18 @@ export function FindingCard({
             minRows={3}
             fullWidth
             value={draftBody}
+            disabled={!selectionEnabled}
             onChange={(event) => onDraftChange(event.target.value)}
-            helperText="Only selected findings are included when preparing feedback."
+            helperText="Edits affect your private feedback draft. The sealed report stays unchanged. Only selected findings are included in prepared feedback."
           />
           {finding.feedbackDraft.suggestion && (
             <Box>
-              <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+              <Stack
+                direction={{ xs: "column", sm: "row" }}
+                spacing={1}
+                useFlexGap
+                sx={{ alignItems: { xs: "flex-start", sm: "center" }, flexWrap: "wrap" }}
+              >
                 <Typography variant="subtitle2">Code replacement suggestion</Typography>
                 <Chip
                   size="small"
@@ -575,6 +594,21 @@ export function FindingCard({
             }
             label="Include this finding in prepared feedback"
           />
+          <Box component="details" sx={{ overflowWrap: "anywhere" }}>
+            <Typography component="summary" sx={{ cursor: "pointer", py: 1 }}>
+              Exact finding and evidence provenance
+            </Typography>
+            <Box
+              component="pre"
+              sx={{ whiteSpace: "pre-wrap", fontSize: 12, overflowWrap: "anywhere" }}
+            >
+              {JSON.stringify(
+                { finding, evidence: evidence.filter((item) => references.has(item.id)) },
+                null,
+                2,
+              )}
+            </Box>
+          </Box>
         </Stack>
       </Collapse>
     </Paper>

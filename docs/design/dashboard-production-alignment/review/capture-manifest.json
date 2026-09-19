@@ -1,0 +1,2443 @@
+{
+  "schemaVersion": "DashboardProductionCaptureManifestV1",
+  "evidenceKind": "production-dashboard-synthetic-fixtures",
+  "candidateSha": "c3dbfa272e96f4d2218fb82043c4a42151b8fcbb6ae8d165d04ed1e8123dedb0",
+  "sourceSha": "a9a0dfdc3be9542bdec73e8cfb2dddf75dc2c24f96ccfa94413f736db816b492",
+  "receiptStatus": "passed",
+  "receiptSchemaVersion": "DashboardProductionBrowserAcceptanceV1",
+  "receiptSha256": "e35d0f69a67e11497d45379d6b52ffe10e0c8caca9a235ebc5e2f18db3a2282f",
+  "generatedAt": "2026-09-19T23:05:55.0703104Z",
+  "captures": [
+    {
+      "id": "capture-0001",
+      "file": "captures/capture-0001.png",
+      "sourceFile": "1440-sign-in.png",
+      "label": "1440-sign-in",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "f2f7c00d3754502cbed948040674560da62e0b128500b8dd66612912bd0dbe51",
+      "byteLength": 64442
+    },
+    {
+      "id": "capture-0002",
+      "file": "captures/capture-0002.png",
+      "sourceFile": "900-sign-in.png",
+      "label": "900-sign-in",
+      "viewport": {
+        "width": 900,
+        "height": 1000
+      },
+      "image": {
+        "width": 900,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "101899de883197dda27f4cce49fee8435c2eafa0cf984eb3f501fce5c57759b1",
+      "byteLength": 55607
+    },
+    {
+      "id": "capture-0003",
+      "file": "captures/capture-0003.png",
+      "sourceFile": "390-sign-in.png",
+      "label": "390-sign-in",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "0ea5ac13b0636370146cee9a2bad6a26fc33356ffdf739fe1282bfea223409e4",
+      "byteLength": 29414
+    },
+    {
+      "id": "capture-0004",
+      "file": "captures/capture-0004.png",
+      "sourceFile": "320-sign-in.png",
+      "label": "320-sign-in",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "1b0a7fd09fe273aa551f5b30c433a05976e849cb602210f8202dff70929a12e1",
+      "byteLength": 28860
+    },
+    {
+      "id": "capture-0005",
+      "file": "captures/capture-0005.png",
+      "sourceFile": "1440-pull-requests.png",
+      "label": "1440-pull-requests",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "3207ca70612a78f68cda9391e84c55ffe4cd56a5ed5b7372d4f023f5783de4be",
+      "byteLength": 116731
+    },
+    {
+      "id": "capture-0006",
+      "file": "captures/capture-0006.png",
+      "sourceFile": "1440-issues.png",
+      "label": "1440-issues",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "16254fa9b5ff7e5f2833a7e9a77ec6eb5bfcabca07e8c6148fad0f6b416e0096",
+      "byteLength": 122921
+    },
+    {
+      "id": "capture-0007",
+      "file": "captures/capture-0007.png",
+      "sourceFile": "1440-issues-bottom.png",
+      "label": "1440-issues-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "4e6d2fb5e61bad1a418f1f18af9f162f7b98333382dec609ecf1e5843b46b1f9",
+      "byteLength": 122880
+    },
+    {
+      "id": "capture-0008",
+      "file": "captures/capture-0008.png",
+      "sourceFile": "1440-tasks.png",
+      "label": "1440-tasks",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "9fad04ee31156d5b8633cc63b8ddb0fcab7243b2e081253237efbc4f733bc26e",
+      "byteLength": 116618
+    },
+    {
+      "id": "capture-0009",
+      "file": "captures/capture-0009.png",
+      "sourceFile": "1440-tasks-bottom.png",
+      "label": "1440-tasks-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "9ae2ff1dbdba93b2515617ac803e80ff2921fc6d8565e3e20eebbbfb8bfa15cb",
+      "byteLength": 117209
+    },
+    {
+      "id": "capture-0010",
+      "file": "captures/capture-0010.png",
+      "sourceFile": "1440-reports.png",
+      "label": "1440-reports",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "ef497d76e9338303c8b0b6e2ef11d7542c117a51531260445b73587301e3f455",
+      "byteLength": 131884
+    },
+    {
+      "id": "capture-0011",
+      "file": "captures/capture-0011.png",
+      "sourceFile": "1440-reports-bottom.png",
+      "label": "1440-reports-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "8c7b1eb48351958a863b5ce1edf465f39a3cce8cb4fec608dab45287aed37553",
+      "byteLength": 143160
+    },
+    {
+      "id": "capture-0012",
+      "file": "captures/capture-0012.png",
+      "sourceFile": "1440-comments.png",
+      "label": "1440-comments",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "5327d5f10b289790d9808e54d35e42941d9783ec786593bc3f651d0ddd4a209b",
+      "byteLength": 129817
+    },
+    {
+      "id": "capture-0013",
+      "file": "captures/capture-0013.png",
+      "sourceFile": "1440-comments-bottom.png",
+      "label": "1440-comments-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "0115e1e6e19a258abd6c091fb270728e38983ac5e46e7f86c38610f3051a3ed3",
+      "byteLength": 140139
+    },
+    {
+      "id": "capture-0014",
+      "file": "captures/capture-0014.png",
+      "sourceFile": "1440-webhooks.png",
+      "label": "1440-webhooks",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "4f11d780850d503ec54ec1f022c384c779da004522b5ec69306d82353aede1dc",
+      "byteLength": 107507
+    },
+    {
+      "id": "capture-0015",
+      "file": "captures/capture-0015.png",
+      "sourceFile": "1440-webhooks-bottom.png",
+      "label": "1440-webhooks-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "24967404fc3bdcacd2f937a2eea46ac0f100049fafed34204296ec4009b2b92e",
+      "byteLength": 108965
+    },
+    {
+      "id": "capture-0016",
+      "file": "captures/capture-0016.png",
+      "sourceFile": "1440-workers.png",
+      "label": "1440-workers",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "7c17c91fcc4769002e746c9096af4206efce68e6d282f22d6da67fc6fb670d90",
+      "byteLength": 113527
+    },
+    {
+      "id": "capture-0017",
+      "file": "captures/capture-0017.png",
+      "sourceFile": "1440-workers-bottom.png",
+      "label": "1440-workers-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "7efee4bf78530a6898dd519c5710ce3fc338e13863fca0ebb82ef6d5dbe31fc4",
+      "byteLength": 109672
+    },
+    {
+      "id": "capture-0018",
+      "file": "captures/capture-0018.png",
+      "sourceFile": "1440-repositories.png",
+      "label": "1440-repositories",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "5a5b86938b24a2d0cde0011c59621ff2afd3bd70efa8d894191048e7ae8224d2",
+      "byteLength": 51057
+    },
+    {
+      "id": "capture-0019",
+      "file": "captures/capture-0019.png",
+      "sourceFile": "1440-account.png",
+      "label": "1440-account",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "97a0f13288b08ff96885af16a0d558bbedaa1faa161bd7743c189ef093d6fc7e",
+      "byteLength": 116113
+    },
+    {
+      "id": "capture-0020",
+      "file": "captures/capture-0020.png",
+      "sourceFile": "1440-account-bottom.png",
+      "label": "1440-account-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "4112578f47dacb7715947a86d78af717178c331da626503693a3d452319a5158",
+      "byteLength": 107440
+    },
+    {
+      "id": "capture-0021",
+      "file": "captures/capture-0021.png",
+      "sourceFile": "1440-accounts.png",
+      "label": "1440-accounts",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "950b8c6e8953d95b8988cd4c97257e7f68c7ce2e392ef1696477a19a0286c5aa",
+      "byteLength": 83434
+    },
+    {
+      "id": "capture-0022",
+      "file": "captures/capture-0022.png",
+      "sourceFile": "1440-pr-detail.png",
+      "label": "1440-pr-detail",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "8db40ace2bd28aaf95f5509a5f03c6cc6018e1ae642f208d39fe9ac4469683ba",
+      "byteLength": 112516
+    },
+    {
+      "id": "capture-0023",
+      "file": "captures/capture-0023.png",
+      "sourceFile": "1440-pr-detail-bottom.png",
+      "label": "1440-pr-detail-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "a43706bf2ea311e09f8552922c0c15d5952beee627354052b216c83c06d9ef1f",
+      "byteLength": 111328
+    },
+    {
+      "id": "capture-0024",
+      "file": "captures/capture-0024.png",
+      "sourceFile": "1440-pr-discussion.png",
+      "label": "1440-pr-discussion",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "88e6a3ad73497c3ea1918233e49a6ce9af09b98efb39cdc534184b2f974c330b",
+      "byteLength": 97404
+    },
+    {
+      "id": "capture-0025",
+      "file": "captures/capture-0025.png",
+      "sourceFile": "1440-pr-discussion-bottom.png",
+      "label": "1440-pr-discussion-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "f921c0aaec20cc2b012cda340d43cf829d6e13748ebe38ab85442161b8ff5145",
+      "byteLength": 93852
+    },
+    {
+      "id": "capture-0026",
+      "file": "captures/capture-0026.png",
+      "sourceFile": "1440-issue-detail.png",
+      "label": "1440-issue-detail",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "e72b7e1c8c7d6b431b89066aa2a4bbd1ed78216590548bb4c76405210f700d08",
+      "byteLength": 114538
+    },
+    {
+      "id": "capture-0027",
+      "file": "captures/capture-0027.png",
+      "sourceFile": "1440-issue-detail-bottom.png",
+      "label": "1440-issue-detail-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "2d18f4750c24393a27a0b443e78f923ff2a1ccfd4d762db183fdf3c4c26db541",
+      "byteLength": 100953
+    },
+    {
+      "id": "capture-0028",
+      "file": "captures/capture-0028.png",
+      "sourceFile": "1440-task-codex-output.png",
+      "label": "1440-task-codex-output",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "1ba6c2a3cda3e5802a1ae87336f6dc8afe09f8e2754420ddce0ff955e075057a",
+      "byteLength": 99959
+    },
+    {
+      "id": "capture-0029",
+      "file": "captures/capture-0029.png",
+      "sourceFile": "1440-task-codex-output-bottom.png",
+      "label": "1440-task-codex-output-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "47f04d6847323ebc15e38f70cc3438e019264b3b4c3062e79791ffe3a691677b",
+      "byteLength": 85519
+    },
+    {
+      "id": "capture-0030",
+      "file": "captures/capture-0030.png",
+      "sourceFile": "1440-task-copilot-output.png",
+      "label": "1440-task-copilot-output",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c5dab8844819fc3b9f66d5c97ccb8f9944d76a10603f826e1036d65145bb69de",
+      "byteLength": 101256
+    },
+    {
+      "id": "capture-0031",
+      "file": "captures/capture-0031.png",
+      "sourceFile": "1440-task-copilot-output-bottom.png",
+      "label": "1440-task-copilot-output-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "f7360002e0ada0a352334634d91207ff6b60dca88cb10651d7d28e588857988e",
+      "byteLength": 86530
+    },
+    {
+      "id": "capture-0032",
+      "file": "captures/capture-0032.png",
+      "sourceFile": "1440-task-static-evidence.png",
+      "label": "1440-task-static-evidence",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "8cea948c30ccc13cb0b7096bec33fe20cdbc348947f42ae3b0836dbdcc3a46c4",
+      "byteLength": 97168
+    },
+    {
+      "id": "capture-0033",
+      "file": "captures/capture-0033.png",
+      "sourceFile": "1440-task-e2e-evidence.png",
+      "label": "1440-task-e2e-evidence",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c6f4ac338114e8647e77718bf121d241bc419f08677904f469ed2bcf172dc6fd",
+      "byteLength": 97962
+    },
+    {
+      "id": "capture-0034",
+      "file": "captures/capture-0034.png",
+      "sourceFile": "1440-task-e2e-evidence-bottom.png",
+      "label": "1440-task-e2e-evidence-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "652489b43b904fddfe9f460461d0c3ce01748ddd9f84c3dc8d68bfde3d02480f",
+      "byteLength": 95817
+    },
+    {
+      "id": "capture-0035",
+      "file": "captures/capture-0035.png",
+      "sourceFile": "1440-task-running-evidence.png",
+      "label": "1440-task-running-evidence",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "3fe48128cf0c39292b3f7f82eaffde7dd0b3c7ff5bb61b3654bfcbb00e33413d",
+      "byteLength": 90669
+    },
+    {
+      "id": "capture-0036",
+      "file": "captures/capture-0036.png",
+      "sourceFile": "1440-task-blocked-evidence.png",
+      "label": "1440-task-blocked-evidence",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "7a0a7d33461c5c83ec70edb67a06d5833684c17bba9e953731d80c84d727c34a",
+      "byteLength": 87505
+    },
+    {
+      "id": "capture-0037",
+      "file": "captures/capture-0037.png",
+      "sourceFile": "1440-task-details.png",
+      "label": "1440-task-details",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "d4dc04241477120134d3504c4aade40389514641301abd7d251c28f3950c0ef3",
+      "byteLength": 81086
+    },
+    {
+      "id": "capture-0038",
+      "file": "captures/capture-0038.png",
+      "sourceFile": "1440-task-details-bottom.png",
+      "label": "1440-task-details-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "2d2a37f90b48114ea967915839b3402676bec42e9adb84b85b57eb06736eda4f",
+      "byteLength": 93760
+    },
+    {
+      "id": "capture-0039",
+      "file": "captures/capture-0039.png",
+      "sourceFile": "1440-task-blocked.png",
+      "label": "1440-task-blocked",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "3efe30c50edc774859ea93efd932bba2294337a8cb419df157b4744c5d2719ce",
+      "byteLength": 96809
+    },
+    {
+      "id": "capture-0040",
+      "file": "captures/capture-0040.png",
+      "sourceFile": "1440-task-blocked-bottom.png",
+      "label": "1440-task-blocked-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c8386fc6570dfe87b13422f97fc6df9335c26914ddb33f19723200dd771bb0cd",
+      "byteLength": 64105
+    },
+    {
+      "id": "capture-0041",
+      "file": "captures/capture-0041.png",
+      "sourceFile": "1440-task-running.png",
+      "label": "1440-task-running",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "3b0d240d8fec7987eb0061846b999a280c9048f4d0ce8b5cfacf37814f3c6504",
+      "byteLength": 96773
+    },
+    {
+      "id": "capture-0042",
+      "file": "captures/capture-0042.png",
+      "sourceFile": "1440-task-running-bottom.png",
+      "label": "1440-task-running-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "16fd1115f7e659d168cf894cad48c0156db5d27d0279e9d5ff5762374b54abd3",
+      "byteLength": 69247
+    },
+    {
+      "id": "capture-0043",
+      "file": "captures/capture-0043.png",
+      "sourceFile": "1440-report-detail.png",
+      "label": "1440-report-detail",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "81e079ae675d94ca0fbec882d336e15591b36aee4e25ff72e4d3b7f4db79c620",
+      "byteLength": 125441
+    },
+    {
+      "id": "capture-0044",
+      "file": "captures/capture-0044.png",
+      "sourceFile": "1440-report-detail-bottom.png",
+      "label": "1440-report-detail-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "7543f28985a454a95a0db45243b8415ecb2d59b4d4c1c5f8bbb8da4bf0702950",
+      "byteLength": 99724
+    },
+    {
+      "id": "capture-0045",
+      "file": "captures/capture-0045.png",
+      "sourceFile": "1440-report-evidence.png",
+      "label": "1440-report-evidence",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "531821cd89a0a5a8c203c70235e7e6c7a84b0f9309d5336988674320cbf26ee9",
+      "byteLength": 101472
+    },
+    {
+      "id": "capture-0046",
+      "file": "captures/capture-0046.png",
+      "sourceFile": "1440-report-evidence-bottom.png",
+      "label": "1440-report-evidence-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "eda792504727669864b04903d1dbbc268c3ff3b9da99d1b1ef6eccd058ba1965",
+      "byteLength": 56391
+    },
+    {
+      "id": "capture-0047",
+      "file": "captures/capture-0047.png",
+      "sourceFile": "1440-report-details.png",
+      "label": "1440-report-details",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "a1e3064bc595a0a166dd7e30fb38159536cc2940ef4e5f70395c3cac6542eb84",
+      "byteLength": 123468
+    },
+    {
+      "id": "capture-0048",
+      "file": "captures/capture-0048.png",
+      "sourceFile": "1440-report-details-bottom.png",
+      "label": "1440-report-details-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "ca85f57287f761189ad33c127cee189ae7b75b4b6e0bb349b8c7fc71a7302f11",
+      "byteLength": 124605
+    },
+    {
+      "id": "capture-0049",
+      "file": "captures/capture-0049.png",
+      "sourceFile": "1440-report-large.png",
+      "label": "1440-report-large",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "1e9a0574576a309b2515ac78bdfc91eb883329c9075b32b06031446163dff35c",
+      "byteLength": 127183
+    },
+    {
+      "id": "capture-0050",
+      "file": "captures/capture-0050.png",
+      "sourceFile": "1440-report-large-bottom.png",
+      "label": "1440-report-large-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "584aad9397682ca85caf8907ebf102eada584ab73eef841519ce0f1746dd370e",
+      "byteLength": 67154
+    },
+    {
+      "id": "capture-0051",
+      "file": "captures/capture-0051.png",
+      "sourceFile": "1440-webhook-failed.png",
+      "label": "1440-webhook-failed",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "94ff41eb69843d79b512a6202c1a80b11a0583e6480e127e7935ff6601c45d93",
+      "byteLength": 101960
+    },
+    {
+      "id": "capture-0052",
+      "file": "captures/capture-0052.png",
+      "sourceFile": "1440-webhook-failed-bottom.png",
+      "label": "1440-webhook-failed-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "06c537788b7f7589c56c198d7311a1add2c6dc694211b78db9cb2709ce87a7fd",
+      "byteLength": 101735
+    },
+    {
+      "id": "capture-0053",
+      "file": "captures/capture-0053.png",
+      "sourceFile": "1440-repository-settings.png",
+      "label": "1440-repository-settings",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "0ef134240c6b431e733cccd1c0200d65c4908fbb826b69c5ff44d5df1c01c954",
+      "byteLength": 74307
+    },
+    {
+      "id": "capture-0054",
+      "file": "captures/capture-0054.png",
+      "sourceFile": "1440-repository-settings-bottom.png",
+      "label": "1440-repository-settings-bottom",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "7cd64ffe99ac2f7f98925bd639a350dda06bfc2cd591d9e4c5bab0727cafa8fc",
+      "byteLength": 69619
+    },
+    {
+      "id": "capture-0055",
+      "file": "captures/capture-0055.png",
+      "sourceFile": "390-pull-requests.png",
+      "label": "390-pull-requests",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "27e7d6646e75f05adeeb95910cfef0d3ec0d3b1769676f8c5337d12fae12982c",
+      "byteLength": 63103
+    },
+    {
+      "id": "capture-0056",
+      "file": "captures/capture-0056.png",
+      "sourceFile": "390-pull-requests-bottom.png",
+      "label": "390-pull-requests-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "482479302f79db19e549b77fc4106e5223d3f4ffa4669176365d9ea074f4584c",
+      "byteLength": 65421
+    },
+    {
+      "id": "capture-0057",
+      "file": "captures/capture-0057.png",
+      "sourceFile": "390-issues.png",
+      "label": "390-issues",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "d6e93c78c32d1dbccb3f0e889b572345bda1faa7186ead62af5e071730b4b443",
+      "byteLength": 60166
+    },
+    {
+      "id": "capture-0058",
+      "file": "captures/capture-0058.png",
+      "sourceFile": "390-issues-bottom.png",
+      "label": "390-issues-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "febd1eea93f19f1b6740f506e1dbe86fc4c6247b39a0dc05ae508829a8f000a3",
+      "byteLength": 64438
+    },
+    {
+      "id": "capture-0059",
+      "file": "captures/capture-0059.png",
+      "sourceFile": "390-tasks.png",
+      "label": "390-tasks",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "008ac4ef9ab9babdc95e304346ada6352f847b2775f282bd7b1fbc971fa53246",
+      "byteLength": 63274
+    },
+    {
+      "id": "capture-0060",
+      "file": "captures/capture-0060.png",
+      "sourceFile": "390-tasks-bottom.png",
+      "label": "390-tasks-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "a5d9481127d6c5cdb20835c07f9449bd14f38f3b5bb3e8f4b02d301a552ed1a0",
+      "byteLength": 70227
+    },
+    {
+      "id": "capture-0061",
+      "file": "captures/capture-0061.png",
+      "sourceFile": "390-reports.png",
+      "label": "390-reports",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "d80dae3e4dc72325ea9d922ab97181d4d46c3ce14bd18ecc9fcc08371db7415d",
+      "byteLength": 67599
+    },
+    {
+      "id": "capture-0062",
+      "file": "captures/capture-0062.png",
+      "sourceFile": "390-reports-bottom.png",
+      "label": "390-reports-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "9f379b2ad0609904d0bafe7a7520549f978451e8444848da32af86bf6765c0a9",
+      "byteLength": 64248
+    },
+    {
+      "id": "capture-0063",
+      "file": "captures/capture-0063.png",
+      "sourceFile": "390-comments.png",
+      "label": "390-comments",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "85a71359ad3006e61e79d7b5be44a5cdd3c4830ec98d7362bf222e386ae42cb6",
+      "byteLength": 63822
+    },
+    {
+      "id": "capture-0064",
+      "file": "captures/capture-0064.png",
+      "sourceFile": "390-comments-bottom.png",
+      "label": "390-comments-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "6aeb069651475d8473f8dceca70fdc23cfb611e3b71f69b4009f29c81e225eed",
+      "byteLength": 71747
+    },
+    {
+      "id": "capture-0065",
+      "file": "captures/capture-0065.png",
+      "sourceFile": "390-webhooks.png",
+      "label": "390-webhooks",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "cbad98bf2c629ba41cbd4af0fec3accbda7e6303d0b5ff3118084d6d58a537db",
+      "byteLength": 63828
+    },
+    {
+      "id": "capture-0066",
+      "file": "captures/capture-0066.png",
+      "sourceFile": "390-webhooks-bottom.png",
+      "label": "390-webhooks-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "38ffba4cbc9527f61e17389ad5360d8300b37d8f4285ea22081ba44c5665e5a8",
+      "byteLength": 66858
+    },
+    {
+      "id": "capture-0067",
+      "file": "captures/capture-0067.png",
+      "sourceFile": "390-workers.png",
+      "label": "390-workers",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "685ecf4d2271a8209466f4a56d096423ac5d097124b6711d3b8ed63f63bf1b87",
+      "byteLength": 63860
+    },
+    {
+      "id": "capture-0068",
+      "file": "captures/capture-0068.png",
+      "sourceFile": "390-workers-bottom.png",
+      "label": "390-workers-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "80d6dba07278116ac0de95a96ff2df7d3c5254b8cd03bd52c3b9e227a0a61a32",
+      "byteLength": 68428
+    },
+    {
+      "id": "capture-0069",
+      "file": "captures/capture-0069.png",
+      "sourceFile": "390-repositories.png",
+      "label": "390-repositories",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "2c771943959b3665a45ffb292fccababa1754c0356c82c74a52fa78058ec3f1f",
+      "byteLength": 41770
+    },
+    {
+      "id": "capture-0070",
+      "file": "captures/capture-0070.png",
+      "sourceFile": "390-account.png",
+      "label": "390-account",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "8137143ba15c98d93d43189256091c5cf278cbbfb7d64fa01e152835fd9c2b94",
+      "byteLength": 59998
+    },
+    {
+      "id": "capture-0071",
+      "file": "captures/capture-0071.png",
+      "sourceFile": "390-account-bottom.png",
+      "label": "390-account-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "5364426b62f445ef77457458caa50f68b214f3a16ae7ca9bd5182da223d98693",
+      "byteLength": 60547
+    },
+    {
+      "id": "capture-0072",
+      "file": "captures/capture-0072.png",
+      "sourceFile": "390-accounts.png",
+      "label": "390-accounts",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "5953648018f0a367244b3c5bd1fd4c7d439ae9c61f6b8ed7f4a02c85c49ac988",
+      "byteLength": 58666
+    },
+    {
+      "id": "capture-0073",
+      "file": "captures/capture-0073.png",
+      "sourceFile": "390-accounts-bottom.png",
+      "label": "390-accounts-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "5b861ae1aca316dffb9a113fb5884e88fa9dfa87fdd4af774c52fe934a9f38fd",
+      "byteLength": 55151
+    },
+    {
+      "id": "capture-0074",
+      "file": "captures/capture-0074.png",
+      "sourceFile": "390-pr-detail.png",
+      "label": "390-pr-detail",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "f84db0dded055996dfa54125e944a685c9c1afbe9d310af298d250bddf33931c",
+      "byteLength": 59674
+    },
+    {
+      "id": "capture-0075",
+      "file": "captures/capture-0075.png",
+      "sourceFile": "390-pr-detail-bottom.png",
+      "label": "390-pr-detail-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "4f9ecccbb52e3ebdacf5c1c9b46876b5d1556d1bed8e63313e1e5438d64b3592",
+      "byteLength": 46034
+    },
+    {
+      "id": "capture-0076",
+      "file": "captures/capture-0076.png",
+      "sourceFile": "390-pr-discussion.png",
+      "label": "390-pr-discussion",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "f9c597165cef8b3d28da04534c196e7f5d2d1118fa4291b5434eec4b00bc5002",
+      "byteLength": 63542
+    },
+    {
+      "id": "capture-0077",
+      "file": "captures/capture-0077.png",
+      "sourceFile": "390-pr-discussion-bottom.png",
+      "label": "390-pr-discussion-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "4c4eb5f41e34cda9cdf0b234302d1a197851cc14f6b0d4a67f82dd77ab944d78",
+      "byteLength": 64518
+    },
+    {
+      "id": "capture-0078",
+      "file": "captures/capture-0078.png",
+      "sourceFile": "390-issue-detail.png",
+      "label": "390-issue-detail",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "4581d7daa8570be98b801424d2890746652848f3e9e586b7716cb9e38c42cbdc",
+      "byteLength": 61094
+    },
+    {
+      "id": "capture-0079",
+      "file": "captures/capture-0079.png",
+      "sourceFile": "390-issue-detail-bottom.png",
+      "label": "390-issue-detail-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "62550b95e398e888f0adafbf7d34c595b125f0ba7232715566afd41631a9f1b5",
+      "byteLength": 45496
+    },
+    {
+      "id": "capture-0080",
+      "file": "captures/capture-0080.png",
+      "sourceFile": "390-task-codex-output.png",
+      "label": "390-task-codex-output",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c7b5bebf912ea0201ddd8904dd866b66eee55a4c952d80db1755461d2536f933",
+      "byteLength": 64423
+    },
+    {
+      "id": "capture-0081",
+      "file": "captures/capture-0081.png",
+      "sourceFile": "390-task-codex-output-bottom.png",
+      "label": "390-task-codex-output-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "31fcd764d0e91cc1f4b94d4f8a9e65a68ff0f5f182c123de955bf8fa389d2177",
+      "byteLength": 65603
+    },
+    {
+      "id": "capture-0082",
+      "file": "captures/capture-0082.png",
+      "sourceFile": "390-task-copilot-output.png",
+      "label": "390-task-copilot-output",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "60f8c48a010359b81b0c9226bd0a09ce48c641746d1a048807a14df0d6058f82",
+      "byteLength": 65482
+    },
+    {
+      "id": "capture-0083",
+      "file": "captures/capture-0083.png",
+      "sourceFile": "390-task-copilot-output-bottom.png",
+      "label": "390-task-copilot-output-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "dda45aaed2c6e6e047811b77676776fe839b50eef8d84ae38559d1557dba3447",
+      "byteLength": 66731
+    },
+    {
+      "id": "capture-0084",
+      "file": "captures/capture-0084.png",
+      "sourceFile": "390-task-static-evidence.png",
+      "label": "390-task-static-evidence",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "1c88479275831d1352df1aac51182996f99be6f0981688d57db542743bed9e59",
+      "byteLength": 70219
+    },
+    {
+      "id": "capture-0085",
+      "file": "captures/capture-0085.png",
+      "sourceFile": "390-task-static-evidence-bottom.png",
+      "label": "390-task-static-evidence-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "b459a5dda155314d13821bf0293d137ff8158c76d04db1cb46c78e82363eb522",
+      "byteLength": 69154
+    },
+    {
+      "id": "capture-0086",
+      "file": "captures/capture-0086.png",
+      "sourceFile": "390-task-e2e-evidence.png",
+      "label": "390-task-e2e-evidence",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c5fa7c136a02a354bda43d50a3e3ed261eab56e6e8c98257873f78f9eff3dd18",
+      "byteLength": 65436
+    },
+    {
+      "id": "capture-0087",
+      "file": "captures/capture-0087.png",
+      "sourceFile": "390-task-e2e-evidence-bottom.png",
+      "label": "390-task-e2e-evidence-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "cbcc225ee19b06512badfe05b205a7a1275b6003c4db140dd62c3bb9c112aa87",
+      "byteLength": 52138
+    },
+    {
+      "id": "capture-0088",
+      "file": "captures/capture-0088.png",
+      "sourceFile": "390-task-running-evidence.png",
+      "label": "390-task-running-evidence",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "031e4cfa159c5f9f3a261c8e0884cb690456d372ed8f1dc611367e5af2bceb2d",
+      "byteLength": 72193
+    },
+    {
+      "id": "capture-0089",
+      "file": "captures/capture-0089.png",
+      "sourceFile": "390-task-running-evidence-bottom.png",
+      "label": "390-task-running-evidence-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "565dbee27b40b446d00280e7a165d922da58e1adcb7c211360c6475ae9071ee1",
+      "byteLength": 64731
+    },
+    {
+      "id": "capture-0090",
+      "file": "captures/capture-0090.png",
+      "sourceFile": "390-task-blocked-evidence.png",
+      "label": "390-task-blocked-evidence",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "9545c62e825013f4e189f5e8829f3e1f42f626681bb946ad76ef12dc394ab238",
+      "byteLength": 67353
+    },
+    {
+      "id": "capture-0091",
+      "file": "captures/capture-0091.png",
+      "sourceFile": "390-task-blocked-evidence-bottom.png",
+      "label": "390-task-blocked-evidence-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "1b82bee6b2ff5f60441ac38cf11db0b5396d5fc3b6e8370f7c37f69638668e20",
+      "byteLength": 58889
+    },
+    {
+      "id": "capture-0092",
+      "file": "captures/capture-0092.png",
+      "sourceFile": "390-task-details.png",
+      "label": "390-task-details",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "1e3c89c4f723c681c6ad959c95f14df12c5f5f984c564dac2ba7dc03cb145c7d",
+      "byteLength": 51161
+    },
+    {
+      "id": "capture-0093",
+      "file": "captures/capture-0093.png",
+      "sourceFile": "390-task-details-bottom.png",
+      "label": "390-task-details-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "cac0e09bf05f9f2971e99877b2eec37050bf93c52d5ee0fdc8b2cd078bc8aaa0",
+      "byteLength": 63176
+    },
+    {
+      "id": "capture-0094",
+      "file": "captures/capture-0094.png",
+      "sourceFile": "390-task-blocked.png",
+      "label": "390-task-blocked",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "7295a9ec997c67c6d1349c55316ba38f5e5340f40068e304fddf36ff62812b93",
+      "byteLength": 65975
+    },
+    {
+      "id": "capture-0095",
+      "file": "captures/capture-0095.png",
+      "sourceFile": "390-task-blocked-bottom.png",
+      "label": "390-task-blocked-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "1d6f52571752a29c3f33d02760505774bba4685296eaf155a1f8ed21a25b5c78",
+      "byteLength": 50195
+    },
+    {
+      "id": "capture-0096",
+      "file": "captures/capture-0096.png",
+      "sourceFile": "390-task-running.png",
+      "label": "390-task-running",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "94c743f663c84e6a0be806cbbf4c76f7e7b7814b8b73ce117e7330857e1eacc6",
+      "byteLength": 63166
+    },
+    {
+      "id": "capture-0097",
+      "file": "captures/capture-0097.png",
+      "sourceFile": "390-task-running-bottom.png",
+      "label": "390-task-running-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "3a827b262b89d9e4622e1ca2e6ab04fbe2ea958dea04d3ca980c2177afcf6e83",
+      "byteLength": 51701
+    },
+    {
+      "id": "capture-0098",
+      "file": "captures/capture-0098.png",
+      "sourceFile": "390-report-detail.png",
+      "label": "390-report-detail",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c4c9b6d6c6b0529becb87816b8803566ae4f9cecc91bc5f43ba92f191895d99e",
+      "byteLength": 63739
+    },
+    {
+      "id": "capture-0099",
+      "file": "captures/capture-0099.png",
+      "sourceFile": "390-report-detail-bottom.png",
+      "label": "390-report-detail-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c598059e93f589a977973bdc58a8e5aab5cb7447c7a3a0bd971b3811aa00d4af",
+      "byteLength": 65754
+    },
+    {
+      "id": "capture-0100",
+      "file": "captures/capture-0100.png",
+      "sourceFile": "390-report-evidence.png",
+      "label": "390-report-evidence",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "947cf303970ba92a82296de213551013d42767aea558a70ee5f67d4e8a1b169b",
+      "byteLength": 62161
+    },
+    {
+      "id": "capture-0101",
+      "file": "captures/capture-0101.png",
+      "sourceFile": "390-report-evidence-bottom.png",
+      "label": "390-report-evidence-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "3cb98011459b64d94e015007ad3cb0a8dd28860ea0903395b415c6abbd39e473",
+      "byteLength": 44455
+    },
+    {
+      "id": "capture-0102",
+      "file": "captures/capture-0102.png",
+      "sourceFile": "390-report-details.png",
+      "label": "390-report-details",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "beec7ad34e2dc38881636e72761829dedb9daf6429246dd8380d55e8a08ab2df",
+      "byteLength": 62568
+    },
+    {
+      "id": "capture-0103",
+      "file": "captures/capture-0103.png",
+      "sourceFile": "390-report-details-bottom.png",
+      "label": "390-report-details-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "f38fc42f220e0f2ac1d12d9a6291866943e4ae901c39812834a25db749d9da4e",
+      "byteLength": 54664
+    },
+    {
+      "id": "capture-0104",
+      "file": "captures/capture-0104.png",
+      "sourceFile": "390-report-large.png",
+      "label": "390-report-large",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "cdd99351cd5c4620e6cce5b3e0feb1145c4be2d8d9f316217b75e94e4b342743",
+      "byteLength": 64858
+    },
+    {
+      "id": "capture-0105",
+      "file": "captures/capture-0105.png",
+      "sourceFile": "390-report-large-bottom.png",
+      "label": "390-report-large-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "16de599699200c1babdaf4059adba1382b53e125c0820fb00debec277516e3f3",
+      "byteLength": 65755
+    },
+    {
+      "id": "capture-0106",
+      "file": "captures/capture-0106.png",
+      "sourceFile": "390-webhook-failed.png",
+      "label": "390-webhook-failed",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "6f3c42321b1f64cd461aa5fdfacb85d5dba1e54964b17cdd99adbfa82a95ca21",
+      "byteLength": 58556
+    },
+    {
+      "id": "capture-0107",
+      "file": "captures/capture-0107.png",
+      "sourceFile": "390-webhook-failed-bottom.png",
+      "label": "390-webhook-failed-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "89d1eb846a8de9346d1b3bf4992ae45d08bb09bf520bf34f1e6e1e618dbfc438",
+      "byteLength": 51082
+    },
+    {
+      "id": "capture-0108",
+      "file": "captures/capture-0108.png",
+      "sourceFile": "390-repository-settings.png",
+      "label": "390-repository-settings",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "21df9ae38e2a991c61e96fb81958b9d01c08c1dd9a212e01f6512e50b40f3dec",
+      "byteLength": 51890
+    },
+    {
+      "id": "capture-0109",
+      "file": "captures/capture-0109.png",
+      "sourceFile": "390-repository-settings-bottom.png",
+      "label": "390-repository-settings-bottom",
+      "viewport": {
+        "width": 390,
+        "height": 1000
+      },
+      "image": {
+        "width": 390,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "8e22288db1c1b2b4b3d885ebddacaaa2a61ed7407dcfa27969d50818fc070a60",
+      "byteLength": 46710
+    },
+    {
+      "id": "capture-0110",
+      "file": "captures/capture-0110.png",
+      "sourceFile": "320-tasks.png",
+      "label": "320-tasks",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "b80b08915c40c24696b69fac0253250099692cbe08bd1a11c796d808869bad83",
+      "byteLength": 57289
+    },
+    {
+      "id": "capture-0111",
+      "file": "captures/capture-0111.png",
+      "sourceFile": "320-tasks-bottom.png",
+      "label": "320-tasks-bottom",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "fe01e2268c1551cf8b61a0e21bc50ddb8a8b0adc01ca2baeb926997df7d4efbe",
+      "byteLength": 57461
+    },
+    {
+      "id": "capture-0112",
+      "file": "captures/capture-0112.png",
+      "sourceFile": "320-accounts.png",
+      "label": "320-accounts",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "5f0c1b3d3d6534d0ed4afefd4364cb660e59bff6b1413016983ccf8cdad8b9ba",
+      "byteLength": 52578
+    },
+    {
+      "id": "capture-0113",
+      "file": "captures/capture-0113.png",
+      "sourceFile": "320-accounts-bottom.png",
+      "label": "320-accounts-bottom",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c021a0e21c88dd3dd4ffd1e850782ba88ef4461150aa0af255e2b4035180fc1b",
+      "byteLength": 50357
+    },
+    {
+      "id": "capture-0114",
+      "file": "captures/capture-0114.png",
+      "sourceFile": "320-task-codex-output.png",
+      "label": "320-task-codex-output",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "c3cef6abb906c540ed169bdebd24729585dd403cf69b6de4a843ecd9bf88b393",
+      "byteLength": 55424
+    },
+    {
+      "id": "capture-0115",
+      "file": "captures/capture-0115.png",
+      "sourceFile": "320-task-codex-output-bottom.png",
+      "label": "320-task-codex-output-bottom",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "e1fdf481602eb9e9cb38d7dcffb9864ddf7a4da2b54b0aec13d77ee3e4dd0dd0",
+      "byteLength": 56222
+    },
+    {
+      "id": "capture-0116",
+      "file": "captures/capture-0116.png",
+      "sourceFile": "320-report-detail.png",
+      "label": "320-report-detail",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "8f63d78bc494703e8d5a1081f5fca1447fd12dbcaae2813910f8c053a3a5b480",
+      "byteLength": 61060
+    },
+    {
+      "id": "capture-0117",
+      "file": "captures/capture-0117.png",
+      "sourceFile": "320-report-detail-bottom.png",
+      "label": "320-report-detail-bottom",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "3800c65b973be09b68cc57d952717586297cfbf3c4c86082511b4d272c0d2ab3",
+      "byteLength": 59272
+    },
+    {
+      "id": "capture-0118",
+      "file": "captures/capture-0118.png",
+      "sourceFile": "320-webhook-failed.png",
+      "label": "320-webhook-failed",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "55073e8bb331f9cf97a2b72267e212ad223694bad213ed88d321db166c6f77d1",
+      "byteLength": 56993
+    },
+    {
+      "id": "capture-0119",
+      "file": "captures/capture-0119.png",
+      "sourceFile": "320-webhook-failed-bottom.png",
+      "label": "320-webhook-failed-bottom",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "ee2c2909f1ffec797458034fb7417c94510e69c9bacef5c32f509cb9da9af70c",
+      "byteLength": 50872
+    },
+    {
+      "id": "capture-0120",
+      "file": "captures/capture-0120.png",
+      "sourceFile": "320-repository-settings.png",
+      "label": "320-repository-settings",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "60e820ce95cd5fcfce76638b1f89c7d2ca17c4d133f0f8dda00ec74a678c8e9d",
+      "byteLength": 50903
+    },
+    {
+      "id": "capture-0121",
+      "file": "captures/capture-0121.png",
+      "sourceFile": "320-repository-settings-bottom.png",
+      "label": "320-repository-settings-bottom",
+      "viewport": {
+        "width": 320,
+        "height": 1000
+      },
+      "image": {
+        "width": 320,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "b9579513be7669cb5f66db47ecb9cd054085f689c5f1afce79bf6b464acc73c6",
+      "byteLength": 45608
+    },
+    {
+      "id": "capture-0122",
+      "file": "captures/capture-0122.png",
+      "sourceFile": "output-readable-codex.png",
+      "label": "output-readable-codex",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "1ba6c2a3cda3e5802a1ae87336f6dc8afe09f8e2754420ddce0ff955e075057a",
+      "byteLength": 99959
+    },
+    {
+      "id": "capture-0123",
+      "file": "captures/capture-0123.png",
+      "sourceFile": "output-readable-copilot.png",
+      "label": "output-readable-copilot",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "fd239434f50d60c14c147dc851852be9d47b23a0755979557d3993d95f35c65e",
+      "byteLength": 101252
+    },
+    {
+      "id": "capture-0124",
+      "file": "captures/capture-0124.png",
+      "sourceFile": "coarse-pull-requests.png",
+      "label": "coarse-pull-requests",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "image": {
+        "width": 390,
+        "height": 844
+      },
+      "theme": "not-recorded",
+      "sha256": "6d36dc553e794526334bf4f3f076acbd76bdb95cbe0d210a0055bd87daa3af65",
+      "byteLength": 55091
+    },
+    {
+      "id": "capture-0125",
+      "file": "captures/capture-0125.png",
+      "sourceFile": "coarse-source-filters.png",
+      "label": "coarse-source-filters",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "image": {
+        "width": 390,
+        "height": 844
+      },
+      "theme": "not-recorded",
+      "sha256": "d560053aa060787c40d73d5ee58bc43d925088705c98931505d0c2a177380b1a",
+      "byteLength": 56560
+    },
+    {
+      "id": "capture-0126",
+      "file": "captures/capture-0126.png",
+      "sourceFile": "coarse-tasks.png",
+      "label": "coarse-tasks",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "image": {
+        "width": 390,
+        "height": 844
+      },
+      "theme": "not-recorded",
+      "sha256": "4b043dd9038b4965d29d2349c11ae818c7a799fba8813e490af027400e9b9d68",
+      "byteLength": 54280
+    },
+    {
+      "id": "capture-0127",
+      "file": "captures/capture-0127.png",
+      "sourceFile": "coarse-task-codex-output.png",
+      "label": "coarse-task-codex-output",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "image": {
+        "width": 390,
+        "height": 844
+      },
+      "theme": "not-recorded",
+      "sha256": "87de41e457e89c6c7ffdfed544365d9f7cb69ea2e1c931b73b22e0437ac04701",
+      "byteLength": 57376
+    },
+    {
+      "id": "capture-0128",
+      "file": "captures/capture-0128.png",
+      "sourceFile": "coarse-task-e2e-evidence.png",
+      "label": "coarse-task-e2e-evidence",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "image": {
+        "width": 390,
+        "height": 844
+      },
+      "theme": "not-recorded",
+      "sha256": "805b93a8e8237ec47fdf0bcfaff2cf114988a177ce2ed62f1544bfea6660a04d",
+      "byteLength": 51533
+    },
+    {
+      "id": "capture-0129",
+      "file": "captures/capture-0129.png",
+      "sourceFile": "coarse-repository-settings.png",
+      "label": "coarse-repository-settings",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "image": {
+        "width": 390,
+        "height": 844
+      },
+      "theme": "not-recorded",
+      "sha256": "911a201e59117cd3a681141f6b21fa856fe9b1db0df1366bc8e021cef8132e76",
+      "byteLength": 48139
+    },
+    {
+      "id": "capture-0130",
+      "file": "captures/capture-0130.png",
+      "sourceFile": "coarse-wide-source-filters.png",
+      "label": "coarse-wide-source-filters",
+      "viewport": {
+        "width": 900,
+        "height": 1000
+      },
+      "image": {
+        "width": 900,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "bb6e32266527266dea8c3e9141071751b7c42b07273170fab1ef989084cf0555",
+      "byteLength": 122092
+    },
+    {
+      "id": "capture-0131",
+      "file": "captures/capture-0131.png",
+      "sourceFile": "dark-pull-requests.png",
+      "label": "dark-pull-requests",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "358653311e45950d24b57d7a0d4c66c1a6777385f57b04da2ee65e712fa952ed",
+      "byteLength": 118052
+    },
+    {
+      "id": "capture-0132",
+      "file": "captures/capture-0132.png",
+      "sourceFile": "dark-issues.png",
+      "label": "dark-issues",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "bbf4f7708c9ab3e41c83f6dddbd009d053c9158a03ba1b22fd2afeafd7f63086",
+      "byteLength": 124196
+    },
+    {
+      "id": "capture-0133",
+      "file": "captures/capture-0133.png",
+      "sourceFile": "dark-tasks.png",
+      "label": "dark-tasks",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "963e6b9e8286e90ef0fc4ac323629b2a3bd1acfb1c28e180aaf7bb3e54c465d0",
+      "byteLength": 117936
+    },
+    {
+      "id": "capture-0134",
+      "file": "captures/capture-0134.png",
+      "sourceFile": "dark-reports.png",
+      "label": "dark-reports",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "02f32f8dc4751c1d4a561bc782b39e5891625956387205710f27fcb7756b3b3e",
+      "byteLength": 132645
+    },
+    {
+      "id": "capture-0135",
+      "file": "captures/capture-0135.png",
+      "sourceFile": "dark-comments.png",
+      "label": "dark-comments",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "764a1787d38d3c634d61b14ed31750a9997cd9ecda89593585b0fe887b66d7f6",
+      "byteLength": 130555
+    },
+    {
+      "id": "capture-0136",
+      "file": "captures/capture-0136.png",
+      "sourceFile": "dark-webhooks.png",
+      "label": "dark-webhooks",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "6234aaa8fb076180e9454e8b4929097fb4271f4cdfcb24f31445824df1fdf34f",
+      "byteLength": 109075
+    },
+    {
+      "id": "capture-0137",
+      "file": "captures/capture-0137.png",
+      "sourceFile": "dark-workers.png",
+      "label": "dark-workers",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "7bd2fe3aecdd8e7e2403b8d4ef8d9b92fad2aa209e68106caedf17c9939ea5e8",
+      "byteLength": 116902
+    },
+    {
+      "id": "capture-0138",
+      "file": "captures/capture-0138.png",
+      "sourceFile": "dark-repositories.png",
+      "label": "dark-repositories",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "597e285a974fd6b59304d71c47e67e4224c34157fd4ad2d003096630182c3b73",
+      "byteLength": 53586
+    },
+    {
+      "id": "capture-0139",
+      "file": "captures/capture-0139.png",
+      "sourceFile": "dark-account.png",
+      "label": "dark-account",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "cc28f62230b9adfbe913064d47fa4b00f53164db6a3c91a5477c8e438836fcb1",
+      "byteLength": 119549
+    },
+    {
+      "id": "capture-0140",
+      "file": "captures/capture-0140.png",
+      "sourceFile": "dark-accounts.png",
+      "label": "dark-accounts",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "5346152e14acb666c65f6ca71a7f899c88a5f8f58a70fcdc638ea1ceaff9391b",
+      "byteLength": 85965
+    },
+    {
+      "id": "capture-0141",
+      "file": "captures/capture-0141.png",
+      "sourceFile": "dark-task-e2e-evidence.png",
+      "label": "dark-task-e2e-evidence",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "a15a77cfef049a2c76deff7aec51af01cc5871a493f4e7da45bc96f5790cdab0",
+      "byteLength": 100451
+    },
+    {
+      "id": "capture-0142",
+      "file": "captures/capture-0142.png",
+      "sourceFile": "dark-report-evidence.png",
+      "label": "dark-report-evidence",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "e663a40cfcb4e1101baa11325d7f46859a8a0a4fc13495bea44e411a908c1788",
+      "byteLength": 103403
+    },
+    {
+      "id": "capture-0143",
+      "file": "captures/capture-0143.png",
+      "sourceFile": "dark-sign-in.png",
+      "label": "dark-sign-in",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "image": {
+        "width": 1440,
+        "height": 1000
+      },
+      "theme": "not-recorded",
+      "sha256": "dde3df64f3c2574d4ec4a102359327f28f7230faf51853fb542eda919d98928b",
+      "byteLength": 68869
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { InvestigationArtifactMetadataV1 } from "@agentic-review/contracts";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -8,9 +9,16 @@ import {
   artifactPreviewKind,
   assertArtifactBinding,
   createArtifactPreview,
+  createAutomaticImagePreviewBudget,
+  evidenceAccessDenied,
+  evidenceAccessQueryKey,
+  maximumAutomaticImageBytes,
+  observeAutomaticImagePreview,
   readVerifiedArtifactContent,
+  useEvidenceAccessGate,
 } from "./artifact-panel";
 import { createSampleInvestigationApi } from "./sample-adapter";
+import { InvestigationHttpError } from "./transport";
 
 async function fixture() {
   const api = createSampleInvestigationApi();
@@ -43,7 +51,55 @@ async function imageFixture() {
   };
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("artifact access revocation", () => {
+  it("requires an explicit retry after denial, including after a reader remount", () => {
+    const client = new QueryClient();
+    const reader: { access?: ReturnType<typeof useEvidenceAccessGate> } = {};
+    function Reader({ identity = "viewer" }: { identity?: string }) {
+      const access = useEvidenceAccessGate(identity, "artifact", "artifact-one");
+      reader.access = access;
+      return <span>{access.denied ? "Access denied" : "Access allowed"}</span>;
+    }
+    const render = (identity = "viewer") =>
+      renderToStaticMarkup(
+        <QueryClientProvider client={client}>
+          <Reader identity={identity} />
+        </QueryClientProvider>,
+      );
+    try {
+      expect(render()).toContain("Access allowed");
+      const access = reader.access;
+      if (!access) throw new Error("The access reader was not rendered.");
+      access.deny();
+      expect(() => access.assertAllowed()).toThrow("explicit retry");
+      expect(
+        client.getQueryData(evidenceAccessQueryKey("viewer", "artifact", "artifact-one")),
+      ).toBe(true);
+      expect(render()).toContain("Access denied");
+      expect(render("another-viewer")).toContain("Access allowed");
+      expect(render()).toContain("Access denied");
+      access.retry();
+      expect(render()).toContain("Access allowed");
+      expect(() => access.assertAllowed()).not.toThrow();
+    } finally {
+      client.clear();
+    }
+  });
+
+  it("distinguishes access revocation from retryable storage failures", () => {
+    expect(evidenceAccessDenied(new InvestigationHttpError(401, "Expired"))).toBe(true);
+    expect(evidenceAccessDenied(new InvestigationHttpError(403, "Denied"))).toBe(true);
+    expect(evidenceAccessDenied(new InvestigationHttpError(500, "Storage unavailable"))).toBe(
+      false,
+    );
+    expect(evidenceAccessDenied(new Error("Integrity check failed"))).toBe(false);
+  });
+});
 
 describe("current artifact availability", () => {
   it("preserves an inherited patch's producer identity and rejects reassignment to the child task", async () => {
@@ -107,6 +163,25 @@ describe("current artifact availability", () => {
     expect(html).not.toContain("/content");
   });
 
+  it("identifies workspace records without implying that a saved report or publication exists", async () => {
+    const { artifact, metadata } = await fixture();
+    const html = renderToStaticMarkup(
+      <ArtifactDetails
+        artifact={artifact}
+        metadata={metadata}
+        recordSource="workspace"
+        busy={false}
+        onDownload={() => {}}
+        onRefresh={() => {}}
+      />,
+    );
+    expect(html).toContain("Availability recorded in workspace");
+    expect(html).toContain("workspace record is preserved");
+    expect(html).toContain("Evidence source and digest");
+    expect(html).toContain("SHA-256");
+    expect(html).not.toContain("Availability recorded in report");
+  });
+
   it("does not offer a download while availability is unverified or refreshing has failed", async () => {
     const { artifact, metadata } = await fixture();
     const available: InvestigationArtifactMetadataV1 = {
@@ -151,6 +226,108 @@ describe("current artifact availability", () => {
 });
 
 describe("artifact media preview", () => {
+  it("limits automatic loads to four available allowlisted images of at most 8 MiB each", async () => {
+    const { artifact } = await imageFixture();
+    const budget = createAutomaticImagePreviewBudget();
+    expect(budget.claim({ ...artifact, mediaType: "video/mp4" })).toBe(false);
+    expect(budget.claim({ ...artifact, mediaType: "image/svg+xml" })).toBe(false);
+    expect(budget.claim({ ...artifact, availability: "expired" })).toBe(false);
+    expect(budget.claim({ ...artifact, availability: "missing" })).toBe(false);
+    expect(budget.claim({ ...artifact, byteLength: maximumAutomaticImageBytes + 1 })).toBe(false);
+    expect(budget.claim({ ...artifact, byteLength: 0 })).toBe(false);
+    budget.suppress(artifact.id);
+    expect(budget.claim(artifact)).toBe(false);
+    for (let index = 0; index < 4; index += 1) {
+      const image = {
+        ...artifact,
+        id: `automatic-image-${index}`,
+        byteLength: maximumAutomaticImageBytes,
+      };
+      expect(budget.claim(image)).toBe(true);
+      expect(budget.claim(image)).toBe(false);
+    }
+    expect(budget.claim({ ...artifact, id: "fifth-image" })).toBe(false);
+  });
+
+  it("waits for visibility and consumes each automatic attempt once, even across a reader restart", async () => {
+    const { artifact, metadata } = await imageFixture();
+    const element = {} as Element;
+    let emit = (_entries: { target: Element; isIntersecting: boolean }[]) => {};
+    const disconnect = vi.fn();
+    const observe = vi.fn();
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: typeof emit) {
+          emit = callback;
+        }
+        observe = observe;
+        disconnect = disconnect;
+      },
+    );
+    const budget = createAutomaticImagePreviewBudget();
+    const load = vi.fn();
+    const stop = observeAutomaticImagePreview(element, artifact, metadata, budget, load);
+    expect(observe).toHaveBeenCalledWith(element);
+    expect(load).not.toHaveBeenCalled();
+    emit([{ target: element, isIntersecting: false }]);
+    expect(load).not.toHaveBeenCalled();
+    emit([{ target: element, isIntersecting: true }]);
+    expect(load).toHaveBeenCalledOnce();
+    emit([{ target: element, isIntersecting: true }]);
+    expect(load).toHaveBeenCalledOnce();
+    stop();
+    const stopAgain = observeAutomaticImagePreview(element, artifact, metadata, budget, load);
+    emit([{ target: element, isIntersecting: true }]);
+    expect(load).toHaveBeenCalledOnce();
+    stopAgain();
+    expect(disconnect).toHaveBeenCalled();
+  });
+
+  it("does not start an automatic load after leaving the view or for unavailable, rebound, or video content", async () => {
+    const { artifact, metadata } = await imageFixture();
+    const element = {} as Element;
+    let emit = (_entries: { target: Element; isIntersecting: boolean }[]) => {};
+    const observe = vi.fn();
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: typeof emit) {
+          emit = callback;
+        }
+        observe = observe;
+        disconnect() {}
+      },
+    );
+    const load = vi.fn();
+    const budget = createAutomaticImagePreviewBudget();
+    const stop = observeAutomaticImagePreview(element, artifact, metadata, budget, load);
+    stop();
+    emit([{ target: element, isIntersecting: true }]);
+    expect(load).not.toHaveBeenCalled();
+    observe.mockClear();
+    const video = { ...artifact, mediaType: "video/mp4" };
+    observeAutomaticImagePreview(element, video, { ...metadata, artifact: video }, budget, load);
+    observeAutomaticImagePreview(
+      element,
+      artifact,
+      { ...metadata, artifact: { ...artifact, availability: "expired" } },
+      budget,
+      load,
+    );
+    expect(() =>
+      observeAutomaticImagePreview(
+        element,
+        artifact,
+        { ...metadata, artifact: { ...artifact, taskId: "foreign-task" } },
+        budget,
+        load,
+      ),
+    ).toThrow("does not match");
+    expect(observe).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["image/png", "image"],
     ["image/jpeg", "image"],
@@ -173,7 +350,7 @@ describe("artifact media preview", () => {
       />,
     );
     expect(artifactPreviewKind(mediaType)).toBe(kind);
-    expect(html).toContain(`Preview ${kind}`);
+    expect(html).toContain(kind === "image" ? "Open screenshot" : "Play recording");
     expect(html).toContain("Download artifact");
     expect(html).not.toContain("<img");
     expect(html).not.toContain("<video");
@@ -205,6 +382,9 @@ describe("artifact media preview", () => {
         expect(html).toContain('preload="metadata"');
         expect(html).not.toContain("autoplay");
         expect(html).toContain("download the artifact to view it");
+      } else {
+        expect(html).toContain("Open screenshot");
+        expect(html).toContain('aria-haspopup="dialog"');
       }
     }
   });
@@ -230,7 +410,7 @@ describe("artifact media preview", () => {
       );
       expect(artifactPreviewKind(mediaType)).toBeUndefined();
       expect(html).toContain("Download artifact");
-      expect(html).not.toContain("Preview image");
+      expect(html).not.toContain("Open screenshot");
       expect(html).not.toContain("<img");
       await expect(
         createArtifactPreview(
@@ -262,7 +442,7 @@ describe("artifact media preview", () => {
           preview={{ kind: "image", url: "blob:unavailable-preview" }}
         />,
       );
-      expect(html).not.toContain("Preview image");
+      expect(html).not.toContain("Open screenshot");
       expect(html).not.toContain("blob:unavailable-preview");
     }
     const html = renderToStaticMarkup(

@@ -1,7 +1,7 @@
 import type { InvestigationE2eResult } from "@agentic-review/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { E2eCoveragePanel } from "./e2e-panel";
+import { E2eCoveragePanel, e2eOutcomeSummary } from "./e2e-panel";
 
 const e2e: InvestigationE2eResult = {
   headSha: "a".repeat(40),
@@ -71,5 +71,21 @@ describe("E2E feature evidence presentation", () => {
     expect(renderToStaticMarkup(<E2eCoveragePanel />)).toContain(
       "does not establish runtime verification",
     );
+  });
+
+  it("keeps task results separate from artifact loading and counts outcomes explicitly", () => {
+    expect(e2eOutcomeSummary(e2e)).toBe("1 passed · 1 not run");
+    const html = renderToStaticMarkup(<E2eCoveragePanel result={e2e} showArtifacts={false} />);
+    expect(html).toContain("Registered artifact references");
+    expect(html).toContain("preview-video");
+    expect(html).toContain("uploaded media alone does not establish a pass");
+    expect(html).not.toContain("Loading screenshots and videos");
+  });
+
+  it("identifies absent artifact records without changing the recorded assertions", () => {
+    const html = renderToStaticMarkup(<E2eCoveragePanel result={e2e} artifacts={[]} />);
+    expect(html).toContain("Some referenced artifact records are unavailable");
+    expect(html).toContain("The old file was renamed");
+    expect(html).toContain("1 passed · 1 not run");
   });
 });

@@ -184,6 +184,7 @@ export function createE2eAgentRunner(options: E2eAgentRunnerOptions): E2eAgentRu
         });
         assertModelPromptBudget({ prompt, schema: E2eAgentResultSchema }, options.modelOptions);
         response = await model.execute({
+          outputProtectedValues: [endpoint.endpoint, endpoint.capability],
           usageContext: { taskId: input.task.id, attemptId: input.attempt.id, purpose: "e2e" },
           ...(input.usageLease === undefined ? {} : { usageLease: input.usageLease }),
           workspace: input.workspace,

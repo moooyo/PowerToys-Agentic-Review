@@ -19,6 +19,7 @@ import {
   TableRow,
   Typography,
 } from "@mui/material";
+import { useId } from "react";
 import { Section } from "./report-sections";
 
 export function tokenCount(value: number | null | undefined): string {
@@ -35,7 +36,32 @@ export function usageTotal(
   return `${tokenCount(summary.reportedTokens)}${summary.completeness === "partial" ? "+" : ""}`;
 }
 
-export function UsageSummaryLabel({ summary }: { summary?: InvestigationUsageSummary }) {
+export function UsageSummaryLabel({
+  summary,
+  compact = false,
+}: {
+  summary?: InvestigationUsageSummary;
+  compact?: boolean;
+}) {
+  if (compact) {
+    const total = usageTotal(summary);
+    return (
+      <Typography
+        component="span"
+        variant="caption"
+        color="text.secondary"
+        title={
+          summary?.completeness === "partial"
+            ? "Partial reported usage"
+            : total === "Unknown"
+              ? "Usage unavailable"
+              : "Reported usage"
+        }
+      >
+        {total === "Unknown" ? "Usage unavailable" : `${total} tokens`}
+      </Typography>
+    );
+  }
   return (
     <Box>
       <Typography variant="body2">{usageTotal(summary)} tokens</Typography>
@@ -63,6 +89,7 @@ export function TokenUsagePanel({
   scope?: "task" | "report";
   active?: boolean;
 }) {
+  const invocationAccordionId = useId();
   const usage = summary?.usage;
   const breakdown =
     usage &&
@@ -171,7 +198,11 @@ export function TokenUsagePanel({
         )}
         {invocations && invocations.length > 0 && (
           <Accordion disableGutters elevation={0}>
-            <AccordionSummary expandIcon={<ExpandMoreRounded />}>
+            <AccordionSummary
+              id={`${invocationAccordionId}-summary`}
+              aria-controls={`${invocationAccordionId}-region`}
+              expandIcon={<ExpandMoreRounded />}
+            >
               <Typography>Model call details ({invocations.length})</Typography>
             </AccordionSummary>
             <AccordionDetails>
@@ -198,7 +229,8 @@ export function TokenUsagePanel({
                       <TableRow key={call.invocationId}>
                         <TableCell sx={{ maxWidth: 300, overflowWrap: "anywhere" }}>
                           <Typography variant="body2">
-                            {call.purpose} · {call.model ?? call.engine}
+                            {call.purpose} · {call.engine} · {call.model ?? "CLI default"}{" "}
+                            (requested)
                           </Typography>
                           <Typography variant="caption" component="div">
                             Call {call.invocationId}

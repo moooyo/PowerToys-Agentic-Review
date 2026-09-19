@@ -1,4 +1,5 @@
 import type { InvestigationArtifactV1, InvestigationE2eResult } from "@agentic-review/contracts";
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import { Alert, Box, Chip, Stack, Typography } from "@mui/material";
 import { ArtifactPanel } from "./artifact-panel";
 import { Section, TextList } from "./report-sections";
@@ -7,12 +8,25 @@ function outcomeLabel(outcome: string): string {
   return outcome === "not_run" ? "Not run" : outcome[0]!.toUpperCase() + outcome.slice(1);
 }
 
+export function e2eOutcomeSummary(result: InvestigationE2eResult): string {
+  return (["passed", "failed", "blocked", "not_run"] as const)
+    .map((outcome) => ({
+      outcome,
+      count: result.features.filter((feature) => feature.outcome === outcome).length,
+    }))
+    .filter(({ count }) => count > 0)
+    .map(({ outcome, count }) => `${count} ${outcome === "not_run" ? "not run" : outcome}`)
+    .join(" · ");
+}
+
 export function E2eCoveragePanel({
   result,
   artifacts,
+  showArtifacts = true,
 }: {
   result?: InvestigationE2eResult;
   artifacts?: InvestigationArtifactV1[];
+  showArtifacts?: boolean;
 }) {
   if (!result)
     return (
@@ -24,13 +38,18 @@ export function E2eCoveragePanel({
   return (
     <Section title="E2E feature coverage">
       <Stack spacing={3}>
+        <Typography variant="body2" color="text.secondary">
+          {e2eOutcomeSummary(result)}. These outcomes come from the recorded assertions; uploaded
+          media alone does not establish a pass.
+        </Typography>
         <Box sx={{ overflowWrap: "anywhere" }}>
           <Typography variant="body2">Tested HEAD: {result.headSha}</Typography>
           <Typography variant="body2">Build: {result.buildIdentity}</Typography>
         </Box>
         {result.features.map((feature) => (
-          <Box key={feature.id}>
+          <Box key={feature.id} component="details" className="task-e2e-feature">
             <Stack
+              component="summary"
               direction="row"
               useFlexGap
               spacing={1}
@@ -49,7 +68,14 @@ export function E2eCoveragePanel({
                         : "default"
                 }
               />
-              <Typography variant="h6">{feature.title}</Typography>
+              <Typography component="span" variant="subtitle1">
+                {feature.title}
+              </Typography>
+              <ExpandMoreRounded
+                className="task-e2e-expand"
+                aria-hidden="true"
+                sx={{ ml: "auto" }}
+              />
             </Stack>
             <Typography sx={{ mt: 1 }}>{feature.scenario}</Typography>
             <Typography variant="caption" color="text.secondary">
@@ -72,13 +98,32 @@ export function E2eCoveragePanel({
               ))}
             </Stack>
             <TextList items={feature.limitations} />
-            {feature.artifactRefs.length > 0 ? (
+            {!showArtifacts ? (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ overflowWrap: "anywhere" }}
+              >
+                Registered artifact references:{" "}
+                {feature.artifactRefs.length ? feature.artifactRefs.join(", ") : "None recorded"}
+              </Typography>
+            ) : feature.artifactRefs.length > 0 ? (
               artifacts ? (
-                <ArtifactPanel
-                  artifacts={artifacts.filter((artifact) =>
-                    feature.artifactRefs.includes(artifact.id),
+                <>
+                  <ArtifactPanel
+                    artifacts={artifacts.filter((artifact) =>
+                      feature.artifactRefs.includes(artifact.id),
+                    )}
+                  />
+                  {feature.artifactRefs.some(
+                    (id) => !artifacts.some((artifact) => artifact.id === id),
+                  ) && (
+                    <Alert severity="warning" sx={{ mt: 1 }}>
+                      Some referenced artifact records are unavailable in this report. Recorded
+                      assertions are unchanged.
+                    </Alert>
                   )}
-                />
+                </>
               ) : (
                 <Typography variant="body2" color="text.secondary">
                   Loading screenshots and videos for this feature…

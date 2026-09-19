@@ -43,6 +43,30 @@ export function parseGitHubUserIds(value: string): number[] {
   return ids;
 }
 
+export function webhookSettingsFieldErrors(
+  form: WebhookSettingsFormValues,
+): Partial<Record<"reviewerUserIdText" | "allowedActorUserIdsText", string>> {
+  const errors: Partial<Record<"reviewerUserIdText" | "allowedActorUserIdsText", string>> = {};
+  const intakeEnabled = form.enabled || form.e2eEnabled === true;
+  try {
+    if (form.reviewerUserIdText.trim()) parseGitHubUserId(form.reviewerUserIdText.trim());
+    else if (intakeEnabled)
+      errors.reviewerUserIdText = "Choose an assignment recipient before enabling intake.";
+  } catch (cause) {
+    errors.reviewerUserIdText =
+      cause instanceof Error ? cause.message : "Enter a numeric GitHub user ID.";
+  }
+  try {
+    const ids = parseGitHubUserIds(form.allowedActorUserIdsText);
+    if (intakeEnabled && ids.length === 0)
+      errors.allowedActorUserIdsText = "Add at least one trusted user before enabling intake.";
+  } catch (cause) {
+    errors.allowedActorUserIdsText =
+      cause instanceof Error ? cause.message : "Enter numeric GitHub user IDs.";
+  }
+  return errors;
+}
+
 export function webhookSettingsInput(
   form: WebhookSettingsFormValues,
   version: number,

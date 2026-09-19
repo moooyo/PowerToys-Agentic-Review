@@ -5,17 +5,34 @@ import type {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  CommentContextLinks,
   CommentDeliveryHistory,
+  CommentDeliveryHistoryPanel,
   CommentPublicationControls,
   commentDeliveriesQueryKey,
   commentPollingInterval,
-  commentSummariesQueryKey,
+  publicationKindLabel,
+  publicationsQueryKey,
   safeCommentUrl,
   TaskComments,
 } from "./comment-deliveries";
-import { commentHistoryFilters } from "./comments-page";
+import { commentHistoryFilters, commentPublicationFilters } from "./comments-page";
+
+vi.mock("./session", () => ({
+  useInvestigationSession: () => ({
+    session: {
+      user: {
+        id: "reader",
+        isAdmin: false,
+        repositoryIds: ["repo-1"],
+        permissions: [],
+        actionCapabilities: [],
+      },
+    },
+  }),
+}));
 
 const timestamp = "2026-09-19T02:00:00.000Z";
 function summary(
@@ -186,11 +203,12 @@ describe("comment delivery history", () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, gcTime: Infinity } },
     });
-    const queryInput = { taskIds: ["task-1"] };
-    client.setQueryData(commentSummariesQueryKey(queryInput), {
+    const queryInput = { taskId: "task-1", cursor: undefined, limit: 25 };
+    client.setQueryData(publicationsQueryKey(queryInput), {
       items: [
         summary({ state: "unconfirmed", requiresAttention: true, availableActions: ["reconcile"] }),
       ],
+      nextCursor: null,
     });
     client.setQueryData(
       commentDeliveriesQueryKey({ taskId: "task-1", cursor: undefined, limit: 25 }),
@@ -203,9 +221,10 @@ describe("comment delivery history", () => {
         </QueryClientProvider>
       </MemoryRouter>,
     );
-    expect(html).toContain("Check delivery");
+    expect(html).toContain("Unconfirmed");
+    expect(html).toContain("commentId=comment-1");
     expect(html).not.toContain("Sync latest progress");
-    const saved = client.getQueryCache().find({ queryKey: commentSummariesQueryKey(queryInput) });
+    const saved = client.getQueryCache().find({ queryKey: publicationsQueryKey(queryInput) });
     const interval: unknown = saved && Reflect.get(saved.options, "refetchInterval");
     expect(typeof interval).toBe("function");
     if (typeof interval === "function" && saved) expect(interval(saved)).toBe(30_000);
@@ -221,7 +240,8 @@ describe("comment delivery history", () => {
         />
       </QueryClientProvider>,
     );
-    expect(html).not.toContain("Check delivery");
+    expect(html).toContain("No delivery check is currently available");
+    expect(html).not.toMatch(/<button[^>]*>Check delivery<\/button>/u);
     expect(html).not.toContain("Sync latest progress");
     expect(html).toContain("View GitHub comment");
     expect(safeCommentUrl(summary())).toContain("9876543210123456789");
@@ -260,5 +280,98 @@ describe("comment delivery history", () => {
     for (const number of ["0", "-1", "7.5", "9007199254740992", "one"])
       expect(commentHistoryFilters(`?workItemNumber=${number}`)).toEqual({});
     expect(commentHistoryFilters("?state=completed")).toEqual({});
+  });
+
+  it("keeps publication filters separate from attempt outcomes and uses real producer kinds", () => {
+    expect(
+      commentPublicationFilters(
+        "?repositoryId=repo-1&taskId=task-1&workItemNumber=7&state=needs_attention&mode=result&taskKind=pr-e2e&search=%20focus%20",
+      ),
+    ).toEqual({
+      repositoryId: "repo-1",
+      taskId: "task-1",
+      workItemNumber: 7,
+      state: "needs_attention",
+      mode: "result",
+      taskKind: "pr-e2e",
+      search: "focus",
+    });
+    expect(
+      commentPublicationFilters("?state=failed&mode=e2e&taskKind=invented&workItemNumber=-1"),
+    ).toEqual({});
+    expect(publicationKindLabel(summary({ mode: "result", producerTaskKind: "pr-e2e" }))).toBe(
+      "E2E result",
+    );
+    expect(publicationKindLabel(summary({ producerTaskKind: "pr-e2e" }))).toBe("E2E progress");
+    expect(
+      publicationKindLabel(summary({ taskId: "e2e-looking-name", producerTaskKind: null })),
+    ).toBe("Progress update");
+  });
+
+  it("links only recorded source, task, and report identities", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <CommentContextLinks comment={summary({ reportId: "report-exact" })} />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("workItemId=item-1");
+    expect(html).toContain("taskId=task-1");
+    expect(html).toContain("reportId=report-exact");
+    const preparation = renderToStaticMarkup(
+      <MemoryRouter>
+        <CommentContextLinks
+          comment={summary({ workItemId: null, taskId: null, reportId: null })}
+        />
+      </MemoryRouter>,
+    );
+    expect(preparation).not.toContain("href=");
+  });
+
+  it("shows every returned publication for a task without collapsing result into progress", () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    client.setQueryData(publicationsQueryKey({ taskId: "task-1", cursor: undefined, limit: 25 }), {
+      items: [summary(), summary({ id: "comment-result", mode: "result", reportId: "report-1" })],
+      nextCursor: "next-page",
+    });
+    client.setQueryData(
+      commentDeliveriesQueryKey({ taskId: "task-1", cursor: undefined, limit: 25 }),
+      { items: [], nextCursor: null },
+    );
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <TaskComments taskId="task-1" active={false} />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(html).toContain("commentId=comment-1");
+    expect(html).toContain("commentId=comment-result");
+    expect(html).toContain("Next publications");
+    client.clear();
+  });
+
+  it("does not show history returned for a different task", () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    client.setQueryData(
+      commentDeliveriesQueryKey({ taskId: "task-1", cursor: undefined, limit: 25 }),
+      {
+        items: [delivery({ taskId: "another-task", body: "Another task's private body" })],
+        nextCursor: null,
+      },
+    );
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <CommentDeliveryHistoryPanel filters={{ taskId: "task-1" }} />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(html).toContain("does not match the selected publication or task");
+    expect(html).not.toContain("Another task&#x27;s private body");
+    client.clear();
   });
 });

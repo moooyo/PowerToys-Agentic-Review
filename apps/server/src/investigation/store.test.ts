@@ -46,7 +46,16 @@ function createV2(path: string): void {
       .prepare('INSERT INTO "investigation_metadata" ("key", "value") VALUES (?, ?)')
       .run("schema_version", "investigation-v2");
     for (const collection of investigationCollections.filter(
-      (name) => !["commentDeliveries", "resourceLeases", "schedulerSettings"].includes(name),
+      (name) =>
+        ![
+          "commentDeliveries",
+          "resourceLeases",
+          "schedulerSettings",
+          "outputEvents",
+          "outputStreams",
+          "outputBatches",
+          "reportDirectory",
+        ].includes(name),
     ))
       database.exec(`CREATE TABLE "${collection}" (
         "id" TEXT PRIMARY KEY NOT NULL,
@@ -329,6 +338,9 @@ describe("InvestigationStore", () => {
     const raw = ' { "state" : "failed", "effect" : "not_sent", "reason" : "Historical receipt" } ';
     const writer = new DatabaseSync(path);
     try {
+      writer.exec(
+        'DROP TABLE "outputEvents"; DROP TABLE "outputStreams"; DROP TABLE "outputBatches"; DROP TABLE "reportDirectory"; DROP INDEX "evidence_metadata_task"; DROP INDEX "work_items_repository"; DROP INDEX "tasks_repository"; DROP INDEX "publications_repository";',
+      );
       writer.exec('DROP TABLE "resourceLeases"; DROP TABLE "schedulerSettings";');
       writer
         .prepare('UPDATE "investigation_metadata" SET "value" = ? WHERE "key" = ?')
@@ -358,6 +370,34 @@ describe("InvestigationStore", () => {
     } finally {
       reader.close();
     }
+  });
+
+  it("adds output storage and bounded directory indexes to the exact v4 schema", async () => {
+    const path = await databasePath();
+    open(path).close();
+    const writer = new DatabaseSync(path);
+    try {
+      writer.exec(
+        'DROP TABLE "outputEvents"; DROP TABLE "outputStreams"; DROP TABLE "outputBatches"; DROP TABLE "reportDirectory"; DROP INDEX "evidence_metadata_task"; DROP INDEX "work_items_repository"; DROP INDEX "tasks_repository"; DROP INDEX "publications_repository";',
+      );
+      writer
+        .prepare('UPDATE "investigation_metadata" SET "value" = ? WHERE "key" = ?')
+        .run("investigation-v4", "schema_version");
+      writer
+        .prepare('INSERT INTO "tasks" ("id", "value") VALUES (?, ?)')
+        .run("retained-task", '{"id":"retained-task","state":"completed"}');
+    } finally {
+      writer.close();
+    }
+    const migrated = open(path);
+    expect(migrated.get("tasks", "retained-task")).toEqual({
+      id: "retained-task",
+      state: "completed",
+    });
+    expect(migrated.list("outputEvents")).toEqual([]);
+    expect(migrated.list("reportDirectory")).toEqual([]);
+    migrated.close();
+    expect(open(path).get("tasks", "retained-task")).toMatchObject({ state: "completed" });
   });
 
   it.each(["extra-index", "partial-new-table", "wrong-version", "changed-definition"])(

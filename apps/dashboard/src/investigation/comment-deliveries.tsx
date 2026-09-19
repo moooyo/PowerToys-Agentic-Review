@@ -2,7 +2,10 @@ import type {
   InvestigationCommentDelivery,
   InvestigationCommentDeliveryQuery,
   InvestigationCommentPublicationSummary,
+  InvestigationPublicationDirectoryQuery,
 } from "@agentic-review/contracts";
+import ChatBubbleOutlineRounded from "@mui/icons-material/ChatBubbleOutlineRounded";
+import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
 import {
   Accordion,
   AccordionDetails,
@@ -12,15 +15,30 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
   Stack,
   Typography,
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Link } from "react-router-dom";
 import { type CommentSummaryQuery, investigationApi } from "./api";
+import {
+  type CommentAction,
+  canScheduleCommentAction,
+  commentCommandQueryKey,
+  hasCommentActionGrant,
+  type RetainedCommentCommand,
+  scheduleCommentCommand,
+} from "./comment-publication-state";
+import { useUnsavedChanges } from "./navigation-guard";
 import { Section } from "./report-sections";
-import { InvestigationHttpError } from "./transport";
+import { useInvestigationSession } from "./session";
+import "./comments-activity.css";
 
 export const commentSummariesQueryKey = (query: CommentSummaryQuery) => [
   "investigation-comments",
@@ -31,11 +49,15 @@ export const commentDeliveriesQueryKey = (query: InvestigationCommentDeliveryQue
   "investigation-comment-deliveries",
   query,
 ];
+export const publicationsQueryKey = (query: InvestigationPublicationDirectoryQuery) => [
+  "investigation-publications",
+  query,
+];
 
-const publicationLabels = {
+export const publicationLabels = {
   pending: "Pending",
   sending: "Sending",
-  synced: "Synced",
+  synced: "Delivered",
   retrying: "Retrying",
   unconfirmed: "Unconfirmed",
   paused: "Paused",
@@ -116,11 +138,124 @@ export function safeCommentUrl(
   return comment.commentUrl === expected ? expected : undefined;
 }
 
-function RecordedTime({ value }: { value: string }) {
+export function RecordedTime({ value }: { value: string }) {
   return (
     <time dateTime={value} title={value}>
       {new Date(value).toLocaleString()}
     </time>
+  );
+}
+
+export function publicationKindLabel(comment: InvestigationCommentPublicationSummary): string {
+  if (comment.producerTaskKind === "pr-e2e")
+    return comment.mode === "progress" ? "E2E progress" : "E2E result";
+  return comment.mode === "progress" ? "Progress update" : "Review result";
+}
+
+export function commentSourceUrl(
+  comment: InvestigationCommentPublicationSummary,
+): string | undefined {
+  return comment.workItemId
+    ? `${comment.workItemKind === "pull_request" ? "/pull-requests" : "/issues"}?repositoryId=${encodeURIComponent(comment.repositoryId)}&workItemId=${encodeURIComponent(comment.workItemId)}`
+    : undefined;
+}
+
+export function CommentContextLinks({
+  comment,
+}: {
+  comment: InvestigationCommentPublicationSummary;
+}) {
+  const source = commentSourceUrl(comment);
+  return (
+    <Stack direction="row" spacing={1} useFlexGap className="comments-actions">
+      {source && (
+        <Button component={Link} to={source}>
+          Open {comment.workItemKind === "pull_request" ? "pull request" : "issue"} #
+          {comment.workItemNumber}
+        </Button>
+      )}
+      {comment.taskId && (
+        <Button
+          component={Link}
+          to={`/tasks?repositoryId=${encodeURIComponent(comment.repositoryId)}&taskId=${encodeURIComponent(comment.taskId)}`}
+        >
+          Open task
+        </Button>
+      )}
+      {comment.reportId && (
+        <Button
+          component={Link}
+          to={`/reports?repositoryId=${encodeURIComponent(comment.repositoryId)}&reportId=${encodeURIComponent(comment.reportId)}`}
+        >
+          Read saved report
+        </Button>
+      )}
+    </Stack>
+  );
+}
+
+export function CommentPublicationRow({
+  comment,
+}: {
+  comment: InvestigationCommentPublicationSummary;
+}) {
+  const request = useQuery<RetainedCommentCommand | null>({
+    queryKey: commentCommandQueryKey(comment.id),
+    queryFn: () => null,
+    initialData: null,
+    enabled: false,
+    gcTime: Infinity,
+  }).data;
+  return (
+    <Box
+      component={Link}
+      to={commentDetailsUrl(comment.id, comment.repositoryId)}
+      className="comments-record"
+      sx={{
+        color: "text.primary",
+        borderColor: "divider",
+        "&:hover": { bgcolor: "action.hover" },
+        "&:focus-visible": { outlineColor: "primary.main" },
+      }}
+    >
+      <Box
+        className="comments-record-symbol"
+        sx={{ bgcolor: "action.hover", color: "text.secondary" }}
+      >
+        <ChatBubbleOutlineRounded fontSize="small" />
+      </Box>
+      <Box className="comments-record-main">
+        <Typography variant="caption" color="text.secondary">
+          {comment.repositoryFullName} · {comment.workItemKind === "pull_request" ? "PR" : "Issue"}{" "}
+          #{comment.workItemNumber} · {publicationKindLabel(comment)}
+        </Typography>
+        <Typography variant="subtitle1">
+          {comment.workItemTitle || publicationKindLabel(comment)}
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          {comment.reason ||
+            (comment.state === "synced"
+              ? "The recorded update was delivered."
+              : "Publication and investigation outcomes are tracked separately.")}
+        </Typography>
+      </Box>
+      <Box className="comments-record-state">
+        <CommentStatus comment={comment} />
+        {request && ["submitting", "unknown", "conflict"].includes(request.state) && (
+          <Typography variant="caption" color="warning.main">
+            {request.state === "submitting"
+              ? "Request in progress"
+              : request.state === "unknown"
+                ? "Request unconfirmed"
+                : "Request needs review"}
+          </Typography>
+        )}
+        <Typography variant="caption" color="text.secondary">
+          <RecordedTime value={comment.updatedAt} />
+        </Typography>
+      </Box>
+      <ChevronRightRounded className="comments-record-chevron" fontSize="small" />
+    </Box>
   );
 }
 
@@ -131,14 +266,31 @@ export function CommentDeliveryHistory({
   items: InvestigationCommentDelivery[];
   showTarget?: boolean;
 }) {
+  const historyId = useId();
   if (items.length === 0)
     return <Typography color="text.secondary">No comment deliveries recorded yet.</Typography>;
   return (
-    <Stack spacing={1.5}>
+    <Stack component="ol" className="comments-timeline" spacing={0}>
       {items.map((delivery) => {
         const state = delivery.state;
+        const detailsId = `${historyId}-${encodeURIComponent(delivery.id)}-details`;
         return (
-          <Box key={delivery.id} sx={{ border: 1, borderColor: "divider", borderRadius: 1, p: 2 }}>
+          <Box
+            component="li"
+            key={delivery.id}
+            className="comments-timeline-entry"
+            sx={{
+              borderColor: "divider",
+              "&::before": {
+                bgcolor:
+                  state === "succeeded"
+                    ? "success.main"
+                    : state === "failed"
+                      ? "error.main"
+                      : "text.secondary",
+              },
+            }}
+          >
             <Stack spacing={1}>
               <Stack
                 direction="row"
@@ -164,7 +316,7 @@ export function CommentDeliveryHistory({
                     {delivery.workItemNumber}
                   </Button>
                 )}
-                {delivery.taskId && (
+                {showTarget && delivery.taskId && (
                   <Button
                     size="small"
                     component={Link}
@@ -179,7 +331,7 @@ export function CommentDeliveryHistory({
                   </Typography>
                 )}
               </Stack>
-              {state !== "succeeded" && delivery.reason && (
+              {delivery.reason && (
                 <Typography variant="body2" color={state === "failed" ? "error" : "text.secondary"}>
                   {delivery.reason}
                 </Typography>
@@ -194,13 +346,23 @@ export function CommentDeliveryHistory({
                   Imported delivery record. Earlier delivery history is unavailable.
                 </Typography>
               )}
-              <Accordion variant="outlined" disableGutters>
-                <AccordionSummary expandIcon={<span aria-hidden="true">+</span>}>
+              <Accordion
+                variant="outlined"
+                disableGutters
+                sx={{ border: 0, bgcolor: "transparent", "&::before": { display: "none" } }}
+              >
+                <AccordionSummary
+                  id={`${detailsId}-summary`}
+                  aria-controls={detailsId}
+                  expandIcon={<span aria-hidden="true">+</span>}
+                >
                   <Typography variant="body2">View delivery details</Typography>
                 </AccordionSummary>
-                <AccordionDetails>
+                <AccordionDetails sx={{ px: 0 }}>
                   <Stack spacing={1.5}>
                     <Typography variant="caption" color="text.secondary">
+                      Attempt {delivery.attemptNumber} ·{" "}
+                      {delivery.effect?.replaceAll("_", " ") ?? "Effect not recorded"} ·{" "}
                       {delivery.finishedAt ? (
                         <>
                           Finished <RecordedTime value={delivery.finishedAt} />
@@ -292,19 +454,42 @@ export function CommentDeliveryHistoryPanel({
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
+  const matchesScope = query.data?.items.every(
+    (item) =>
+      (!filters.commentId || item.commentId === filters.commentId) &&
+      (!filters.repositoryId || item.repositoryId === filters.repositoryId) &&
+      (!filters.taskId || item.taskId === filters.taskId) &&
+      (!filters.workItemNumber || item.workItemNumber === filters.workItemNumber),
+  );
   return (
     <Stack spacing={2}>
-      <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
-        <Typography variant="subtitle1">Comment delivery history</Typography>
+      <Stack
+        direction="row"
+        useFlexGap
+        sx={{ justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1 }}
+      >
+        <Typography variant="h6">Delivery timeline</Typography>
         <Button disabled={query.isFetching} onClick={() => void query.refetch()}>
           Refresh history
         </Button>
       </Stack>
       {query.isPending && <CircularProgress size={24} aria-label="Loading comment deliveries" />}
       {query.isError && <Alert severity="error">{query.error.message}</Alert>}
-      {query.data && <CommentDeliveryHistory items={query.data.items} showTarget={showTarget} />}
+      {query.data &&
+        (matchesScope ? (
+          <CommentDeliveryHistory items={query.data.items} showTarget={showTarget} />
+        ) : (
+          <Alert severity="error">
+            The delivery history does not match the selected publication or task.
+          </Alert>
+        ))}
       {(cursors.length > 1 || query.data?.nextCursor) && (
-        <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ alignItems: "center", flexWrap: "wrap" }}
+        >
           <Button
             disabled={cursors.length === 1 || query.isFetching}
             onClick={() => setCursors((value) => value.slice(0, -1))}
@@ -333,63 +518,89 @@ export function CommentPublicationControls({
   comment: InvestigationCommentPublicationSummary;
 }) {
   const queryClient = useQueryClient();
-  const [busy, setBusy] = useState(false);
+  const { session } = useInvestigationSession();
+  const requestKey = commentCommandQueryKey(comment.id);
+  const requestQuery = useQuery<RetainedCommentCommand | null>({
+    queryKey: requestKey,
+    queryFn: () => null,
+    initialData: null,
+    enabled: false,
+    gcTime: Infinity,
+  });
+  const request = requestQuery.data;
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string>();
-  const [message, setMessage] = useState<string>();
-  const [commandKeys, setCommandKeys] = useState<Record<string, string>>({});
+  const [preview, setPreview] = useState<{
+    action: CommentAction;
+    version: string;
+    commentId: string;
+  }>();
+  useUnsavedChanges(Boolean(preview), {
+    description: "A publication preview is open. Leave without scheduling it?",
+    onDiscard: () => setPreview(undefined),
+  });
+  const busy = refreshing || request?.state === "submitting";
+  const canSchedule = (action: CommentAction) =>
+    canScheduleCommentAction(comment, session.user, action, request);
   const refresh = async () => {
-    setBusy(true);
+    if (busy) return;
+    setRefreshing(true);
     setError(undefined);
-    setMessage(undefined);
     try {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: commentQueryKey(comment.id) }),
-        queryClient.invalidateQueries({ queryKey: ["investigation-comments"] }),
-      ]);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const perform = async (action: "sync" | "reconcile") => {
-    if (busy || !comment.availableActions.includes(action)) return;
-    setBusy(true);
-    setError(undefined);
-    setMessage(undefined);
-    const commandKey = `${comment.version}:${action}`;
-    const idempotencyKey = commandKeys[commandKey] ?? crypto.randomUUID();
-    setCommandKeys((value) => ({ ...value, [commandKey]: idempotencyKey }));
-    try {
-      const updated = await (action === "sync"
-        ? investigationApi.syncComment
-        : investigationApi.reconcileComment)(comment.id, {
-        version: comment.version,
-        idempotencyKey,
+      await queryClient.cancelQueries({ queryKey: commentQueryKey(comment.id) });
+      await queryClient.fetchQuery({
+        queryKey: commentQueryKey(comment.id),
+        queryFn: async () => {
+          const updated = await investigationApi.comment(comment.id);
+          if (updated.id !== comment.id || updated.repositoryId !== comment.repositoryId)
+            throw new Error("The service returned a different publication.");
+          return updated;
+        },
+        staleTime: 0,
       });
-      queryClient.setQueryData(commentQueryKey(comment.id), updated);
+      const current = queryClient.getQueryData<RetainedCommentCommand | null>(requestKey);
+      if (current && ["conflict", "rejected"].includes(current.state)) {
+        queryClient.setQueryData(requestKey, {
+          ...current,
+          state: "refreshed",
+          message:
+            "Latest status loaded. Review the current destination and operation before making a new request.",
+        } satisfies RetainedCommentCommand);
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["investigation-comments"] }),
+        queryClient.invalidateQueries({ queryKey: ["investigation-publications"] }),
         queryClient.invalidateQueries({ queryKey: ["investigation-comment-deliveries"] }),
       ]);
-      setMessage(
-        action === "sync"
-          ? "Synchronization scheduled."
-          : "Delivery check scheduled. This check does not write to GitHub.",
-      );
     } catch (cause) {
       setError(
-        cause instanceof InvestigationHttpError && cause.status === 409
-          ? "This comment changed. Refresh its status before trying again."
-          : cause instanceof Error
-            ? cause.message
-            : "The comment operation could not be scheduled.",
+        cause instanceof Error
+          ? cause.message
+          : "The latest publication status could not be loaded.",
       );
     } finally {
-      setBusy(false);
+      setRefreshing(false);
     }
   };
+  const confirm = () => {
+    if (
+      !preview ||
+      busy ||
+      preview.commentId !== comment.id ||
+      preview.version !== comment.version ||
+      !canSchedule(preview.action)
+    )
+      return;
+    void scheduleCommentCommand(queryClient, comment, preview.action);
+    setPreview(undefined);
+  };
   const commentUrl = safeCommentUrl(comment);
+  const syncLabel =
+    comment.state === "synced" && comment.producerTaskKind === "pr-e2e"
+      ? "Refresh E2E publication"
+      : "Publish prepared update";
   return (
-    <Stack spacing={1}>
+    <Stack spacing={2} className="comments-publication-controls">
       <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
         <CommentStatus comment={comment} />
         {comment.lastAttemptAt && (
@@ -409,18 +620,8 @@ export function CommentPublicationControls({
           </Button>
         )}
         <Button size="small" disabled={busy} onClick={() => void refresh()}>
-          Refresh status
+          {refreshing ? "Refreshing…" : "Refresh status"}
         </Button>
-        {comment.availableActions.includes("reconcile") && (
-          <Button size="small" disabled={busy} onClick={() => void perform("reconcile")}>
-            Check delivery
-          </Button>
-        )}
-        {comment.availableActions.includes("sync") && (
-          <Button size="small" disabled={busy} onClick={() => void perform("sync")}>
-            Sync latest progress
-          </Button>
-        )}
       </Stack>
       {comment.reason && (
         <Typography variant="body2" color="text.secondary">
@@ -428,21 +629,195 @@ export function CommentPublicationControls({
         </Typography>
       )}
       {comment.nextAttemptAt && (
-        <Typography variant="caption" color="text.secondary">
-          Next attempt <RecordedTime value={comment.nextAttemptAt} />
-        </Typography>
+        <Alert severity="info">
+          Automatic processing is scheduled for <RecordedTime value={comment.nextAttemptAt} />.
+        </Alert>
       )}
+      {comment.state === "unconfirmed" && (
+        <Alert severity="warning">
+          The earlier write may have reached GitHub. Check that delivery before publishing another
+          update.
+        </Alert>
+      )}
+      {request && (
+        <Alert
+          severity={
+            request.state === "completed"
+              ? "success"
+              : request.state === "submitting" || request.state === "refreshed"
+                ? "info"
+                : "warning"
+          }
+        >
+          {request.message}
+          {request.state === "unknown" && (
+            <Stack
+              direction="row"
+              spacing={1}
+              useFlexGap
+              className="comments-actions"
+              sx={{ mt: 1 }}
+            >
+              <Button disabled={busy} onClick={() => void refresh()}>
+                Check request status
+              </Button>
+              <Button
+                disabled={busy || !hasCommentActionGrant(comment, session.user, request.action)}
+                onClick={() =>
+                  void scheduleCommentCommand(queryClient, comment, request.action, request)
+                }
+              >
+                Retry same request
+              </Button>
+            </Stack>
+          )}
+          <Box component="details" sx={{ mt: 1 }}>
+            <Box component="summary" sx={{ cursor: "pointer", py: 1 }}>
+              Saved request
+            </Box>
+            <Typography variant="body2">
+              {request.action === "sync" ? "Publication" : "Delivery check"} ·{" "}
+              <RecordedTime value={request.requestedAt} />
+            </Typography>
+            <Typography variant="caption" component="div" sx={{ overflowWrap: "anywhere" }}>
+              Version: {request.version}
+            </Typography>
+            <Typography variant="caption" component="div" sx={{ overflowWrap: "anywhere" }}>
+              Request: {request.idempotencyKey}
+            </Typography>
+          </Box>
+        </Alert>
+      )}
+      <Box>
+        <Typography variant="subtitle1">{syncLabel}</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          Schedule publication from the latest saved task state and configured templates. This can
+          create or update a GitHub comment; it does not rerun the investigation.
+        </Typography>
+        {comment.availableActions.includes("sync") ? (
+          <Button
+            variant="outlined"
+            disabled={busy || !canSchedule("sync")}
+            onClick={() =>
+              setPreview({ action: "sync", version: comment.version, commentId: comment.id })
+            }
+          >
+            {syncLabel}
+          </Button>
+        ) : (
+          <Typography variant="caption" color="text.secondary">
+            {comment.mode === "result"
+              ? "Conclusion-only publication keeps its saved ActionIntent recovery. Open the report to review next steps."
+              : comment.state === "synced"
+                ? "The recorded update is already delivered."
+                : "No publication action is available for this record."}
+          </Typography>
+        )}
+        {comment.availableActions.includes("sync") &&
+          !hasCommentActionGrant(comment, session.user, "sync") && (
+            <Typography variant="caption" component="p" color="text.secondary">
+              Requires repository access, Prepare actions, Confirm actions, and the Comment action.
+            </Typography>
+          )}
+      </Box>
+      <Divider />
+      <Box>
+        <Typography variant="subtitle1">Check delivery</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          Read the existing GitHub comment and retain an observation. This check does not publish,
+          resend, or restart the investigation.
+        </Typography>
+        {comment.availableActions.includes("reconcile") ? (
+          <Button
+            variant="outlined"
+            disabled={busy || !canSchedule("reconcile")}
+            onClick={() =>
+              setPreview({ action: "reconcile", version: comment.version, commentId: comment.id })
+            }
+          >
+            Check delivery
+          </Button>
+        ) : (
+          <Typography variant="caption" color="text.secondary">
+            No delivery check is currently available.
+          </Typography>
+        )}
+        {comment.availableActions.includes("reconcile") &&
+          !hasCommentActionGrant(comment, session.user, "reconcile") && (
+            <Typography variant="caption" component="p" color="text.secondary">
+              Requires repository access, Prepare actions, and the Comment action.
+            </Typography>
+          )}
+      </Box>
       {error && <Alert severity="error">{error}</Alert>}
-      {message && <Alert severity="success">{message}</Alert>}
+      <Dialog open={Boolean(preview)} onClose={() => setPreview(undefined)} fullWidth maxWidth="sm">
+        <DialogTitle>
+          {preview?.action === "sync" ? `${syncLabel}?` : "Check this delivery?"}
+        </DialogTitle>
+        <DialogContent>
+          <Stack spacing={2}>
+            <Box sx={{ bgcolor: "action.hover", p: 2, borderRadius: 2, overflowWrap: "anywhere" }}>
+              <Typography variant="caption" color="text.secondary">
+                Destination
+              </Typography>
+              <Typography>
+                {comment.repositoryFullName} ·{" "}
+                {comment.workItemKind === "pull_request" ? "PR" : "Issue"} #{comment.workItemNumber}
+              </Typography>
+              <Typography variant="body2">{publicationKindLabel(comment)}</Typography>
+            </Box>
+            {preview?.action === "sync" ? (
+              <Alert severity="warning">
+                The publisher prepares the latest saved task state when it processes this request.
+                Earlier delivery bodies are retained history, not an exact preview of the next
+                update. Current publication policy and permissions are checked before dispatch.
+              </Alert>
+            ) : (
+              <Alert severity="info">
+                The service reads the existing comment and records the result. No comment body is
+                sent again.
+              </Alert>
+            )}
+            {preview &&
+              (preview.commentId !== comment.id || preview.version !== comment.version) && (
+                <Alert severity="warning">
+                  The publication changed while this preview was open. Close this preview and review
+                  the latest status.
+                </Alert>
+              )}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ flexWrap: "wrap", gap: 1, p: 2 }}>
+          <Button onClick={() => setPreview(undefined)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={
+              !preview ||
+              busy ||
+              preview.commentId !== comment.id ||
+              preview.version !== comment.version ||
+              !canSchedule(preview.action)
+            }
+            onClick={confirm}
+          >
+            {preview?.action === "sync" ? "Schedule publication" : "Schedule delivery check"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }
 
-export function TaskComments({ taskId, active }: { taskId: string; active: boolean }) {
-  const input = { taskIds: [taskId] };
+export function TaskComments(props: { taskId: string; active: boolean }) {
+  return <TaskCommentPublications key={props.taskId} {...props} />;
+}
+
+function TaskCommentPublications({ taskId, active }: { taskId: string; active: boolean }) {
+  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
+  const input = { taskId, cursor: cursors.at(-1), limit: 25 };
   const query = useQuery({
-    queryKey: commentSummariesQueryKey(input),
-    queryFn: () => investigationApi.comments(input),
+    queryKey: publicationsQueryKey(input),
+    queryFn: ({ signal }) => investigationApi.publications(input, signal),
     refetchInterval: (current) =>
       commentPollingInterval(current.state.data?.items ?? []) || (active ? 5_000 : false),
     refetchIntervalInBackground: false,
@@ -460,8 +835,32 @@ export function TaskComments({ taskId, active }: { taskId: string; active: boole
           </Alert>
         )}
         {query.data?.items.map((comment) => (
-          <CommentPublicationControls key={comment.id} comment={comment} />
+          <CommentPublicationRow key={comment.id} comment={comment} />
         ))}
+        {query.data?.items.length === 0 && (
+          <Typography color="text.secondary">
+            No publications are recorded for this task.
+          </Typography>
+        )}
+        {(cursors.length > 1 || query.data?.nextCursor) && (
+          <Stack direction="row" spacing={1} useFlexGap className="comments-actions">
+            <Button
+              disabled={cursors.length === 1 || query.isFetching}
+              onClick={() => setCursors((value) => value.slice(0, -1))}
+            >
+              Previous publications
+            </Button>
+            <Button
+              disabled={!query.data?.nextCursor || query.isFetching}
+              onClick={() => {
+                const next = query.data?.nextCursor;
+                if (next) setCursors((value) => [...value, next]);
+              }}
+            >
+              Next publications
+            </Button>
+          </Stack>
+        )}
         <CommentDeliveryHistoryPanel
           filters={{ taskId }}
           pollInterval={interval}

@@ -38,6 +38,7 @@ import {
   makePrompt,
 } from "./model-turn-runner.js";
 import { InvestigationModelUsageJournal } from "./model-usage-journal.js";
+import type { InvestigationOutputJournal } from "./output-journal.js";
 import type {
   InvestigationPrDiffChunk,
   InvestigationPrDiffManifest,
@@ -3138,6 +3139,264 @@ describe("investigation model turn runner", () => {
 });
 
 describe("managed model invocation usage integration", () => {
+  async function outputInitializationFixture(initializationTimeoutMs = 10) {
+    const directory = await mkdtemp(join(tmpdir(), "runner-output-initialization-"));
+    const receipts: InvestigationModelInvocationReceipt[] = [];
+    const f = fixture({
+      stdout: jsonl(
+        {
+          type: "item.completed",
+          item: { id: "visible-message", type: "agent_message", text: "Visible model text." },
+        },
+        codexComplete,
+      ),
+    });
+    const usageLease = {
+      attemptId: f.input.attempt.id,
+      fence: f.input.attempt.leaseVersion,
+      leaseToken: "private-initialization-lease",
+    };
+    const usageJournal = new InvestigationModelUsageJournal({
+      directory,
+      createInvocationId: () => "initialization-call",
+      deliver: async (receipt) => {
+        receipts.push(receipt);
+      },
+    });
+    const opening = Promise.withResolvers<void>();
+    const openingStarted = Promise.withResolvers<void>();
+    let initializationSignal: AbortSignal | undefined;
+    const outputJournal: InvestigationOutputJournal = {
+      openAttempt: vi.fn<InvestigationOutputJournal["openAttempt"]>((_taskId, _lease, signal) => {
+        initializationSignal = signal;
+        openingStarted.resolve();
+        return opening.promise;
+      }),
+      append: vi.fn(),
+      closeAttempt: vi.fn(),
+      replay: vi.fn(async () => {}),
+      flush: vi.fn(async () => true),
+      stop: vi.fn(async () => true),
+    };
+    const runner = createModelTurnRunner({
+      ...f.options,
+      usageJournal,
+      outputJournal,
+      outputInitializationTimeoutMs: initializationTimeoutMs,
+    });
+    return {
+      directory,
+      receipts,
+      f,
+      usageLease,
+      outputJournal,
+      runner,
+      opening,
+      openingStarted,
+      initializationSignal: () => initializationSignal,
+    };
+  }
+
+  it.each(["timeout", "rejection"] as const)(
+    "continues accounted execution and cleanup when visible output initialization ends by %s",
+    async (failureMode) => {
+      const context = await outputInitializationFixture();
+      try {
+        const { f, runner, usageLease, opening, openingStarted, outputJournal, receipts } = context;
+        const execution = runner.execute({ ...f.input, usageLease });
+        await openingStarted.promise;
+        expect(receipts.map((receipt) => receipt.state)).toEqual(["registered", "running"]);
+        if (failureMode === "rejection")
+          opening.reject(new Error("Synthetic output storage failure."));
+        await expect(execution).resolves.toMatchObject({
+          usage: { invocationId: "initialization-call", tokens: 50 },
+        });
+        expect(context.initializationSignal()?.aborted).toBe(true);
+        expect(f.start).toHaveBeenCalledOnce();
+        expect(f.terminate).not.toHaveBeenCalled();
+        expect(f.io.removeDirectory).toHaveBeenCalledOnce();
+        expect(receipts.at(-1)).toMatchObject({
+          state: "completed",
+          completeness: "complete",
+          usage: { totalTokens: 50 },
+        });
+        expect(outputJournal.append).not.toHaveBeenCalled();
+        expect(outputJournal.closeAttempt).not.toHaveBeenCalled();
+      } finally {
+        await rm(context.directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["resolution", "rejection"] as const)(
+    "ignores late output initialization %s after its timeout without closing the shared attempt",
+    async (lateOutcome) => {
+      const context = await outputInitializationFixture();
+      try {
+        const { f, runner, usageLease, opening, outputJournal, receipts } = context;
+        await expect(runner.execute({ ...f.input, usageLease })).resolves.toHaveProperty("round");
+        const settledReceipts = structuredClone(receipts);
+        if (lateOutcome === "resolution") opening.resolve();
+        else opening.reject(new Error("Synthetic late output storage failure."));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(context.initializationSignal()?.aborted).toBe(true);
+        expect(outputJournal.append).not.toHaveBeenCalled();
+        expect(outputJournal.closeAttempt).not.toHaveBeenCalled();
+        expect(receipts).toEqual(settledReceipts);
+        expect(f.start).toHaveBeenCalledOnce();
+        expect(f.io.removeDirectory).toHaveBeenCalledOnce();
+      } finally {
+        await rm(context.directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "preserves cancellation before dispatch when output initialization is pending or completes concurrently: %s",
+    async (resolveConcurrently) => {
+      const context = await outputInitializationFixture(1_000);
+      try {
+        const { f, runner, usageLease, opening, openingStarted, outputJournal, receipts } = context;
+        const execution = runner.execute({ ...f.input, usageLease });
+        await openingStarted.promise;
+        expect(receipts.map((receipt) => receipt.state)).toEqual(["registered", "running"]);
+        const reason = new Error("The attempt was cancelled during visible output initialization.");
+        const rejection = expect(execution).rejects.toBe(reason);
+        if (resolveConcurrently) opening.resolve();
+        f.controller.abort(reason);
+        await rejection;
+        expect(context.initializationSignal()?.aborted).toBe(true);
+        expect(f.start).not.toHaveBeenCalled();
+        expect(f.terminate).not.toHaveBeenCalled();
+        expect(f.io.removeDirectory).toHaveBeenCalledOnce();
+        expect(receipts.at(-1)).toMatchObject({
+          state: "cancelled",
+          disposition: "rejected",
+          completeness: "complete",
+          usage: { totalTokens: 0 },
+        });
+        const settledReceipts = structuredClone(receipts);
+        opening.resolve();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(outputJournal.append).not.toHaveBeenCalled();
+        expect(outputJournal.closeAttempt).not.toHaveBeenCalled();
+        expect(receipts).toEqual(settledReceipts);
+      } finally {
+        await rm(context.directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "observes sanitized output only after registration without changing settlement when its sink fails: %s",
+    async (failOutput) => {
+      const directory = await mkdtemp(join(tmpdir(), "runner-visible-output-"));
+      try {
+        const receipts: InvestigationModelInvocationReceipt[] = [];
+        const protectedValue = "synthetic-worker-private-value";
+        const f = fixture({
+          stdout: jsonl(
+            {
+              type: "item.completed",
+              item: {
+                id: "visible-message",
+                type: "agent_message",
+                text: `A visible message ${protectedValue}.`,
+              },
+            },
+            {
+              type: "item.completed",
+              item: {
+                id: "visible-command",
+                type: "command_execution",
+                command: "Write-Output visible",
+                aggregated_output: "visible",
+                status: "completed",
+                exit_code: 0,
+              },
+            },
+            {
+              type: "item.completed",
+              item: {
+                id: "private-reasoning",
+                type: "reasoning",
+                text: "Private reasoning must stay private.",
+              },
+            },
+            codexComplete,
+          ),
+        });
+        const usageLease = {
+          attemptId: f.input.attempt.id,
+          fence: f.input.attempt.leaseVersion,
+          leaseToken: "private-delivery-lease",
+        };
+        const usageJournal = new InvestigationModelUsageJournal({
+          directory,
+          createInvocationId: () => "visible-call",
+          deliver: async (receipt) => {
+            receipts.push(receipt);
+          },
+        });
+        const outputJournal: InvestigationOutputJournal = {
+          openAttempt: vi.fn(async () => {
+            expect(receipts.map((receipt) => receipt.state)).toEqual(["registered", "running"]);
+          }),
+          append: vi.fn(() => {
+            if (failOutput) throw new Error("Synthetic output sink unavailable.");
+          }),
+          closeAttempt: vi.fn(),
+          replay: vi.fn(async () => {}),
+          flush: vi.fn(async () => true),
+          stop: vi.fn(async () => true),
+        };
+        const runner = createModelTurnRunner({
+          ...f.options,
+          usageJournal,
+          outputJournal,
+          protectedValues: [protectedValue],
+          processHost: {
+            start: async (...args) => ({
+              ...(await f.start(...args)),
+              stderr: Readable.from(["Private stderr is not visible output."]),
+            }),
+          },
+        });
+        const result = await runner.execute({ ...f.input, usageLease });
+        expect(result.usage).toMatchObject({ invocationId: "visible-call", tokens: 50 });
+        expect(outputJournal.openAttempt).toHaveBeenCalledWith(
+          f.input.task.id,
+          usageLease,
+          expect.any(AbortSignal),
+        );
+        expect(outputJournal.append).toHaveBeenCalledWith(
+          f.input.task.id,
+          f.input.attempt.id,
+          "visible-call",
+          expect.objectContaining({ kind: "assistant", text: "A visible message [REDACTED]." }),
+        );
+        expect(outputJournal.append).toHaveBeenCalledWith(
+          f.input.task.id,
+          f.input.attempt.id,
+          "visible-call",
+          expect.objectContaining({
+            kind: "tool",
+            command: "Write-Output visible",
+            result: "visible",
+          }),
+        );
+        const recorded = JSON.stringify(vi.mocked(outputJournal.append).mock.calls);
+        expect(recorded).not.toContain(protectedValue);
+        expect(recorded).not.toContain("Private reasoning must stay private.");
+        expect(recorded).not.toContain("Private stderr is not visible output.");
+        expect(receipts.at(-1)).toMatchObject({ state: "completed", completeness: "complete" });
+        expect(f.io.removeDirectory).toHaveBeenCalled();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("durably registers before process dispatch and records provider subdivisions once", async () => {
     const directory = await mkdtemp(join(tmpdir(), "runner-model-usage-"));
     try {
