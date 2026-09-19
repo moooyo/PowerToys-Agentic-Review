@@ -3,6 +3,7 @@ import {
   CloseRounded,
   CommentOutlined,
   DarkModeOutlined,
+  DnsOutlined,
   FactCheckOutlined,
   FolderOutlined,
   GitHub,
@@ -12,6 +13,7 @@ import {
   MenuRounded,
   PersonOutlineRounded,
   PlayCircleOutlineRounded,
+  WebhookOutlined,
 } from "@mui/icons-material";
 import {
   Alert,
@@ -48,6 +50,8 @@ import {
 } from "./investigation/repository-scope";
 import { InvestigationSessionProvider, useInvestigationSession } from "./investigation/session";
 import TasksPage from "./investigation/task-workspace";
+import WebhookDeliveriesPage from "./investigation/webhook-deliveries-page";
+import WorkersPage from "./investigation/workers-page";
 import IssuesPage from "./pages/Issues";
 import PullRequestsPage from "./pages/PullRequests";
 import { MaterialTheme, useColorMode } from "./theme";
@@ -58,6 +62,8 @@ const pages: Record<string, ComponentType> = {
   "./Issues": IssuesPage,
   "./InvestigationTasks": TasksPage,
   "./InvestigationComments": CommentsPage,
+  "./InvestigationWebhooks": WebhookDeliveriesPage,
+  "./InvestigationWorkers": WorkersPage,
   "./InvestigationReport": ReportPage,
   "./InvestigationRepositories": RepositoriesPage,
   "./MyAccount": MyAccountPage,
@@ -68,6 +74,8 @@ const icons: Record<string, ComponentType> = {
   "/issues": FactCheckOutlined,
   "/tasks": PlayCircleOutlineRounded,
   "/comments": CommentOutlined,
+  "/webhooks": WebhookOutlined,
+  "/workers": DnsOutlined,
   "/repositories": FolderOutlined,
   "/account": PersonOutlineRounded,
   "/accounts": ManageAccountsOutlined,
@@ -305,7 +313,7 @@ function ApplicationShell() {
                           <Navigate to={`/pull-requests${scopeQuery}`} replace />
                         ) : route.adminOnly && !session.user?.isAdmin ? (
                           <Alert severity="info">
-                            Account administration requires an administrator account.
+                            This page requires an administrator account.
                           </Alert>
                         ) : Page ? (
                           <Page />

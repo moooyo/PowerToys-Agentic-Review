@@ -211,6 +211,25 @@ function stripUnsafeControlCharacters(value: string): string {
     .join("");
 }
 
+/** Preserve public URLs and relative source references while removing absolute local paths. */
+export function redactAbsolutePosixPaths(value: string): string {
+  // A zero-width boundary lets the complete quoted-path branch win at the same start offset.
+  return value.replace(
+    /(?<url>https?:\/\/[^\s"`<>]+)|(?<quote>["'`])\/(?!\/)(?:\\[^\r\n]|(?!\k<quote>)[^\\\r\n])*\k<quote>|(?<prefix>(?<=^|[\s(\[{:;,=>])(?:[*_~`]{1,3}|["'])?)\/(?!\/)[^\s"'`<>|;,\])}]+/giu,
+    (
+      match: string,
+      url: string | undefined,
+      quote: string | undefined,
+      prefix: string | undefined,
+    ) => {
+      if (url !== undefined) return match;
+      if (quote !== undefined) return "[local path omitted]";
+      const punctuation = /[.!?:*_~]+$/u.exec(match)?.[0] ?? "";
+      return `${prefix ?? ""}[local path omitted]${punctuation}`;
+    },
+  );
+}
+
 function redactPrivateText(value: string, identifiers: readonly string[]): string {
   let text = stripUnsafeControlCharacters(value.replace(/\r\n?/gu, "\n"))
     .replace(
@@ -246,11 +265,8 @@ function redactPrivateText(value: string, identifiers: readonly string[]): strin
     )
     .replace(/(["'`])(?:[A-Za-z]:[\\/]|\\\\)[^\n]*?\1/gu, "[local path omitted]")
     .replace(/\b[A-Za-z]:[\\/][^\s"'`<>|;,()]*/gu, "[local path omitted]")
-    .replace(/\\\\[^\s"'`<>|;,()]+/gu, "[local path omitted]")
-    .replace(
-      /\/(?:home|root|tmp|var|etc|Users|mnt|media|opt|private|workspace|workspaces|run|proc|sys|dev)\/[^\s"'`<>|;,()]*/gu,
-      "[local path omitted]",
-    );
+    .replace(/\\\\[^\s"'`<>|;,()]+/gu, "[local path omitted]");
+  text = redactAbsolutePosixPaths(text);
   for (const identifier of identifiers)
     text = text.replaceAll(identifier, "[internal reference omitted]");
   return text;

@@ -36,6 +36,7 @@ import {
   sampleIssueAutoReplyTemplate,
   samplePullRequestAutoReplyTemplate,
 } from "./sample-auto-reply-templates";
+import { createSampleOperationsApi } from "./sample-operations";
 import { InvestigationHttpError } from "./transport";
 
 const repository = {
@@ -984,6 +985,7 @@ export function createSampleInvestigationApi(): InvestigationApi {
   }
 
   const api: InvestigationApi = {
+    ...createSampleOperationsApi(),
     commentDeliveries: async (query = {}) =>
       sampleCommentPage([...commentDeliveries.values()], structuredClone(query)),
     comments: async (query = {}) => {

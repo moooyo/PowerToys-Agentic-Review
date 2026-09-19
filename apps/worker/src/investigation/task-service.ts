@@ -1,4 +1,9 @@
-import type { InvestigationClaimResponse, InvestigationTaskKind } from "@agentic-review/contracts";
+import {
+  type InvestigationClaimResponse,
+  type InvestigationTaskKind,
+  investigationTaskRequiresE2e,
+  isInvestigationStaticTaskKind,
+} from "@agentic-review/contracts";
 import type { Logger } from "../logging/logger.js";
 import { delay } from "../util/async.js";
 import type { InvestigationWorkerClient } from "./http-client.js";
@@ -97,7 +102,7 @@ export class InvestigationTaskService {
   async #claimTasks(): Promise<void> {
     const claimSignal = AbortSignal.any([this.#claimAbort.signal, this.#shutdown.signal]);
     while (!this.#draining && !this.#shutdown.signal.aborted) {
-      const supportedKinds = this.#supportedKinds.filter((kind) => {
+      let supportedKinds = this.#supportedKinds.filter((kind) => {
         const pool = investigationTaskPool(kind);
         return this.#activeByPool[pool] < this.#capacity[pool];
       });
@@ -107,6 +112,20 @@ export class InvestigationTaskService {
       }
       let claim: ClaimedInvestigationTask | null;
       try {
+        const policy = await this.options.client.workerPolicy?.(
+          { supportedKinds: [...this.#supportedKinds] },
+          claimSignal,
+        );
+        supportedKinds = supportedKinds.filter((kind) =>
+          policy === undefined
+            ? isInvestigationStaticTaskKind(kind)
+            : policy.effectiveKinds.includes(kind) &&
+              (isInvestigationStaticTaskKind(kind) || policy.e2eEnabled === true),
+        );
+        if (supportedKinds.length === 0) {
+          await delay(this.#claimPollMs, claimSignal).catch(() => undefined);
+          continue;
+        }
         claim = await this.options.client.claim({ supportedKinds }, claimSignal);
       } catch (error) {
         if (claimSignal.aborted) break;
@@ -124,6 +143,7 @@ export class InvestigationTaskService {
       }
       if (!supportedKinds.includes(claim.task.kind))
         throw new Error("The server claimed an investigation task outside the available pools.");
+      assertInvestigationClaimPool(claim);
       const attemptId = claim.attempt.id;
       const taskId = claim.task.id;
       const pool = investigationTaskPool(claim.task.kind);
@@ -159,7 +179,20 @@ export class InvestigationTaskService {
 
 /** Execution tasks share one E2E slot, including legacy saved-plan tasks. */
 export function investigationTaskPool(kind: InvestigationTaskKind): InvestigationTaskPool {
-  return kind === "pr-review" || kind === "issue-investigate" ? "static" : "e2e";
+  return isInvestigationStaticTaskKind(kind) ? "static" : "e2e";
+}
+
+/** A static label cannot admit an execution policy or a saved executable plan. */
+export function assertInvestigationClaimPool(claim: ClaimedInvestigationTask): void {
+  if (
+    isInvestigationStaticTaskKind(claim.task.kind) &&
+    (investigationTaskRequiresE2e(claim.task) ||
+      claim.task.executionPolicy.allowRepositoryExecution ||
+      claim.task.executionPolicy.authorizationRef !== null ||
+      claim.execution !== null)
+  ) {
+    throw new Error("A static investigation claim cannot carry repository execution authority.");
+  }
 }
 
 export function startInvestigationWorker(

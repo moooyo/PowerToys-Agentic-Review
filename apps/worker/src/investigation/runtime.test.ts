@@ -27,6 +27,7 @@ import {
 import { loadInvestigationWorkerRuntimeConfig } from "./runtime-config.js";
 import {
   type ClaimedInvestigationTask,
+  type InvestigationClaimExecutor,
   InvestigationTaskService,
   type InvestigationTaskServiceOptions,
 } from "./task-service.js";
@@ -72,6 +73,12 @@ function fixture() {
   });
   const events: string[] = [];
   const client: InvestigationWorkerClient = {
+    workerPolicy: async (request) => ({
+      workerId: "synthetic-worker",
+      version: 1,
+      e2eEnabled: true,
+      effectiveKinds: [...request.supportedKinds],
+    }),
     claim: never,
     heartbeat: never,
     checkpoint: never,
@@ -125,7 +132,7 @@ function fixture() {
     },
   };
   const coordinator = {
-    execute: vi.fn(async () => {
+    execute: vi.fn<InvestigationClaimExecutor["execute"]>(async () => {
       events.push("coordinator.execute");
     }),
   };
@@ -236,6 +243,123 @@ function desktopGuardFixture(events: string[]): AttemptDesktopGuard {
 }
 
 describe("production investigation runtime composition", () => {
+  it("preserves server E2E cancellation, the renewed lease, and cleanup", async () => {
+    const f = fixture();
+    const heartbeat = {
+      cancelRequested: true,
+      serverTime: "2026-09-19T00:00:00.000Z",
+      leaseExpiresAt: "2026-09-19T00:02:00.000Z",
+    };
+    f.client.heartbeat = vi.fn(async () => heartbeat);
+    f.coordinator.execute.mockImplementation(async (claim) => {
+      const observed = await f.captured.coordinator!.client.heartbeat(claim.task.id, {
+        lease: claim.lease,
+      });
+      expect(observed).toEqual({ ...heartbeat, cancelRequested: true });
+      await f.captured.coordinator!.onAttemptCleanupConfirmed?.();
+    });
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, f.dependencies);
+    const claim = claimFixture();
+    claim.task.kind = "pr-e2e";
+    await f.captured.service!.executor.execute(claim, new AbortController().signal);
+    expect(f.cleanupJournal.localCleanupConfirmed).toHaveBeenCalledWith(claim.attempt.id);
+    expect(f.cleanupJournal.guardReleased).toHaveBeenCalledWith(claim.attempt.id);
+    await runtime.stop();
+  });
+
+  it("rechecks E2E permission on an already-running attempt without stopping static heartbeats", async () => {
+    const f = fixture();
+    let enabled = true;
+    f.client.workerPolicy = vi.fn<NonNullable<InvestigationWorkerClient["workerPolicy"]>>(
+      async (request) => ({
+        workerId: "synthetic-worker",
+        version: enabled ? 2 : 3,
+        e2eEnabled: enabled,
+        effectiveKinds: enabled ? request.supportedKinds : ["pr-review", "issue-investigate"],
+      }),
+    );
+    const heartbeat = {
+      cancelRequested: false,
+      serverTime: "2026-09-19T00:00:00.000Z",
+      leaseExpiresAt: "2026-09-19T00:02:00.000Z",
+    };
+    f.client.heartbeat = vi.fn<InvestigationWorkerClient["heartbeat"]>(async (taskId) => ({
+      ...heartbeat,
+      cancelRequested: taskId !== "static-task" && !enabled,
+    }));
+    f.coordinator.execute.mockImplementation(async (claim) => {
+      const client = f.captured.coordinator!.client;
+      expect((await client.heartbeat(claim.task.id, { lease: claim.lease })).cancelRequested).toBe(
+        false,
+      );
+      enabled = false;
+      expect((await client.heartbeat(claim.task.id, { lease: claim.lease })).cancelRequested).toBe(
+        true,
+      );
+      expect(
+        (
+          await client.heartbeat("static-task", {
+            lease: { ...claim.lease, attemptId: "static-attempt" },
+          })
+        ).cancelRequested,
+      ).toBe(false);
+      await f.captured.coordinator!.onAttemptCleanupConfirmed?.();
+    });
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, f.dependencies);
+    const claim = claimFixture();
+    claim.task.kind = "pr-e2e";
+    await f.captured.service!.executor.execute(claim, new AbortController().signal);
+    expect(f.client.workerPolicy).not.toHaveBeenCalled();
+    await runtime.stop();
+  });
+
+  it("replays retained cleanup and usage while an execution-only Worker has no permitted claims", async () => {
+    const f = fixture();
+    f.client.workerPolicy = async () => ({
+      workerId: "synthetic-worker",
+      version: 3,
+      e2eEnabled: false,
+      effectiveKinds: [],
+    });
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, f.dependencies);
+    expect(f.cleanupJournal.recover).toHaveBeenCalledTimes(1);
+    const policy = await f.captured.service!.client.workerPolicy!({ supportedKinds: ["pr-e2e"] });
+    expect(policy.effectiveKinds).toEqual([]);
+    expect(f.cleanupJournal.recover).toHaveBeenCalledTimes(2);
+    expect(f.replayUsage).toHaveBeenCalledTimes(2);
+    await runtime.stop();
+  });
+
+  it("rejects forged static execution authority at the runtime boundary", async () => {
+    const f = fixture();
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, f.dependencies);
+    const claim = claimFixture();
+    claim.task.executionPolicy.mode = "execute";
+    await expect(
+      f.captured.service!.executor.execute(claim, new AbortController().signal),
+    ).rejects.toThrow(/cannot carry repository execution authority/);
+    expect(f.coordinator.execute).not.toHaveBeenCalled();
+    expect(f.cleanupJournal.register).not.toHaveBeenCalled();
+    await runtime.stop();
+  });
+
+  it("enforces a static local role at the execution boundary even when E2E is advertised", async () => {
+    const f = fixture();
+    const runtime = await createInvestigationExecutionRuntime(
+      { ...f.config, role: "static" },
+      logger,
+      f.dependencies,
+    );
+    const claim = claimFixture();
+    claim.task.kind = "pr-e2e";
+    await expect(
+      f.captured.service!.executor.execute(claim, new AbortController().signal),
+    ).rejects.toThrow(/configured task role/);
+    expect(f.coordinator.execute).not.toHaveBeenCalled();
+    expect(f.cleanupJournal.register).not.toHaveBeenCalled();
+    await runtime.stop();
+  });
+
   it("awaits the private durable cleanup identity before any E2E guard or source side effect", async () => {
     const f = fixture();
     const registrationStarted = Promise.withResolvers<void>();

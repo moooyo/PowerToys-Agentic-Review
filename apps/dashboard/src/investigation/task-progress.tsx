@@ -53,13 +53,18 @@ export function elapsedTime(from: string | null | undefined, now: number): strin
 }
 
 export function taskQueueReason(
-  task: Pick<InvestigationTaskV1, "kind" | "state">,
+  task: Pick<InvestigationTaskV1, "kind" | "state"> &
+    Partial<Pick<InvestigationTaskV1, "executionPolicy">>,
   scheduler?: InvestigationSchedulerStatus,
 ): string | null {
   if (task.state !== "queued") return null;
-  const isStatic = task.kind === "pr-review" || task.kind === "issue-investigate";
+  const isStatic =
+    (task.kind === "pr-review" || task.kind === "issue-investigate") &&
+    task.executionPolicy?.mode !== "execute";
   if (!scheduler)
-    return "Waiting for an eligible worker and available task capacity. Resource status is unavailable.";
+    return isStatic
+      ? "Waiting for an eligible worker and available task capacity. Resource status is unavailable."
+      : "Waiting for a worker that allows E2E and available task capacity. Resource status is unavailable.";
   if (isStatic && scheduler.occupiedStatic >= scheduler.staticConcurrency)
     return "Waiting for static task capacity. Running tasks will finish before another task is admitted.";
   if (!isStatic && scheduler.occupiedE2e >= scheduler.e2eConcurrency) {
@@ -67,7 +72,9 @@ export function taskQueueReason(
       return "Waiting for desktop cleanup confirmation. The next E2E task cannot start while the previous desktop lease needs cleanup.";
     return "Waiting for the exclusive E2E desktop. Only one E2E task can run globally; static tasks can continue.";
   }
-  return "Capacity is available. Waiting for an eligible worker to claim this task.";
+  return isStatic
+    ? "Capacity is available. Waiting for an eligible worker to claim this task."
+    : "Capacity is available. Waiting for a worker that allows E2E to claim this task.";
 }
 
 export function TaskProgressPanel({
@@ -79,7 +86,7 @@ export function TaskProgressPanel({
   now = Date.now(),
 }: {
   task: Pick<InvestigationTaskV1, "kind" | "state" | "updatedAt"> &
-    Partial<Pick<InvestigationTaskV1, "id">>;
+    Partial<Pick<InvestigationTaskV1, "id" | "executionPolicy">>;
   progress?: TaskProgress;
   scheduler?: InvestigationSchedulerStatus;
   resourceLeases?: TaskDetail["resourceLeases"];

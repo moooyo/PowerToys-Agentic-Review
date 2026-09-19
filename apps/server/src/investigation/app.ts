@@ -17,7 +17,12 @@ import {
   InvestigationReportPartRequestSchema,
   InvestigationSchedulerSettingsRequestSchema,
   InvestigationTaskKindSchema,
+  InvestigationWorkerControlListSchema,
+  InvestigationWorkerControlSchema,
+  InvestigationWorkerControlUpdateSchema,
   InvestigationWorkerLeaseSchema,
+  InvestigationWorkerPolicyRequestSchema,
+  InvestigationWorkerPolicySchema,
 } from "@agentic-review/contracts";
 import { InvestigationLoopError } from "@agentic-review/domain";
 import { type Static, Type } from "@sinclair/typebox";
@@ -50,6 +55,7 @@ export interface InvestigationAppOptions
   extends Pick<
     InvestigationServiceOptions,
     | "prepareTaskInput"
+    | "workerControls"
     | "resolveTaskSource"
     | "resolvePlanPrerequisites"
     | "maxReportBytes"
@@ -439,6 +445,37 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
     async (request) => await service.reconcileIntent(actor(request), request.params.id),
   );
 
+  app.get(
+    "/api/workers",
+    {
+      preHandler: authenticateOperator,
+      schema: { response: { 200: InvestigationWorkerControlListSchema } },
+    },
+    async (request) => service.listWorkers(actor(request)),
+  );
+  app.post<{ Params: IdParams; Body: LastBodyOf<InvestigationService["updateWorkerE2e"]> }>(
+    "/api/workers/:id/e2e",
+    {
+      preHandler: authenticateOperator,
+      schema: {
+        params: idParamsSchema,
+        body: InvestigationWorkerControlUpdateSchema,
+        response: { 200: InvestigationWorkerControlSchema },
+      },
+    },
+    async (request) => service.updateWorkerE2e(actor(request), request.params.id, request.body),
+  );
+  app.post<{ Body: BodyOf<InvestigationService["workerPolicy"]> }>(
+    "/api/worker/policy",
+    {
+      preHandler: authenticateWorker,
+      schema: {
+        body: InvestigationWorkerPolicyRequestSchema,
+        response: { 200: InvestigationWorkerPolicySchema },
+      },
+    },
+    async (request) => service.workerPolicy(worker(request), request.body),
+  );
   app.get("/api/investigation/scheduler", { preHandler: authenticateOperator }, async (request) =>
     service.schedulerStatus(actor(request)),
   );

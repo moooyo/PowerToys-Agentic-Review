@@ -4,7 +4,8 @@ Agentic Review investigates GitHub pull requests and issues, produces complete s
 reports, and prepares explicit follow-up actions. The application is unreleased. Its active
 execution model uses `Task`, `Attempt`, `LoopCheckpoint`, `Report`, and `ActionIntent`.
 The refactor does not provide legacy API compatibility, dual writes, data conversion, or
-migration scripts.
+retired Job database migration scripts. The limited additive upgrades of the active investigation
+store are described below.
 
 The [current design](./docs/design/2026-09-15-structured-investigation-results-and-loop.md)
 describes the result contract, complete investigation loop, and action rules. The
@@ -36,6 +37,25 @@ GitHub user IDs in the Dashboard. A verified assignment imports a complete froze
 automatically queues a native Task. Delivery deduplication and durable recovery preserve its
 identity across retries. This path does not poll GitHub; see the
 [receiver setup](./apps/server/README.md#listen-for-trusted-assignments).
+
+Trusted users can independently request a pinned PR E2E run with a new `@configured-account e2e`
+conversation comment when E2E intake is enabled. This creates a separate execution Task and progress
+comment. Static review capacity is configurable; all execution tasks share one global E2E slot,
+held through confirmed process, workspace, and desktop cleanup. See the
+[trusted E2E command setup](./apps/server/README.md#trusted-pr-e2e-commands).
+
+Each Worker starts with E2E disabled. Administrators enable its single persisted execution setting
+in **Workers**; local roles can narrow capability but cannot grant permission. Disabling it stops
+new execution claims and requests cancellation, with cleanup confirmation shown separately. This
+setting does not remove local shell access or screenshots. Static report images/videos cannot be
+published to GitHub. See [Worker controls](./apps/server/README.md#worker-execution-permission).
+
+**Webhooks** shows scoped assignment/E2E receipts, failure reasons, processing history, and linked
+Tasks. A versioned, idempotent retry resumes failed intake and reattaches an already committed Task
+without repeating execution. A separate durable relay spool covers events received by a configured
+relay, with explicit versioned retry for failed deliveries and retained attempt history. It does
+not automatically request GitHub redelivery. See
+[webhook recovery](./apps/server/README.md#inspect-and-retry-webhook-intake).
 
 PR and Issue investigation use a persistent discovery and recheck loop. Every retained finding
 contains its priority, trigger, impact, root cause or explicit uncertainty, evidence, repair
@@ -122,8 +142,13 @@ third-party login and conversion of the previous authentication database are out
 GitHub API credentials and Worker credentials remain independent of console login.
 
 The [account design](./docs/design/2026-09-15-built-in-accounts.md) records the API, session behavior,
-and acceptance scope. Dedicated PowerToys UI scenarios and model-quality evaluation are not part
-of this delivery, following the user's current scope decision.
+and acceptance scope. General model-quality evaluation remains outside this delivery. The current
+[Worker controls and webhook recovery follow-up](./docs/design/2026-09-19-worker-controls-and-webhook-recovery.md)
+targets the real merged revision of a PR whose changes are entirely in PowerToys Run Calculator,
+retaining full changed-path coverage. The current fixture is owned-fork PR #15; PR #14
+remains an open draft preserving its unsuccessful source-preparation sequences. Earlier Peek and
+Launcher failures and blockers
+remain recorded in the [2026-09-19 handoff](./docs/handoff/2026-09-19-local-source-review-e2e.md).
 
 Run verification on the project-designated remote Windows worker. Linux-specific checks may use
 `test-env`; local verification requires explicit authorization for the current task. Standard
@@ -140,6 +165,23 @@ artifacts. Bounded cleanup preserves recovery and follow-up source dependencies.
 availability is separate from immutable reports, and inherited patches retain their original
 producer identities in `sourceArtifacts`. See the [Server evidence instructions](./apps/server/README.md#evidence-retention-and-capacity)
 for configuration, HTTP availability responses, and physical SQLite storage limits.
+
+The 2026-09-19 acceptance covers complete pinned-checkout static review, invocation usage,
+static/E2E scheduling, independent PNG/MP4 publication and playback, managed recovery, and
+application-open cancellation. Functional PR scenarios retain their own unsuccessful outcomes;
+playable evidence is not a functional pass. That earlier redelivery received an external HTTP 401
+before the receiver; the later cached-duplicate result below retains its separate scope. Production deployment
+and sustained workload/storage-capacity acceptance are explicitly deferred.
+
+The subsequent Worker controls, static-media publication guards, webhook recovery, and durable relay
+spool have [scoped software and Dashboard/native-intake verification](./docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md).
+The native intake browser scope uses real HTTP/SQLite with GitHub mocked. PR #15's sixth Task passed
+three Calculator features and four UI assertions with confirmed cleanup. The fifth report's four
+GitHub images and MP4 playback passed while that Task remained blocked. Real HTTPS redelivery
+returned a cached duplicate without a second Server receipt. The eighth Task completed naturally
+with confirmed cleanup but no disable CAS. A separate synthetic-input/real-runtime native W4 fixture
+passed; the real-PR observer failures remain. Operational closeout is complete and temporary capacity
+settings are restored, with legacy services/history preserved. Git integration/publication is a separate handoff.
 
 [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) distinguishes this refactor from historical
 milestones. M39/M40 model workflows, M41 publication acceptance, M42 selected PowerToys tests, and

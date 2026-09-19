@@ -1,4 +1,9 @@
-import type { InvestigationTaskKind } from "@agentic-review/contracts";
+import {
+  type InvestigationTaskKind,
+  type InvestigationTaskV1,
+  investigationTaskRequiresE2e,
+  isInvestigationStaticTaskKind,
+} from "@agentic-review/contracts";
 import { requireCondition } from "./errors.js";
 import type { InvestigationStore } from "./store.js";
 
@@ -24,8 +29,16 @@ export interface InvestigationSchedulerSettings {
 }
 
 /** Every task that can execute repository code shares the exclusive desktop pool. */
-export function investigationResourcePool(kind: InvestigationTaskKind): InvestigationResourcePool {
-  return kind === "pr-review" || kind === "issue-investigate" ? "static" : "e2e";
+export function investigationResourcePool(
+  task: InvestigationTaskKind | Pick<InvestigationTaskV1, "kind" | "executionPolicy">,
+): InvestigationResourcePool {
+  return (
+    typeof task === "string"
+      ? !isInvestigationStaticTaskKind(task)
+      : investigationTaskRequiresE2e(task)
+  )
+    ? "e2e"
+    : "static";
 }
 
 /** Mutations run inside the same store transaction as their task/attempt transition. */
@@ -106,7 +119,27 @@ export class InvestigationResourceScheduler {
       "state" | "acquiredAt" | "updatedAt" | "releasedAt" | "reason"
     >,
   ): void {
-    if (this.lease(input.attemptId) !== undefined) return;
+    const existing = this.lease(input.attemptId);
+    if (existing !== undefined) {
+      requireCondition(
+        existing.taskId === input.taskId &&
+          existing.workerId === input.workerId &&
+          existing.fence === input.fence,
+        409,
+        "resource_lease_mismatch",
+        "A retained resource lease must match its original task, worker, and fence.",
+      );
+      // An older kind-only classification must not release an executable task as static work.
+      if (existing.pool === "static" && input.pool === "e2e" && existing.state !== "released")
+        this.store.put("resourceLeases", input.attemptId, {
+          ...existing,
+          pool: "e2e",
+          state: "needs_cleanup",
+          updatedAt: this.now().toISOString(),
+          reason: "execution_policy_requires_e2e",
+        } satisfies InvestigationResourceLease);
+      return;
+    }
     const at = this.now().toISOString();
     this.store.insert("resourceLeases", input.attemptId, {
       ...input,

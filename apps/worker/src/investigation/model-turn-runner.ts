@@ -414,14 +414,7 @@ export function createStaticModelJsonRunner(
         await assertMissing(io, resultPath);
         if (options.engine === "copilot") await assertMissing(io, usagePath);
         const prompt = input.prompt;
-        const completeInputSize =
-          Buffer.byteLength(prompt, "utf8") +
-          (options.engine === "copilot" ? Buffer.byteLength(schemaJson, "utf8") + 256 : 0);
-        if (completeInputSize > inputLimit)
-          throw failure(
-            "MODEL_INPUT_LIMIT_EXCEEDED",
-            "The complete round input exceeds the configured CLI transport budget; no input was truncated.",
-          );
+        assertModelPromptBudget(input, options);
         if (containsProtectedValue(prompt, options.protectedValues))
           throw failure(
             "MODEL_INPUT_INVALID",
@@ -823,6 +816,65 @@ function assertInputBinding(input: ModelTurnExecutionInput): void {
     );
 }
 
+export function assertModelPromptBudget(
+  input: Pick<StaticModelJsonInput, "prompt" | "schema">,
+  options: Pick<ModelTurnRunnerOptions, "engine" | "maximumInputBytes">,
+): void {
+  const inputLimit = options.maximumInputBytes ?? maximumTransportInputBytes;
+  if (
+    !Number.isSafeInteger(inputLimit) ||
+    inputLimit < 1 ||
+    inputLimit > maximumTransportInputBytes
+  )
+    throw new TypeError("maximumInputBytes must be within the CLI transport budget.");
+  const completeInputSize =
+    Buffer.byteLength(input.prompt, "utf8") +
+    (options.engine === "copilot"
+      ? Buffer.byteLength(
+          JSON.stringify(createInvestigationModelOutputSchema(input.schema)),
+          "utf8",
+        ) + 256
+      : 0);
+  if (completeInputSize > inputLimit)
+    throw failure(
+      "MODEL_INPUT_LIMIT_EXCEEDED",
+      "The complete round input exceeds the configured CLI transport budget; no input was truncated.",
+    );
+}
+
+/** Read the complete immutable snapshot without widening the task's source or execution scope. */
+export async function readFrozenModelInput(
+  input: Pick<ModelTurnExecutionInput, "workspace" | "signal">,
+  options: Pick<ModelTurnRunnerOptions, "fileIO" | "maximumSnapshotBytes"> = {},
+): Promise<InvestigationInputSnapshotV1> {
+  const maximumBytes = options.maximumSnapshotBytes ?? 64 * 1024 * 1024;
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1)
+    throw new TypeError("maximumSnapshotBytes must be a positive safe integer.");
+  await input.workspace.assertIntegrity();
+  const frozenInput = await readStableUtf8(
+    options.fileIO ?? defaultFileIO,
+    input.workspace.modelInputPath,
+    maximumBytes,
+    "MODEL_INPUT_LIMIT_EXCEEDED",
+    input.signal,
+  );
+  if (sha256(frozenInput) !== input.workspace.modelInputDigest)
+    throw failure("MODEL_INPUT_INVALID", "The immutable model input digest changed.");
+  let snapshot: unknown;
+  try {
+    snapshot = JSON.parse(frozenInput);
+  } catch {
+    throw failure("MODEL_INPUT_INVALID", "The frozen model input is not valid JSON.");
+  }
+  if (!Value.Check(InvestigationInputSnapshotV1Schema, snapshot))
+    throw failure(
+      "MODEL_INPUT_INVALID",
+      "The frozen model input does not match InvestigationInputSnapshotV1.",
+    );
+  await input.workspace.assertIntegrity();
+  return snapshot;
+}
+
 export async function makePrompt(
   input: ModelTurnExecutionInput,
   io: ModelTurnFileIO,
@@ -861,26 +913,7 @@ export async function makePrompt(
         "The owned PR diff manifest does not match the checkpoint and immutable PR subject.",
       );
   }
-  const frozenInput = await readStableUtf8(
-    io,
-    input.workspace.modelInputPath,
-    maximumSnapshotBytes,
-    "MODEL_INPUT_LIMIT_EXCEEDED",
-    input.signal,
-  );
-  if (sha256(frozenInput) !== input.workspace.modelInputDigest)
-    throw failure("MODEL_INPUT_INVALID", "The immutable model input digest changed.");
-  let snapshot: unknown;
-  try {
-    snapshot = JSON.parse(frozenInput);
-  } catch {
-    throw failure("MODEL_INPUT_INVALID", "The frozen model input is not valid JSON.");
-  }
-  if (!Value.Check(InvestigationInputSnapshotV1Schema, snapshot))
-    throw failure(
-      "MODEL_INPUT_INVALID",
-      "The frozen model input does not match InvestigationInputSnapshotV1.",
-    );
+  const snapshot = await readFrozenModelInput(input, { fileIO: io, maximumSnapshotBytes });
   const analysisTask = input.task.kind === "pr-review" || input.task.kind === "issue-investigate";
   if (input.task.executionPolicy.mode !== "snapshot_only" && analysisTask) {
     await input.workspace.assertSourceBinding();

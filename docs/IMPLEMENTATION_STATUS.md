@@ -1,5 +1,144 @@
 # Implementation Status
 
+## Worker controls and webhook recovery implementation, 2026-09-19
+
+The implementation, sealed v4 software candidate, and scoped Dashboard/native-intake
+browser checks are recorded in the [current handoff](handoff/2026-09-19-worker-controls-and-webhook-recovery.md).
+The sixth Task's scoped Calculator E2E, its cleanup/native lease release, and fifth report's GitHub
+media display/playback are accepted. The eighth Task completed naturally with confirmed cleanup,
+but no disable CAS occurred. W4 subsequently passed in a separate native cancellation fixture;
+Operational closeout is complete and temporary capacity settings are restored. Git publication is a
+separate handoff. Documentation is a later
+overlay; the sealed v4 implementation was not changed by the browser helper corrections.
+
+Real isolated-application Dashboard checks passed 5 steps. Synthetic UI coverage passed 16 steps
+across 4 Worker states with 19 screenshots. Native HTTP/SQLite/browser intake coverage, with GitHub
+mocked, passed 12 steps with 13 screenshots: two events each retained three failures, recovered
+through the actual retry button on attempt 4, and linked exactly one queued Task. The separate
+native self-check accepted `403`/`409` and idempotency behavior. Earlier selector and transient-layout
+helper failures remain recorded; no product CSS change was required. These checks do not accept
+real Calculator behavior, media publication, GitHub redelivery, or disabling a running application.
+See the [implementation and acceptance plan](design/2026-09-19-worker-controls-and-webhook-recovery.md).
+
+The separate v5 comment-text privacy increment covers absolute POSIX paths missed by the former
+root list. Its initial two-template run retained 245 passes and 7 quoted-path failures; a zero-width
+boundary correction, with unchanged assertions, then passed all 252 cases (205 automatic, 47
+progress), plus Server type/build checks. Four-file lint exited 0 with 79 warnings and 2 infos.
+Only two templates and their two test files changed, adding 30 cases. Final v5 source/asset sealing
+is complete for that delta and the rebuilt Server output, with other assets reused byte for byte.
+This focused result does not claim a full v5 Server/UI rerun or live acceptance.
+
+The Spectre-library repair is followed by a passed independent fixed-source Launcher readiness build:
+exit 0, four warnings, zero errors, and complete retained output, with no model, application launch,
+or Task. The fifth real PR #15 Task then independently checked out and built the source, sealed
+1,321 outputs, and started Launcher. Three registered features passed four real UI assertions with
+four PNGs and one valid MP4; every assertion has its media binding, and the implicit positive control
+preceded the no-error-row assertion. All four images and assertion receipts were independently
+inspected. The Task nevertheless ended blocked: an earlier feature's two assertions against static
+`Title`/`Path` accessibility labels remained unexecuted. The controlled build and four individual
+business behaviors are accepted, not all registered features or an overall E2E pass.
+
+Its report and owned cleanup were confirmed, its lease was released, and attempt directories were
+empty. The single invocation reported 4,098,851 tokens; that milestone's cumulative usage was
+6,397,588 tokens across five invocations with no unknowns. The fifth report's GitHub comment later
+loaded four PNGs and played/decoded its MP4, and an anonymous body read matched the native body.
+Two `TypeError` messages came from intercepted peripheral GitHub POSTs; no error-free whole-page
+claim is made. Media acceptance does not change the fifth blocked report.
+
+The sixth Task completed at 13:51:42 UTC after its own fresh fixed-source build and launch, without
+reusing earlier Task or readiness outputs. Exactly three features and four required UI assertions
+passed, with four PNGs and one valid MP4 and complete evidence bindings. The implicit positive
+control preceded the absence check. Independent review read all four raw assertions and the sealed
+report matrix and visually checked all four PNGs. Only observed control mapping was added as command
+context; code, gates, API, source, and expectations were unchanged. Its invocation reported 4,006,462
+tokens; cumulative usage is complete at 10,404,050 across six invocations with no unknowns.
+
+The accepted scope retains the report's limits: source unit tests were read but not executed,
+the internal evaluator's concrete runtime type was not independently measured, and non-target
+plugins logged initialization errors while Calculator global-query participation was verified.
+No additional validation is implied. Sixth-Task cleanup reached journal revision 6 with all required
+confirmations true at 13:57:22.280 UTC; native readback at 13:58:25 UTC confirmed lease release,
+zero scheduler occupancy, no attempt directories, and no owned applications. The settled six-Task
+usage total was 10,404,050 tokens. The seventh Task then completed with 3,406,345 tokens, bringing
+settled usage to 13,810,395 across seven complete calls with no unknowns. Its observer failed before
+any disable marker/CAS. The eighth Task subsequently completed naturally at 16:14:50.871 UTC with
+three features/four assertions passed and 3,835,014 tokens. Settled real-model usage is 17,645,409
+across eight complete calls with no unknowns. Its cleanup journal reached revision 6/all three true
+at 16:19:46.257 UTC; slots, directories, owned applications, and leases were then empty. Anonymous
+terminal-comment readback matched the native body, with four PNG/one MP4 bindings verified.
+
+The eighth real-Task W4 observation did not pass: its watcher failed window/receipt consistency before any CAS. Its
+report records foreground loss, initial video-finalization blockage, and later short-clip capture;
+handle selection alone is not an established cause. Bounded read-only recovery ended without a new
+eligible clip when the Task became terminal. A separate isolated native fixture then passed: only
+source/upstream/provider inputs were synthetic, with real Server/Worker/E2E tools/ProcessHost/window/
+FFmpeg and flag-API cancellation. Two native observations proved live application and recorder
+before disable; both exited, the Task cancelled, journal revision 6 confirmed cleanup, and its lease
+released with zero slots. Fixture/runtime/Server closure passed. The provider only awaited abort
+after setup; it never stopped/deleted or wrote journals/leases. Zero real-model calls and synthetic
+zero usage do not alter the main eight-call total. The helper's original syntax-check failure was
+retained; one missing closing brace was added before the passing case. Neither real-PR W4 failure
+is relabeled. Phase 1 idle-disable UI, hook/HTTPS shutdown, assignment restoration, and all nine
+workflow baseline states are confirmed, closing the fork test-write window. Owned runtime/resource
+cleanup is complete, temporary capacity settings are restored, and legacy services/history remain
+preserved. Git integration/publication is a separate handoff.
+
+Real standard HTTPS GitHub redelivery returned a cached duplicate from the owned relay for the same
+delivery GUID and raw bytes, without changing the four pre-existing Task/Attempt/invocation identities.
+This does not claim a second Server receipt. Native duplicate/commit recovery and isolated relay
+restart results retain their separate scopes; the old CLI-hook HTTP `401` failure remains unresolved.
+
+- Each Worker has one persisted Server `e2eEnabled` setting, defaulting to false, with administrator
+  version checks and audit history. Existing local roles and kinds narrow capability. Server claims,
+  Worker policy polling, and execution guards exclude unauthorized execution and reject static kinds
+  carrying `execute` policy. Disabling requests cancellation while retaining report and cleanup paths.
+- The Dashboard exposes Worker controls and webhook receipt history. Pending cleanup and offline
+  confirmation are distinct from a completed disable. Webhook intake, Task, and comment states remain
+  independent; scoped list/detail reads continue with intake disabled.
+- Failed canonical assignment/E2E intake supports versioned, idempotent explicit retry and bounded
+  automatic retry. Prior processing attempts remain recorded. A committed Task is reattached without
+  another model or desktop run, including after the intake binding was revoked.
+- A separate SQLite relay spool persists received signed envelopes before local forwarding and
+  retains bounded attempts across restart. Explicit failed-delivery retry uses version checks,
+  idempotent request IDs, and finite additional batches without resetting cumulative history.
+  Spool schema v1 upgrades additively to v2; application storage remains `investigation-v4`. The
+  module requires a companion adapter and does not itself start a relay or request GitHub redelivery.
+  The local retry boundary begins at relay receipt.
+- Static investigation media is excluded from GitHub uploads. Publication requires the exact stored
+  E2E Task, sealed report, subject, producer attempts, and trusted tool observations. Worker controls
+  do not remove general shell access, prohibit local screenshots, or introduce an OS sandbox.
+- The E2E runner receives the complete frozen scope and execution policy without narrowing required
+  changed-path coverage. The current fixture is open draft PR #15, using upstream PowerToys
+  PR #47506's actual merge and its sole parent at the exact revisions in the plan. It is one commit,
+  four Calculator files, +21/-1, with complete source trees containing no gitlinks or unsupported
+  entries. The subsequent controlled build and Launcher startup are accepted within the scope above;
+  The sixth Task passed exactly three registered features and all four required UI assertions,
+  while the fifth Task's earlier unexecuted feature keeps that historical outcome blocked. Three scenarios cover an
+  explicit unsupported-complex-number `SubTitle` for `sqrt(-1)`, no Calculator error row for the
+  same query without its action keyword, and result `4` for explicit `2+2`. The implicit-query
+  absence check requires a same-session, same-mode positive control: implicit `2+2` must first
+  produce the Calculator result `4`, so a disabled plugin cannot cause a false pass.
+
+PR #14 remains an open draft with its two unsuccessful live sequences preserved. The first monitor
+misclassified legitimate source preparation and cancelled both Tasks; its Worker exited 1 after
+`SOURCE_PROCESS_CLEANUP_UNCONFIRMED`, with owned-process termination proved independently later.
+The second static Task blocked on `SOURCE_TREE_UNSUPPORTED` because both original revisions contain
+two mode `160000` gitlinks; its queued E2E Task was cancelled. Across the four Tasks, three are
+cancelled and one blocked, with complete usage summaries of zero invocations and zero reported
+tokens. The signed intake/default-off admission observations do not establish completed model or
+application work. Sequence-specific cleanup is recorded in the handoff; overall closeout remains
+pending. The source gate and the sealed v4 implementation were not weakened.
+
+Owned-fork PR #13, mirroring upstream #47767, is superseded, unexecuted, and closed. Only its state
+changed; refs and body remain preserved, and the abandoned run created no comments or reviews. Its
+combined Run/CmdPal changes are not accepted through a Run-only scope. The replacement fixture
+preserves the existing all-changed-path coverage gate rather than introducing scope-based exceptions.
+
+Earlier Peek/Launcher failures, the external redelivery HTTP 401, and their original reports retain
+their historical status. Production deployment and long-term workload/storage capacity remain
+deferred. New results must be recorded separately rather than inferred from implementation or fixture
+preparation.
+
 ## Local source review, usage, and E2E acceptance, 2026-09-19
 
 Static reviews now inspect the complete pinned local checkout, with the diff defining scope and
@@ -14,6 +153,17 @@ Actual application cancellation, queued recovery, token projection, and media pl
 verified. The tested PR scenarios retain their recorded failures and blockers; this does not
 certify that every PR feature passed. See the [complete handoff](handoff/2026-09-19-local-source-review-e2e.md)
 for outcomes and limitations. Dashboard history remains available with automatic execution disabled.
+
+Current investigation storage is `investigation-v4`. Exact, complete `investigation-v2` and
+`investigation-v3` stores receive additive comment-history and scheduler migrations; unrelated or
+incomplete schemas are rejected without deleting retained data.
+
+Functional acceptance remains open: Peek recorded two passed, four failed, and one blocked
+assertion, without exercising cross-file disposal. Launcher recorded one passed, one failed, and
+two blocked scenarios. These outcomes do not by themselves establish PR regressions. A real GitHub
+redelivery received an external HTTP 401 before reaching the receiver, leaving full-path redelivery
+idempotence unaccepted. Production deployment and sustained workload/storage-capacity acceptance
+are explicitly deferred. The subsequent controls/recovery and Calculator follow-up is described above.
 
 ## Comment cancellation labels and source wording, 2026-09-19
 
@@ -464,7 +614,7 @@ external publication.
 | --- | --- | --- |
 | Native lifecycle | Accepted for the synthetic fixture | Actual Server/Worker startup, password accounts and explicit grants, two consecutive tasks, cancellation, graceful stop/restart, and checkpoint resume passed on Windows. |
 | Complete report delivery | Accepted for the synthetic fixture | 137 findings and 137 final rechecks, approximately 3.9 MB exports, complete 50/50/37 pagination, retained partial findings, cleanup, and zero action intents. |
-| Evidence operations | Implemented with scoped regression coverage | `investigation-v2`, atomic resident quotas, bounded retention, current metadata APIs, protected recovery/source dependencies, and original producer lineage. Production capacity remains separate. |
+| Evidence operations | Implemented with scoped regression coverage | At this milestone: `investigation-v2`, atomic resident quotas, bounded retention, current metadata APIs, protected recovery/source dependencies, and original producer lineage. The active store is now v4; production capacity remains separate. |
 | Real model and recovery | Accepted as a combined sequence | Five actual model rounds followed by native attempt 2 on the same task sealed a complete 30,886-byte report with zero new model rounds/tokens. The original failed delivery remains unchanged; this is not an uninterrupted-run claim. |
 | Native publication | Approved scope accepted | Both native intents succeeded on owned-fork PR #3 and Issue #5. Each target had one confirmation and one new matching comment observed by GET; the one-run approval is consumed. |
 
@@ -630,7 +780,8 @@ establish independently verified remote-model identity. The unused `executionAcc
 absent from that baseline's contracts, results and UI. That unreleased snapshot directly maintained
 SQLite schema **31**, without database resets, old-version upgrades, data conversion or compatibility
 migration work, using its ordered SQL initialization. This is historical architecture;
-the active investigation runtime now initializes `investigation-v2` directly.
+the active investigation runtime now initializes `investigation-v4` directly and accepts exact
+v2/v3 stores through the limited additive migrations described above.
 Historical schema numbers describe their original snapshots. Existing data and historical artifacts
 remain unchanged. Automated suites use isolated synthetic data; the explicitly
 authorized real CLI probes and controlled-fixture workflow acceptance below are separately scoped.
@@ -836,7 +987,8 @@ not override later accepted scopes, and retired designs are not queued implement
 The 2026-09-15 [structured investigation refactor](./design/2026-09-15-structured-investigation-results-and-loop.md)
 is implemented and verified within the automated and browser scope recorded above. Its native
 contracts, storage, complete Worker loop, operation handlers, and Dashboard are the active path.
-Legacy compatibility, dual writes, data backfills, and migration scripts are not pending work.
+Legacy API compatibility, dual writes, data backfills, and retired Job database conversion are not
+pending work. The active investigation store's limited v2/v3 additive migrations are implemented.
 Actual deployment and scenario acceptance remain scoped below; automated verification does not
 authorize writes to actual repository PRs or issues.
 
@@ -850,25 +1002,52 @@ owned-fork PR #3 and Issue #5. That one-run authorization is consumed. Broader r
 human workflows and additional delivery scenarios need their own acceptance and explicit write
 approval; they are not covered by either this run or the historical M41 authorization.
 
-- **Deployment operations:** the new synthetic exercise has accepted full Server/Worker entry
-  points, consecutive tasks, cancellation, graceful restart/resume, and owned cleanup on Windows.
-  It does not accept hard-crash orphan recovery, SCM restart/signal policy, production hosting,
-  real source/executable/UI profiles, or sustained workload capacity. These boundaries must not be
-  confused with an unimplemented native task loop or the older M39 component-only exercise.
-- **Operational capacity:** resident evidence quotas, bounded retention, expiry reads, and source
-  protection are implemented. Remaining deployment work is to accept the intended sustained
-  workload and physical SQLite/WAL storage growth under that policy. A bounded logical content
-  quota does not establish total disk capacity or physical file compaction.
+The [2026-09-19 handoff](handoff/2026-09-19-local-source-review-e2e.md) additionally accepts complete
+pinned-checkout static review, invocation accounting, configurable static concurrency, global E2E
+serialization, independent comments and image/video publication/playback, recorded-result recovery,
+and cancellation with an owned application open. Managed process generation and cleanup recovery
+were verified, including a lost Server acknowledgement. This does not prove cleanup of arbitrary
+service-broker or externally detached processes. Historical failed receipts remain unchanged.
 
-Dedicated PowerToys UI scenarios and general model-quality evaluation remain outside the current
-delivery. Ordinary software tests, report validation, and source/evidence checks remain part of
-implementation correctness; no model-ranking or quality-scoring project is required.
+- **Worker controls and webhook recovery — implementation/acceptance in progress:** the new
+  default-off Worker policy, disable/cleanup lifecycle, static-media upload guard, intake history
+  and retry, and durable relay module have the software and scoped browser evidence recorded in the
+  current handoff. Real static-only execution, static/E2E overlap, static text publication, and cached
+  HTTPS redelivery have their recorded scopes. The sixth Task's functional E2E and fifth report's
+  GitHub media display/playback and sixth/eighth-Task cleanup are accepted. The real-task observers
+  failed before disable; the separate synthetic-input/real-runtime W4 fixture passed. Operational
+  closeout is complete; Git integration/publication is a separate handoff.
+- **Real functional E2E — accepted for the recorded PR #15 scope:** the sixth Task independently
+  built and launched the pinned Run Calculator source and passed three features/four required UI
+  assertions, including the implicit positive control. Earlier Peek has two passed, four failed, and one
+  blocked assertion; cross-file disposal remains unexercised. Earlier Launcher has one passed, one
+  failed, and two blocked scenarios. A simpler successful fixture would not resolve these older
+  scenarios. Build success, media playback, and recorded-result recovery are separate claims.
+- **Webhook recovery — accepted within recorded boundaries:** native failure/retry and committed-Task
+  recovery, isolated relay restart, and real same-delivery HTTPS cached redelivery have separate
+  evidence. The real redelivery did not enter the Server a second time. The earlier CLI-hook HTTP
+  401 remains a failed receipt with no established cause; neither result claims physical power-loss
+  or long-term capacity acceptance.
+- **Production deployment — deferred:** full Server/Worker entry points, consecutive tasks,
+  graceful restart/resume, managed cleanup recovery, and real cancellation have accepted scopes.
+  Production hosting, unattended service installation, and SCM restart/signal policy remain
+  unaccepted and are deferred from the current follow-up.
+- **Long-term operational capacity — deferred:** resident evidence quotas, bounded retention,
+  expiry reads, and source protection are implemented. Sustained workload throughput and physical
+  SQLite/WAL storage growth still need acceptance. A bounded logical content quota does not
+  establish total disk capacity or physical file compaction.
+
+General model-quality evaluation remains outside the current delivery. Ordinary software tests,
+report validation, and source/evidence checks remain part of implementation correctness; no
+model-ranking or quality-scoring project is required.
 
 The removed split Worker, WindowsAttempt protected-journal/OS-attestation, provider registry and
-model HTTP relay are retired. Old-version upgrades, resets, conversions and compatibility migrations
-are not product tasks for this unreleased codebase. Private checkout, automatic distribution,
-video evidence and reusable build artifacts remain separate unimplemented scope, rather than
-requirements to reopen the completed M38/M39 milestones.
+model HTTP relay are retired. Broad legacy upgrades, resets, conversions, and compatibility work
+are not product tasks for this unreleased codebase. Private checkout, automatic Worker
+distribution/installation/upgrades, and reusable build outputs remain optional unimplemented
+extensions. Video evidence is implemented and its publication/playback was accepted in the
+2026-09-19 scope; it is no longer an unimplemented backlog item. These extensions do not reopen
+the completed M38/M39 milestones.
 
 Automated tests must not write any repository's PRs/issues without explicit approval of the exact
 targets, operations and content. General implementation or verification authorization does not

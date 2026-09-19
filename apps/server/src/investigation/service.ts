@@ -26,12 +26,16 @@ import type {
   InvestigationSubjectV1,
   InvestigationTaskV1,
   InvestigationUsageSummary,
+  InvestigationWorkerControlUpdate,
   InvestigationWorkerLease,
+  InvestigationWorkerPolicyRequest,
 } from "@agentic-review/contracts";
 import {
   EntityIdSchema,
   InvestigationCreateTaskRequestV1Schema,
   InvestigationInputSnapshotV1Schema,
+  investigationTaskRequiresE2e,
+  isInvestigationStaticTaskKind,
   Sha256Schema,
   validateInvestigationAnalysisForTask,
   validateInvestigationTask,
@@ -93,6 +97,7 @@ import {
   investigationUsageSummary,
   recordInvestigationUsage,
 } from "./usage-ledger.js";
+import { InvestigationWorkerControls } from "./worker-controls.js";
 
 interface AttemptRecord {
   attempt: InvestigationAttemptV1;
@@ -140,6 +145,7 @@ interface CheckpointAcceptanceRecord {
 }
 export interface InvestigationServiceOptions {
   store: InvestigationStore;
+  workerControls?: InvestigationWorkerControls;
   actionTransport?: InvestigationActionTransport;
   enableExternalWrites?: boolean;
   now?: () => Date;
@@ -179,6 +185,7 @@ export interface InvestigationServiceOptions {
 export class InvestigationService {
   readonly actions: InvestigationActions;
   readonly evidence: InvestigationEvidenceStore;
+  readonly workerControls: InvestigationWorkerControls;
   private readonly store: InvestigationStore;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
@@ -190,6 +197,8 @@ export class InvestigationService {
   constructor(private readonly options: InvestigationServiceOptions) {
     this.store = options.store;
     this.now = options.now ?? (() => new Date());
+    this.workerControls =
+      options.workerControls ?? new InvestigationWorkerControls(this.store, this.now);
     this.evidence = new InvestigationEvidenceStore(this.store, options.evidencePolicy, this.now);
     this.idFactory = options.idFactory ?? randomUUID;
     this.leaseDurationMs = options.leaseDurationMs ?? 120_000;
@@ -216,7 +225,7 @@ export class InvestigationService {
           taskId: task.id,
           workerId: record.attempt.workerId,
           fence: record.attempt.leaseVersion,
-          pool: investigationResourcePool(task.kind),
+          pool: investigationResourcePool(task),
         });
       }
     });
@@ -608,6 +617,12 @@ export class InvestigationService {
             ? "snapshot_only"
             : "source_read"
           : "execute");
+    requireCondition(
+      !isInvestigationStaticTaskKind(request.kind) || mode !== "execute",
+      400,
+      "static_task_execution_forbidden",
+      "Static investigation tasks cannot execute repository code; create an execution task instead.",
+    );
     requireCondition(
       request.kind !== "pr-e2e" || mode === "execute",
       400,
@@ -1417,6 +1432,37 @@ export class InvestigationService {
     };
   }
 
+  listWorkers(actor: InvestigationOperatorPrincipal) {
+    this.reapExpiredLeases();
+    return this.workerControls.list(actor);
+  }
+
+  workerPolicy(worker: InvestigationWorkerPrincipal, request: InvestigationWorkerPolicyRequest) {
+    return this.workerControls.policy(worker, request);
+  }
+
+  updateWorkerE2e(
+    actor: InvestigationOperatorPrincipal,
+    workerId: string,
+    request: InvestigationWorkerControlUpdate,
+  ) {
+    this.reapExpiredLeases();
+    return this.workerControls.update(actor, workerId, request, () => {
+      for (const record of this.store.list<AttemptRecord>(
+        "attempts",
+        (entry) => entry.attempt.workerId === workerId && entry.attempt.state === "running",
+      )) {
+        const task = this.required<InvestigationTaskV1>("tasks", record.attempt.taskId);
+        if (!investigationTaskRequiresE2e(task)) continue;
+        const checkpoint = this.store.get<InvestigationLoopCheckpointV1>("checkpoints", task.id);
+        // Accepted terminal results still need report delivery and owned cleanup, never new execution.
+        if (checkpoint !== undefined && checkpoint.stopReason !== "continuing") continue;
+        this.store.put("attempts", record.attempt.id, { ...record, cancelRequested: true });
+        this.resourceScheduler.requestCleanup(record.attempt.id, "worker_e2e_disabled");
+      }
+    });
+  }
+
   configureScheduler(
     actor: InvestigationOperatorPrincipal,
     request: InvestigationSchedulerSettingsRequest,
@@ -1611,6 +1657,8 @@ export class InvestigationService {
   ): InvestigationClaimResponse {
     this.reapExpiredLeases();
     return this.store.transaction(() => {
+      this.workerControls.observe(worker);
+      const e2eEnabled = this.workerControls.allowsE2e(worker);
       const availablePools = {
         static: this.resourceScheduler.available("static"),
         e2e: this.resourceScheduler.available("e2e"),
@@ -1621,10 +1669,15 @@ export class InvestigationService {
           (entry) =>
             entry.state === "queued" &&
             worker.repositoryIds.includes(entry.repository.id) &&
-            request.supportedKinds.includes(entry.kind),
+            request.supportedKinds.includes(entry.kind) &&
+            (!isInvestigationStaticTaskKind(entry.kind) ||
+              (entry.executionPolicy.mode !== "execute" &&
+                !entry.executionPolicy.allowRepositoryExecution &&
+                entry.executionPolicy.authorizationRef === null)) &&
+            (e2eEnabled || !investigationTaskRequiresE2e(entry)),
         )
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-        .find((entry) => availablePools[investigationResourcePool(entry.kind)]);
+        .find((entry) => availablePools[investigationResourcePool(entry)]);
       if (task === undefined) return { claim: null };
       const number = this.attempts(task.id).length + 1;
       const attempt: InvestigationAttemptV1 = {
@@ -1672,7 +1725,7 @@ export class InvestigationService {
         taskId: task.id,
         workerId: worker.id,
         fence: number,
-        pool: investigationResourcePool(task.kind),
+        pool: investigationResourcePool(task),
       });
       this.store.insert("attempts", attempt.id, record);
       this.store.put("tasks", task.id, running);
@@ -1698,13 +1751,21 @@ export class InvestigationService {
     request: InvestigationHeartbeatRequest,
   ) {
     return this.store.transaction(() => {
-      const { record } = this.lease(worker, taskId, request.lease);
+      const { task, record } = this.lease(worker, taskId, request.lease);
+      this.workerControls.observe(worker);
+      const checkpoint = this.store.get<InvestigationLoopCheckpointV1>("checkpoints", taskId);
+      const revoked =
+        investigationTaskRequiresE2e(task) &&
+        (isInvestigationStaticTaskKind(task.kind) || !this.workerControls.allowsE2e(worker)) &&
+        (checkpoint === undefined || checkpoint.stopReason === "continuing");
+      const cancelRequested = record.cancelRequested || revoked;
+      if (revoked) this.resourceScheduler.requestCleanup(record.attempt.id, "worker_e2e_disabled");
       const serverTime = this.now();
       const leaseExpiresAt = new Date(serverTime.getTime() + this.leaseDurationMs).toISOString();
-      this.store.put("attempts", record.attempt.id, { ...record, leaseExpiresAt });
+      this.store.put("attempts", record.attempt.id, { ...record, leaseExpiresAt, cancelRequested });
       recordInvestigationHeartbeat(this.store, taskId, record.attempt.id, serverTime.toISOString());
       return {
-        cancelRequested: record.cancelRequested,
+        cancelRequested,
         leaseExpiresAt,
         serverTime: serverTime.toISOString(),
       };
@@ -1938,14 +1999,17 @@ export class InvestigationService {
             );
     } else {
       requireCondition(
-        task.executionPolicy.allowRepositoryExecution,
+        !isInvestigationStaticTaskKind(task.kind) &&
+          task.executionPolicy.mode === "execute" &&
+          task.executionPolicy.allowRepositoryExecution,
         403,
         "execution_not_authorized",
         "This task is not authorized for runtime execution.",
       );
       const runtime = request.execution;
+      const executionAllowed = this.workerControls.allowsE2e(worker) && !record.cancelRequested;
       requireCondition(
-        !record.cancelRequested ||
+        executionAllowed ||
           runtime.startedSteps.every((step) =>
             checkpoint.runtime.startedSteps.some(
               (started) => investigationContentDigest(started) === investigationContentDigest(step),
@@ -1959,7 +2023,7 @@ export class InvestigationService {
       const frozenInput = this.required<FrozenTaskInput>("idempotency", `input:${task.id}`);
       if (task.kind === "pr-e2e") {
         requireCondition(
-          !record.cancelRequested || checkpoint.runtime.e2eExecution !== undefined,
+          executionAllowed || checkpoint.runtime.e2eExecution !== undefined,
           409,
           "cancellation_requested",
           "A cancelled E2E task cannot establish a new execution start.",

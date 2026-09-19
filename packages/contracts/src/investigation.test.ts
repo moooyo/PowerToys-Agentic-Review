@@ -1020,6 +1020,23 @@ describe("investigation subject evidence binding", () => {
 });
 
 describe("frozen investigation authorization", () => {
+  it.each(["pr", "bug"] as const)(
+    "rejects execute policy under the static %s task kind even with explicit authorization",
+    (kind) => {
+      const { task } = createInvestigationFixture(kind);
+      task.executionPolicy = {
+        ...task.executionPolicy,
+        mode: "execute",
+        allowRepositoryExecution: true,
+        authorizationRef: "synthetic-administrator",
+      };
+      expect(Value.Check(InvestigationTaskV1Schema, task)).toBe(true);
+      expect(validateInvestigationTask(task).errors).toContainEqual(
+        expect.objectContaining({ code: "STATIC_TASK_EXECUTION_FORBIDDEN" }),
+      );
+    },
+  );
+
   it("accepts snapshot-only Issue analysis without inventing a source SHA", () => {
     const { task } = createInvestigationFixture("bug");
     expect(validateInvestigationTask(task)).toEqual({ valid: true, errors: [] });

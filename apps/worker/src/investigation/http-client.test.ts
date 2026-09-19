@@ -471,6 +471,34 @@ function expectSafeError(error: InvestigationWorkerClientError, ...secrets: stri
 }
 
 describe("Investigation HTTP client requests", () => {
+  it("reads task admission policy through the authenticated Worker transport", async () => {
+    const fixture = createFixture();
+    const request = { supportedKinds: ["pr-review", "pr-e2e"] as const };
+    const pending = fixture.client.workerPolicy!({ supportedKinds: [...request.supportedKinds] });
+    const captured = fixture.lastRequest();
+    expect(captured.url.pathname).toBe("/api/worker/policy");
+    const response = {
+      workerId: "worker-1",
+      version: 3,
+      e2eEnabled: false,
+      effectiveKinds: ["pr-review"],
+    };
+    captured.request.respondJson(response);
+    await expect(pending).resolves.toEqual(response);
+  });
+
+  it("rejects a policy that advertises a task kind outside the local Worker role", async () => {
+    const fixture = createFixture();
+    const pending = fixture.client.workerPolicy!({ supportedKinds: ["pr-review"] });
+    fixture.lastRequest().request.respondJson({
+      workerId: "worker-1",
+      version: 3,
+      e2eEnabled: true,
+      effectiveKinds: ["pr-review", "pr-e2e"],
+    });
+    expect((await rejectionOf(pending)).code).toBe("invalid_response");
+  });
+
   it("requests the frozen report usage snapshot with the exact attempt lease", async () => {
     const fixture = createFixture();
     const request = { lease };

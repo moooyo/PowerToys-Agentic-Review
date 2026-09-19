@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
   InvestigationCreateTaskRequestV1,
   InvestigationTaskV1,
+  InvestigationWebhookRetryRequest,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
@@ -15,6 +16,13 @@ import type {
   InvestigationWorkItemRecord,
 } from "./types.js";
 import type { InvestigationWebhookBinding, InvestigationWebhookConfig } from "./webhook-config.js";
+import {
+  authorizeWebhookRetry,
+  beginWebhookAttempt,
+  finishWebhookAttempt,
+  phaseWebhookAttempt,
+  projectWebhookDelivery,
+} from "./webhook-delivery-controls.js";
 import type { InvestigationWebhookDeliveryInput } from "./webhook-http.js";
 import type { InvestigationWebhookSettings } from "./webhook-settings.js";
 
@@ -75,6 +83,8 @@ export interface InvestigationWebhookReceipt {
   readonly policyDigest: string;
   readonly state: "accepted" | "source_ready" | "completed" | "ignored" | "failed";
   readonly attempts: number;
+  readonly totalAttempts?: number;
+  readonly retryGeneration?: number;
   readonly nextAttemptAt: number;
   readonly source: ImportedSource | null;
   readonly taskRequest: InvestigationCreateTaskRequestV1 | null;
@@ -259,10 +269,13 @@ export class InvestigationWebhookIntake {
   }
 
   #isActive(receipt: InvestigationWebhookReceipt): boolean {
+    const task =
+      receipt.taskId === null
+        ? this.#committedTask(receipt)
+        : this.options.store.get<InvestigationTaskV1>("tasks", receipt.taskId);
+    if (task !== undefined) return task.state === "queued" || task.state === "running";
     if (receipt.state === "accepted" || receipt.state === "source_ready") return true;
-    if (receipt.state !== "completed" || receipt.taskId === null) return false;
-    const task = this.options.store.get<InvestigationTaskV1>("tasks", receipt.taskId);
-    return task !== undefined && (task.state === "queued" || task.state === "running");
+    return false;
   }
 
   #activeReceipt(assignment: Assignment): InvestigationWebhookReceipt | undefined {
@@ -423,27 +436,11 @@ export class InvestigationWebhookIntake {
         if (
           previous.id === canonical.id &&
           canonical.state === "failed" &&
-          (active === undefined || active.id === canonical.id)
+          (this.#committedTask(canonical) !== undefined ||
+            active === undefined ||
+            active.id === canonical.id)
         ) {
-          requireCondition(
-            this.options.store.countPrefix("idempotency", pendingPrefix) < maximumPending,
-            503,
-            "webhook_queue_full",
-            "The received-event queue is full; redeliver this event later.",
-          );
-          const retried: InvestigationWebhookReceipt = {
-            ...canonical,
-            state: canonical.source === null ? "accepted" : "source_ready",
-            attempts: 0,
-            nextAttemptAt: this.#now(),
-            reason: null,
-          };
-          this.options.store.put("idempotency", canonical.id, retried);
-          this.options.store.put("idempotency", canonical.pendingId, { receiptId: canonical.id });
-          this.options.store.put("idempotency", activeCycleKey(canonical.assignment), {
-            receiptId: canonical.id,
-          });
-          this.options.onAssignmentChanged?.(this.#admission(retried), "preparing");
+          this.#requeue(canonical);
           return { status: "accepted" as const };
         }
         return {
@@ -465,6 +462,8 @@ export class InvestigationWebhookIntake {
           canonicalReceiptId: original.id,
           assignment,
           state: "ignored",
+          attempts: 0,
+          totalAttempts: 0,
           reason: "duplicate_assignment",
         } satisfies InvestigationWebhookReceipt);
         return {
@@ -484,6 +483,8 @@ export class InvestigationWebhookIntake {
           receivedAt: input.receivedAt,
           assignment,
           state: "ignored",
+          attempts: 0,
+          totalAttempts: 0,
           reason: "active_assignment_cycle",
         } satisfies InvestigationWebhookReceipt);
         this.options.store.insert("idempotency", semanticKey, { receiptId: active.id });
@@ -546,28 +547,72 @@ export class InvestigationWebhookIntake {
       "webhook_delivery_not_found",
       "This webhook delivery is not recorded.",
     );
+    return projectWebhookDelivery(this.options.store, actor, receipt);
+  }
+
+  retryReceipt(
+    actor: InvestigationOperatorPrincipal,
+    deliveryId: string,
+    request: InvestigationWebhookRetryRequest,
+  ) {
+    this.options.store.transaction(() => {
+      const receipt = this.options.store.get<InvestigationWebhookReceipt>(
+        "idempotency",
+        `${deliveryPrefix}${deliveryId}`,
+      );
+      requireCondition(
+        receipt !== undefined,
+        404,
+        "webhook_delivery_not_found",
+        "This delivery is not recorded.",
+      );
+      const command = authorizeWebhookRetry(this.options.store, actor, receipt, request);
+      if (command.replay) return;
+      const committed = this.#committedTask(receipt);
+      requireCondition(
+        committed !== undefined || this.#binding(receipt.assignment) !== undefined,
+        403,
+        "webhook_authorization_revoked",
+        "The assignment grant no longer authorizes this delivery.",
+      );
+      const active = this.#activeReceipt(receipt.assignment);
+      requireCondition(
+        committed !== undefined || active === undefined || active.id === receipt.id,
+        409,
+        "webhook_retry_unavailable",
+        "Another assignment cycle is already active.",
+      );
+      this.#requeue(receipt);
+      command.remember();
+    });
+    this.#wake();
+    return this.readReceipt(actor, deliveryId);
+  }
+
+  #requeue(receipt: InvestigationWebhookReceipt): void {
     requireCondition(
-      actor.repositoryIds.includes(receipt.assignment.repository.id),
-      403,
-      "repository_access_denied",
-      "This identity cannot read the delivery's repository.",
+      this.options.store.countPrefix("idempotency", pendingPrefix) < maximumPending,
+      503,
+      "webhook_queue_full",
+      "The received-event queue is full; retry later.",
     );
-    const canonical = this.#canonical(receipt);
-    return {
-      deliveryId: receipt.deliveryId,
-      repositoryId: receipt.assignment.repository.id,
-      kind: receipt.assignment.kind,
-      number: receipt.assignment.number,
-      actorUserId: receipt.assignment.actorUserId,
-      assigneeUserId: receipt.assignment.assigneeUserId,
-      receivedAt: receipt.receivedAt,
-      state: receipt.state,
-      attempts: receipt.attempts,
-      reason: receipt.reason,
-      canonicalReceiptId: canonical.id,
-      taskId: canonical.taskId,
-      snapshotRef: canonical.source?.snapshotRef ?? null,
+    const retried: InvestigationWebhookReceipt = {
+      ...receipt,
+      state: receipt.source === null ? "accepted" : "source_ready",
+      attempts: 0,
+      retryGeneration: (receipt.retryGeneration ?? 0) + 1,
+      totalAttempts: receipt.totalAttempts ?? receipt.attempts,
+      nextAttemptAt: this.#now(),
+      reason: null,
     };
+    this.options.store.put("idempotency", receipt.id, retried);
+    this.options.store.put("idempotency", receipt.pendingId, { receiptId: receipt.id });
+    const active = this.#activeReceipt(receipt.assignment);
+    if ((active === undefined || active.id === receipt.id) && this.#isActive(retried))
+      this.options.store.put("idempotency", activeCycleKey(receipt.assignment), {
+        receiptId: receipt.id,
+      });
+    this.options.onAssignmentChanged?.(this.#admission(retried), "preparing");
   }
 
   async stop(): Promise<void> {
@@ -626,7 +671,7 @@ export class InvestigationWebhookIntake {
     return current?.claim?.ownerId === this.#ownerId && current.claim.expiresAt > this.#now();
   }
 
-  #save(receipt: InvestigationWebhookReceipt, terminal = false): void {
+  #save(receipt: InvestigationWebhookReceipt, terminal = false, retrying = false): void {
     this.options.store.transaction(() => {
       requireCondition(
         this.#owns(receipt),
@@ -646,6 +691,18 @@ export class InvestigationWebhookIntake {
         },
       });
       if (terminal) this.options.store.delete("idempotency", receipt.pendingId);
+      if (terminal)
+        finishWebhookAttempt(
+          this.options.store,
+          receipt,
+          receipt.state === "completed"
+            ? "completed"
+            : receipt.state === "ignored"
+              ? "ignored"
+              : "failed",
+          this.#now(),
+        );
+      else if (retrying) finishWebhookAttempt(this.options.store, receipt, "retrying", this.#now());
       if (
         previous.state !== receipt.state ||
         previous.reason !== receipt.reason ||
@@ -715,11 +772,11 @@ export class InvestigationWebhookIntake {
     this.#save(receipt, true);
   }
 
-  #recoverCommittedTask(receipt: InvestigationWebhookReceipt): boolean {
-    if (receipt.taskRequest === null) return false;
+  #committedTask(receipt: InvestigationWebhookReceipt): InvestigationTaskV1 | undefined {
+    if (receipt.taskRequest === null) return undefined;
     const key = `task:${principal(receipt.assignment).id}:${receipt.taskRequest.idempotencyKey}`;
     const saved = this.options.store.get<{ digest: string; entityId: string }>("idempotency", key);
-    if (saved === undefined) return false;
+    if (saved === undefined) return undefined;
     requireCondition(
       saved.digest === investigationContentDigest(receipt.taskRequest),
       409,
@@ -733,6 +790,13 @@ export class InvestigationWebhookIntake {
       "webhook_task_missing",
       "The saved task is unavailable.",
     );
+    return task;
+  }
+
+  #recoverCommittedTask(receipt: InvestigationWebhookReceipt): boolean {
+    const task = this.#committedTask(receipt);
+    if (task === undefined) return false;
+    phaseWebhookAttempt(this.options.store, receipt.id, "recovery");
     this.options.store.transaction(() => {
       this.options.onTaskCreated?.(
         task,
@@ -751,17 +815,31 @@ export class InvestigationWebhookIntake {
         "idempotency",
         original.id,
       )!;
+      if (
+        (current.state !== "accepted" && current.state !== "source_ready") ||
+        !this.options.store.has("idempotency", current.pendingId)
+      )
+        return null;
       if ((current.claim?.expiresAt ?? 0) > this.#now() || current.nextAttemptAt > this.#now())
         return null;
       const next = {
         ...current,
         attempts: current.attempts + 1,
+        totalAttempts: (current.totalAttempts ?? current.attempts) + 1,
+        reason: null,
         claim: {
           ownerId: this.#ownerId,
           expiresAt: this.#now() + (this.options.claimDurationMs ?? 60_000),
         },
       };
       this.options.store.put("idempotency", next.id, next);
+      beginWebhookAttempt(
+        this.options.store,
+        next.id,
+        next.attempts,
+        this.#now(),
+        next.totalAttempts,
+      );
       this.options.onAssignmentChanged?.(this.#admission(next), "preparing");
       return next;
     });
@@ -786,6 +864,12 @@ export class InvestigationWebhookIntake {
       // Completing a receipt for an existing Task does not authorize any new work.
       if (this.#recoverCommittedTask(receipt)) return;
       requireCondition(
+        receipt.attempts <= (this.options.maximumAttempts ?? 3),
+        409,
+        "webhook_attempts_exhausted",
+        "The intake attempt limit was reached before its last failure could be acknowledged.",
+      );
+      requireCondition(
         this.#binding(receipt.assignment) !== undefined,
         403,
         "webhook_authorization_revoked",
@@ -800,6 +884,7 @@ export class InvestigationWebhookIntake {
           ? {}
           : { baseSha: receipt.assignment.baseSha, headSha: receipt.assignment.headSha! }),
       };
+      phaseWebhookAttempt(this.options.store, receipt.id, "source");
       if (receipt.source === null) {
         const imported = await this.options.importer.importWorkItem(
           actor,
@@ -848,6 +933,7 @@ export class InvestigationWebhookIntake {
         "The event processing lease was superseded.",
       );
       let notified = false;
+      phaseWebhookAttempt(this.options.store, receipt.id, "task");
       const task = await this.options.service.createImportedTask(
         actor,
         receipt.taskRequest!,
@@ -903,16 +989,20 @@ export class InvestigationWebhookIntake {
         error.code === "source_changed_during_import" ||
         stalePreparedSource;
       if (retryable && receipt.attempts < (this.options.maximumAttempts ?? 3)) {
-        this.#save({
-          ...receipt,
-          // No Task was committed. Retain the old immutable snapshot and import a complete new one.
-          ...(stalePreparedSource
-            ? { state: "accepted" as const, source: null, taskRequest: null }
-            : {}),
-          reason,
-          nextAttemptAt:
-            this.#now() + (this.options.retryDelayMs ?? 1_000) * 2 ** (receipt.attempts - 1),
-        });
+        this.#save(
+          {
+            ...receipt,
+            // No Task was committed. Retain the old immutable snapshot and import a complete new one.
+            ...(stalePreparedSource
+              ? { state: "accepted" as const, source: null, taskRequest: null }
+              : {}),
+            reason,
+            nextAttemptAt:
+              this.#now() + (this.options.retryDelayMs ?? 1_000) * 2 ** (receipt.attempts - 1),
+          },
+          false,
+          true,
+        );
       } else {
         this.#finish({ ...receipt, state: "failed", reason });
         this.options.onError?.(reason);

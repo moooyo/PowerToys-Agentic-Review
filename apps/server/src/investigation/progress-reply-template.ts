@@ -4,6 +4,7 @@ import {
   type AutomaticReplyModelContext,
   type RenderedAutomaticReply,
   recordedE2eRerunNextStep,
+  redactAbsolutePosixPaths,
   renderAutomaticReplyIdentity,
   renderReplyTokenUsage,
 } from "./auto-reply-template.js";
@@ -190,7 +191,7 @@ export function validateProgressReplyTemplate(
 }
 
 function publicText(value: string, templateLiteral = false): string {
-  const text = [...value.replace(/\r\n?/gu, "\n")]
+  const sanitized = [...value.replace(/\r\n?/gu, "\n")]
     .filter((character) => {
       const code = character.charCodeAt(0);
       return !(
@@ -235,11 +236,8 @@ function publicText(value: string, templateLiteral = false): string {
     )
     .replace(/(["'`])(?:[A-Za-z]:[\\/]|\\\\)[^\n]*?\1/gu, "[local path omitted]")
     .replace(/\b[A-Za-z]:[\\/][^\s"'`<>|;,()]*/gu, "[local path omitted]")
-    .replace(/\\\\[^\s"'`<>|;,()]+/gu, "[local path omitted]")
-    .replace(
-      /\/(?:home|root|tmp|var|etc|Users|mnt|media|opt|private|workspace|workspaces|run|proc|sys|dev)\/[^\s"'`<>|;,()]*/gu,
-      "[local path omitted]",
-    )
+    .replace(/\\\\[^\s"'`<>|;,()]+/gu, "[local path omitted]");
+  const text = redactAbsolutePosixPaths(sanitized)
     .replace(
       /(?:agentic-review-progress|agentic-review-action|action-intent-binding):[A-Za-z0-9._:-]+/gu,
       "[publication marker omitted]",

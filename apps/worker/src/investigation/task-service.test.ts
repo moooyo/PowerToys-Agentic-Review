@@ -48,6 +48,12 @@ function fixture() {
   };
   const claim = vi.fn<InvestigationWorkerClient["claim"]>(async () => claimFixture());
   const client: InvestigationWorkerClient = {
+    workerPolicy: async (request) => ({
+      workerId: "synthetic-worker",
+      version: 1,
+      e2eEnabled: true,
+      effectiveKinds: [...request.supportedKinds],
+    }),
     claim,
     heartbeat: unavailable,
     checkpoint: unavailable,
@@ -81,6 +87,77 @@ const executionKinds = [
 ] as const satisfies readonly InvestigationTaskKind[];
 
 describe("InvestigationTaskService", () => {
+  it.each(["disabled", "missing"] as const)(
+    "keeps static work available when the E2E policy is %s",
+    async (mode) => {
+      const f = fixture();
+      if (mode === "missing") delete f.client.workerPolicy;
+      else
+        f.client.workerPolicy = async () => ({
+          workerId: "synthetic-worker",
+          version: 2,
+          e2eEnabled: false,
+          effectiveKinds: ["issue-investigate"],
+        });
+      const service = new InvestigationTaskService({
+        client: f.client,
+        executor: {
+          execute: async () => {
+            service.requestDrain();
+          },
+        },
+        supportedKinds: ["issue-investigate", ...executionKinds],
+        logger: f.logger,
+      });
+      await service.run();
+      expect(f.claim).toHaveBeenCalledTimes(1);
+      expect(f.claim.mock.calls[0]![0].supportedKinds).toEqual(["issue-investigate"]);
+    },
+  );
+
+  it("does not issue an empty claim when an execution-only Worker is disabled", async () => {
+    const f = fixture();
+    f.client.workerPolicy = async () => {
+      service.requestDrain();
+      return { workerId: "synthetic-worker", version: 2, e2eEnabled: false, effectiveKinds: [] };
+    };
+    const execute = vi.fn(async () => {});
+    const service = new InvestigationTaskService({
+      client: f.client,
+      executor: { execute },
+      supportedKinds: [...executionKinds],
+      role: "e2e",
+      logger: f.logger,
+    });
+    await service.run();
+    expect(f.claim).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each(["execute", "permission", "authorization", "binding"] as const)(
+    "rejects a static task carrying %s authority before its executor runs",
+    async (mode) => {
+      const f = fixture();
+      const claim = claimFixture();
+      if (mode === "execute") claim.task.executionPolicy.mode = "execute";
+      if (mode === "permission") claim.task.executionPolicy.allowRepositoryExecution = true;
+      if (mode === "authorization")
+        claim.task.executionPolicy.authorizationRef = "unexpected-grant";
+      if (mode === "binding") claim.execution = {} as NonNullable<InvestigationClaim["execution"]>;
+      f.claim.mockResolvedValue(claim);
+      const execute = vi.fn(async () => {});
+      const service = new InvestigationTaskService({
+        client: f.client,
+        executor: { execute },
+        supportedKinds: ["issue-investigate"],
+        role: "static",
+        logger: f.logger,
+      });
+      await expect(service.run()).rejects.toThrow(/cannot carry repository execution authority/);
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["static-first", "e2e-first"] as const)(
     "fills independent pools and excludes full pools from claims (%s)",
     async (order) => {

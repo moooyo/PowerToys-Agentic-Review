@@ -7,9 +7,11 @@ provides repository selection, light and dark themes, and session controls.
 
 The current application follows `WorkItem -> Task -> Attempt / LoopCheckpoint ->
 Report`. Its entry point uses the implementation in `src/investigation/` and the
-new investigation contracts. Retired Jobs, Workers, configuration, notification,
-and evaluation pages are not registered in the current shell. Their remaining
-source files do not provide a compatibility API or a migration path.
+new investigation contracts. Retired Job-based Workers, Jobs, configuration,
+notification, and evaluation pages are not registered in the current shell.
+The current `/workers` page provides investigation Worker task controls, while
+`/webhooks` provides current intake history and retry. Neither reactivates the
+retired pages or provides a compatibility API or migration path.
 
 ## Pages and navigation
 
@@ -18,6 +20,9 @@ source files do not provide a compatibility API or a migration path.
 | `/pull-requests` | Lists registered pull requests; `workItemId` opens the item, its tasks, and available actions. |
 | `/issues` | Lists registered issues and opens their investigations, including Bug and Feature assessments. |
 | `/tasks` | Lists tasks; `taskId` opens attempts, the saved checkpoint, the latest report, and linked tasks. |
+| `/comments` | Lists scoped comment delivery history; `commentId` opens one comment and its available recovery actions. |
+| `/webhooks` | Lists scoped assignment/E2E intake events; `deliveryId` opens its attempts, linked Task, and available intake retry. |
+| `/workers` | Administrator-only investigation Worker controls, effective task types, contact, and cleanup state. |
 | `/reports` | Opens the immutable report identified by `reportId`; reached from an item or task. |
 | `/repositories` | Lists repositories shared with the account and offers scoped PR/Issue import when permitted. |
 | `/account` | Lets the signed-in user change their own password. |
@@ -39,6 +44,49 @@ tasks can resume from their checkpoint. The resume dialog shows saved limits and
 consumption, allows explicit budget increases, and preserves the frozen source,
 scope, profile, and prompt. The server rejects budget reductions, exhausted
 unchanged limits, or increases beyond its resource limits.
+
+## Worker task controls
+
+Only workspace administrators can open **Workers** or change its **Allow E2E**
+switch. The Server separately enforces this permission; a direct URL does not
+bypass it. Each registered Worker starts with the single persisted setting off,
+so new Tasks are limited to static PR review and Issue analysis. Enabling it
+permits execution only when the Worker also advertises the required task type;
+local role and supported-kind settings can narrow its capability.
+
+The page shows advertised and effective task types, last contact, active E2E
+Tasks, and attempts awaiting cleanup. Disabling prevents new execution claims
+and requests cancellation of running execution. **Disabling E2E** or **Awaiting
+cleanup confirmation** remains visible until owned cleanup is confirmed. A saved
+setting and an offline Worker do not prove that an application exited. Accepted
+terminal results can still finish report delivery and cleanup. A version conflict
+requires refreshing and reviewing the current setting before another change.
+
+The setting controls product task types. Local screenshots remain allowed, and
+it does not remove general model shell access or add an operating-system sandbox.
+Static investigation images and videos are not uploaded to GitHub. Authorized
+E2E publication still requires exact task, report, revision, and producer evidence.
+See [Server Worker controls](../server/README.md#worker-execution-permission).
+
+## Webhook event history and retry
+
+**Webhook events** is available to signed-in repository readers. Results remain
+limited to their repository grants, including when the selector shows all
+repositories. Filter by target type/number, intake state, or static/E2E mode and
+open an event to inspect its processing attempts, failure reason, canonical
+delivery, and linked Task. History remains readable when new intake is disabled.
+**Processed** means intake handling finished; Task execution and GitHub comment
+delivery have separate outcomes.
+
+**Retry event handling** appears only when the Server returns it as an available
+action for a failed canonical receipt. It requires repository scope,
+`repository:manage`, and `task:create`; E2E retry also requires repository-execution
+permission. The request retains a version and idempotency key. A conflict blocks
+another attempt until **Refresh status** obtains the current state. Retry first
+reattaches an already committed Task and does not rerun it, retry a comment
+delivery, or request GitHub redelivery. Use the separate Task and Comments views
+for their respective outcomes and recovery actions. See
+[webhook recovery](../server/README.md#inspect-and-retry-webhook-intake).
 
 ## Structured reports
 
@@ -125,6 +173,10 @@ sample data or fabricated success.
 | `POST /api/accounts/:id/update` | Update an account's enabled state, administrator status, and explicit access grants using its version. |
 | `POST /api/accounts/:id/password` | Reset an account password as an administrator using its version. |
 | `GET /api/repositories` | List accessible repositories. |
+| `GET /api/workers` | List investigation Worker controls as an administrator. |
+| `POST /api/workers/:id/e2e` | Save the administrator's versioned `e2eEnabled` setting. |
+| `GET /api/github/webhook-deliveries` and `GET /api/github/webhook-deliveries/:deliveryId` | Read scoped intake history and one event's processing attempts. |
+| `POST /api/github/webhook-deliveries/:deliveryId/retry` | Request a permitted intake retry using its current version and an idempotency key. |
 | `POST /api/repositories/:id/import-work-item` | Import a PR or Issue snapshot and complete comment history through read-only upstream requests. |
 | `GET /api/work-items` and `GET /api/work-items/:id` | Read registered items. |
 | `GET /api/tasks` and `GET /api/tasks/:id` | Read tasks, attempts, checkpoints, and linked work. |
@@ -147,9 +199,10 @@ ASCII letters, digits, periods, underscores, or hyphens and start with a letter
 or digit. New passwords require 15-128 characters. Passwords are case-sensitive
 and are not trimmed.
 
-`isAdmin` controls the Accounts navigation entry and page. The server separately
-enforces account-administration authorization. Administrator status does not
-implicitly grant repository access, business permissions, or action capabilities.
+`isAdmin` controls the Accounts and Workers navigation entries and pages. The
+server separately enforces account and Worker administration. Administrator
+status does not implicitly grant repository access, business permissions, or
+action capabilities.
 Account forms retain an explicit version for updates and resets. A conflict
 requires refreshing and reviewing the current account before trying again;
 the dashboard does not silently overwrite a concurrent administrator's changes.
@@ -227,17 +280,18 @@ The package requires Node.js `>=24.20.0 <25` and pnpm `>=11.24.0 <12`.
 Its build and typecheck scripts consume the built shared contracts package,
 including the package-exported declarations and TypeBox ESM symbols.
 
-Use the authorized execution environment for the commands below. Tests, type
-checks, builds used for verification, browser smoke tests, and runtime probes
-must run on `test-env` unless the user explicitly authorizes local verification
-for the current task. Connect with:
+Use the project-designated remote Windows worker for verification, including
+Dashboard checks that can run on Windows. Linux-specific work may use `test-env`.
+Tests, type checks, builds used for verification, browser smoke tests, and runtime
+probes require explicit authorization before running on the local workstation.
+For Linux-specific verification, connect with:
 
 ```powershell
 ssh test-env
 ```
 
-From the repository checkout on that host, prepare and start the development
-preview with:
+From the repository checkout in the designated environment, prepare and start
+the development preview with:
 
 ```powershell
 pnpm --filter @agentic-review/contracts build
@@ -259,16 +313,26 @@ Also run the repository's production-source boundary checks when changing
 imports, entry points, or preview helpers. Browser verification should cover both
 development samples and the production bundle with a real test session, including
 password login and failure handling, session expiration, account access changes,
-self-service password changes, administrator conflicts and resets, report
-pagination, preparation versus confirmation, logout, and narrow layouts.
-If `test-env` is unavailable, report verification as blocked; do not fall back to
-local testing.
+self-service password changes, administrator conflicts and resets, Worker
+static-only/enable/disable states, webhook history and stale-retry handling,
+report pagination, preparation versus confirmation, logout, and narrow layouts.
+If the designated verification environment is unavailable, report verification
+as blocked; do not fall back to local testing.
 
 Automated verification must use mocked upstream responses, isolated synthetic
 data, or read-only live checks. Access to `test-env` is not authorization to
 create or mutate a repository's actual PRs or Issues. Live writes require the
 user's explicit approval of the exact targets, operations, content, and execution
 scope.
+
+These instructions and registered pages do not establish live UI acceptance.
+The [current handoff](../../docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md)
+records software checks and scoped real/synthetic Dashboard observations, including native
+HTTP/SQLite intake with GitHub mocked. The later scoped Calculator E2E, fifth-report GitHub media,
+cached HTTPS redelivery, and sixth/eighth-Task cleanup have separate evidence. The real-task observers
+failed before disable; a separate synthetic-input/real-runtime W4 fixture passed. Phase 1 idle-disable
+UI and restoration checks passed independently. Operational closeout is complete; temporary capacity
+settings are restored and legacy services/history preserved. Git publication is a separate handoff.
 
 The product contract and loop design are documented in
 [Structured investigation results and loop](../../docs/design/2026-09-15-structured-investigation-results-and-loop.md).

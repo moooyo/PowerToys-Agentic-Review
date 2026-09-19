@@ -335,6 +335,16 @@ describe("investigation Worker and Server HTTP roundtrip", () => {
     const parts: RecordedPart[] = [];
     const firstServer = await startServer(databasePath, initial.task.repository.id, parts);
     expect(
+      await firstServer.client.workerPolicy!({
+        supportedKinds: ["issue-investigate", "pr-e2e"],
+      }),
+    ).toMatchObject({
+      workerId: "roundtrip-worker",
+      e2eEnabled: false,
+      version: 1,
+      effectiveKinds: ["issue-investigate"],
+    });
+    expect(
       (await post(firstServer.app, "/api/repositories", initial.task.repository)).statusCode,
     ).toBe(201);
     expect((await post(firstServer.app, "/api/work-items", item)).statusCode).toBe(201);
@@ -406,6 +416,15 @@ describe("investigation Worker and Server HTTP roundtrip", () => {
     await firstServer.close();
 
     const secondServer = await startServer(databasePath, initial.task.repository.id, parts);
+    expect(
+      await secondServer.client.workerPolicy!({
+        supportedKinds: ["issue-investigate", "pr-e2e"],
+      }),
+    ).toMatchObject({
+      e2eEnabled: false,
+      version: 1,
+      effectiveKinds: ["issue-investigate"],
+    });
     const restoredResponse = await get(secondServer.app, `/api/tasks/${task.id}`);
     expect(restoredResponse.statusCode).toBe(200);
     expect(restoredResponse.json<TaskDetail>().checkpoint).toEqual(interrupted.checkpoint);

@@ -21,8 +21,23 @@ describe("task progress and resource waiting", () => {
     );
     expect(
       taskQueueReason({ kind: "pr-e2e", state: "queued" }, { ...scheduler, occupiedE2e: 0 }),
-    ).toContain("eligible worker");
+    ).toContain("worker that allows E2E");
     expect(taskQueueReason({ kind: "pr-e2e", state: "running" }, scheduler)).toBeNull();
+    expect(
+      taskQueueReason(
+        {
+          kind: "pr-review",
+          state: "queued",
+          executionPolicy: {
+            mode: "execute",
+            allowedSubjectRefs: [],
+            allowRepositoryExecution: true,
+            authorizationRef: "legacy-authorization",
+          },
+        },
+        { ...scheduler, occupiedE2e: 0 },
+      ),
+    ).toContain("worker that allows E2E");
   });
 
   it("keeps a pending desktop cleanup visible even after cancellation", () => {

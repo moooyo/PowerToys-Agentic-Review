@@ -142,6 +142,38 @@ token from at least 32 cryptographically random bytes encoded as base64url. Work
 configuration, ignoring identity claims in request bodies. Worker tokens cannot administer accounts,
 and browser cookies cannot claim worker tasks. No configured workers means no worker admission.
 
+### Worker execution permission
+
+Each configured Worker has one Server-persisted `e2eEnabled` setting, initially `false`. The
+administrator's **Workers** page shows the setting, advertised and effective task kinds, last
+authenticated contact, and outstanding execution/cleanup identities. Existing Worker role and
+supported-kind settings can narrow eligibility; they cannot grant E2E permission. There is no
+additional local E2E enable flag.
+
+| Endpoint | Authentication and request | Result |
+| --- | --- | --- |
+| `GET /api/workers` | Administrator browser session | Registered Worker controls and current state; bearer Worker credentials cannot read the management view. |
+| `POST /api/workers/:id/e2e` | Administrator session; `{ "version": 1, "e2eEnabled": true }` | Persists the next version and an audit record. A stale version returns HTTP `409`; reload before making a new decision. |
+| `POST /api/worker/policy` | Scoped Worker bearer token; `{ "supportedKinds": ["pr-review", "pr-e2e"] }` | Returns `workerId`, `version`, `e2eEnabled`, and `effectiveKinds`. The request advertises capability and cannot enable execution. |
+
+The Worker polls policy before claims; the Server independently checks admission. `pr-review` and
+`issue-investigate` are static kinds and cannot carry `executionPolicy.mode: "execute"`. Creation,
+claim, and Worker execution reject that combination, including malformed retained tasks. Other
+task kinds require an E2E-enabled Worker and retain their normal task-level execution prerequisites.
+
+Disabling E2E prevents new execution claims and requests cancellation of active execution through
+the existing heartbeat response. Accepted terminal checkpoints can still deliver their report;
+usage, process termination, workspace/desktop cleanup, and cleanup acknowledgements remain available.
+The setting changing to false is not proof that an application has exited. `disabling` means an
+online Worker still owns an unreleased E2E lease; `awaiting_confirmation` covers unresolved ownership
+while offline, or an enabled Worker whose capabilities/contact have not been confirmed. Only
+confirmed cleanup releases the execution slot. `static_only` also applies when local capability
+settings advertise no execution kinds despite the Server permission being enabled.
+
+This setting controls application task assignment and execution. It does not remove general model
+shell access, prohibit local screenshots, or add an operating-system sandbox. Static investigation
+images and videos are excluded from the GitHub media publication path.
+
 ### Independent task resource pools
 
 Static review and investigation share a configurable global capacity. The initial
@@ -375,8 +407,9 @@ variant, with entries such as
 `{"repositoryId":"repo-example","reviewerUserId":12345678,"allowedActorUserIds":[23456789]}`.
 Saved repository settings override those defaults. No repository is watched by default.
 
-The receiver only handles `issues.assigned` and `pull_request.assigned`. Other events, including
-review requests, pushes, edits, and comments, do not start Tasks. There is no periodic GitHub
+Assignment intake handles `issues.assigned` and `pull_request.assigned`; review requests, pushes,
+and edits do not start assignment Tasks. Independently enabled [trusted PR E2E commands](#trusted-pr-e2e-commands)
+use new `issue_comment` events to create separate execution Tasks. There is no periodic GitHub
 discovery or polling. Reads occur to prepare a received event, retry that event, or serve an
 explicit import. The configurable payload limit defaults to 2 MiB through
 `INVESTIGATION_GITHUB_WEBHOOK_MAXIMUM_BYTES`.
@@ -385,7 +418,7 @@ After checking the exact repository and assignment grant, the Server durably rec
 and returns HTTP `202`. Background processing imports complete input and atomically creates an
 ordinary `pr-review` (`source_read`) or `issue-investigate` (`snapshot_only`) Task. It verifies that
 the same upstream item is still open and assigned, and that a PR still has the signed event's
-base/head SHAs. Root intake never grants repository execution or a GitHub write capability.
+base/head SHAs. Assignment intake never grants repository execution or a GitHub write capability.
 
 Delivery ID plus payload digest prevent replay conflicts; equivalent assignment events and
 the same actor/recipient's identical frozen input also share the original Task. The exact imported
@@ -393,16 +426,101 @@ snapshot and Task request are saved before Task creation, so service restart can
 later comment snapshot or create a second Task after an uncertain local commit. Processing uses
 durable leases and renewals. The inbox admits at most 1,000 pending events and returns HTTP `503`
 when full. Transient processing failures retry the received event up to three attempts; a failed
-record can be retried by explicitly redelivering the same GitHub delivery. Unsupported or
+canonical record can be retried through the scoped controls below or by explicitly redelivering
+the same GitHub delivery. Unsupported or
 unauthorized events return `ignored` without importing source or creating a Task.
 
-Authenticated repository readers can inspect
-`GET /api/github/webhook-deliveries/:deliveryId` for preparation state, failure reason, source
-reference, and Task identity. HTTP `202` acknowledges durable intake, not completed investigation.
+An HTTP `202` response with `accepted` or `duplicate` identifies committed intake or its existing
+receipt, not Task creation, execution, or completed investigation. An `ignored` response can come
+from a filtered event without creating an inbox record; HTTP status alone does not prove persistence.
 Receiver subscriptions and public hosting are deployment configuration; starting the application
 does not create or edit GitHub Webhooks. Comments require a separately authorized publication policy
 or confirmed ActionIntent. Reviews, closure, and merging retain the confirmed ActionIntent path.
 All publication remains behind the external-write switch.
+
+### Inspect and retry webhook intake
+
+The **Webhooks** page combines assignment and E2E delivery receipts. It keeps intake state separate
+from Task outcome and comment-delivery state. Authenticated readers see only their repository scope;
+history remains readable when intake is disabled or no receiver is configured.
+
+- `GET /api/github/webhook-deliveries` accepts `repositoryId`, `kind`, `number`, `state`, `mode`,
+  `cursor`, and `limit`. `mode` is `static` or `e2e`; `limit` defaults to 20 and is at most 50.
+  Pagination cursors are bound to the filters and current repository scope.
+- `GET /api/github/webhook-deliveries/:deliveryId` returns preparation state, opaque `version`,
+  failure reason, source reference, canonical delivery identity, linked Task, next attempt time,
+  available actions, and processing attempt history.
+- `POST /api/github/webhook-deliveries/:deliveryId/retry` accepts the current `version` and a new
+  `idempotencyKey`. It requires repository scope, `repository:manage`, and `task:create`; E2E retry
+  also requires repository-execution permission. Browser mutation requests retain the normal Origin
+  and current-account checks.
+
+Only a failed canonical intake can be requeued. `completed`, `ignored`, still-processing, and alias
+receipts do not offer this operation. A retry starts another bounded intake cycle while preserving
+prior attempts and the known cumulative count. Automatic transient retries default to three attempts
+per cycle with exponential delay starting at one second. The original history is not replaced, and
+older aggregate-only records do not acquire invented timestamps or attempt details.
+
+An exact repeated retry command observes its current result without requeueing. Reusing its key for
+another payload returns `webhook_retry_conflict`; a stale version returns `webhook_delivery_stale`.
+Both are HTTP `409`. An ineligible receipt returns `webhook_retry_unavailable`. Insufficient grants
+return HTTP `403`; an unconfigured intake returns HTTP `503` with `webhook_intake_unavailable`.
+
+Assignment and E2E intake first recover an already committed Task. This only restores the receipt's
+association, including after the repository binding was revoked; it does not rerun model or desktop
+work or replace a newer active request. If no committed Task exists, current repository authority,
+source identity, and applicable assignment/comment checks are required again. Another delivery of
+the same E2E command still deduplicates by comment identity. Recovering a failed Task result or
+requesting another execution uses the separate explicit Task workflow.
+
+### Durable relay delivery
+
+`src/investigation/webhook-relay-spool.ts` provides a separate SQLite spool for a relay companion.
+It is not a Server-started relay or an automatic GitHub redelivery client. The companion authenticates
+its event source, calls `enqueue` before forwarding, and calls `runNext` for due work. The supplied
+transport posts only to a loopback `/api/github/webhook` endpoint and does not follow redirects.
+
+The spool retains exact signed payload bytes and approved headers in a private database. Identical
+delivery identity is deduplicated; changed bytes or headers under the same identity are rejected.
+Only HTTP `202` with the matching delivery ID and `accepted`, `duplicate`, or `ignored` status counts
+as delivered. That confirms the receiver's intake decision, not a successful Task or, for `ignored`,
+an inbox record. Network errors, request timeouts, HTTP
+`429`, and `5xx` receive bounded retry. Permanent rejection and malformed acknowledgements fail
+visibly. Expired in-flight attempts survive restart as interrupted history and consume the same
+bounded attempt allowance.
+
+Defaults are 1,000 retained deliveries, 2 MiB per payload, a 64 MiB logical admission budget including
+reserved history, and a 128 MiB SQLite page limit. The page limit excludes journal/filesystem overhead.
+Each delivery initially allows six attempts, with a 20-second request timeout and exponential retry
+from one second up to 30 seconds. A valid receiver `Retry-After` is respected for up to one day; a longer wait
+fails visibly instead of retrying early. Capacity exhaustion rejects new events without evicting
+retained receipts. The module has no automatic pruning or background timer.
+
+The companion can explicitly call `retryFailed({deliveryId, expectedVersion, requestId, reason,
+additionalAttempts?})` after addressing a failure. This module method queues work; it makes no HTTP
+request. It accepts only `failed` records at the inspected numeric version. `reason` is one of
+`receiver_available`, `configuration_corrected`, or `manual_recovery`. The same `requestId` and
+payload replay returns the current delivery and original retry receipt without requeueing; changed
+payload under that ID fails with `idempotency_conflict`. Request IDs are unique across the spool.
+A stale version returns `version_conflict`; ordinary claim/result transitions also advance version.
+
+An explicit batch defaults to six additional attempts and permits 1-100, subject to the configured
+lifetime ceiling of 100 attempts by default. Cumulative attempt numbers are never reset. The
+transaction preserves earlier attempts and retry receipts, reserves capacity for the added history,
+and queues the batch together; insufficient capacity or remaining attempt allowance rejects the
+whole change. `enqueue` of an existing delivery only returns its current record. A new retry command
+rejects a delivered record. Replaying an earlier accepted retry still returns `duplicate` and its
+original receipt after delivery, without queuing another attempt.
+
+The independent spool database uses schema version 2 and additively upgrades its version 1 records
+to retain retry/version metadata. This migration does not change the application's
+`investigation-v4` database. Relay retry receipts and intake retry receipts are separate records and
+use separate command contracts.
+
+Relay retry only covers events already received and persisted by that relay. A failure before receipt
+requires external delivery diagnosis and an explicitly requested GitHub redelivery. Socket reconnect
+cannot reconstruct missing events. Keep signed payloads, signatures, and private relay state out of
+logs and public reports.
 
 ## Import complete upstream inputs
 
@@ -530,6 +648,15 @@ reads from superseding newer work.
 E2E Tasks have no required parent static report or saved plan. They are explicitly authorized to
 execute repository code, use their own prompt, and own a separate progress publication and exact
 GitHub comment ID. Static review comments cannot be selected as E2E update targets.
+
+Repository `e2eEnabled` authorizes intake; the separate per-Worker setting authorizes execution
+admission. An accepted request can remain queued until a permitted, capable Worker is available.
+Disabling a Worker does not change repository trust or publication settings.
+
+Image/video publication accepts only the exact Server-authorized `pr-e2e` Task, sealed report,
+pinned subject, and Server-assigned producer attempts with trusted E2E tool observations. Static
+report media and forged producer metadata cannot enter that pipeline. This publication boundary
+does not prohibit a model from taking a local screenshot.
 
 ## Evidence retention and capacity
 

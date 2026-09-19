@@ -45,6 +45,11 @@ import {
   InvestigationReportPartResponseSchema,
   InvestigationUsageSummarySchema,
   InvestigationWorkerLeaseSchema,
+  type InvestigationWorkerPolicy,
+  type InvestigationWorkerPolicyRequest,
+  InvestigationWorkerPolicyRequestSchema,
+  InvestigationWorkerPolicySchema,
+  isInvestigationStaticTaskKind,
   PositiveIntegerSchema,
   validateInvestigationTokenUsage,
 } from "@agentic-review/contracts";
@@ -118,6 +123,11 @@ export interface InvestigationHttpClientDependencies {
 }
 
 export interface InvestigationWorkerClient {
+  /** Execution admission fails closed when an older embedded client lacks this operation. */
+  workerPolicy?(
+    request: InvestigationWorkerPolicyRequest,
+    signal?: AbortSignal,
+  ): Promise<InvestigationWorkerPolicy>;
   claim(
     request: InvestigationClaimRequest,
     signal?: AbortSignal,
@@ -184,6 +194,26 @@ export function createInvestigationHttpClient(
 ): InvestigationWorkerClient {
   const transport = new InvestigationJsonTransport(options, dependencies);
   return {
+    async workerPolicy(request, signal) {
+      request = snapshotRequest(InvestigationWorkerPolicyRequestSchema, request, signal);
+      const response = requireResponse(
+        await transport.request(
+          "/api/worker/policy",
+          request,
+          InvestigationWorkerPolicySchema,
+          signal,
+        ),
+      );
+      if (
+        response.effectiveKinds.some(
+          (kind) =>
+            !request.supportedKinds.includes(kind) ||
+            (!response.e2eEnabled && !isInvestigationStaticTaskKind(kind)),
+        )
+      )
+        throw new InvestigationWorkerClientError("invalid_response", false, 200);
+      return response;
+    },
     async reportUsage(taskId, request, signal) {
       request = snapshotRequest(InvestigationReportUsageRequestSchema, request, signal);
       const response = requireResponse(

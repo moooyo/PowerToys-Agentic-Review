@@ -69,6 +69,7 @@ import {
   type InvestigationWorkerRuntimeConfig,
 } from "./runtime-config.js";
 import {
+  assertInvestigationClaimPool,
   type InvestigationClaimExecutor,
   InvestigationTaskService,
   type InvestigationTaskServiceOptions,
@@ -229,6 +230,21 @@ export async function createInvestigationExecutionRuntime(
   };
   const client: InvestigationWorkerClient = {
     ...transportClient,
+    ...(transportClient.workerPolicy === undefined
+      ? {}
+      : ({
+          async workerPolicy(request, signal) {
+            try {
+              return await transportClient.workerPolicy!(request, signal);
+            } finally {
+              // A disabled execution-only Worker still needs to deliver retained receipts.
+              void replayUsage();
+              void replayCleanup().catch(() =>
+                logger.warn("Pending execution cleanup remains retained for recovery."),
+              );
+            }
+          },
+        } satisfies Pick<InvestigationWorkerClient, "workerPolicy">)),
     async claim(request, signal) {
       const response = await transportClient.claim(request, signal);
       // Idle polling also retries terminal receipts after the last attempt ends.
@@ -242,6 +258,7 @@ export async function createInvestigationExecutionRuntime(
       const response = await transportClient.heartbeat(taskId, request, signal);
       // Accounting retries must not delay lease renewal or change execution authority.
       void replayUsage();
+      // Server admission is checked in this same renewal response before execution proceeds.
       return response;
     },
     ...(transportClient.cleanup === undefined
@@ -455,6 +472,13 @@ export async function createInvestigationExecutionRuntime(
     });
     const executor: InvestigationClaimExecutor = {
       async execute(claim, signal) {
+        assertInvestigationClaimPool(claim);
+        const pool = investigationTaskPool(claim.task.kind);
+        if (
+          !config.supportedKinds.includes(claim.task.kind) ||
+          (config.role !== undefined && config.role !== "all" && config.role !== pool)
+        )
+          throw new Error("The investigation claim is outside this Worker's configured task role.");
         let cleanupIdentity: AttemptCleanupIdentity | undefined;
         const executeAttempt = async (
           cleanupHooks: Partial<AttemptDesktopCleanupHooks> = {},

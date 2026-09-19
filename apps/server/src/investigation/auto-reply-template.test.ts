@@ -1670,6 +1670,64 @@ describe("public reply safety and size", () => {
     }
   });
 
+  it.each([
+    ["/srv/privacy-fixture/capture.png", "privacy-fixture/capture.png"],
+    ["Saved /data/privacy-fixture/recording.webm.", "privacy-fixture/recording.webm"],
+    ["path=/custom-root/privacy-fixture/screen.png", "privacy-fixture/screen.png"],
+    ['Captured "/srv/privacy fixture/Sensitive Shot.png".', "Sensitive Shot.png"],
+    ["Captured '/data/privacy fixture/Sensitive Recording.webm'.", "Sensitive Recording.webm"],
+    [
+      "Captured (`/isolated-volume/privacy fixture/Private Preview.png`), then continued.",
+      "Private Preview.png",
+    ],
+    ["Saved '/custom-root/privacy fixture/owner\\'s Private Image.png'.", "Private Image.png"],
+    ["Captured [/custom-root/privacy-fixture/SecretScreenshot.png].", "SecretScreenshot.png"],
+    ["**/home/privacy-fixture/HiddenCapture.png**", "HiddenCapture.png"],
+    ["<code>/srv/privacy-fixture/HiddenRecording.webm</code>", "HiddenRecording.webm"],
+    ['Unclosed "/custom-root/privacy-fixture/PrivateCapture.png', "PrivateCapture.png"],
+  ])("redacts absolute POSIX paths in static report text: %s", (summary, privateFragment) => {
+    const report = preview();
+    report.report.summary = summary;
+    for (const body of [
+      render(report),
+      renderAutomaticReplySummaryParts(report, verifiedIdentity).body,
+    ]) {
+      expect(body).toContain("local path omitted");
+      expect(body).not.toContain(privateFragment);
+      expect(body).not.toContain("/srv/");
+      expect(body).not.toContain("/data/");
+      expect(body).not.toContain("/custom-root/");
+      expect(body).not.toContain("/isolated-volume/");
+    }
+  });
+
+  it("preserves punctuation around an absolute POSIX path without publishing the path", () => {
+    const report = preview();
+    report.report.summary =
+      "Before (/srv/privacy-fixture/capture.png), after /data/private-output.log.";
+    expect(render(report)).toContain(
+      "Before (\\[local path omitted\\]), after \\[local path omitted\\].",
+    );
+  });
+
+  it("preserves relative source references and public HTTPS URL paths and query values", () => {
+    const report = preview();
+    report.report.summary =
+      "Inspect src/Settings UI/Renderer.cs, ./src/Renderer.cs, and ../shared/Renderer.cs. " +
+      "Reference https://example.com/home/public/srv/document?next='/data/public/file.png'&root=/custom-volume/source.";
+    const body = render(report);
+    for (const reference of [
+      "src/Settings UI/Renderer.cs",
+      "./src/Renderer.cs",
+      "../shared/Renderer.cs",
+    ])
+      expect(body).toContain(reference);
+    expect(body).toContain(
+      "https\u200b://example.com/home/public/srv/document?next='/data/public/file.png'&amp;root=/custom-volume/source.",
+    );
+    expect(body).not.toContain("local path omitted");
+  });
+
   it("constructs public frozen source links with encoded path segments and line ranges", () => {
     const report = preview();
     report.findings[0]!.locations = [

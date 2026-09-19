@@ -62,12 +62,43 @@ Supported task kinds are `pr-review`, `issue-investigate`, `pr-e2e`, `pr-verify`
 can restrict the claimed kinds. Snapshot-only investigation does not checkout or execute source.
 Source-aware Issue work requires an explicitly selected commit; the Worker does not guess a branch.
 
+### Server-controlled E2E permission
+
+Every registered Worker starts with Server-persisted `e2eEnabled: false`. An administrator changes
+that single setting from the Dashboard **Workers** page or the versioned Server API. The existing
+`INVESTIGATION_WORKER_ROLE` and `INVESTIGATION_WORKER_SUPPORTED_KINDS_JSON` narrow capability but
+cannot enable execution. There is no additional local E2E enable flag.
+
+Before claiming work, the Worker advertises its configured kinds through
+`POST /api/worker/policy` with `{ "supportedKinds": [...] }` and uses the returned `effectiveKinds`.
+The Server checks the permission independently when admitting a claim. `pr-review` and
+`issue-investigate` must remain static: a claim combining either kind with `executionPolicy.mode`
+set to `execute` is rejected before source preparation or execution. Other kinds use the execution
+pool and require Server permission as well as their normal execution policy and prerequisites.
+
+Disabling the setting stops new execution claims. The Server's existing heartbeat response requests
+cancellation of active execution; the Worker checks that response before execution and during the
+attempt. Already accepted terminal records can finish report delivery. Usage replay, application
+termination, workspace/desktop cleanup, and exact lease acknowledgements continue even for an
+execution-only Worker that now has no eligible kinds. The management view retains `disabling` or
+`awaiting_confirmation` while cleanup remains unconfirmed; an offline Worker is not proof of exit.
+
+This control limits product Tasks. It does not remove general model shell access, prohibit local
+screenshots, or introduce an operating-system sandbox. Static review keeps its source-analysis
+scope, and static investigation image/video artifacts cannot be published to GitHub. See the
+[Server control API](../server/README.md#worker-execution-permission).
+
+### E2E execution and evidence
+
 `pr-e2e` is a root execution task and does not require a static parent report or saved plan.
 Its independent agent prompt permits builds, tests, application launch, UI interaction and
 media capture. A per-attempt loopback tool service executes these actions through ProcessHost,
 records assertion receipts and imports actual PNG or finalized H.264 MP4 evidence. The agent
 can discover and adapt scenarios from the pinned diff; registered scenarios remain available
-to legacy saved-plan tasks. Repository source is never changed to make a check pass.
+to legacy saved-plan tasks. The model input includes the complete frozen Task scope and execution
+policy. Passing that scope through does not narrow the existing required changed-path coverage or
+allow the result to omit another changed component. Repository source is never changed to make a
+check pass.
 
 Run the E2E role in an unlocked interactive Windows session. The bundle includes
 `e2e-desktop-driver.ps1`, which uses Windows UI Automation and verified process identities.
@@ -106,6 +137,11 @@ recording. One feature's receipts cannot establish another feature's success. Wo
 supply report expectations and build identity; the agent's blocked or unexecuted disposition
 is never upgraded to passed.
 
+An absence assertion requires a positive control for the same feature and query mode when an
+inactive feature could produce the same absence. For the Calculator fixture, implicit `2+2` must
+return the Calculator result `4` before implicit `sqrt(-1)` can establish suppression of an error
+row. Explicit-keyword Calculator results do not prove the plugin is active for implicit queries.
+
 The Server durably records an E2E start before the first side effect and persists observations
 as they arrive. If execution is interrupted before a complete result, resuming the Task does
 not repeat desktop actions; an explicit new Task is required to rerun. Complete accepted E2E
@@ -117,6 +153,10 @@ prerequisites, uncovered paths or missing media cannot produce a completed E2E r
 Worker stops all attempt-owned process trees and confirms desktop cleanup before acknowledging
 release of the exclusive slot. A cleanup uncertainty keeps the desktop quarantined. Only the
 Server publishes GitHub comments or uploads media.
+
+GitHub media publication additionally requires the exact Server-authorized `pr-e2e` Task, sealed
+report, pinned subject, assigned producer attempts, and trusted E2E tool observations. A static
+Task's screenshot or a model-supplied producer label cannot satisfy that boundary.
 
 PR source preparation verifies exact base/head and merge-base identities. Investigation maintains
 complete coverage and candidate/recheck records; a final report is not a top-k selection. Partial
@@ -150,6 +190,8 @@ cannot bypass either limit. Claims skip task kinds whose local pool is full.
 `INVESTIGATION_WORKER_ROLE` is `all` by default; `static` and `e2e` select independent role
 processes. Role processes must use separate data directories. Increasing the Server setting only
 admits new work up to the Workers' configured local limits; lowering it does not cancel active work.
+This concurrency setting is separate from the per-Worker E2E permission, whose disable operation
+does request cancellation of active execution.
 
 Every execution attempt also holds one machine-wide filesystem guard from source preparation
 through build, UI work, and confirmed local cleanup. `INVESTIGATION_WORKER_DESKTOP_LOCK_DIRECTORY`

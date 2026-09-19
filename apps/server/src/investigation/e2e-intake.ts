@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   InvestigationCreateTaskRequestV1,
   InvestigationTaskV1,
+  InvestigationWebhookRetryRequest,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
@@ -17,6 +18,13 @@ import type {
   InvestigationWorkItemRecord,
 } from "./types.js";
 import type { InvestigationWebhookBinding } from "./webhook-config.js";
+import {
+  authorizeWebhookRetry,
+  beginWebhookAttempt,
+  finishWebhookAttempt,
+  phaseWebhookAttempt,
+  projectWebhookDelivery,
+} from "./webhook-delivery-controls.js";
 import type {
   InvestigationWebhookAcceptance,
   InvestigationWebhookDeliveryInput,
@@ -134,8 +142,11 @@ export interface InvestigationE2eReceipt {
   readonly taskRequest: InvestigationCreateTaskRequestV1 | null;
   readonly admission: TrustedAssignmentAdmission | null;
   readonly attempts: number;
+  readonly totalAttempts?: number;
+  readonly retryGeneration?: number;
   readonly nextAttemptAt: number;
   readonly claim?: { readonly ownerId: string; readonly expiresAt: number };
+  readonly canonicalReceiptId?: string;
 }
 
 export interface InvestigationE2eIntakeOptions {
@@ -193,9 +204,42 @@ export class InvestigationE2eIntake {
         "webhook_delivery_conflict",
         "The delivery ID already identifies another payload.",
       );
+      if (previous.state === "failed") {
+        const retried = this.options.store.transaction(() => {
+          const current = this.options.store.get<InvestigationE2eReceipt>("idempotency", id)!;
+          if (current.state !== "failed")
+            return {
+              status: "duplicate" as const,
+              ...(current.taskId === null ? {} : { taskId: current.taskId }),
+            };
+          requireCondition(
+            this.#committedTask(current) !== undefined || this.#authorized(current),
+            403,
+            "e2e_authorization_revoked",
+            "The repository no longer authorizes this E2E command.",
+          );
+          this.#requeue(current);
+          return { status: "accepted" as const };
+        });
+        this.#wake(true);
+        return retried;
+      }
+      const canonical =
+        previous.canonicalReceiptId === undefined
+          ? previous
+          : this.options.store.get<InvestigationE2eReceipt>(
+              "idempotency",
+              previous.canonicalReceiptId,
+            );
+      requireCondition(
+        canonical !== undefined,
+        409,
+        "webhook_canonical_missing",
+        "The canonical E2E receipt is unavailable.",
+      );
       return {
         status: "duplicate",
-        ...(previous.taskId === null ? {} : { taskId: previous.taskId }),
+        ...(canonical.taskId === null ? {} : { taskId: canonical.taskId }),
       };
     }
     const remoteRepository = object(payload.repository);
@@ -276,6 +320,30 @@ export class InvestigationE2eIntake {
       nextAttemptAt: this.#now(),
     };
     const result = this.options.store.transaction(() => {
+      const concurrent = this.options.store.get<InvestigationE2eReceipt>("idempotency", id);
+      if (concurrent !== undefined) {
+        requireCondition(
+          concurrent.payloadSha256 === input.payloadSha256 &&
+            concurrent.eventName === input.eventName,
+          409,
+          "webhook_delivery_conflict",
+          "The delivery ID already identifies another payload.",
+        );
+        if (concurrent.state === "failed") {
+          requireCondition(
+            this.#committedTask(concurrent) !== undefined || this.#authorized(concurrent),
+            403,
+            "e2e_authorization_revoked",
+            "The repository no longer authorizes this E2E command.",
+          );
+          this.#requeue(concurrent);
+          return { status: "accepted" as const };
+        }
+        return {
+          status: "duplicate" as const,
+          ...(concurrent.taskId === null ? {} : { taskId: concurrent.taskId }),
+        };
+      }
       if (command !== null) {
         const duplicate = this.options.store.get<{ receiptId: string }>(
           "idempotency",
@@ -288,6 +356,7 @@ export class InvestigationE2eIntake {
           )!;
           this.options.store.insert("idempotency", id, {
             ...receipt,
+            canonicalReceiptId: original.id,
             state: "ignored",
             reason: "duplicate_comment",
             taskId: original.taskId,
@@ -312,7 +381,7 @@ export class InvestigationE2eIntake {
         });
       return { status: "accepted" as const };
     });
-    this.#wake();
+    this.#wake(true);
     return result;
   }
 
@@ -327,25 +396,69 @@ export class InvestigationE2eIntake {
       "webhook_delivery_not_found",
       "This E2E delivery is not recorded.",
     );
+    return projectWebhookDelivery(this.options.store, actor, receipt);
+  }
+
+  retryReceipt(
+    actor: InvestigationOperatorPrincipal,
+    deliveryId: string,
+    request: InvestigationWebhookRetryRequest,
+  ) {
+    this.options.store.transaction(() => {
+      const receipt = this.options.store.get<InvestigationE2eReceipt>(
+        "idempotency",
+        `${receiptPrefix}${deliveryId}`,
+      );
+      requireCondition(
+        receipt !== undefined,
+        404,
+        "webhook_delivery_not_found",
+        "This E2E delivery is not recorded.",
+      );
+      const command = authorizeWebhookRetry(this.options.store, actor, receipt, request);
+      if (command.replay) return;
+      requireCondition(
+        this.#committedTask(receipt) !== undefined || this.#authorized(receipt),
+        403,
+        "e2e_authorization_revoked",
+        "The repository no longer authorizes this E2E command.",
+      );
+      this.#requeue(receipt);
+      command.remember();
+    });
+    this.#wake(true);
+    return this.readReceipt(actor, deliveryId);
+  }
+
+  #requeue(receipt: InvestigationE2eReceipt): void {
     requireCondition(
-      actor.repositoryIds.includes(receipt.repository.id),
-      403,
-      "repository_forbidden",
-      "The delivery is outside this identity's repository scope.",
+      receipt.state === "failed" &&
+        (receipt.canonicalReceiptId === undefined || receipt.canonicalReceiptId === receipt.id),
+      409,
+      "webhook_retry_unavailable",
+      "Only a failed canonical intake can be retried.",
     );
-    return {
-      deliveryId: receipt.deliveryId,
-      repositoryId: receipt.repository.id,
-      kind: "pull_request",
-      number: receipt.number,
-      actorUserId: receipt.actorUserId,
-      receivedAt: receipt.receivedAt,
-      state: receipt.state,
-      attempts: receipt.attempts,
-      reason: receipt.reason,
-      taskId: receipt.taskId,
-      snapshotRef: receipt.source?.snapshotRef ?? null,
+    requireCondition(
+      this.options.store.countPrefix("idempotency", pendingPrefix) < 1_000,
+      503,
+      "e2e_queue_full",
+      "The E2E intake queue is full; retry later.",
+    );
+    const retried: InvestigationE2eReceipt = {
+      ...receipt,
+      state: receipt.source === null ? "accepted" : "source_ready",
+      attempts: 0,
+      retryGeneration: (receipt.retryGeneration ?? 0) + 1,
+      totalAttempts: receipt.totalAttempts ?? receipt.attempts,
+      nextAttemptAt: this.#now(),
+      reason: null,
     };
+    this.options.store.put("idempotency", receipt.id, retried);
+    this.options.store.put("idempotency", `${pendingPrefix}${receipt.id}`, {
+      receiptId: receipt.id,
+    });
+    if (receipt.admission !== null)
+      this.options.onAdmissionChanged?.(receipt.admission, "preparing");
   }
 
   hasReceipt(deliveryId: string): boolean {
@@ -365,20 +478,36 @@ export class InvestigationE2eIntake {
   }
   drain(): Promise<void> {
     if (this.#running !== undefined) return this.#running;
-    this.#running = this.#drain().finally(() => {
-      this.#running = undefined;
-      if (this.options.store.countPrefix("idempotency", pendingPrefix) > 0) this.#wake();
-    });
+    this.#running = this.#drain()
+      .catch((error: unknown) => {
+        if (this.#started) {
+          this.#timer = setTimeout(
+            () => {
+              this.#timer = undefined;
+              this.#wake();
+            },
+            Math.max(1_000, this.options.retryDelayMs ?? 1_000),
+          );
+          this.#timer.unref();
+        }
+        throw error;
+      })
+      .finally(() => {
+        this.#running = undefined;
+        if (this.options.store.countPrefix("idempotency", pendingPrefix) > 0) this.#wake();
+      });
     return this.#running;
   }
-  #wake(): void {
+  #wake(immediate = false): void {
     if (
       !this.#started ||
       this.#scheduled !== undefined ||
       this.#running !== undefined ||
-      this.#timer !== undefined
+      (!immediate && this.#timer !== undefined)
     )
       return;
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
     this.#scheduled = setImmediate(() => {
       this.#scheduled = undefined;
       void this.drain().catch(() => this.options.onError?.("e2e_intake_failed"));
@@ -424,7 +553,7 @@ export class InvestigationE2eIntake {
       target.expiresAt > this.#now()
     );
   }
-  #save(receipt: InvestigationE2eReceipt): void {
+  #save(receipt: InvestigationE2eReceipt, retrying = false): void {
     requireCondition(
       this.#owns(receipt),
       409,
@@ -434,6 +563,59 @@ export class InvestigationE2eIntake {
     this.options.store.put("idempotency", receipt.id, receipt);
     if (terminalStates.has(receipt.state))
       this.options.store.delete("idempotency", `${pendingPrefix}${receipt.id}`);
+    if (terminalStates.has(receipt.state))
+      finishWebhookAttempt(
+        this.options.store,
+        receipt,
+        receipt.state === "completed"
+          ? "completed"
+          : receipt.state === "ignored"
+            ? "ignored"
+            : "failed",
+        this.#now(),
+      );
+    else if (retrying) finishWebhookAttempt(this.options.store, receipt, "retrying", this.#now());
+  }
+
+  #committedTask(receipt: InvestigationE2eReceipt): InvestigationTaskV1 | undefined {
+    if (receipt.taskRequest === null) return undefined;
+    const saved = this.options.store.get<{ digest: string; entityId: string }>(
+      "idempotency",
+      `task:${this.#principal(receipt).id}:${receipt.taskRequest.idempotencyKey}`,
+    );
+    if (saved === undefined) return undefined;
+    requireCondition(
+      saved.digest === digest(receipt.taskRequest),
+      409,
+      "webhook_task_conflict",
+      "The saved Task request no longer matches this delivery.",
+    );
+    const task = this.options.store.get<InvestigationTaskV1>("tasks", saved.entityId);
+    requireCondition(
+      task !== undefined,
+      409,
+      "webhook_task_missing",
+      "The saved Task is unavailable.",
+    );
+    return task;
+  }
+
+  #recoverCommittedTask(receipt: InvestigationE2eReceipt): boolean {
+    const task = this.#committedTask(receipt);
+    if (task === undefined) return false;
+    phaseWebhookAttempt(this.options.store, receipt.id, "recovery");
+    this.options.store.transaction(() => {
+      // Adopt an existing Task without rechecking a command that can no longer create work.
+      // A newer command may already own the active pointer; recovery must not replace it.
+      const active = this.#active(receipt);
+      if (active === undefined && activeStates.has(task.state))
+        this.options.store.put("idempotency", activeKey(receipt.repository, receipt.number), {
+          taskId: task.id,
+        });
+      if (receipt.admission !== null) this.options.onTaskCreated?.(receipt.admission, task);
+      this.#save({ ...receipt, taskId: task.id, state: "completed", reason: null });
+    });
+    return true;
   }
   #active(receipt: InvestigationE2eReceipt): InvestigationTaskV1 | undefined {
     const pointer = this.options.store.get<{ taskId: string }>(
@@ -530,9 +712,18 @@ export class InvestigationE2eIntake {
       const claimed = {
         ...current,
         attempts: current.attempts + 1,
+        totalAttempts: (current.totalAttempts ?? current.attempts) + 1,
+        reason: null,
         claim: { ownerId: this.#ownerId, expiresAt: this.#now() + duration },
       };
       this.options.store.put("idempotency", claimed.id, claimed);
+      beginWebhookAttempt(
+        this.options.store,
+        claimed.id,
+        claimed.attempts,
+        this.#now(),
+        claimed.totalAttempts,
+      );
       this.options.store.put("idempotency", targetClaimKey(claimed), {
         ownerId: this.#ownerId,
         receiptId: claimed.id,
@@ -562,6 +753,13 @@ export class InvestigationE2eIntake {
     );
     heartbeat.unref();
     try {
+      if (this.#recoverCommittedTask(receipt)) return;
+      requireCondition(
+        receipt.attempts <= (this.options.maximumAttempts ?? 3),
+        409,
+        "e2e_attempts_exhausted",
+        "The intake attempt limit was reached before its last failure could be acknowledged.",
+      );
       requireCondition(
         this.#authorized(receipt),
         403,
@@ -569,6 +767,7 @@ export class InvestigationE2eIntake {
         "The repository no longer authorizes this E2E command.",
       );
       const actor = this.#principal(receipt);
+      phaseWebhookAttempt(this.options.store, receipt.id, "source");
       const revision =
         receipt.command === null
           ? await this.options.importer.readPullRequestRevision(
@@ -603,13 +802,15 @@ export class InvestigationE2eIntake {
       // The per-PR intake lease serializes this decision. cancelTask owns its own transaction.
       const active = this.#supersede(receipt, revision);
       if (receipt.command === null || active !== undefined) {
-        this.#save({
-          ...receipt,
-          revision,
-          state: "completed",
-          reason: active === undefined ? "revision_observed" : "active_e2e_revision",
-          taskId: active?.id ?? null,
-        });
+        this.options.store.transaction(() =>
+          this.#save({
+            ...receipt,
+            revision,
+            state: "completed",
+            reason: active === undefined ? "revision_observed" : "active_e2e_revision",
+            taskId: active?.id ?? null,
+          }),
+        );
         return;
       }
       const existing = this.options.store.list<InvestigationWorkItemRecord>(
@@ -685,7 +886,7 @@ export class InvestigationE2eIntake {
           taskRequest,
           state: "source_ready",
         };
-        this.#save(receipt);
+        this.options.store.transaction(() => this.#save(receipt));
       }
       if (!this.#started) return;
       const latest = await this.options.importer.verifyE2eCommand(
@@ -705,6 +906,7 @@ export class InvestigationE2eIntake {
         "The PR changed before E2E dispatch.",
       );
       let notified = false;
+      if (this.#owns(receipt)) phaseWebhookAttempt(this.options.store, receipt.id, "task");
       const task = await this.options.service.createImportedTask(
         actor,
         receipt.taskRequest!,
@@ -747,7 +949,9 @@ export class InvestigationE2eIntake {
         error instanceof InvestigationRequestError ? error.code : "e2e_preparation_failed";
       if (reason === "e2e_already_active") {
         const active = this.#active(receipt);
-        this.#save({ ...receipt, taskId: active?.id ?? null, state: "completed", reason });
+        this.options.store.transaction(() => {
+          this.#save({ ...receipt, taskId: active?.id ?? null, state: "completed", reason });
+        });
         if (receipt.admission !== null)
           this.options.onAdmissionChanged?.(receipt.admission, "cancelled", reason);
         return;
@@ -758,14 +962,21 @@ export class InvestigationE2eIntake {
         error.statusCode === 429 ||
         reason === "source_changed_during_import";
       if (retryable && receipt.attempts < (this.options.maximumAttempts ?? 3)) {
-        this.#save({
-          ...receipt,
-          reason,
-          nextAttemptAt:
-            this.#now() + (this.options.retryDelayMs ?? 1_000) * 2 ** (receipt.attempts - 1),
-        });
+        this.options.store.transaction(() =>
+          this.#save(
+            {
+              ...receipt,
+              reason,
+              nextAttemptAt:
+                this.#now() + (this.options.retryDelayMs ?? 1_000) * 2 ** (receipt.attempts - 1),
+            },
+            true,
+          ),
+        );
       } else {
-        this.#save({ ...receipt, reason, state: "failed" });
+        this.options.store.transaction(() => {
+          this.#save({ ...receipt, reason, state: "failed" });
+        });
         if (receipt.admission !== null)
           this.options.onAdmissionChanged?.(
             receipt.admission,
@@ -780,15 +991,17 @@ export class InvestigationE2eIntake {
       }
     } finally {
       clearInterval(heartbeat);
-      const current = this.options.store.get<InvestigationE2eReceipt>("idempotency", receipt.id);
-      if (current?.claim?.ownerId === this.#ownerId)
-        this.options.store.put("idempotency", current.id, {
-          ...current,
-          claim: { ownerId: this.#ownerId, expiresAt: 0 },
-        });
-      const target = this.options.store.get<TargetClaim>("idempotency", targetClaimKey(receipt));
-      if (target?.ownerId === this.#ownerId && target.receiptId === receipt.id)
-        this.options.store.delete("idempotency", targetClaimKey(receipt));
+      this.options.store.transaction(() => {
+        const current = this.options.store.get<InvestigationE2eReceipt>("idempotency", receipt.id);
+        if (current?.claim?.ownerId === this.#ownerId)
+          this.options.store.put("idempotency", current.id, {
+            ...current,
+            claim: { ownerId: this.#ownerId, expiresAt: 0 },
+          });
+        const target = this.options.store.get<TargetClaim>("idempotency", targetClaimKey(receipt));
+        if (target?.ownerId === this.#ownerId && target.receiptId === receipt.id)
+          this.options.store.delete("idempotency", targetClaimKey(receipt));
+      });
     }
   }
 }

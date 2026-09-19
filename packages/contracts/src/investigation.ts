@@ -2524,6 +2524,12 @@ export function validateInvestigationTask(
       "The task subject must be inside its execution scope.",
     );
   if (task.executionPolicy.mode === "execute") {
+    if (task.kind === "pr-review" || task.kind === "issue-investigate")
+      add(
+        "/executionPolicy/mode",
+        "STATIC_TASK_EXECUTION_FORBIDDEN",
+        "Static investigation task kinds cannot execute repository code.",
+      );
     if (!task.executionPolicy.authorizationRef || !task.executionPolicy.allowRepositoryExecution)
       add(
         "/executionPolicy",

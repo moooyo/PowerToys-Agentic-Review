@@ -51,6 +51,11 @@ function fixture(staticConcurrency = 2) {
     staticConcurrency,
   };
   const service = new InvestigationService(options);
+  const enableE2e = (owner = worker) => {
+    service.workerControls.initialize([owner]);
+    const version = service.workerControls.get(owner.id)!.version;
+    service.updateWorkerE2e(operator, owner.id, { version, e2eEnabled: true });
+  };
   const enqueue = (id: string, kind: InvestigationTaskKind = "pr-review") => {
     const task: InvestigationTaskV1 = {
       ...structuredClone(original),
@@ -91,6 +96,7 @@ function fixture(staticConcurrency = 2) {
     worker,
     enqueue,
     claim,
+    enableE2e,
     advance: (milliseconds: number) => {
       now += milliseconds;
     },
@@ -100,6 +106,7 @@ function fixture(staticConcurrency = 2) {
 describe("investigation resource scheduling", () => {
   it("provides authenticated scheduler settings and exact cleanup HTTP routes", async () => {
     const f = fixture();
+    f.enableE2e();
     const app = buildInvestigationApp({
       ...f.options,
       authenticateOperator: (request) =>
@@ -154,10 +161,24 @@ describe("investigation resource scheduling", () => {
       "feature-implement",
     ] as const)
       expect(investigationResourcePool(kind)).toBe("e2e");
+    const task = createInvestigationPreview("pr", { findingCount: 0 }).task;
+    expect(investigationResourcePool(task)).toBe("static");
+    expect(
+      investigationResourcePool({
+        ...task,
+        executionPolicy: {
+          ...task.executionPolicy,
+          mode: "execute",
+          allowRepositoryExecution: true,
+          authorizationRef: "synthetic-administrator",
+        },
+      }),
+    ).toBe("e2e");
   });
 
   it("keeps independent capacities and skips an unavailable pool at the queue head", () => {
     const f = fixture(2);
+    f.enableE2e();
     f.enqueue("e2e-one", "pr-verify");
     f.enqueue("e2e-two", "issue-verify");
     f.enqueue("static-one");
@@ -186,6 +207,7 @@ describe("investigation resource scheduling", () => {
 
   it("can start E2E when the independent static pool is full", () => {
     const f = fixture(1);
+    f.enableE2e();
     f.enqueue("static-one");
     f.enqueue("static-two");
     f.enqueue("e2e-one", "pr-verify");
@@ -216,6 +238,7 @@ describe("investigation resource scheduling", () => {
 
   it("holds cancelled execution until exact-owner cleanup and makes cleanup retries harmless", () => {
     const f = fixture();
+    f.enableE2e();
     f.enqueue("e2e-one", "pr-verify");
     f.enqueue("e2e-two", "pr-verify");
     const first = f.claim()!;
@@ -248,6 +271,7 @@ describe("investigation resource scheduling", () => {
 
   it("does not interpret lease expiry or server restart as desktop cleanup", () => {
     const f = fixture();
+    f.enableE2e();
     f.enqueue("e2e-one", "pr-verify");
     f.enqueue("e2e-two", "pr-verify");
     const first = f.claim()!;
@@ -269,6 +293,7 @@ describe("investigation resource scheduling", () => {
 
   it("releases expired static capacity while preserving execution quarantine", () => {
     const f = fixture(1);
+    f.enableE2e();
     f.enqueue("static-one");
     f.enqueue("static-two");
     f.enqueue("e2e-one", "pr-verify");
@@ -284,6 +309,7 @@ describe("investigation resource scheduling", () => {
 
   it("rejects cleanup while an execution attempt can still start work", () => {
     const f = fixture();
+    f.enableE2e();
     f.enqueue("e2e-one", "pr-verify");
     const claim = f.claim()!;
     expect(() =>
@@ -298,6 +324,7 @@ describe("investigation resource scheduling", () => {
 
   it("rolls back the resource lease with a failed claim transaction", () => {
     const f = fixture();
+    f.enableE2e();
     f.enqueue("task-one", "pr-verify");
     const failing = new InvestigationService({
       ...f.options,
@@ -314,6 +341,7 @@ describe("investigation resource scheduling", () => {
 
   it("adopts a running pre-upgrade attempt and never reclaims another owner's desktop", () => {
     const f = fixture();
+    f.enableE2e();
     f.enqueue("legacy-one", "pr-verify");
     f.enqueue("queued-two", "pr-verify");
     const existing = f.claim()!;
@@ -322,6 +350,83 @@ describe("investigation resource scheduling", () => {
     expect(f.claim(undefined, f.worker, restarted)).toBeNull();
     expect(restarted.schedulerStatus(f.operator).leases[0]?.attemptId).toBe(existing.attempt.id);
   });
+
+  it("quarantines historical execution hidden under a static kind and never releases it on expiry", () => {
+    const f = fixture();
+    f.enableE2e();
+    const task = f.enqueue("legacy-static-execution");
+    const claimed = f.claim()!;
+    f.store.put("tasks", task.id, {
+      ...claimed.task,
+      executionPolicy: {
+        ...task.executionPolicy,
+        mode: "execute",
+        allowRepositoryExecution: true,
+        authorizationRef: f.operator.id,
+      },
+    });
+    const restarted = new InvestigationService(f.options);
+    expect(restarted.schedulerStatus(f.operator)).toMatchObject({
+      occupiedStatic: 0,
+      occupiedE2e: 1,
+      leases: [
+        expect.objectContaining({
+          attemptId: claimed.attempt.id,
+          pool: "e2e",
+          state: "needs_cleanup",
+          reason: "execution_policy_requires_e2e",
+        }),
+      ],
+    });
+    expect(
+      restarted.workerHeartbeat(f.worker, task.id, { lease: claimed.lease }).cancelRequested,
+    ).toBe(true);
+    expect(() =>
+      restarted.workerCheckpoint(f.worker, task.id, {
+        kind: "execution",
+        lease: claimed.lease,
+        execution: claimed.checkpoint!.runtime,
+      }),
+    ).toThrow("not authorized for runtime execution");
+    f.advance(2_000);
+    expect(restarted.schedulerStatus(f.operator).occupiedE2e).toBe(1);
+    expect(restarted.schedulerStatus(f.operator).leases[0]?.state).toBe("needs_cleanup");
+    expect(
+      restarted.workerCleanup(f.worker, task.id, {
+        lease: claimed.lease,
+        ownedProcessesStopped: true,
+        desktopRestored: true,
+      }).released,
+    ).toBe(true);
+    expect(restarted.schedulerStatus(f.operator).occupiedE2e).toBe(0);
+  });
+
+  it.each(["taskId", "workerId", "fence"] as const)(
+    "does not adopt a retained execution lease with a mismatched %s",
+    (property) => {
+      const f = fixture();
+      const scheduler = new InvestigationResourceScheduler(f.store, f.options.now);
+      const owner = {
+        attemptId: "retained-attempt",
+        taskId: "retained-task",
+        workerId: f.worker.id,
+        fence: 1,
+        pool: "static" as const,
+      };
+      f.store.transaction(() => scheduler.acquire(owner));
+      const forged = {
+        ...owner,
+        pool: "e2e" as const,
+        ...(property === "taskId" ? { taskId: "different-task" } : {}),
+        ...(property === "workerId" ? { workerId: "different-worker" } : {}),
+        ...(property === "fence" ? { fence: 2 } : {}),
+      };
+      expect(() => f.store.transaction(() => scheduler.adopt(forged))).toThrow(
+        "original task, worker, and fence",
+      );
+      expect(scheduler.lease(owner.attemptId)).toMatchObject({ ...owner, state: "held" });
+    },
+  );
 
   it("keeps normal execution completion reserved until cleanup acknowledgement", () => {
     const f = fixture();

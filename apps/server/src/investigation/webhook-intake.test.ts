@@ -9,7 +9,10 @@ import { InvestigationRequestError } from "../../dist/investigation/errors.js";
 import { InvestigationService } from "../../dist/investigation/service.js";
 import { InvestigationSourceImporter } from "../../dist/investigation/source-import.js";
 import { InvestigationStore } from "../../dist/investigation/store.js";
-import type { InvestigationActionTransport } from "../../dist/investigation/types.js";
+import type {
+  InvestigationActionTransport,
+  InvestigationOperatorPrincipal,
+} from "../../dist/investigation/types.js";
 import type {
   InvestigationWebhookBinding,
   InvestigationWebhookConfig,
@@ -28,6 +31,14 @@ const repository = {
 };
 const startedAt = Date.parse("2026-09-16T08:00:00.000Z");
 const retryDelayMs = 60_000;
+const operator: InvestigationOperatorPrincipal = {
+  id: "intake-console-operator",
+  displayName: "Synthetic intake operator",
+  repositoryIds: [repository.id],
+  permissions: ["repository:manage", "task:create"],
+  actionCapabilities: [],
+  allowRepositoryExecution: false,
+};
 const stores: InvestigationStore[] = [];
 const intakes: InvestigationWebhookIntake[] = [];
 const directories: string[] = [];
@@ -1366,5 +1377,232 @@ describe("durable assignment-only Webhook intake", () => {
       `input:${test.tasks()[0]!.id}`,
     )!;
     expect(input.inputSnapshot.comments[0]!.body).toBe("Complete conversation comment");
+  });
+
+  it("retries a failed assignment from the console without losing its original failure", async () => {
+    const test = harness({ maximumAttempts: 1 });
+    vi.spyOn(test.service, "createImportedTask").mockRejectedValueOnce(
+      new InvestigationRequestError(503, "synthetic_task_unavailable", "Synthetic Task failure."),
+    );
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    const failed = test.intake.readReceipt(operator, "delivery-1");
+    const originalSource = test.receipt().source;
+    const originalRequest = test.receipt().taskRequest;
+    expect(failed).toMatchObject({
+      state: "failed",
+      totalAttempts: 1,
+      availableActions: ["retry"],
+      attemptHistory: [{ state: "failed", phase: "task", reason: "synthetic_task_unavailable" }],
+    });
+    const command = { version: failed.version, idempotencyKey: "retry-assignment-console" };
+    const queued = test.intake.retryReceipt(operator, "delivery-1", command);
+    expect(queued).toMatchObject({ state: "source_ready", attempts: 0, totalAttempts: 1 });
+    expect(queued.attemptHistory).toEqual(failed.attemptHistory);
+    expect(test.intake.retryReceipt(operator, "delivery-1", command)).toEqual(queued);
+    expect(test.receipt()).toMatchObject({ source: originalSource, taskRequest: originalRequest });
+    await test.intake.drain();
+    const completed = test.intake.readReceipt(operator, "delivery-1");
+    expect(completed).toMatchObject({ state: "completed", attempts: 1, totalAttempts: 2 });
+    expect(completed.attemptHistory.map((attempt) => attempt.state)).toEqual([
+      "failed",
+      "completed",
+    ]);
+    expect(test.intake.retryReceipt(operator, "delivery-1", command)).toEqual(completed);
+    expect(() =>
+      test.intake.retryReceipt(operator, "delivery-1", {
+        version: completed.version,
+        idempotencyKey: "must-not-run-the-task-again",
+      }),
+    ).toThrow(expect.objectContaining({ code: "webhook_retry_unavailable" }));
+    expect(test.tasks()).toHaveLength(1);
+  });
+
+  it("rejects stale, unauthorized, and revoked assignment retry commands before queueing", async () => {
+    let bindings = configuration().bindings;
+    const test = harness({ maximumAttempts: 1, settings: { bindings: () => bindings } });
+    vi.spyOn(test.importer, "importWorkItem").mockRejectedValueOnce(new Error("Synthetic outage."));
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    const failed = test.intake.readReceipt(operator, "delivery-1");
+    const command = { version: failed.version, idempotencyKey: "retry-assignment-guarded" };
+    expect(() =>
+      test.intake.retryReceipt(operator, "delivery-1", {
+        ...command,
+        version: "stale",
+      }),
+    ).toThrow(expect.objectContaining({ code: "webhook_delivery_stale" }));
+    expect(() =>
+      test.intake.retryReceipt({ ...operator, permissions: [] }, "delivery-1", command),
+    ).toThrow(expect.objectContaining({ code: "webhook_retry_forbidden" }));
+    bindings = [];
+    expect(() => test.intake.retryReceipt(operator, "delivery-1", command)).toThrow(
+      expect.objectContaining({ code: "webhook_authorization_revoked" }),
+    );
+    expect(test.intake.readReceipt(operator, "delivery-1")).toEqual(failed);
+    expect(test.store.countPrefix("idempotency", "webhook:pending:")).toBe(0);
+    expect(test.tasks()).toEqual([]);
+  });
+
+  it.each(["issue", "pull_request"] as const)(
+    "joins a later %s assignment when the original Task committed before intake failed",
+    async (kind) => {
+      const test = harness({ kind, maximumAttempts: 1 });
+      const create = test.service.createImportedTask.bind(test.service);
+      const creating = vi
+        .spyOn(test.service, "createImportedTask")
+        .mockImplementationOnce(async (...args) => {
+          await create(...args);
+          throw new Error("Synthetic lost response after Task commit.");
+        });
+      test.intake.accept(test.delivery());
+      await run(test.intake);
+      const task = test.tasks()[0]!;
+      expect(test.receipt()).toMatchObject({ state: "failed", taskId: null });
+      expect(task.state).toBe("queued");
+      test.calls.length = 0;
+      test.advance(1_000);
+      test.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+
+      expect(
+        test.intake.accept(test.delivery({ id: "assignment-after-lost-response" })),
+      ).toMatchObject({ status: "duplicate" });
+      expect(test.receipt("assignment-after-lost-response")).toMatchObject({
+        state: "ignored",
+        reason: "active_assignment_cycle",
+        canonicalReceiptId: test.receipt().id,
+      });
+      await test.intake.drain();
+      expect(test.calls).toEqual([]);
+      expect(creating).toHaveBeenCalledTimes(1);
+      expect(test.tasks().map((entry) => entry.id)).toEqual([task.id]);
+    },
+  );
+
+  it("recovers an old committed terminal Task without replacing a newer active assignment", async () => {
+    let bindings = configuration().bindings;
+    const test = harness({ maximumAttempts: 1, settings: { bindings: () => bindings } });
+    const create = test.service.createImportedTask.bind(test.service);
+    const creating = vi
+      .spyOn(test.service, "createImportedTask")
+      .mockImplementationOnce(async (...args) => {
+        await create(...args);
+        throw new Error("Synthetic lost response after the original Task committed.");
+      });
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    const originalTask = test.tasks()[0]!;
+    expect(test.receipt()).toMatchObject({ state: "failed", taskId: null });
+    test.store.put("tasks", originalTask.id, { ...originalTask, state: "failed" });
+    test.advance(1_000);
+    test.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+    expect(test.intake.accept(test.delivery({ id: "newer-assignment" }))).toEqual({
+      status: "accepted",
+    });
+    await test.intake.drain();
+    const newerTaskId = test.receipt("newer-assignment").taskId!;
+    expect(newerTaskId).not.toBe(originalTask.id);
+    expect(test.store.get<InvestigationTaskV1>("tasks", newerTaskId)?.state).toBe("queued");
+    expect(creating).toHaveBeenCalledTimes(2);
+    test.calls.length = 0;
+    bindings = [];
+
+    const failed = test.intake.readReceipt(operator, "delivery-1");
+    test.intake.retryReceipt(operator, "delivery-1", {
+      version: failed.version,
+      idempotencyKey: "recover-old-task-with-newer-assignment",
+    });
+    await test.intake.drain();
+    expect(test.intake.readReceipt(operator, "delivery-1")).toMatchObject({
+      state: "completed",
+      taskId: originalTask.id,
+      attemptHistory: [
+        { state: "failed", phase: "task" },
+        { state: "completed", phase: "recovery", taskId: originalTask.id },
+      ],
+    });
+    expect(test.calls).toEqual([]);
+    expect(creating).toHaveBeenCalledTimes(2);
+    expect(test.store.get<InvestigationTaskV1>("tasks", originalTask.id)?.state).toBe("failed");
+    expect(test.store.get<InvestigationTaskV1>("tasks", newerTaskId)?.state).toBe("queued");
+
+    bindings = configuration().bindings;
+    test.advance(1_000);
+    test.upstream.updated_at = new Date(startedAt + 2_000).toISOString();
+    expect(test.intake.accept(test.delivery({ id: "assignment-after-recovery" }))).toEqual({
+      status: "duplicate",
+      taskId: newerTaskId,
+    });
+    expect(test.receipt("assignment-after-recovery").canonicalReceiptId).toBe(
+      test.receipt("newer-assignment").id,
+    );
+    expect(test.tasks()).toHaveLength(2);
+  });
+
+  it("preserves a legacy assignment attempt count through a real retry cycle", async () => {
+    const test = harness();
+    test.intake.accept(test.delivery());
+    const accepted = test.receipt();
+    test.store.put("idempotency", accepted.id, {
+      ...accepted,
+      state: "failed",
+      attempts: 3,
+      reason: "legacy_preparation_failed",
+    });
+    test.store.delete("idempotency", accepted.pendingId);
+    const failed = test.intake.readReceipt(operator, "delivery-1");
+    expect(failed).toMatchObject({ totalAttempts: 3, attemptHistory: [] });
+
+    const retried = test.intake.retryReceipt(operator, "delivery-1", {
+      version: failed.version,
+      idempotencyKey: "retry-legacy-assignment",
+    });
+    expect(retried).toMatchObject({ attempts: 0, totalAttempts: 3, attemptHistory: [] });
+    await run(test.intake);
+    expect(test.intake.readReceipt(operator, "delivery-1")).toMatchObject({
+      state: "completed",
+      attempts: 1,
+      totalAttempts: 4,
+      attemptHistory: [{ number: 4, cycleAttempt: 1, state: "completed" }],
+    });
+    expect(test.tasks()).toHaveLength(1);
+  });
+
+  it("closes an exhausted interrupted assignment without importing source or creating a Task", async () => {
+    const test = harness({ maximumAttempts: 3 });
+    test.intake.accept(test.delivery());
+    const accepted = test.receipt();
+    test.store.put("idempotency", accepted.id, {
+      ...accepted,
+      attempts: 3,
+      claim: { ownerId: "interrupted-intake-owner", expiresAt: 0 },
+    });
+    const importing = vi.spyOn(test.importer, "importWorkItem");
+    const verifying = vi.spyOn(test.importer, "verifyAssignment");
+    const creating = vi.spyOn(test.service, "createImportedTask");
+
+    await run(test.intake);
+    expect(test.intake.readReceipt(operator, "delivery-1")).toMatchObject({
+      state: "failed",
+      attempts: 4,
+      totalAttempts: 4,
+      taskId: null,
+      reason: "webhook_attempts_exhausted",
+      attemptHistory: [
+        {
+          number: 4,
+          cycleAttempt: 4,
+          state: "failed",
+          phase: "authorization",
+          reason: "webhook_attempts_exhausted",
+        },
+      ],
+    });
+    expect(importing).not.toHaveBeenCalled();
+    expect(verifying).not.toHaveBeenCalled();
+    expect(creating).not.toHaveBeenCalled();
+    expect(test.calls).toEqual([]);
+    expect(test.tasks()).toEqual([]);
+    expect(test.store.countPrefix("idempotency", "webhook:pending:")).toBe(0);
   });
 });

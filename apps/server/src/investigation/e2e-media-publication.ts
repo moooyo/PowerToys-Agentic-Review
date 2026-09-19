@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   InvestigationArtifactV1,
+  InvestigationAttemptV1,
   InvestigationResultV1,
   InvestigationTaskV1,
 } from "@agentic-review/contracts";
@@ -79,6 +80,10 @@ const uploadKey = (reportId: string, artifactId: string) =>
 const equal = (left: unknown, right: unknown) =>
   investigationContentDigest(left) === investigationContentDigest(right);
 const code = (value: string) => value.replace(/[^A-Za-z0-9_.:-]/gu, "_").slice(0, 256);
+interface MediaAttemptRecord {
+  readonly attempt: InvestigationAttemptV1;
+  readonly reportId: string;
+}
 
 /** Upload receipts are durable independently of report and comment delivery retries. */
 export class InvestigationE2eMediaPublications {
@@ -90,16 +95,54 @@ export class InvestigationE2eMediaPublications {
   }
 
   /** Called for the exact sealed report, never from model-supplied publication URLs. */
-  prepare(report: InvestigationResultV1, task: InvestigationTaskV1): E2eMediaPublicationReceipt {
+  prepare(
+    report: InvestigationResultV1,
+    suppliedTask: InvestigationTaskV1,
+  ): E2eMediaPublicationReceipt {
+    const task = this.options.store.get<InvestigationTaskV1>("tasks", suppliedTask.id);
     requireCondition(
-      task.kind === "pr-e2e" &&
+      task !== undefined &&
+        task.kind === "pr-e2e" &&
+        suppliedTask.kind === task.kind &&
+        suppliedTask.subjectRef === task.subjectRef &&
+        equal(suppliedTask.repository, task.repository) &&
+        equal(suppliedTask.workItem, task.workItem) &&
+        equal(suppliedTask.subjects, task.subjects) &&
+        equal(suppliedTask.executionPolicy, task.executionPolicy) &&
+        task.executionPolicy.mode === "execute" &&
+        task.executionPolicy.allowRepositoryExecution &&
+        task.executionPolicy.authorizationRef !== null &&
+        task.executionPolicy.allowedSubjectRefs.includes(task.subjectRef) &&
         report.context.task.id === task.id &&
         report.context.task.kind === "pr-e2e" &&
         report.context.task.subjectRef === task.subjectRef &&
-        equal(report.context.repository, task.repository),
+        equal(report.context.repository, task.repository) &&
+        equal(report.context.workItem, task.workItem),
       409,
       "e2e_media_task_mismatch",
-      "E2E media must belong to the exact task and report.",
+      "E2E media must belong to the exact Server-authorized execution task and report.",
+    );
+    const savedReport = this.options.store.get<InvestigationResultV1>("reports", report.report.id);
+    requireCondition(
+      savedReport !== undefined && equal(report, savedReport),
+      409,
+      "e2e_media_report_mismatch",
+      "E2E media requires the exact Server-sealed report.",
+    );
+    const reportAttempt = this.options.store.get<MediaAttemptRecord>(
+      "attempts",
+      report.context.attempt.id,
+    );
+    requireCondition(
+      reportAttempt !== undefined &&
+        reportAttempt.attempt.id === report.context.attempt.id &&
+        reportAttempt.attempt.taskId === task.id &&
+        reportAttempt.attempt.number === report.context.attempt.number &&
+        reportAttempt.attempt.workerId !== null &&
+        reportAttempt.reportId === report.report.id,
+      409,
+      "e2e_media_attempt_mismatch",
+      "E2E media requires the Server-assigned report attempt.",
     );
     const subject = task.subjects.find((entry) => entry.id === task.subjectRef);
     requireCondition(
@@ -113,10 +156,17 @@ export class InvestigationE2eMediaPublications {
     if (e2e === undefined) blockers.push("coverage_missing");
     else if (e2e.headSha !== subject.headSha) blockers.push("coverage_revision_mismatch");
     const artifacts = new Map(report.artifacts.map((artifact) => [artifact.id, artifact]));
-    const allowedAttempts = new Set([
-      report.context.attempt.id,
-      ...report.context.adoptedAttemptIds,
-    ]);
+    const allowedAttempts = new Set(
+      [report.context.attempt.id, ...report.context.adoptedAttemptIds].filter((id) => {
+        const record = this.options.store.get<MediaAttemptRecord>("attempts", id);
+        return (
+          record !== undefined &&
+          record.attempt.id === id &&
+          record.attempt.taskId === task.id &&
+          record.attempt.workerId !== null
+        );
+      }),
+    );
     const evidence = new Map(report.verificationEvidence.map((entry) => [entry.id, entry]));
     const trustedEvidence = (id: string) => {
       const entry = evidence.get(id);
@@ -125,6 +175,7 @@ export class InvestigationE2eMediaPublications {
         ["executor_observation", "visual_observation"].includes(entry.source) &&
         entry.subjectRef === task.subjectRef &&
         entry.provenance.taskId === task.id &&
+        entry.provenance.producer === "e2e-tool-server" &&
         allowedAttempts.has(entry.provenance.attemptId)
         ? entry
         : undefined;
@@ -356,6 +407,15 @@ export class InvestigationE2eMediaPublications {
       "e2e_media_not_prepared",
       "The E2E media manifest has not been prepared.",
     );
+    const report = this.options.store.get<InvestigationResultV1>("reports", reportId);
+    const task = this.options.store.get<InvestigationTaskV1>("tasks", publication.taskId);
+    requireCondition(
+      report !== undefined && task !== undefined,
+      409,
+      "e2e_media_publication_source_missing",
+      "The Server-sealed report and authorized E2E task must remain available.",
+    );
+    this.prepare(report, task);
     if (
       publication.blockers.some(
         (entry) => entry === "coverage_missing" || entry === "coverage_revision_mismatch",

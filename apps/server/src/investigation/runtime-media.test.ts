@@ -63,9 +63,16 @@ describe("production E2E media and comment assembly", () => {
       repositoryIds: [task.repository.id],
       permissions: ["repository:manage", "task:create", "action:prepare", "action:execute"],
       actionCapabilities: ["comment"],
+      allowRepositoryExecution: true,
     });
     accounts.close();
     if (actor === null) throw new Error("The fixture account was not created.");
+    task.executionPolicy = {
+      mode: "execute",
+      allowedSubjectRefs: [task.subjectRef],
+      allowRepositoryExecution: true,
+      authorizationRef: actor.id,
+    };
     const requests: InvestigationProgressCommentRequest[] = [];
     const transport: InvestigationActionTransport = {
       supportedActions: ["comment"],
@@ -219,6 +226,13 @@ describe("production E2E media and comment assembly", () => {
       };
       store.put("tasks", task.id, completed);
       store.put("reports", report.report.id, report);
+      store.put("attempts", preview.attempt.id, {
+        attempt: preview.attempt,
+        leaseTokenDigest: "0".repeat(64),
+        leaseExpiresAt: now.toISOString(),
+        reportId: report.report.id,
+        cancelRequested: false,
+      });
       pending.update(completed, report);
     } finally {
       store.close();
@@ -298,6 +312,6 @@ describe("production E2E media and comment assembly", () => {
     });
     const retained = await app.inject({ method: "GET", url: `/api/tasks/${task.id}`, headers });
     expect(retained.json().task.state).toBe("completed");
-    expect(retained.json().attempts).toHaveLength(0);
+    expect(retained.json().attempts).toEqual([preview.attempt]);
   });
 });

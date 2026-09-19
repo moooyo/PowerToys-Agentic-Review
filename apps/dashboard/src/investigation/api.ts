@@ -25,6 +25,13 @@ import {
   InvestigationTaskProgressSchema,
   InvestigationTaskV1Schema,
   InvestigationUsageSummarySchema,
+  InvestigationWebhookDeliveryListSchema,
+  type InvestigationWebhookDeliveryQuery,
+  InvestigationWebhookDeliverySchema,
+  type InvestigationWebhookRetryRequest,
+  InvestigationWorkerControlListSchema,
+  InvestigationWorkerControlSchema,
+  type InvestigationWorkerControlUpdate,
   Sha256Schema,
 } from "@agentic-review/contracts";
 import { type Static, Type } from "@sinclair/typebox";
@@ -194,6 +201,28 @@ export interface CommentSummaryQuery {
 
 export function createInvestigationApi(transport: InvestigationTransport) {
   return {
+    workers: () => transport("/api/workers", InvestigationWorkerControlListSchema),
+    updateWorkerE2e: (id: string, input: InvestigationWorkerControlUpdate) =>
+      transport(`/api/workers/${encodeURIComponent(id)}/e2e`, InvestigationWorkerControlSchema, {
+        method: "POST",
+        body: input,
+      }),
+    webhookDeliveries: (query: InvestigationWebhookDeliveryQuery = {}) =>
+      transport(
+        `/api/github/webhook-deliveries${queryString(query)}`,
+        InvestigationWebhookDeliveryListSchema,
+      ),
+    webhookDelivery: (id: string) =>
+      transport(
+        `/api/github/webhook-deliveries/${encodeURIComponent(id)}`,
+        InvestigationWebhookDeliverySchema,
+      ),
+    retryWebhookDelivery: (id: string, input: InvestigationWebhookRetryRequest) =>
+      transport(
+        `/api/github/webhook-deliveries/${encodeURIComponent(id)}/retry`,
+        InvestigationWebhookDeliverySchema,
+        { method: "POST", body: input },
+      ),
     scheduler: () => transport("/api/investigation/scheduler", InvestigationSchedulerStatusSchema),
     updateScheduler: (input: { staticConcurrency: number }) =>
       transport("/api/investigation/scheduler", InvestigationSchedulerStatusSchema, {

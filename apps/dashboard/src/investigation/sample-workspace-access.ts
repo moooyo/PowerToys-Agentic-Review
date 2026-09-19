@@ -6,7 +6,10 @@ import type {
   InvestigationCommentCommand,
   InvestigationCommentPublicationSummary,
   InvestigationSession,
+  InvestigationWebhookDelivery,
 } from "@agentic-review/contracts";
+import { InvestigationWebhookRetryRequestSchema } from "@agentic-review/contracts";
+import { Value } from "@sinclair/typebox/value";
 import type { InvestigationApi, RepositoryAutoReplySettings } from "./api";
 import { InvestigationHttpError } from "./transport";
 
@@ -170,6 +173,14 @@ export function createSessionScopedSampleApi(
     return `sample-account:${encodeURIComponent(user.id)}:${key}`;
   }
 
+  async function scopedWebhookKey(user: User, key: string): Promise<string> {
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify([user.id, key])),
+    );
+    return `sample-webhook:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
+
   function ownedIntent(
     user: User,
     value: InvestigationActionIntentV1,
@@ -238,7 +249,80 @@ export function createSessionScopedSampleApi(
     return structuredClone(scopeComment(updated, latest));
   }
 
+  function webhookRetryGrant(value: InvestigationWebhookDelivery): Grant {
+    return { permission: "task:create", execution: value.mode === "e2e" };
+  }
+
+  function scopeWebhook(
+    value: InvestigationWebhookDelivery,
+    user: User,
+  ): InvestigationWebhookDelivery {
+    const allowed =
+      canPerform(user, { permission: "repository:manage" }) &&
+      canPerform(user, webhookRetryGrant(value));
+    return { ...value, availableActions: allowed ? value.availableActions : [] };
+  }
+
   return {
+    async workers() {
+      const user = await currentUser();
+      if (!user.isAdmin) forbidden();
+      const value = await api.workers();
+      const current = await currentUser(user.id);
+      if (!current.isAdmin) forbidden();
+      return structuredClone(value);
+    },
+    async updateWorkerE2e(id, input) {
+      const snapshot = structuredClone(input);
+      const user = await currentUser();
+      if (!user.isAdmin) forbidden();
+      const value = await api.updateWorkerE2e(id, snapshot);
+      const current = await currentUser(user.id);
+      if (!current.isAdmin) forbidden();
+      return structuredClone(value);
+    },
+    async webhookDeliveries(query = {}) {
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      if (
+        snapshot.repositoryId !== undefined &&
+        !user.repositoryIds.includes(snapshot.repositoryId)
+      )
+        return { items: [], nextCursor: null };
+      const value = await api.webhookDeliveries(snapshot);
+      const current = await currentUser(user.id);
+      return structuredClone({
+        ...value,
+        items: value.items
+          .filter((item) => current.repositoryIds.includes(item.repositoryId))
+          .map((item) => scopeWebhook(item, current)),
+      });
+    },
+    async webhookDelivery(id) {
+      const user = await currentUser();
+      const value = await api.webhookDelivery(id);
+      const current = await currentAccess(user, value.repositoryId);
+      return structuredClone(scopeWebhook(value, current));
+    },
+    async retryWebhookDelivery(id, input) {
+      const snapshot = structuredClone(input);
+      const user = await currentUser();
+      requireGrant(user, { permission: "repository:manage" });
+      requireGrant(user, { permission: "task:create" });
+      if (!Value.Check(InvestigationWebhookRetryRequestSchema, snapshot))
+        throw new InvestigationHttpError(400, "The webhook retry request is invalid.");
+      const idempotencyKey = await scopedWebhookKey(user, snapshot.idempotencyKey);
+      const value = await api.webhookDelivery(id);
+      const current = await currentAccess(user, value.repositoryId, webhookRetryGrant(value));
+      requireGrant(current, { permission: "repository:manage" });
+      const updated = await api.retryWebhookDelivery(id, {
+        ...snapshot,
+        idempotencyKey,
+      });
+      const latest = await currentAccess(user, updated.repositoryId, webhookRetryGrant(updated));
+      requireGrant(latest, { permission: "repository:manage" });
+      return structuredClone(scopeWebhook(updated, latest));
+    },
     async scheduler() {
       const user = await currentUser();
       const value = await api.scheduler();

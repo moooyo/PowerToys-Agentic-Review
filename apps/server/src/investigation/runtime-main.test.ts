@@ -55,6 +55,79 @@ async function fixture(seedAccount = true) {
 }
 
 describe("production investigation runtime assembly", () => {
+  it("initializes configured worker controls as static-only and retains administrator grants across restart", async () => {
+    const configured = await fixture();
+    const workerToken = "W".repeat(43);
+    const config = {
+      ...configured,
+      workers: [{ id: "worker-controls-runtime", token: workerToken, repositoryIds: ["repo-1"] }],
+    };
+    const first = await createInvestigationRuntime(config, { logger: false });
+    applications.push(first);
+    const login = await first.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      headers: { host, origin },
+      payload: { username: "fixture-admin", password },
+    });
+    expect(login.statusCode).toBe(200);
+    const cookie = login.cookies.map((entry) => `${entry.name}=${entry.value}`).join("; ");
+    const headers = { host, origin, cookie };
+    const initial = await first.inject({ method: "GET", url: "/api/workers", headers });
+    expect(initial.statusCode, initial.body).toBe(200);
+    expect(initial.json()).toMatchObject({
+      items: [
+        {
+          id: "worker-controls-runtime",
+          version: 1,
+          e2eEnabled: false,
+          lastSeenAt: null,
+          advertisedKinds: null,
+          status: "static_only",
+        },
+      ],
+    });
+    const policyRequest = {
+      method: "POST" as const,
+      url: "/api/worker/policy",
+      headers: { authorization: `Bearer ${workerToken}` },
+      payload: { supportedKinds: ["pr-review", "pr-e2e"] },
+    };
+    const staticPolicy = await first.inject(policyRequest);
+    expect(staticPolicy.statusCode, staticPolicy.body).toBe(200);
+    expect(staticPolicy.json()).toMatchObject({ e2eEnabled: false, effectiveKinds: ["pr-review"] });
+    const enabled = await first.inject({
+      method: "POST",
+      url: "/api/workers/worker-controls-runtime/e2e",
+      headers,
+      payload: { version: 1, e2eEnabled: true },
+    });
+    expect(enabled.statusCode, enabled.body).toBe(200);
+    expect(enabled.json()).toMatchObject({ e2eEnabled: true, version: 2 });
+    await first.close();
+    const second = await createInvestigationRuntime(config, { logger: false });
+    applications.push(second);
+    const retainedPolicy = await second.inject(policyRequest);
+    expect(retainedPolicy.statusCode, retainedPolicy.body).toBe(200);
+    expect(retainedPolicy.json()).toMatchObject({
+      e2eEnabled: true,
+      version: 2,
+      effectiveKinds: ["pr-review", "pr-e2e"],
+    });
+    const disabled = await second.inject({
+      method: "POST",
+      url: "/api/workers/worker-controls-runtime/e2e",
+      headers,
+      payload: { version: 2, e2eEnabled: false },
+    });
+    expect(disabled.statusCode, disabled.body).toBe(200);
+    expect((await second.inject(policyRequest)).json()).toMatchObject({
+      e2eEnabled: false,
+      version: 3,
+      effectiveKinds: ["pr-review"],
+    });
+  });
+
   it("exposes scoped E2E media status without triggering an upload from a Dashboard read", async () => {
     const config = await fixture();
     const { result } = createInvestigationPreview("pr", { findingCount: 0 });

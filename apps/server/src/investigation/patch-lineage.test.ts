@@ -28,6 +28,7 @@ import type {
   InvestigationWorkerPrincipal,
   InvestigationWorkItemRecord,
 } from "./types.js";
+import { InvestigationWorkerControls } from "./worker-controls.js";
 
 const recordedAt = "2026-09-15T02:01:00.000Z";
 const resources: Array<{ app: FastifyInstance; store: InvestigationStore }> = [];
@@ -102,8 +103,11 @@ async function harness() {
   };
   let sequence = 0;
   const store = new InvestigationStore();
+  const workerControls = new InvestigationWorkerControls(store, () => new Date(recordedAt));
+  workerControls.initialize([worker]);
   const app = buildInvestigationApp({
     store,
+    workerControls,
     now: () => new Date(recordedAt),
     idFactory: () => `lineage-generated-${++sequence}`,
     enableExternalWrites: false,
@@ -210,8 +214,15 @@ async function harness() {
       checkpoint,
       reportId: claim.reportId,
       outcome: "blocked",
+      parentPlan: claim.plan,
     });
-    const input = { task: claim.task, attempt: claim.attempt, checkpoint, ...submission };
+    const input = {
+      task: claim.task,
+      attempt: claim.attempt,
+      checkpoint,
+      parentPlan: claim.plan,
+      ...submission,
+    };
     const result = assembleInvestigationReport(input);
     const validation = validateInvestigationResult(result);
     expect(validation.errors).toEqual([]);
@@ -246,15 +257,72 @@ async function harness() {
     return { result, input };
   }
 
-  return { app, store, item, subject, createAndClaim, upload, saveReport };
+  return {
+    app,
+    store,
+    item,
+    subject,
+    createAndClaim,
+    upload,
+    saveReport,
+    enableE2e: () =>
+      workerControls.update(
+        { ...operator, id: "lineage-administrator", isAdmin: true },
+        worker.id,
+        { version: 1, e2eEnabled: true },
+        () => {},
+      ),
+  };
 }
 
 async function lineage() {
   const fixture = await harness();
-  const origin = await fixture.createAndClaim({
+  const review = await fixture.createAndClaim({
     kind: "pr-review",
+    idempotencyKey: "root-review",
+    executionMode: "source_read",
+  });
+  expect(review.task.executionPolicy).toMatchObject({
+    mode: "source_read",
+    allowRepositoryExecution: false,
+    authorizationRef: null,
+  });
+  const originPlan: InvestigationPlanDraft = {
+    id: "lineage-origin-verification-plan",
+    version: 1,
+    kind: "verification",
+    subjectRef: fixture.subject.id,
+    title: "Prepare synthetic patch variants for verification",
+    rationale: "Verify inherited source bindings using isolated patch artifacts.",
+    prerequisites: [],
+    steps: [
+      {
+        id: "lineage-origin-verification-step",
+        description: "Prepare and inspect two synthetic patch variants of the frozen PR source.",
+        expectedObservation: "Each patch retains its exact source and originating attempt.",
+        checkIds: [],
+      },
+    ],
+    acceptanceCriteria: ["Patch metadata preserves the frozen base and exact content digest."],
+  };
+  const reviewReport = await fixture.saveReport(review, { plans: [originPlan] });
+  const savedOriginPlan = reviewReport.result.plans[0]!;
+  fixture.enableE2e();
+  const origin = await fixture.createAndClaim({
+    kind: "pr-verify",
     idempotencyKey: "origin",
     executionMode: "execute",
+    parentReportRef: reportRef(reviewReport.result),
+    planRef: {
+      id: savedOriginPlan.id,
+      version: savedOriginPlan.version,
+      digest: savedOriginPlan.digest,
+    },
+  });
+  expect(origin.task.executionPolicy).toMatchObject({
+    mode: "execute",
+    allowRepositoryExecution: true,
+    authorizationRef: "lineage-operator",
   });
   const patches = ["selected", "unrelated"].map((name) => {
     const bytes = Buffer.from(`Synthetic ${name} patch bytes.\n`);

@@ -663,6 +663,141 @@ describe("assignment progress reply templates", () => {
     expect(body).toContain("\\[link\\]");
   });
 
+  it.each([
+    {
+      failure: "/srv/private/srv-capture.png",
+      expected: "\\[local path omitted\\]",
+      privateNames: ["srv-capture.png"],
+    },
+    {
+      failure: "/data/private/data-video.mp4",
+      expected: "\\[local path omitted\\]",
+      privateNames: ["data-video.mp4"],
+    },
+    {
+      failure: "/custom-mount/private/custom-capture.png",
+      expected: "\\[local path omitted\\]",
+      privateNames: ["custom-capture.png"],
+    },
+    {
+      failure: "Stopped (/srv/private/parenthesized-capture.png).",
+      expected: "Stopped (\\[local path omitted\\]).",
+      privateNames: ["parenthesized-capture.png"],
+    },
+    {
+      failure: "Captured [/data/private/bracketed-video.mp4], retry.",
+      expected: "Captured \\[\\[local path omitted\\]\\], retry.",
+      privateNames: ["bracketed-video.mp4"],
+    },
+    {
+      failure: "artifact=/custom-mount/private/keyed-capture.png; retry.",
+      expected: "artifact=\\[local path omitted\\]; retry.",
+      privateNames: ["keyed-capture.png"],
+    },
+    {
+      failure: "artifact:/custom-mount/private/colon-video.mp4, retry.",
+      expected: "artifact:\\[local path omitted\\], retry.",
+      privateNames: ["colon-video.mp4"],
+    },
+    {
+      failure: "/srv/private/first-capture.png,/data/private/second-video.mp4",
+      expected: "\\[local path omitted\\],\\[local path omitted\\]",
+      privateNames: ["first-capture.png", "second-video.mp4"],
+    },
+    {
+      failure: "**/home/private/emphasized-capture.png**",
+      expected: "\\*\\*\\[local path omitted\\]\\*\\*",
+      privateNames: ["emphasized-capture.png"],
+    },
+    {
+      failure: "<code>/srv/private/html-capture.png</code>",
+      expected: "&lt;code&gt;\\[local path omitted\\]&lt;/code&gt;",
+      privateNames: ["html-capture.png"],
+    },
+  ])(
+    "redacts complete absolute POSIX paths in failed replies: $failure",
+    ({ failure, expected, privateNames }) => {
+      const body = renderProgressReply({
+        stage: "failed",
+        template: defaultProgressReplyTemplates.failed,
+        trigger,
+        updatedAt: timestamp,
+        failure,
+      });
+      expect(body.endsWith(expected)).toBe(true);
+      for (const privateName of privateNames) expect(body).not.toContain(privateName);
+    },
+  );
+
+  it.each([
+    ['"', "/srv/private workspace/double quoted capture.png"],
+    ["'", "/data/private workspace/single quoted video.mp4"],
+    ["`", "/custom-mount/private workspace/backtick capture.png"],
+  ])("redacts the complete space-containing POSIX path quoted with %s", (quote, path) => {
+    const body = renderProgressReply({
+      stage: "failed",
+      template: defaultProgressReplyTemplates.failed,
+      trigger,
+      updatedAt: timestamp,
+      failure: `Captured ${quote}${path}${quote}; review required.`,
+    });
+    expect(body.endsWith("Captured \\[local path omitted\\]; review required.")).toBe(true);
+    expect(body).not.toContain("private workspace");
+    expect(body).not.toContain(path.slice(path.lastIndexOf("/") + 1));
+  });
+
+  it.each([
+    ['"', '"'],
+    ["'", "'"],
+    ["`", "\\`"],
+  ])("redacts a bare POSIX path after an unclosed %s quote", (quote, renderedQuote) => {
+    const body = renderProgressReply({
+      stage: "failed",
+      template: defaultProgressReplyTemplates.failed,
+      trigger,
+      updatedAt: timestamp,
+      failure: `Captured ${quote}/srv/private/unclosed-capture.png`,
+    });
+    expect(body.endsWith(`Captured ${renderedQuote}\\[local path omitted\\]`)).toBe(true);
+    expect(body).not.toContain("unclosed-capture.png");
+  });
+
+  it("preserves relative source references and public URL paths and queries in failed replies", () => {
+    const body = renderProgressReply({
+      stage: "failed",
+      template: defaultProgressReplyTemplates.failed,
+      trigger,
+      updatedAt: timestamp,
+      failure: [
+        "Inspect src/review.ts, ./src/worker.ts, and ../shared/contracts.ts.",
+        "Inspect src/_/file.cs and src/*/file.cs.",
+        "https://example.com/srv/public-capture.png?next=/data/public-video.mp4&home=/home/shared",
+        "https://example.com/data/public-video.mp4?next=/srv/public-capture.png&home=/home/shared",
+        "https://example.com/home/shared?next=/srv/public-capture.png&data=/data/public-video.mp4",
+        "https://example.com/docs?next='/data/public/file'&home='/home/public/file'",
+      ].join("\n"),
+    });
+    expect(body).toContain("src/review.ts");
+    expect(body).toContain("./src/worker.ts");
+    expect(body).toContain("../shared/contracts.ts");
+    expect(body).toContain("src/\\_/file.cs");
+    expect(body).toContain("src/\\*/file.cs");
+    expect(body).toContain(
+      "https\u200b://example.com/srv/public-capture.png?next=/data/public-video.mp4&amp;home=/home/shared",
+    );
+    expect(body).toContain(
+      "https\u200b://example.com/data/public-video.mp4?next=/srv/public-capture.png&amp;home=/home/shared",
+    );
+    expect(body).toContain(
+      "https\u200b://example.com/home/shared?next=/srv/public-capture.png&amp;data=/data/public-video.mp4",
+    );
+    expect(body).toContain(
+      "https\u200b://example.com/docs?next='/data/public/file'&amp;home='/home/public/file'",
+    );
+    expect(body).not.toContain("local path omitted");
+    expect(body).not.toContain("https://");
+  });
+
   it("preserves the complete trusted report without escaping, substituting, or truncating it", () => {
     const report = `## Conclusion\n\n${"Full finding. ".repeat(5_000)}\n<details><summary>Details</summary>\n\n[Source](https://github.com/fixture/project/blob/abc/file.ts#L1)\n{{trigger}}\n</details>`;
     const body = renderProgressReply({

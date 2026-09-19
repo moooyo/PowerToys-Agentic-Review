@@ -5,6 +5,8 @@ export default [
   { path: "/issues", name: "Issues", component: "./Issues" },
   { path: "/tasks", name: "Tasks", component: "./InvestigationTasks" },
   { path: "/comments", name: "Comments", component: "./InvestigationComments" },
+  { path: "/webhooks", name: "Webhook events", component: "./InvestigationWebhooks" },
+  { path: "/workers", name: "Workers", component: "./InvestigationWorkers", adminOnly: true },
   { path: "/reports", name: "Report", hideInMenu: true, component: "./InvestigationReport" },
   { path: "/repositories", name: "Repositories", component: "./InvestigationRepositories" },
   { path: "/account", name: "My account", component: "./MyAccount" },

@@ -186,6 +186,15 @@ describe("sample workspace session and repository access", () => {
     const api = createSessionScopedSampleApi(raw, session, expired);
     const operations: Array<() => Promise<unknown>> = [
       () => api.repositories(),
+      () => api.workers(),
+      () => api.updateWorkerE2e("sample-static-worker", { version: 1, e2eEnabled: true }),
+      () => api.webhookDeliveries(),
+      () => api.webhookDelivery("sample-webhook-task-failed"),
+      () =>
+        api.retryWebhookDelivery("sample-webhook-task-failed", {
+          version: "sample-version",
+          idempotencyKey: "signed-out-webhook-retry",
+        }),
       () => api.comments(),
       () => api.commentDeliveries(),
       () => api.comment("sample-pr-p0-comment"),
@@ -252,6 +261,115 @@ describe("sample workspace session and repository access", () => {
     expect(updating).toHaveBeenCalledWith(repositoryId, input);
     expect(updated).toEqual({ ...input, repositoryId, version: 1, receiverConfigured: false });
     expect(await api.repositoryWebhookSettings(repositoryId)).toEqual(updated);
+  });
+
+  it("restricts global worker settings to administrators without dispatching denied mutations", async () => {
+    const raw = createSampleInvestigationApi();
+    const reading = vi.spyOn(raw, "workers");
+    const updating = vi.spyOn(raw, "updateWorkerE2e");
+    let current = signedIn({ isAdmin: false });
+    const api = createSessionScopedSampleApi(raw, async () => current);
+    await expectDenied(api.workers());
+    await expectDenied(
+      api.updateWorkerE2e("sample-static-worker", { version: 1, e2eEnabled: true }),
+    );
+    expect(reading).not.toHaveBeenCalled();
+    expect(updating).not.toHaveBeenCalled();
+    current = signedIn();
+    const worker = required(
+      (await api.workers()).items.find((item) => item.id === "sample-static-worker"),
+    );
+    expect(
+      await api.updateWorkerE2e(worker.id, { version: worker.version, e2eEnabled: true }),
+    ).toMatchObject({
+      e2eEnabled: true,
+      effectiveKinds: ["pr-review", "issue-investigate"],
+    });
+  });
+
+  it("scopes webhook events and grants retry only with repository, task, and execution permissions", async () => {
+    const raw = createSampleInvestigationApi();
+    const retrying = vi.spyOn(raw, "retryWebhookDelivery");
+    let current = signedIn({ isAdmin: false, permissions: [] });
+    const api = createSessionScopedSampleApi(raw, async () => current);
+    const staticId = "sample-webhook-task-failed";
+    const e2eId = "sample-webhook-e2e-failed";
+    expect(
+      (await api.webhookDeliveries()).items.every((item) => item.availableActions.length === 0),
+    ).toBe(true);
+    const staticEvent = await api.webhookDelivery(staticId);
+    const e2eEvent = await api.webhookDelivery(e2eId);
+    await expectDenied(
+      api.retryWebhookDelivery(staticId, {
+        version: staticEvent.version,
+        idempotencyKey: "denied-static-retry",
+      }),
+    );
+    expect(retrying).not.toHaveBeenCalled();
+    current = signedIn({
+      permissions: ["repository:manage", "task:create"],
+      allowRepositoryExecution: false,
+    });
+    expect((await api.webhookDelivery(staticId)).availableActions).toEqual(["retry"]);
+    expect((await api.webhookDelivery(e2eId)).availableActions).toEqual([]);
+    await expectDenied(
+      api.retryWebhookDelivery(e2eId, {
+        version: e2eEvent.version,
+        idempotencyKey: "denied-e2e-retry",
+      }),
+    );
+    expect(retrying).not.toHaveBeenCalled();
+    expect(
+      (
+        await api.retryWebhookDelivery(staticId, {
+          version: staticEvent.version,
+          idempotencyKey: "allowed-static-retry",
+        })
+      ).state,
+    ).toBe("accepted");
+    expect(retrying).toHaveBeenLastCalledWith(staticId, {
+      version: staticEvent.version,
+      idempotencyKey: expect.stringMatching(/^sample-webhook:[a-f0-9]{64}$/u),
+    });
+    current = signedIn({ allowRepositoryExecution: true });
+    expect((await api.webhookDelivery(e2eId)).availableActions).toEqual(["retry"]);
+    current = signedIn({ repositoryIds: [] });
+    expect((await api.webhookDeliveries()).items).toEqual([]);
+    expect(await api.webhookDeliveries({ repositoryId })).toEqual({ items: [], nextCursor: null });
+    await expectDenied(api.webhookDelivery(staticId));
+    await expectDenied(
+      api.retryWebhookDelivery(e2eId, {
+        version: e2eEvent.version,
+        idempotencyKey: "wrong-scope-retry",
+      }),
+    );
+    expect(retrying).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the full webhook idempotency key allowance while isolating accounts", async () => {
+    const raw = createSampleInvestigationApi();
+    const retrying = vi.spyOn(raw, "retryWebhookDelivery");
+    let current = signedIn();
+    const api = createSessionScopedSampleApi(raw, async () => current);
+    const delivery = await api.webhookDelivery("sample-webhook-task-failed");
+    const input = { version: delivery.version, idempotencyKey: "x".repeat(128) };
+    const queued = await api.retryWebhookDelivery(delivery.deliveryId, input);
+    expect(await api.retryWebhookDelivery(delivery.deliveryId, input)).toEqual(queued);
+    const firstKey = retrying.mock.calls[0]?.[1].idempotencyKey;
+    expect(firstKey).toMatch(/^sample-webhook:[a-f0-9]{64}$/u);
+    expect(retrying.mock.calls[1]?.[1].idempotencyKey).toBe(firstKey);
+    current = signedIn({ id: "another-operator" });
+    await expect(api.retryWebhookDelivery(delivery.deliveryId, input)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(retrying.mock.calls[2]?.[1].idempotencyKey).not.toBe(firstKey);
+    await expect(
+      api.retryWebhookDelivery(delivery.deliveryId, {
+        ...input,
+        idempotencyKey: "x".repeat(129),
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(retrying).toHaveBeenCalledTimes(3);
   });
 
   it("filters mixed repository, work item, and task lists by current repository grants", async () => {

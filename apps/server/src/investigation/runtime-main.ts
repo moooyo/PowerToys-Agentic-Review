@@ -29,9 +29,12 @@ import {
 } from "./source-import.js";
 import { InvestigationStore } from "./store.js";
 import type { InvestigationActionTransport } from "./types.js";
+import { InvestigationWebhookDeliveryControls } from "./webhook-delivery-controls.js";
+import { registerInvestigationWebhookDeliveryRoutes } from "./webhook-delivery-http.js";
 import { registerInvestigationWebhookRoute } from "./webhook-http.js";
 import { InvestigationWebhookIntake } from "./webhook-intake.js";
 import { InvestigationWebhookSettings } from "./webhook-settings.js";
+import { InvestigationWorkerControls } from "./worker-controls.js";
 
 export interface InvestigationRuntimeDependencies {
   readonly actionTransport?: InvestigationActionTransport;
@@ -65,6 +68,7 @@ export async function createInvestigationRuntime(
   if (config.databasePath !== ":memory:")
     mkdirSync(dirname(config.databasePath), { recursive: true });
   const store = new InvestigationStore(config.databasePath);
+  const workerControls = new InvestigationWorkerControls(store);
   let auth: InvestigationRuntimeAuth | undefined;
   let app: FastifyInstance | undefined;
   let reaper: NodeJS.Timeout | undefined;
@@ -80,6 +84,7 @@ export async function createInvestigationRuntime(
   try {
     auth = new InvestigationRuntimeAuth(config);
     await auth.initialize();
+    workerControls.initialize(config.workers);
     const sourceImporter = new InvestigationSourceImporter({
       store,
       ...(config.github === undefined ? {} : { github: config.github }),
@@ -124,6 +129,7 @@ export async function createInvestigationRuntime(
     );
     app = buildInvestigationApp({
       store,
+      workerControls,
       authenticateOperator: auth.authenticateOperator,
       authenticateWorker: auth.authenticateWorker,
       prepareTaskInput: sourceImporter.prepareTaskInput,
@@ -434,7 +440,13 @@ export async function createInvestigationRuntime(
             return webhookSettings.update(actor, request.params.id, request.body);
           },
         );
-        if (webhookConfig === undefined) return;
+        if (webhookConfig === undefined) {
+          registerInvestigationWebhookDeliveryRoutes(ingressApp, {
+            controls: new InvestigationWebhookDeliveryControls({ store }),
+            authenticateOperator: runtimeAuth.authenticateOperator,
+          });
+          return;
+        }
         const webhookImporter = new InvestigationSourceImporter({
           store,
           classifyProgressComment: (repository, target, comment) =>
@@ -495,30 +507,10 @@ export async function createInvestigationRuntime(
             return intake.accept(input);
           },
         });
-        ingressApp.get<{ Params: { deliveryId: string } }>(
-          "/api/github/webhook-deliveries/:deliveryId",
-          {
-            schema: {
-              params: Type.Object(
-                { deliveryId: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }) },
-                { additionalProperties: false },
-              ),
-            },
-          },
-          async (request, reply) => {
-            const actor = await runtimeAuth.authenticateOperator(request);
-            requireCondition(
-              actor !== null,
-              401,
-              "operator_authentication_required",
-              "Operator authentication is required.",
-            );
-            reply.header("cache-control", "no-store");
-            return e2eIntake.hasReceipt(request.params.deliveryId)
-              ? e2eIntake.readReceipt(actor, request.params.deliveryId)
-              : intake.readReceipt(actor, request.params.deliveryId);
-          },
-        );
+        registerInvestigationWebhookDeliveryRoutes(ingressApp, {
+          controls: new InvestigationWebhookDeliveryControls({ store, intake, e2eIntake }),
+          authenticateOperator: runtimeAuth.authenticateOperator,
+        });
       },
     });
     const runtimeApp = app;

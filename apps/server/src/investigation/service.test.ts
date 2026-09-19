@@ -41,6 +41,7 @@ import type {
   InvestigationWorkItemRecord,
 } from "../../dist/investigation/types.js";
 import { investigationUsagePublicationPendingKey } from "../../dist/investigation/usage-ledger.js";
+import { InvestigationWorkerControls } from "../../dist/investigation/worker-controls.js";
 
 const resources: { app: FastifyInstance; store: InvestigationStore }[] = [];
 const startedAt = Date.parse("2026-09-15T02:01:00.000Z");
@@ -86,6 +87,7 @@ async function harness(
   options: {
     actionTransport?: InvestigationActionTransport;
     allowRepositoryExecution?: boolean;
+    enableWorkerE2e?: boolean;
     evidencePolicy?: Partial<InvestigationEvidencePolicy>;
     onTaskStateChanged?: InvestigationServiceOptions["onTaskStateChanged"];
     onTaskUsageChanged?: InvestigationServiceOptions["onTaskUsageChanged"];
@@ -137,8 +139,14 @@ async function harness(
   let time = startedAt;
   let sequence = 0;
   const store = new InvestigationStore();
+  const administrator = { ...operator, id: "synthetic-administrator", isAdmin: true };
+  const workerControls = new InvestigationWorkerControls(store, () => new Date(time));
+  workerControls.initialize([worker, otherWorker, sameScopeWorker]);
+  if (options.enableWorkerE2e === true)
+    workerControls.update(administrator, worker.id, { version: 1, e2eEnabled: true }, () => {});
   const app = buildInvestigationApp({
     store,
+    workerControls,
     now: () => new Date(time),
     idFactory: () => `synthetic-generated-${++sequence}`,
     leaseDurationMs: 1_000,
@@ -155,11 +163,13 @@ async function harness(
       ? {}
       : { onTaskUsageChanged: options.onTaskUsageChanged }),
     authenticateOperator: (request) =>
-      request.headers.authorization === "operator"
-        ? operator
-        : request.headers.authorization === "other-operator"
-          ? otherOperator
-          : null,
+      request.headers.authorization === "administrator"
+        ? administrator
+        : request.headers.authorization === "operator"
+          ? operator
+          : request.headers.authorization === "other-operator"
+            ? otherOperator
+            : null,
     authenticateWorker: (request) =>
       request.headers.authorization === "worker"
         ? worker
@@ -772,7 +782,10 @@ describe("investigation service API", () => {
   });
 
   it("rejects new execution starts after cancellation without changing the accepted runtime", async () => {
-    const { app, store, item, operator } = await harness({ allowRepositoryExecution: true });
+    const { app, store, item, operator } = await harness({
+      allowRepositoryExecution: true,
+      enableWorkerE2e: true,
+    });
     const { task: original, result } = createInvestigationFixture("pr", { findingCount: 0 });
     const plan = result.plans[0];
     const plannedStep = plan?.steps[0];
@@ -2139,7 +2152,10 @@ describe("recorded E2E analysis recovery accounting", () => {
   }
 
   it("recovers accepted execution across attempts, seals a report, and retains exactly one original model charge", async () => {
-    const { app, item, advance } = await harness({ allowRepositoryExecution: true });
+    const { app, item, advance } = await harness({
+      allowRepositoryExecution: true,
+      enableWorkerE2e: true,
+    });
     const created = await post(app, "/api/tasks", {
       workItemId: item.id,
       kind: "pr-e2e",
@@ -2329,6 +2345,30 @@ describe("recorded E2E analysis recovery accounting", () => {
     expect(accepted.statusCode, accepted.body).toBe(200);
     const recovered = accepted.json<InvestigationCheckpointResponse>().checkpoint;
     expect(recovered).toMatchObject({ stopReason: "complete", consumed: { tokens: 70 } });
+    const disabled = await post(
+      app,
+      "/api/workers/synthetic-worker/e2e",
+      { version: 2, e2eEnabled: false },
+      "administrator",
+    );
+    expect(disabled.statusCode, disabled.body).toBe(200);
+    expect(disabled.json()).toMatchObject({ e2eEnabled: false, status: "disabling" });
+    const heartbeat = await post(
+      app,
+      `/api/worker/tasks/${second.task.id}/heartbeat`,
+      { lease: second.lease },
+      "worker",
+    );
+    expect(heartbeat.statusCode, heartbeat.body).toBe(200);
+    expect(heartbeat.json().cancelRequested).toBe(false);
+    const executionAfterCompletion = await post(
+      app,
+      `/api/worker/tasks/${second.task.id}/checkpoints`,
+      { kind: "execution", lease: second.lease, execution: recovered.runtime },
+      "worker",
+    );
+    expect(executionAfterCompletion.statusCode).toBe(409);
+    expect(executionAfterCompletion.json().code).toBe("loop_already_stopped");
     expect(
       (
         await post(
@@ -2394,6 +2434,17 @@ describe("recorded E2E analysis recovery accounting", () => {
     });
     expect(detail.invocations).toHaveLength(1);
     expect(detail.invocations[0].attemptId).toBe(first.attempt.id);
+    const cleanup = await post(
+      app,
+      `/api/worker/tasks/${second.task.id}/cleanup`,
+      { lease: second.lease, ownedProcessesStopped: true, desktopRestored: true },
+      "worker",
+    );
+    expect(cleanup.statusCode, cleanup.body).toBe(200);
+    const workerState = await get(app, "/api/workers", "administrator");
+    expect(workerState.json().items).toContainEqual(
+      expect.objectContaining({ id: "synthetic-worker", e2eEnabled: false, status: "static_only" }),
+    );
   });
 
   it("does not allow a static task to replace a registered model call with zero-cost analysis", async () => {

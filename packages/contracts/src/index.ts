@@ -32,6 +32,8 @@ export * from "./investigation-progress.js";
 export * from "./investigation-scheduler.js";
 export * from "./investigation-source.js";
 export * from "./investigation-usage.js";
+export * from "./investigation-webhook-deliveries.js";
+export * from "./investigation-worker-controls.js";
 export * from "./issue-reproduction.js";
 export * from "./job-admission.js";
 export * from "./job-envelope.js";

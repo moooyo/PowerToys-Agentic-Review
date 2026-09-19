@@ -10,7 +10,10 @@ and prepares explicit follow-up actions. The application is unreleased. The acti
 Worker entry point, `apps/worker/src/main.ts`, starts the native investigation runtime. Tasks are
 not converted into the older Job protocol. Historical source modules, design decisions, and
 acceptance receipts do not define alternate production endpoints. There is no legacy API
-compatibility, dual-write path, data conversion, or migration project.
+compatibility, dual-write path, data conversion, or retired Job database migration project.
+
+The current store accepts only the exact additive `investigation-v2` and `investigation-v3`
+upgrades described below; this does not add compatibility with the retired Job runtime.
 
 The [structured investigation design](./docs/design/2026-09-15-structured-investigation-results-and-loop.md)
 and [built-in account design](./docs/design/2026-09-15-built-in-accounts.md) record the current
@@ -67,7 +70,7 @@ loop transitions, completion requirements, recommendations, and operation guards
 | `Report` | Seals one complete collection of findings, assessment, validation, evidence, artifacts, plans, next actions, and explicit limitations. |
 | `ActionIntent` | Binds an actor, exact target/revision, reviewed payload digest, and current guards to a prepared follow-up operation. |
 
-Task kinds are `pr-review`, `issue-investigate`, `pr-verify`, `issue-verify`,
+Task kinds are `pr-review`, `issue-investigate`, `pr-e2e`, `pr-verify`, `issue-verify`,
 `reproduction-setup`, `issue-fix`, and `feature-implement`. Task and attempt outcomes distinguish
 `completed`, `blocked`, `failed`, `cancelled`, and `interrupted`. Report completeness is a separate
 `complete` or `partial` property; neither a successful process exit nor a sealed partial report
@@ -101,6 +104,34 @@ pointer. Settings and repository identities are checked again across asynchronou
 The inbox, assignment claims, and settings use separate namespaces in the existing idempotency
 collection. See the [receiver operations](./apps/server/README.md#listen-for-trusted-assignments).
 
+Independently enabled E2E intake accepts a trusted user's new PR conversation comment containing
+`@configured-account e2e` on its own line through the signed `issue_comment` webhook. It reuses the
+repository's trusted numeric user IDs and checks the current comment, repository, and open PR.
+Quoted, edited, hidden, and automation-authored commands do not authorize execution. Durable
+repository/comment identities deduplicate delivery; an active request at the same base/head revision
+is reused. A later command after a terminal result can create another run. PR synchronization cancels
+obsolete work without automatically starting a new revision. Each `pr-e2e` Task owns an independent
+progress comment and requires no parent static report or saved plan. See
+[trusted E2E commands](./apps/server/README.md#trusted-pr-e2e-commands).
+
+Both inboxes expose repository-scoped delivery list/detail reads and versioned, idempotent explicit
+retry. Intake state, Task outcome, and comment delivery remain separate. Processing attempts retain
+their phases, reasons, timestamps, and known cumulative count across bounded automatic retry cycles.
+Only failed canonical intake is eligible for explicit retry. A committed Task is reattached before
+new-work authorization, without another model or desktop run; otherwise current authority and source
+identity are checked again. Read-only history remains available with intake disabled. The operations
+contract is documented in [webhook recovery](./apps/server/README.md#inspect-and-retry-webhook-intake).
+
+An optional relay companion can use the separate SQLite `WebhookRelaySpool` module. It commits exact
+signed envelopes before local forwarding, preserves attempt history across restart, and accepts only
+a matching receiver acknowledgement as delivered. Network and retryable receiver failures consume a
+bounded retry allowance. The module does not start a relay, load GitHub credentials, or request
+upstream redelivery. Events lost before relay receipt remain outside its recovery boundary.
+An explicit `retryFailed` command uses numeric version checks and idempotent request IDs to queue
+another finite batch only for failed deliveries. It preserves cumulative attempts and reserves
+additional history capacity atomically; delivered records never requeue. Spool schema v2 additively
+upgrades v1 independently of the application's `investigation-v4` store.
+
 Operators register exact internal and GitHub numeric repository identities. The production import
 endpoint reads the current PR or Issue and every conversation page, including PR review comments
 and review summaries. It verifies the upstream repository, work item, and final revision before
@@ -115,12 +146,20 @@ check out or execute repository source. Source-aware Issue work requires an expl
 full commit SHA, verified by the Server against GitHub. Issue content cannot silently choose an
 arbitrary branch or grant execution authority. Source execution additionally requires the actor's
 explicit repository-execution grant and a task policy bound to authorized subjects.
+Static kinds `pr-review` and `issue-investigate` cannot carry `execute` policy. Creation, admission,
+and Worker execution reject that combination; an old malformed static kind does not bypass execution
+ownership or cleanup guards.
 
 PR source materialization uses the exact frozen base and head commits and verifies the merge base
 and checked-out identity. The Worker admits public repositories through an explicit allowlist;
 Git acquisition disables inherited credentials, hooks, and submodule execution. Source coverage
 records what was actually materialized and supplied to analysis. Omitted source cannot be marked
 reviewed merely because the model completed a turn.
+
+New static source reviews navigate the complete pinned local checkout. The merge-base diff defines
+required change coverage; the agent can discover unchanged dependencies and read base blobs when
+needed. Repeated diff/base/head bundles remain a historical-checkpoint behavior rather than the
+only source available to a new review.
 
 ## Accounts and credential boundaries
 
@@ -167,10 +206,29 @@ heartbeats renew that lease and receive cancellation state. Checkpoint, artifact
 and finalization requests are checked against the current task, attempt, Worker, and lease.
 Expired or superseded Workers cannot commit new progress.
 
-The default Worker concurrency is one. Attempt workspaces isolate source and model control files.
-Execution records are retained before cleanup. SIGINT/SIGTERM stops new claims, cancels owned work,
-drains managed processes, and closes ProcessHost. Unconfirmed cleanup causes a node fault and
-retains the affected workspace; a later attempt must not reuse uncertain local state.
+Each Worker has one durable Server-owned `e2eEnabled` setting, defaulting to false, with versioned
+administrator updates and an audit record. Local role and supported-kind settings only narrow its
+capability. The Worker advertises those kinds through `POST /api/worker/policy`, and both the claim
+loop and Server admission apply the effective kinds. No additional local E2E enable flag is required.
+The administrator API exposes `GET /api/workers` and `POST /api/workers/:id/e2e`.
+
+Disabling the setting stops new execution claims and requests cancellation of active execution in
+the existing heartbeat response. Accepted terminal checkpoints may still complete report delivery;
+usage replay and cleanup channels remain available. `disabling` and `awaiting_confirmation` retain
+unresolved ownership instead of treating an offline Worker or a changed setting as cleanup proof.
+These controls do not remove general model shell access, prohibit local screenshots, or add an
+operating-system sandbox.
+
+Static reviews share a configurable global capacity, initially one. All execution tasks share one
+global E2E slot, independently of static capacity and eligible Worker capacity. An E2E waiter does
+not block eligible static work. Admission atomically acquires the resource and creates the attempt.
+The E2E lease and machine desktop guard cover the whole attempt through confirmed cleanup; report
+finalization, cancellation, lease expiry, or elapsed time alone cannot release the slot.
+
+Attempt workspaces isolate source and model control files. Execution records are retained before
+cleanup. SIGINT/SIGTERM stops new claims, cancels owned work, drains managed processes, and closes
+ProcessHost. Unconfirmed cleanup causes a node fault and retains the affected workspace; a later
+attempt must not reuse uncertain local state.
 
 ## Model turns and executable plans
 
@@ -179,11 +237,19 @@ project has no provider registry or model HTTP relay. Deployment verifies the st
 and disables unmanaged tools before starting the Worker. CLI engine, executable pin, model choice,
 and explicit account environment are deployment settings.
 
-Investigation turns analyze supplied snapshots and complete source files and return structured
-analysis. They do not execute repository commands, build, test, browse, or mutate files. CLI launch
-restrictions, output-schema validation, and event checks enforce the static-turn contract. A model
-cannot supply authoritative Worker execution observations, operation permissions, or a successful
-validation result.
+Static investigation turns analyze frozen snapshots or navigate the pinned local source and return
+structured analysis. The static prompt permits source-inspection commands and prohibits repository
+builds, tests, scripts, application launch, browser interaction, desktop interaction, and source
+mutation. This prompt policy is not a new command sandbox. A model cannot supply authoritative
+Worker execution observations, operation permissions, or a successful validation result.
+
+The independent `pr-e2e` prompt permits controlled builds, tests, application launch, UI interaction,
+screenshots, and recording. Its per-attempt tool service executes through ProcessHost and retains
+build identity, owned process/window observations, feature assertions, and actual media. A passed
+user-visible feature requires its own evidence; a successful build or a playable failed-state video
+does not establish that the feature passed. The model receives the complete frozen scope and
+execution policy without narrowing the required changed-path coverage. Source is not modified
+to make a check pass.
 
 Executable follow-ups use saved plans from immutable reports. A deployment-owned execution binding
 maps an exact plan or profile reference to ordered `command`, `ui`, or `model-edit` operations.
@@ -225,6 +291,22 @@ session. Completed analysis can be restored for report delivery without repeatin
 Confirmed completed execution can be retained across attempts; an uncertain in-flight mutation is
 not automatically replayed. Patch restoration requires the exact saved artifact and source digest.
 
+E2E execution is recorded before runtime side effects, and partial observations are saved during
+execution. Recorded-result recovery can deliver accepted observations without another model or
+application launch. Repeating an interrupted incomplete execution requires a new explicit Task.
+ProcessHost proves the prior owned generation stopped before its successor becomes ready and
+waits for a fresh Job Object. A durable cleanup journal separates owned local cleanup from the
+Server acknowledgement, so acknowledgement retries do not repeat deletion or desktop-guard release.
+This recovery covers managed process trees; arbitrary service-broker or externally detached
+processes are not covered by that proof. Uncertain process or desktop state remains a cleanup blocker.
+
+Every actual model invocation has a separate durable usage identity, including rejected output,
+failure, cancellation, and resume. Task totals include all attempts without duplicating retried
+receipts; sealed Reports retain their publication-time usage snapshot. Available input, output,
+cache, and reasoning details remain distinct. Missing provider counters remain unknown rather
+than zero. Heartbeat, activity, meaningful progress, accepted rounds, invocation count, and
+saved-state version are separate projections; stage timings expose work outside model execution.
+
 ## Reports, evidence, and storage
 
 Report transport uses bounded typed parts plus a final header and manifest. Parts carry task,
@@ -238,6 +320,16 @@ separate collections. Evidence records its subject, producer, authority, and pro
 analysis is distinguishable from captured execution or Server observations. Artifact content is
 checked against its declared size and digest and is accessed through scoped authenticated APIs.
 Availability distinguishes available, expired, and missing evidence.
+
+E2E evidence includes verified PNG images and finalized H.264 MP4 recordings tied to the exact
+attempt, revision, feature, and assertion. The authenticated Dashboard displays this media. With
+authorized publication configured, the Server uploads attachments through the established CLI
+path and persists upload identities for the independent E2E comment. Media availability and
+playback are separate claims from functional success.
+Publication requires the exact stored `pr-e2e` Task, Server-sealed report, pinned subject, assigned
+producer attempts, and trusted E2E tool observations. Static investigation media never enters this
+GitHub upload path, even if an artifact or model output claims E2E provenance. This does not prohibit
+local screenshot capture.
 
 Mutable evidence metadata, retention pins, and aggregate usage are separate from immutable artifact
 identities and sealed reports. The default policy allows 1 GiB of resident original content bytes
@@ -261,10 +353,11 @@ report. Server recommendations and hard blockers use the complete saved collecti
 findings beyond the visible page. Export retains the complete result and its logical content digest.
 
 The Server process owns SQLite through `InvestigationStore`, with schema identity
-`investigation-v2`, and a separate account store. Schemas are initialized directly for this
-unreleased product; incompatible existing databases are rejected without conversion, deletion, or
-fallback. Both databases must remain private and outside the Dashboard static directory. Detailed
-retention controls and operating guidance are in the [Server instructions](./apps/server/README.md).
+`investigation-v4`, and a separate account store. New investigation databases initialize directly
+at v4. Exact, complete `investigation-v2` and `investigation-v3` databases receive additive comment
+history and scheduler storage migrations. Unrelated or incomplete schemas are rejected without
+deletion or fallback. Both databases must remain private and outside the Dashboard static directory.
+Detailed retention controls and operating guidance are in the [Server instructions](./apps/server/README.md).
 Historical evidence services and schema numbers do not describe this active store.
 
 ## Recommendations and action delivery
@@ -341,9 +434,40 @@ installation, scoped PowerToys build, and seven selected tests; its earlier unin
 historical. These receipts preserve their original revisions and environments and do not establish
 acceptance of the new Task protocol or a newly deployed Windows Worker.
 
-Current deployment, real-model workflow, human-action, capacity, and evidence-retention acceptance
-must be recorded independently in [Implementation Status](./docs/IMPLEMENTATION_STATUS.md).
-Dedicated PowerToys UI scenarios, general model-quality evaluation, and third-party login are
-outside the current delivery. Private checkout, automatic distribution, video evidence, and reusable
-build artifacts remain separate unimplemented scope. Retired split-Worker, protected-journal,
+The [2026-09-19 handoff](./docs/handoff/2026-09-19-local-source-review-e2e.md) accepts the recorded
+local-source static reviews, invocation accounting, static/E2E overlap, global E2E serialization,
+independent media publication/playback, managed recovery, and application-open cancellation. Peek
+and Launcher functional scenarios retain failures and blockers and require further acceptance.
+That earlier GitHub redelivery encountered an external HTTP 401 before the receiver and did not
+establish full-path idempotence. The later cached-redelivery result retains its separate scope below.
+
+The subsequent [Worker controls and webhook recovery implementation](./docs/design/2026-09-19-worker-controls-and-webhook-recovery.md)
+adds the default-off Worker setting, static-media publication guard, inspectable/retryable intake,
+and durable relay spool. Scoped software and Dashboard/native-intake browser checks are recorded in
+the [current handoff](./docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md); the native
+browser scope uses real HTTP/SQLite with GitHub mocked. PR #15's sixth Task passed three Calculator
+features and four UI assertions, and its owned cleanup/native lease release are confirmed. The
+fifth report's four GitHub images and MP4 playback passed while its Task remained blocked. Real
+HTTPS redelivery returned a cached duplicate without another Server receiver entry. The eighth Task
+completed naturally with confirmed cleanup but no disable CAS. A separate native cancellation fixture
+passed with synthetic inputs and real runtime/window/FFmpeg processes. Operational closeout is complete;
+temporary capacity settings are restored with legacy services/history preserved. Git publication is
+a separate handoff. PR #14 remains an
+open draft with two failed/cancelled live sequences, including source
+admission blocked by unsupported gitlinks. The current fixture is owned-fork PR #15, using
+the actual merge of upstream PowerToys PR #47506 and its sole parent, whose complete trees have no
+gitlinks. All four changed files belong to Run Calculator. Three scenarios cover
+explicit complex-number errors, suppression of implicit-query error rows, and ordinary arithmetic.
+The implicit-query absence assertion requires a same-mode positive Calculator result first; an
+inactive plugin is not evidence that error suppression works.
+The existing all-changed-path coverage gate remains in force. The earlier mixed Run/CmdPal fixture,
+owned-fork PR #13, is superseded, unexecuted, and closed; neither fixture changes the older
+Peek/Launcher outcomes.
+
+Production hosting, service restart policy, and sustained workload/physical SQLite and WAL capacity
+acceptance are explicitly deferred. General model-quality evaluation and third-party login remain
+outside this delivery. Private checkout, automatic Worker distribution/installation/upgrades, and
+reusable build outputs are optional unimplemented extensions. Video evidence is implemented and
+accepted within the recorded scope. [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) tracks
+the current backlog separately from historical receipts. Retired split-Worker, protected-journal,
 provider-registry, and model-relay designs are not current backlog items.

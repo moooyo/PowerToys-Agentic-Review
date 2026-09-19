@@ -5,10 +5,12 @@ import { join } from "node:path";
 import {
   createInvestigationPreview,
   type InvestigationArtifactV1,
+  type InvestigationAttemptV1,
   type InvestigationResultV1,
   type InvestigationTaskV1,
 } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defaultAutomaticReplyTemplates, renderAutomaticReply } from "./auto-reply-template.js";
 import {
   type E2eMediaUploadReceipt,
   InvestigationE2eMediaPublications,
@@ -34,7 +36,16 @@ function harness(uploader?: InvestigationMediaUploader, databasePath?: string) {
   stores.push(store);
   const evidence = new InvestigationEvidenceStore(store);
   const preview = createInvestigationPreview("pr", { findingCount: 0 });
-  const task: InvestigationTaskV1 = { ...preview.task, kind: "pr-e2e" };
+  const task: InvestigationTaskV1 = {
+    ...preview.task,
+    kind: "pr-e2e",
+    executionPolicy: {
+      ...preview.task.executionPolicy,
+      mode: "execute",
+      allowRepositoryExecution: true,
+      authorizationRef: "synthetic-e2e-authorization",
+    },
+  };
   const subject = task.subjects.find((entry) => entry.id === task.subjectRef)!;
   if (subject.kind !== "original_pr") throw new Error("invalid fixture");
   const assets = [
@@ -137,6 +148,13 @@ function harness(uploader?: InvestigationMediaUploader, databasePath?: string) {
       },
     ]),
   };
+  store.put("tasks", task.id, task);
+  store.put("attempts", preview.attempt.id, {
+    attempt: preview.attempt,
+    reportId: report.report.id,
+  });
+  const saveReport = () => store.put("reports", report.report.id, report);
+  saveReport();
   let clock = Date.parse("2026-09-19T00:00:00.000Z");
   const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
     const target = new URL(String(input));
@@ -168,6 +186,7 @@ function harness(uploader?: InvestigationMediaUploader, databasePath?: string) {
     artifacts,
     fetch,
     options,
+    saveReport,
     media: new InvestigationE2eMediaPublications(options),
     advance: (milliseconds: number) => {
       clock += milliseconds;
@@ -176,6 +195,124 @@ function harness(uploader?: InvestigationMediaUploader, databasePath?: string) {
 }
 
 describe("durable E2E media publication", () => {
+  it.each(["pr", "bug"] as const)(
+    "never uploads static %s images or videos while retaining the text reply",
+    async (kind) => {
+      const upload = vi.fn<InvestigationMediaUploader["upload"]>();
+      const h = harness({ upload });
+      const { task, result: report } = createInvestigationPreview(kind, { findingCount: 0 });
+      report.artifacts = h.artifacts.map((artifact) => ({
+        ...artifact,
+        taskId: task.id,
+        attemptId: report.context.attempt.id,
+        subjectRef: task.subjectRef,
+      }));
+      h.store.put("tasks", task.id, task);
+      h.store.put("reports", report.report.id, report);
+
+      expect(() => h.media.prepare(report, task)).toThrow("Server-authorized execution task");
+      await expect(h.media.publish(report.report.id)).rejects.toThrow("has not been prepared");
+      expect(upload).not.toHaveBeenCalled();
+      const body = renderAutomaticReply(
+        report,
+        kind === "pr"
+          ? defaultAutomaticReplyTemplates.pullRequest
+          : defaultAutomaticReplyTemplates.issue,
+        { githubUserId: 42, githubLogin: "synthetic-publisher" },
+      );
+      expect(body).toContain(kind === "pr" ? "## Findings" : "## Next steps");
+      expect(body).not.toContain("user-attachments");
+      expect(body).not.toContain("![");
+    },
+  );
+
+  it.each([
+    { mode: "source_read" as const },
+    { allowRepositoryExecution: false },
+    { authorizationRef: null },
+  ])("rejects E2E media without an authorized execute policy: %j", async (policy) => {
+    const upload = vi.fn<InvestigationMediaUploader["upload"]>();
+    const h = harness({ upload });
+    h.task.executionPolicy = { ...h.task.executionPolicy, ...policy };
+    h.store.put("tasks", h.task.id, h.task);
+    expect(() => h.media.prepare(h.report, h.task)).toThrow("Server-authorized execution task");
+    await expect(h.media.publish(h.report.report.id)).rejects.toThrow("has not been prepared");
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it("rejects a caller's forged E2E task and altered report before upload", () => {
+    const upload = vi.fn<InvestigationMediaUploader["upload"]>();
+    const h = harness({ upload });
+    h.store.put("tasks", h.task.id, { ...h.task, kind: "pr-review" });
+    expect(() => h.media.prepare(h.report, h.task)).toThrow("Server-authorized execution task");
+    h.store.put("tasks", h.task.id, h.task);
+    h.report.report.summary = "This report was not sealed by the Server.";
+    expect(() => h.media.prepare(h.report, h.task)).toThrow("Server-sealed report");
+    expect(h.media.receipt(h.report.report.id)).toBeUndefined();
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it("rejects a report attributed to another Server-assigned attempt", () => {
+    const upload = vi.fn<InvestigationMediaUploader["upload"]>();
+    const h = harness({ upload });
+    const record = h.store.get<{ attempt: InvestigationAttemptV1; reportId: string }>(
+      "attempts",
+      h.report.context.attempt.id,
+    )!;
+    h.store.put("attempts", record.attempt.id, { ...record, reportId: "other-report" });
+    expect(() => h.media.prepare(h.report, h.task)).toThrow("Server-assigned report attempt");
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it.each(["producer", "artifact-task", "adopted-attempt"] as const)(
+    "never uploads media with forged %s provenance",
+    async (mismatch) => {
+      const upload = vi.fn<InvestigationMediaUploader["upload"]>();
+      const h = harness({ upload });
+      if (mismatch === "producer") {
+        for (const evidence of h.report.verificationEvidence)
+          evidence.provenance.producer = "investigation-model";
+      } else if (mismatch === "artifact-task") {
+        for (const artifact of h.report.artifacts) artifact.taskId = "another-task";
+      } else {
+        const attemptId = "another-task-attempt";
+        const record = h.store.get<{ attempt: InvestigationAttemptV1; reportId: string }>(
+          "attempts",
+          h.report.context.attempt.id,
+        )!;
+        h.store.put("attempts", attemptId, {
+          ...record,
+          attempt: { ...record.attempt, id: attemptId, taskId: "another-task" },
+        });
+        h.report.context.adoptedAttemptIds.push(attemptId);
+        for (const artifact of h.report.artifacts) artifact.attemptId = attemptId;
+        for (const evidence of h.report.verificationEvidence)
+          evidence.provenance.attemptId = attemptId;
+      }
+      h.saveReport();
+      h.media.prepare(h.report, h.task);
+      await h.media.publish(h.report.report.id);
+      expect(h.media.status(h.report.report.id).blockers).toContain(
+        "media_provenance_mismatch:image-evidence",
+      );
+      expect(h.media.status(h.report.report.id).blockers).toContain(
+        "media_provenance_mismatch:video-evidence",
+      );
+      expect(upload).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rechecks the saved task when publishing a previously prepared receipt", async () => {
+    const upload = vi.fn<InvestigationMediaUploader["upload"]>();
+    const h = harness({ upload });
+    h.media.prepare(h.report, h.task);
+    h.store.put("tasks", h.task.id, { ...h.task, kind: "pr-review" });
+    await expect(h.media.publish(h.report.report.id)).rejects.toThrow(
+      "Server-authorized execution task",
+    );
+    expect(upload).not.toHaveBeenCalled();
+  });
+
   it("uploads bytes before rendering embeds and reuses receipts across comment retry and service restart", async () => {
     const h = harness();
     h.media.prepare(h.report, h.task);
@@ -287,6 +424,7 @@ describe("durable E2E media publication", () => {
     const h = harness();
     h.report.context.e2e!.features[0]!.artifactRefs = [];
     h.report.context.e2e!.features[0]!.assertions[0]!.evidenceRefs = [];
+    h.saveReport();
     h.media.prepare(h.report, h.task);
     await h.media.publish(h.report.report.id);
     expect(h.media.render(h.report.report.id)).toContain("missing_feature_media:feature-0");
@@ -297,6 +435,7 @@ describe("durable E2E media publication", () => {
   it("blocks provenance mismatch and never publishes another attempt's evidence", async () => {
     const h = harness();
     h.report.artifacts[0]!.attemptId = "different-attempt";
+    h.saveReport();
     h.media.prepare(h.report, h.task);
     await h.media.publish(h.report.report.id);
     expect(h.media.render(h.report.report.id)).toContain(
@@ -310,7 +449,17 @@ describe("durable E2E media publication", () => {
     const h = harness();
     const originalAttemptId = h.report.context.attempt.id;
     h.report.context.attempt.id = "resumed-attempt";
+    h.report.context.attempt.number = 2;
     h.report.context.adoptedAttemptIds.push(originalAttemptId);
+    const original = h.store.get<{ attempt: InvestigationAttemptV1; reportId: string }>(
+      "attempts",
+      originalAttemptId,
+    )!;
+    h.store.put("attempts", "resumed-attempt", {
+      ...original,
+      attempt: { ...original.attempt, id: "resumed-attempt", number: 2 },
+    });
+    h.saveReport();
     h.media.prepare(h.report, h.task);
     await h.media.publish(h.report.report.id);
     expect(h.media.render(h.report.report.id)).toContain("Published.");
@@ -323,6 +472,7 @@ describe("durable E2E media publication", () => {
   it("resolves Worker assertion evidence IDs instead of accepting artifact IDs as assertions", async () => {
     const h = harness();
     h.report.context.e2e!.features[0]!.assertions[0]!.evidenceRefs = [h.artifacts[0]!.id];
+    h.saveReport();
     h.media.prepare(h.report, h.task);
     await h.media.publish(h.report.report.id);
     expect(h.media.render(h.report.report.id)).toContain("missing_feature_assertion:feature-0");
@@ -332,11 +482,13 @@ describe("durable E2E media publication", () => {
   it("binds uploads to the pinned revision and rejects a changed sealed manifest", async () => {
     const h = harness();
     h.report.context.e2e!.headSha = "0".repeat(40);
+    h.saveReport();
     h.media.prepare(h.report, h.task);
     await h.media.publish(h.report.report.id);
     expect(h.fetch).not.toHaveBeenCalled();
     expect(h.media.render(h.report.report.id)).toContain("coverage_revision_mismatch");
     h.report.artifacts[0]!.digest = "0".repeat(64);
+    h.saveReport();
     expect(() => h.media.prepare(h.report, h.task)).toThrow("sealed evidence manifest");
   });
 
@@ -347,6 +499,7 @@ describe("durable E2E media publication", () => {
     }));
     const h = harness({ upload });
     h.report.context.e2e!.features[0]!.scenario = "https://attacker.invalid/not-evidence.png";
+    h.saveReport();
     h.media.prepare(h.report, h.task);
     await h.media.publish(h.report.report.id);
     expect(h.media.render(h.report.report.id)).not.toContain("attacker.invalid");
