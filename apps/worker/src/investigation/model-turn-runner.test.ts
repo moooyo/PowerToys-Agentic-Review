@@ -728,6 +728,50 @@ describe("investigation model turn runner", () => {
     expect(p.workspace.assertSourceBinding).toHaveBeenCalled();
   });
 
+  it.each(["brokered", "local checkout"])(
+    "preserves independent submodule identities in the %s review prompt",
+    async (mode) => {
+      const p = prChunkFixture();
+      if (mode === "local checkout") useLocalCheckout(p);
+      const submodules = [
+        {
+          path: "deps/library",
+          repository: "vendor/library",
+          commitSha: "a".repeat(40),
+          parentPath: null,
+          parentCommitSha: p.workspace.sourceBinding!.sourceSha,
+        },
+        {
+          path: "deps/library/nested",
+          repository: "vendor/helper",
+          commitSha: "b".repeat(40),
+          parentPath: "deps/library",
+          parentCommitSha: "a".repeat(40),
+        },
+      ];
+      const gitlinks = [
+        { path: "deps/library", revisionSha: p.manifest.mergeBaseSha, commitSha: "c".repeat(40) },
+        { path: "deps/library", revisionSha: p.manifest.headSha, commitSha: "a".repeat(40) },
+      ];
+      const workspace = {
+        ...p.workspace,
+        sourceBinding: { ...p.workspace.sourceBinding!, submodules, gitlinks },
+      };
+      const prepared = await makePrompt({ ...p.input, workspace }, p.f.io, 128 * 1024, 1024 * 1024);
+      const tag =
+        mode === "local checkout" ? "local_source_review_context" : "frozen_investigation_context";
+      const context = JSON.parse(prepared.prompt.split(`<${tag}>\n`)[1]!.split(`\n</${tag}>`)[0]!);
+      const representation =
+        mode === "local checkout" ? context.workspace : context.sourceRepresentation;
+      expect(representation.submodules).toEqual(submodules);
+      expect(representation.gitlinks).toEqual(gitlinks);
+      expect(prepared.prompt).toContain("Subproject commit");
+      expect(prepared.prompt).toContain("git submodule update");
+      expect(prepared.prompt).toContain("child commit");
+      expect(context.turn.task.subjectRef).toBe(p.input.task.subjectRef);
+    },
+  );
+
   it("leaves oversized initial diff content for exact local Git inspection instead of blocking the review", async () => {
     const p = prChunkFixture({
       chunks: [
@@ -852,6 +896,224 @@ describe("investigation model turn runner", () => {
     const readSourceDependencies = attachSourceDependencies(p);
     return { ...p, sourceContext, readSourceContext, readSourceDependencies };
   }
+
+  function pointerSourceFixture(nested = false) {
+    const p = focusedSourceFixture();
+    const mount = nested ? "deps/library/nested" : "deps/library";
+    p.checkpoint.analysis.coverage.includedUnits.find((unit) => unit.id === "source-core")!.paths =
+      [mount];
+    const submodules = [
+      {
+        path: "deps/library",
+        repository: "vendor/library",
+        commitSha: "a".repeat(40),
+        parentPath: null as string | null,
+        parentCommitSha: p.workspace.sourceBinding!.sourceSha,
+      },
+    ];
+    if (nested)
+      submodules.push({
+        path: mount,
+        repository: "vendor/helper",
+        commitSha: "b".repeat(40),
+        parentPath: "deps/library",
+        parentCommitSha: "a".repeat(40),
+      });
+    const binding = {
+      ...p.workspace.sourceBinding!,
+      submodules,
+      gitlinks: [
+        {
+          path: "deps/library",
+          revisionSha: p.workspace.sourceBinding!.sourceSha,
+          commitSha: "a".repeat(40),
+        },
+      ],
+    };
+    const content = `Subproject commit ${nested ? "b".repeat(40) : "a".repeat(40)}\n`;
+    const pointer = { path: mount, content, digest: hash(content) };
+    const readSourceFile = vi.fn(async (_path: string) => ({ ...pointer }));
+    const workspace = { ...p.workspace, sourceBinding: binding, readSourceFile };
+    return {
+      ...p,
+      mount,
+      binding,
+      pointer,
+      readSourceFile,
+      workspace,
+      input: { ...p.input, workspace },
+    };
+  }
+
+  it.each([false, true])(
+    "delivers a complete pinned mount pointer without reading its directory or searching it as lexical source: nested=%s",
+    async (nested) => {
+      const p = pointerSourceFixture(nested);
+      const result = await makePrompt(p.input, p.f.io, 128 * 1024, 128 * 1024);
+      const context = JSON.parse(
+        result.prompt
+          .split("<frozen_investigation_context>\n")[1]!
+          .split("\n</frozen_investigation_context>")[0]!,
+      );
+      expect(result.projection.selectedUnitIds).toEqual(["source-core"]);
+      expect(context.sourceFiles).toEqual([
+        { path: p.mount, content: p.pointer.content, sha256: p.pointer.digest },
+      ]);
+      expect(context.sourceProjection).toMatchObject({
+        allSelectedFilesIncluded: true,
+        allRequiredFilesIncluded: true,
+        allDependencyFilesIncluded: false,
+      });
+      expect(context.sourceDiscovery.reason).toContain("pinned Git pointers");
+      expect(p.readSourceFile).toHaveBeenCalledExactlyOnceWith(p.mount);
+      expect(p.workspace.resolveSourcePath).not.toHaveBeenCalled();
+      expect(p.readSourceContext).not.toHaveBeenCalled();
+      expect(p.readSourceDependencies).not.toHaveBeenCalled();
+      expect(p.f.start).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps pinned pointers out of mixed focused lexical context while retaining ordinary complete source", async () => {
+    const p = pointerSourceFixture();
+    p.checkpoint.analysis.coverage.includedUnits.find((unit) => unit.id === "source-core")!.paths =
+      ["src/Core.cs", p.mount];
+    const result = await makePrompt(p.input, p.f.io, 128 * 1024, 128 * 1024);
+    const context = JSON.parse(
+      result.prompt
+        .split("<frozen_investigation_context>\n")[1]!
+        .split("\n</frozen_investigation_context>")[0]!,
+    );
+    expect(p.readSourceContext).toHaveBeenCalledExactlyOnceWith(["src/Core.cs"]);
+    expect(context.sourceFiles).toEqual(
+      expect.arrayContaining([
+        { path: p.mount, content: p.pointer.content, sha256: p.pointer.digest },
+        {
+          path: "src/Core.cs",
+          content: p.sourceContext.requiredFiles[0]!.content,
+          sha256: p.sourceContext.requiredFiles[0]!.digest,
+        },
+      ]),
+    );
+    expect(context.sourceDiscovery.unsupportedSeedPaths).toEqual([p.mount]);
+    expect(context.sourceProjection).toMatchObject({
+      allSelectedFilesIncluded: true,
+      allRequiredFilesIncluded: true,
+      allDependencyFilesIncluded: false,
+    });
+    expect(p.workspace.resolveSourcePath).not.toHaveBeenCalled();
+  });
+
+  it("delivers a legacy full-diff mount seed as a pointer and retains its unsupported lexical-search status", async () => {
+    const p = pointerSourceFixture();
+    const coverage = p.checkpoint.analysis.coverage;
+    coverage.includedUnits = coverage.includedUnits.filter((unit) => unit.id !== "source-core");
+    coverage.unresolvedUnitRefs = ["full-diff"];
+    coverage.includedUnits.find((unit) => unit.kind === "full_diff")!.paths = [p.mount];
+    p.readSourceDependencies.mockImplementation(async (seedPaths) => ({
+      sourceSha: p.binding.sourceSha,
+      seedPaths: [...seedPaths],
+      unsupportedSeedPaths: [p.mount],
+      symbols: ["removed"],
+      searchDepth: 1,
+      queries: [
+        {
+          revisionSha: p.binding.sourceSha,
+          symbols: ["removed"],
+          paths: ["src/deleted.ts"],
+          depth: 1,
+        },
+      ],
+      files: [],
+    }));
+    const result = await makePrompt(p.input, p.f.io, 128 * 1024, 128 * 1024);
+    const context = JSON.parse(
+      result.prompt
+        .split("<frozen_investigation_context>\n")[1]!
+        .split("\n</frozen_investigation_context>")[0]!,
+    );
+    expect(result.projection.selectedUnitIds).toEqual(["full-diff"]);
+    expect(context.sourceFiles).toEqual([
+      { path: p.mount, content: p.pointer.content, sha256: p.pointer.digest },
+    ]);
+    expect(context.sourceDiscovery.unsupportedSeedPaths).toEqual([p.mount]);
+    expect(p.readSourceFile).toHaveBeenCalledExactlyOnceWith(p.mount);
+    expect(p.readSourceDependencies).toHaveBeenCalledExactlyOnceWith([p.mount, "src/deleted.ts"]);
+    expect(p.readSourceContext).not.toHaveBeenCalled();
+    expect(p.workspace.resolveSourcePath).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "pointer text",
+    "digest",
+    "returned path",
+    "root gitlink",
+    "parent pin",
+    "binding mutation",
+  ])("rejects a pinned mount with invalid %s before model dispatch", async (mutation) => {
+    const p = pointerSourceFixture();
+    if (mutation === "pointer text") p.pointer.content = `Subproject commit ${"f".repeat(40)}\n`;
+    if (mutation === "digest") p.pointer.digest = "0".repeat(64);
+    if (mutation === "returned path") p.pointer.path = "deps/other";
+    if (mutation === "root gitlink") p.binding.gitlinks[0]!.commitSha = "f".repeat(40);
+    if (mutation === "parent pin") p.binding.submodules[0]!.parentCommitSha = "f".repeat(40);
+    if (mutation === "binding mutation")
+      p.readSourceFile.mockImplementation(async () => {
+        p.binding.submodules[0]!.commitSha = "f".repeat(40);
+        return { ...p.pointer };
+      });
+    await expect(makePrompt(p.input, p.f.io, 128 * 1024, 128 * 1024)).rejects.toMatchObject({
+      code: "MODEL_SOURCE_UNAVAILABLE",
+    });
+    expect(p.workspace.resolveSourcePath).not.toHaveBeenCalled();
+    expect(p.f.start).not.toHaveBeenCalled();
+  });
+
+  it.each(["unreported pointer seed", "pointer query", "pointer file"])(
+    "rejects a dependency broker result claiming lexical source for %s",
+    async (mutation) => {
+      const p = pointerSourceFixture();
+      const coverage = p.checkpoint.analysis.coverage;
+      coverage.includedUnits = coverage.includedUnits.filter((unit) => unit.id !== "source-core");
+      coverage.unresolvedUnitRefs = ["full-diff"];
+      coverage.includedUnits.find((unit) => unit.kind === "full_diff")!.paths = [p.mount];
+      p.readSourceDependencies.mockImplementation(async (seedPaths) => ({
+        sourceSha: p.binding.sourceSha,
+        seedPaths: [...seedPaths],
+        ...(mutation === "unreported pointer seed" ? {} : { unsupportedSeedPaths: [p.mount] }),
+        symbols: ["removed"],
+        searchDepth: 1,
+        queries: [
+          {
+            revisionSha: p.binding.sourceSha,
+            symbols: ["removed"],
+            paths: mutation === "pointer query" ? [p.mount] : ["src/deleted.ts"],
+            depth: 1,
+          },
+        ],
+        files: mutation === "pointer file" ? [{ ...p.pointer }] : [],
+      }));
+      await expect(makePrompt(p.input, p.f.io, 128 * 1024, 128 * 1024)).rejects.toMatchObject({
+        code: "MODEL_SOURCE_UNAVAILABLE",
+      });
+      expect(p.readSourceFile).not.toHaveBeenCalled();
+      expect(p.f.start).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a focused context broker that presents a mount pointer as an ordinary source file", async () => {
+    const p = pointerSourceFixture();
+    p.checkpoint.analysis.coverage.includedUnits.find((unit) => unit.id === "source-core")!.paths =
+      ["src/Core.cs", p.mount];
+    p.readSourceContext.mockResolvedValue({
+      ...p.sourceContext,
+      contextFiles: [{ ...p.sourceContext.contextFiles[0]!, ...p.pointer }],
+    });
+    await expect(makePrompt(p.input, p.f.io, 128 * 1024, 128 * 1024)).rejects.toMatchObject({
+      code: "MODEL_SOURCE_UNAVAILABLE",
+    });
+    expect(p.readSourceFile).not.toHaveBeenCalled();
+    expect(p.f.start).not.toHaveBeenCalled();
+  });
 
   function jointBlockedSourceFixture(optionalContent?: string, requiredFileBytes = 64) {
     const p = focusedSourceFixture(optionalContent);

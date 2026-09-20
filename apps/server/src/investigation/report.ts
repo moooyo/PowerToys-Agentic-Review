@@ -20,6 +20,7 @@ import {
   projectInvestigationCheckpointPresentation,
   validateInvestigationResult,
   validateInvestigationSourceCoverage,
+  validateInvestigationSourceProvenance,
   validateInvestigationTask,
 } from "@agentic-review/contracts";
 import {
@@ -431,10 +432,32 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
     "checkpoint_budget_mismatch",
     "The frozen investigation budget cannot change during report assembly.",
   );
+  if (checkpoint.runtime.sourceProvenance !== undefined) {
+    const validation = validateInvestigationSourceProvenance(
+      checkpoint.runtime.sourceProvenance,
+      task,
+    );
+    requireCondition(
+      (task.executionPolicy.mode === "source_read" ||
+        (task.executionPolicy.mode === "execute" &&
+          task.executionPolicy.allowRepositoryExecution &&
+          task.executionPolicy.authorizationRef !== null)) &&
+        task.executionPolicy.allowedSubjectRefs.includes(task.subjectRef) &&
+        subject.repositoryId === task.repository.id &&
+        subject.workItemId === task.workItem.id &&
+        validation.valid,
+      422,
+      "invalid_source_provenance",
+      "Accepted source provenance must preserve the authorized frozen primary source and dependency pins.",
+    );
+  }
   requireEqual(
     header.context,
     {
       ...(checkpoint.runtime.e2e === undefined ? {} : { e2e: checkpoint.runtime.e2e }),
+      ...(checkpoint.runtime.sourceProvenance === undefined
+        ? {}
+        : { sourceProvenance: checkpoint.runtime.sourceProvenance }),
       repository: task.repository,
       workItem: task.workItem,
       task: {

@@ -430,7 +430,7 @@ describe("managed native Git source materialization", () => {
     await expect(result.assertBinding()).rejects.toMatchObject({ code: "SOURCE_BINDING_MISMATCH" });
   });
 
-  it("continues to reject submodules before an E2E checkout", async () => {
+  it("rejects undeclared submodules before acquiring an E2E dependency", async () => {
     const f = fixture();
     f.input.task.kind = "pr-e2e";
     f.input.task.executionPolicy = {
@@ -442,8 +442,8 @@ describe("managed native Git source materialization", () => {
     f.setListing(`160000 commit ${sha}\ttooling/submodule\0`);
     await expect(
       new ProductionInvestigationGitSourceMaterializer(f.options).materialize(f.input, f.context),
-    ).rejects.toMatchObject({ code: "SOURCE_TREE_UNSUPPORTED" });
-    expect(f.calls.some((call) => call.arguments.includes("checkout"))).toBe(false);
+    ).rejects.toMatchObject({ code: "SOURCE_SUBMODULE_UNSUPPORTED" });
+    expect(f.calls.some((call) => call.workingDirectory !== source)).toBe(false);
   });
 
   it("does not reuse immutable symlink metadata for a saved local patch", async () => {

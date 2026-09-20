@@ -1744,6 +1744,172 @@ describe("public reply safety and size", () => {
     );
   });
 
+  function submoduleSourceReport(path = "deps/spdlog/include/spdlog/common.h") {
+    const report = preview();
+    const subject = report.context.subjects.find(
+      (entry) => entry.id === report.context.task.subjectRef,
+    )!;
+    if (subject.kind !== "original_pr")
+      throw new Error("The synthetic source must be an original PR.");
+    report.context.sourceProvenance = {
+      subjectRef: subject.id,
+      sourceSha: subject.headSha,
+      submodules: [
+        {
+          path: "deps/spdlog",
+          repository: "gabime/spdlog",
+          commitSha: "c".repeat(40),
+          parentPath: null,
+          parentCommitSha: subject.headSha,
+        },
+      ],
+    };
+    report.findings[0]!.locations = [
+      {
+        kind: "source",
+        subjectRef: subject.id,
+        path,
+        startLine: 7,
+        endLine: 11,
+      },
+    ];
+    return report;
+  }
+
+  it("links a mounted dependency to its own pinned repository and relative path", () => {
+    const report = submoduleSourceReport("deps/spdlog/include/spdlog/A(test)#1.h");
+    const body = render(report);
+    expect(body).toContain(
+      `https://github.com/gabime/spdlog/blob/${"c".repeat(40)}/include/spdlog/A%28test%29%231.h#L7-L11`,
+    );
+    expect(body).not.toContain(
+      `https://github.com/moooyo/PowerToys/blob/${"b".repeat(40)}/deps/spdlog/`,
+    );
+    expect(body).toContain("deps/spdlog/include/spdlog/");
+  });
+
+  it("uses the deepest recorded mount for a nested dependency", () => {
+    const report = submoduleSourceReport("deps/spdlog/third_party/fmt/include/fmt/base.h");
+    report.context.sourceProvenance!.submodules.push({
+      path: "deps/spdlog/third_party/fmt",
+      repository: "fmtlib/fmt",
+      commitSha: "d".repeat(40),
+      parentPath: "deps/spdlog",
+      parentCommitSha: "c".repeat(40),
+    });
+    const body = render(report);
+    expect(body).toContain(
+      `https://github.com/fmtlib/fmt/blob/${"d".repeat(40)}/include/fmt/base.h#L7-L11`,
+    );
+    expect(body).not.toContain("https://github.com/gabime/spdlog/blob/");
+    expect(body).not.toContain("https://github.com/moooyo/PowerToys/blob/");
+  });
+
+  it("uses mounted path ownership even when the root and dependency commits have the same SHA", () => {
+    const report = submoduleSourceReport();
+    report.context.sourceProvenance!.submodules[0]!.commitSha =
+      report.context.sourceProvenance!.sourceSha;
+    expect(render(report)).toContain(
+      `https://github.com/gabime/spdlog/blob/${"b".repeat(40)}/include/spdlog/common.h#L7-L11`,
+    );
+  });
+
+  it("does not borrow another subject's pinned dependency identity", () => {
+    const report = submoduleSourceReport();
+    const original = report.context.subjects[0]!;
+    if (original.kind !== "original_pr")
+      throw new Error("The synthetic source must be an original PR.");
+    const other = { ...original, id: "another-source-subject", headSha: "e".repeat(40) };
+    report.context.subjects.push(other);
+    report.findings[0]!.locations[0] = {
+      kind: "source",
+      subjectRef: other.id,
+      path: "deps/spdlog/include/spdlog/common.h",
+      startLine: 1,
+      endLine: 1,
+    };
+    expect(render(report)).not.toContain("https://github.com/");
+  });
+
+  it("keeps parent-repository links outside every dependency mount", () => {
+    const report = submoduleSourceReport("src/runner/main.cpp");
+    expect(render(report)).toContain(
+      `https://github.com/moooyo/PowerToys/blob/${"b".repeat(40)}/src/runner/main.cpp#L7-L11`,
+    );
+    report.findings[0]!.locations[0] = {
+      kind: "source",
+      subjectRef: report.context.task.subjectRef,
+      path: "deps/spdlog-helper/readme.md",
+      startLine: 1,
+      endLine: 1,
+    };
+    expect(render(report)).toContain(
+      `https://github.com/moooyo/PowerToys/blob/${"b".repeat(40)}/deps/spdlog-helper/readme.md#L1`,
+    );
+  });
+
+  it.each(["deps/spdlog", "Deps/spdlog/include/spdlog/common.h"])(
+    "does not invent a parent blob URL for the mount or ambiguous casing %s",
+    (path) => {
+      const body = render(submoduleSourceReport(path));
+      expect(body).not.toContain("https://github.com/");
+      expect(body).toContain("public source link unavailable");
+    },
+  );
+
+  it("does not fall back to a parent dependency for an exact nested mount or its case alias", () => {
+    const report = submoduleSourceReport("deps/spdlog/third_party/fmt");
+    report.context.sourceProvenance!.submodules.push({
+      path: "deps/spdlog/third_party/fmt",
+      repository: "fmtlib/fmt",
+      commitSha: "d".repeat(40),
+      parentPath: "deps/spdlog",
+      parentCommitSha: "c".repeat(40),
+    });
+    expect(render(report)).not.toContain("https://github.com/");
+    report.findings[0]!.locations[0] = {
+      kind: "source",
+      subjectRef: report.context.task.subjectRef,
+      path: "deps/spdlog/third_party/FMT/include/fmt/base.h",
+      startLine: 1,
+      endLine: 1,
+    };
+    expect(render(report)).not.toContain("https://github.com/");
+  });
+
+  it.each([
+    "repository",
+    "sourceSha",
+    "parentCommitSha",
+    "parentPath",
+    "subjectRef",
+    "null",
+  ] as const)("does not manufacture a link from invalid dependency provenance: %s", (field) => {
+    const report = submoduleSourceReport();
+    const provenance = report.context.sourceProvenance!;
+    if (field === "repository")
+      provenance.submodules[0]!.repository = "github.com@private.invalid/repo";
+    else if (field === "sourceSha") provenance.sourceSha = "e".repeat(40);
+    else if (field === "parentCommitSha")
+      provenance.submodules[0]!.parentCommitSha = "e".repeat(40);
+    else if (field === "parentPath") provenance.submodules[0]!.parentPath = "missing-parent";
+    else if (field === "subjectRef") provenance.subjectRef = "unknown-source-subject";
+    else Object.assign(report.context, { sourceProvenance: null });
+    const body = render(report);
+    expect(body).not.toContain("https://github.com/");
+    expect(body).not.toContain("private.invalid");
+    expect(body).toContain("public source link unavailable");
+  });
+
+  it("does not expose protected values in an otherwise well-formed dependency repository", () => {
+    const report = submoduleSourceReport();
+    report.context.sourceProvenance!.submodules[0]!.repository =
+      "owner/ghp_abcdefghijklmnopqrstuvwxyz012345";
+    const body = render(report);
+    expect(body).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz012345");
+    expect(body).not.toContain("https://github.com/");
+  });
+
   it("does not expose secrets through an otherwise valid source-link destination", () => {
     const report = preview();
     const credential = "ghp_abcdefghijklmnopqrstuvwxyz012345";

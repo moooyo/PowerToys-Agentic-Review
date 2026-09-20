@@ -32,6 +32,7 @@ import {
   publicationPolicy,
   publicationReason,
   publicationStage,
+  publicSourcePreparationBlockerCode,
   stoppedCopy,
 } from "./progress-publication.js";
 import { migrateLegacyProgressReply } from "./progress-publication-legacy.js";
@@ -442,6 +443,7 @@ export class InvestigationProgressReplies {
     if (record === undefined || !this.#currentTask(record, task)) return;
     if (record.resultOnly && task.state !== "completed") return;
     try {
+      const attempt = this.#latestAttempt(task.id);
       const source =
         report ??
         (task.state === "completed" && task.latestReportRef !== null
@@ -454,9 +456,34 @@ export class InvestigationProgressReplies {
         "progress_reply_report_binding_changed",
         "The completed task has no bound sealed report.",
       );
-      const attempt = this.#latestAttempt(task.id);
       const stopReason = source?.report.loop.stopReason ?? attempt?.terminationReason ?? undefined;
-      const copy = stoppedCopy(task.state, stopReason, record.desired.context.mode);
+      const checkpoint =
+        task.state === "blocked"
+          ? this.options.store.get<InvestigationLoopCheckpointV1>("checkpoints", task.id)
+          : undefined;
+      const blockerReport =
+        source ??
+        (task.state === "blocked" && task.latestReportRef !== null
+          ? this.options.store.get<InvestigationResultV1>("reports", task.latestReportRef.id)
+          : undefined);
+      if (
+        source === undefined &&
+        blockerReport !== undefined &&
+        blockerReport.context.attempt.id === attempt?.id
+      )
+        this.#assertReport(record, task, blockerReport);
+      const blockerCode =
+        task.state !== "blocked" || attempt === undefined
+          ? undefined
+          : blockerReport?.context.attempt.id === attempt.id &&
+              blockerReport.context.attempt.number === attempt.number
+            ? publicSourcePreparationBlockerCode(blockerReport.diagnostics)
+            : checkpoint?.taskId === task.id &&
+                checkpoint.attemptId === attempt.id &&
+                checkpoint.stopReason === "blocked"
+              ? publicSourcePreparationBlockerCode(checkpoint.analysis.diagnostics)
+              : undefined;
+      const copy = stoppedCopy(task.state, blockerCode ?? stopReason, record.desired.context.mode);
       const startedAt =
         record.firstStartedAt ??
         attempt?.startedAt ??
@@ -479,7 +506,7 @@ export class InvestigationProgressReplies {
         context,
         copy.failure,
         source ?? null,
-        `task:${task.id}:${task.updatedAt}:${task.state}:${attempt?.number ?? 0}:${task.latestReportRef?.digest ?? ""}:${stopReason ?? ""}:${investigationContentDigest(context.usage ?? null)}`,
+        `task:${task.id}:${task.updatedAt}:${task.state}:${attempt?.number ?? 0}:${task.latestReportRef?.digest ?? ""}:${stopReason ?? ""}:${blockerCode ?? ""}:${investigationContentDigest(context.usage ?? null)}`,
         task.updatedAt,
       );
     } catch {

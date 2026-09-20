@@ -1,5 +1,6 @@
 import type {
   InvestigationCommentPublicationSummary,
+  InvestigationDiagnostic,
   InvestigationReportRef,
   InvestigationTaskV1,
 } from "@agentic-review/contracts";
@@ -209,6 +210,50 @@ export function publicationReason(code: string | null): string | null {
   return "Comment delivery needs attention. The task outcome and retained delivery history remain available.";
 }
 
+const sourcePreparationBlockers = {
+  SOURCE_TREE_UNSUPPORTED: {
+    failure:
+      "The pinned source snapshot contains a repository entry the worker cannot safely prepare (SOURCE_TREE_UNSUPPORTED).",
+    nextStep:
+      "Use a worker that supports the repository's source layout, then explicitly resume this task.",
+  },
+  SOURCE_SUBMODULE_UNAVAILABLE: {
+    failure: "A pinned submodule commit could not be obtained (SOURCE_SUBMODULE_UNAVAILABLE).",
+    nextStep:
+      "Check worker access to the configured submodule source and availability of the recorded commit, then explicitly resume this task.",
+  },
+  SOURCE_SUBMODULE_UNSUPPORTED: {
+    failure:
+      "The source uses a submodule configuration the worker cannot safely prepare (SOURCE_SUBMODULE_UNSUPPORTED).",
+    nextStep:
+      "Use a worker that supports this submodule configuration, then explicitly resume this task.",
+  },
+  SOURCE_SUBMODULE_LIMIT_EXCEEDED: {
+    failure:
+      "Preparing the pinned submodules exceeded the worker's configured source limits (SOURCE_SUBMODULE_LIMIT_EXCEEDED).",
+    nextStep:
+      "Review the submodule source limits and repository size, then explicitly resume with an appropriately configured worker.",
+  },
+  SOURCE_SUBMODULE_BINDING_MISMATCH: {
+    failure:
+      "A submodule did not match the commit recorded by its parent repository (SOURCE_SUBMODULE_BINDING_MISMATCH).",
+    nextStep:
+      "Resolve the source binding mismatch and prepare the exact pinned commits before explicitly resuming this task.",
+  },
+} as const;
+
+/** Older retained diagnostics must not replace a later, unrelated terminal blocker. */
+export function publicSourcePreparationBlockerCode(
+  diagnostics: readonly Pick<InvestigationDiagnostic, "code" | "category">[],
+): keyof typeof sourcePreparationBlockers | undefined {
+  const latest = diagnostics.findLast(
+    (diagnostic) => diagnostic.category === "blocker" || diagnostic.category === "error",
+  );
+  return latest !== undefined && Object.hasOwn(sourcePreparationBlockers, latest.code)
+    ? (latest.code as keyof typeof sourcePreparationBlockers)
+    : undefined;
+}
+
 export function stoppedCopy(
   status: NonNullable<ProgressReplyContext["status"]>,
   reasonCode?: string,
@@ -244,6 +289,12 @@ export function stoppedCopy(
       nextStep:
         "A repository operator must review the budget and explicitly resume the task if more investigation is needed.",
     };
+  if (
+    status === "blocked" &&
+    reasonCode !== undefined &&
+    Object.hasOwn(sourcePreparationBlockers, reasonCode)
+  )
+    return { ...sourcePreparationBlockers[reasonCode as keyof typeof sourcePreparationBlockers] };
   if (status === "blocked")
     return {
       failure:

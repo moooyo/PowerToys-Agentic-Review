@@ -8,6 +8,7 @@ import {
   type InvestigationResultV1,
   type InvestigationSubjectV1,
   type InvestigationUsageSummary,
+  validateInvestigationSourceProvenance,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import { InvestigationRequestError } from "./errors.js";
@@ -354,9 +355,40 @@ function sourceUrl(
     redactPrivateText(repository, identifiers) !== repository
   )
     return null;
-  const sha = subjectSha(subject);
+  let sourceRepository = repository;
+  let sourcePath = location.path;
+  let sha = subjectSha(subject);
+  const provenance = report.context.sourceProvenance;
+  if (provenance !== undefined) {
+    if (
+      !validateInvestigationSourceProvenance(provenance, {
+        subjectRef: report.context.task.subjectRef,
+        subjects: report.context.subjects,
+      }).valid
+    )
+      return null;
+    const foldedPath = location.path.toLowerCase();
+    const owner = provenance.submodules
+      .filter(
+        (module) =>
+          foldedPath === module.path.toLowerCase() ||
+          foldedPath.startsWith(`${module.path.toLowerCase()}/`),
+      )
+      .sort((left, right) => right.path.length - left.path.length)[0];
+    if (owner !== undefined) {
+      // A mount is a parent gitlink, not a blob. Casing and subject changes cannot select a blob.
+      if (provenance.subjectRef !== subject.id || !location.path.startsWith(`${owner.path}/`))
+        return null;
+      sourceRepository = owner.repository;
+      sourcePath = location.path.slice(owner.path.length + 1);
+      sha = owner.commitSha;
+    }
+  }
   if (
     sha === null ||
+    !repositoryPath(sourcePath) ||
+    redactPrivateText(sourceRepository, identifiers) !== sourceRepository ||
+    redactPrivateText(sourcePath, identifiers) !== sourcePath ||
     !Number.isSafeInteger(location.startLine) ||
     location.startLine < 1 ||
     !Number.isSafeInteger(location.endLine) ||
@@ -364,7 +396,7 @@ function sourceUrl(
   )
     return null;
   const end = location.endLine === location.startLine ? "" : `-L${location.endLine}`;
-  return `https://github.com/${repository}/blob/${sha}/${location.path.split("/").map(encodeSegment).join("/")}#L${location.startLine}${end}`;
+  return `https://github.com/${sourceRepository}/blob/${sha}/${sourcePath.split("/").map(encodeSegment).join("/")}#L${location.startLine}${end}`;
 }
 
 const human = (value: string): string => value.replaceAll("_", " ").replaceAll("-", " ");

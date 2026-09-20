@@ -7,6 +7,7 @@ import {
   type InvestigationRuntimeState,
   isCorrectableInvestigationModelOutputIssue,
   validateInvestigationAnalysisForTask,
+  validateInvestigationSourceProvenance,
 } from "@agentic-review/contracts";
 import {
   applyInvestigationLoopRound,
@@ -168,6 +169,12 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
           );
           assertAcceptedCheckpoint(claim, response.checkpoint);
           checkpoint = response.checkpoint;
+          if (
+            request.kind === "source_provenance" &&
+            investigationContentDigest(checkpoint.runtime.sourceProvenance ?? null) !==
+              investigationContentDigest(request.provenance)
+          )
+            throw new Error("The trusted source provenance was not retained by its checkpoint.");
           // The acknowledged analysis already charged this call, including its final budget unit.
           if (request.kind === "analysis" && checkpoint.round === request.round.round) {
             pendingModelUsage = undefined;
@@ -201,6 +208,35 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             );
           }
         };
+        const binding = workspace.sourceBinding;
+        const provenance =
+          binding !== null && (binding.submodules?.length ?? 0) > 0
+            ? structuredClone({
+                subjectRef: binding.subjectRef,
+                sourceSha: binding.sourceSha,
+                submodules: [...binding.submodules!],
+              })
+            : undefined;
+        const previousProvenance = checkpoint.runtime.sourceProvenance;
+        if (
+          (provenance !== undefined &&
+            (claim.task.executionPolicy.mode === "snapshot_only" ||
+              !claim.task.executionPolicy.allowedSubjectRefs.includes(provenance.subjectRef) ||
+              !validateInvestigationSourceProvenance(provenance, {
+                subjectRef: claim.task.subjectRef,
+                subjects: claim.task.subjects,
+              }).valid)) ||
+          (previousProvenance !== undefined &&
+            investigationContentDigest(previousProvenance) !==
+              investigationContentDigest(provenance ?? null))
+        )
+          throw new InvestigationExecutionStopped(
+            "blocked",
+            "SOURCE_SUBMODULE_BINDING_MISMATCH",
+            "The materialized dependency graph does not match the task's frozen source provenance.",
+          );
+        if (provenance !== undefined && previousProvenance === undefined)
+          await accepted({ kind: "source_provenance", lease: claim.lease, provenance });
         const uploadArtifacts = async (
           artifacts: InvestigationRuntimeState["artifacts"],
         ): Promise<void> => {
@@ -847,6 +883,21 @@ function classifyStop(error: unknown): {
         "The server cancelled the task before accepting further work; the last accepted checkpoint was retained.",
     };
   }
+  const submodulePrerequisites: Readonly<Record<string, string>> = {
+    SOURCE_SUBMODULE_UNAVAILABLE:
+      "A pinned Git submodule could not be acquired from its recorded public repository. Restore access to the exact dependency commit before resuming.",
+    SOURCE_SUBMODULE_UNSUPPORTED:
+      "A Git submodule definition uses an unsupported repository URL or configuration. Resolve the recorded source prerequisite before resuming.",
+    SOURCE_SUBMODULE_LIMIT_EXCEEDED:
+      "The pinned Git submodule graph exceeds the configured depth, count, or materialization budget. Review the source limits before resuming.",
+    SOURCE_SUBMODULE_BINDING_MISMATCH:
+      "A Git submodule no longer matches its recorded path, parent commit, or pinned dependency commit. Restore the exact source binding before resuming.",
+  };
+  const submoduleMessage = Object.hasOwn(submodulePrerequisites, code)
+    ? submodulePrerequisites[code]
+    : undefined;
+  if (submoduleMessage !== undefined)
+    return { outcome: "blocked", code, message: submoduleMessage };
   if (
     [
       "SOURCE_DIFF_TOO_LARGE",

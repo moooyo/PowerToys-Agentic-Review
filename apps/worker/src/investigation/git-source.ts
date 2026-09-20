@@ -14,6 +14,7 @@ import {
   OwnedHardlinkError,
   validateOwnedHardlinkGroups,
 } from "./owned-hardlinks.js";
+import { parsePinnedGitSubmodules } from "./submodule-manifest.js";
 import {
   type InvestigationPrDiffChunk,
   type InvestigationPrDiffChunkDescriptor,
@@ -53,6 +54,8 @@ export interface InvestigationGitSourceOptions {
   readonly maximumTreeEntries?: number;
   readonly maximumPatchBytes?: number;
   readonly maximumDiffBytes?: number;
+  readonly maximumSubmodules?: number;
+  readonly maximumSubmoduleDepth?: number;
   /** A prior completed step's server-persisted patch; never an uncertain in-flight mutation. */
   readonly restorePatchSubject?: Extract<InvestigationSubjectV1, { kind: "local_patch" }>;
   readonly readPatchArtifact?: (
@@ -151,8 +154,34 @@ const dependencySourceExtensions = new Set([
 ]);
 interface GitSourceTreeEntry {
   readonly path: string;
-  readonly mode: "100644" | "100755" | "120000";
+  readonly mode: "100644" | "100755" | "120000" | "160000";
+  /** The immutable blob object, or the gitlink's commit object. */
   readonly blobId: string;
+}
+
+type GitSourceInput = InvestigationWorkspaceInput & { readonly destinationDirectory: string };
+type PreparedGitSource = Awaited<ReturnType<InvestigationSourceMaterializer["materialize"]>>;
+type GitRun = (
+  argumentsList: readonly string[],
+  signal?: AbortSignal,
+  extra?: Readonly<Record<string, string>>,
+  allowGrepNoMatch?: boolean,
+) => Promise<Uint8Array>;
+interface GitRepositoryNode {
+  readonly repository: string;
+  readonly sourceSha: string;
+  readonly sourceTree: ReadonlyMap<string, GitSourceTreeEntry>;
+  readonly run: GitRun;
+  readonly prepared: PreparedGitSource;
+  readonly assertMetadata: () => Promise<void>;
+  readonly readBlob: (kind: "blob" | "-s", path: string) => Promise<Uint8Array>;
+  readonly grep: (argumentsList: readonly string[]) => Promise<Uint8Array>;
+  readonly children: readonly { readonly path: string; readonly node: GitRepositoryNode }[];
+}
+interface GitGraphScope {
+  readonly depth: number;
+  readonly ancestors: ReadonlySet<string>;
+  readonly budget: { modules: number; entries: number };
 }
 
 /** Public exact-SHA source acquisition; every Git process belongs to the attempt's ProcessHost. */
@@ -177,6 +206,8 @@ export class ProductionInvestigationGitSourceMaterializer
       ["maximumTreeEntries", options.maximumTreeEntries ?? 250_000, 1_000_000],
       ["maximumPatchBytes", options.maximumPatchBytes ?? 32 * 1024 * 1024, 32 * 1024 * 1024],
       ["maximumDiffBytes", options.maximumDiffBytes ?? 64 * 1024 * 1024, 256 * 1024 * 1024],
+      ["maximumSubmodules", options.maximumSubmodules ?? 32, 128],
+      ["maximumSubmoduleDepth", options.maximumSubmoduleDepth ?? 4, 8],
     ] as const) {
       if (!Number.isSafeInteger(value) || value < 1 || value > maximum)
         throw failure(
@@ -204,9 +235,23 @@ export class ProductionInvestigationGitSourceMaterializer
   }
 
   public async materialize(
-    input: InvestigationWorkspaceInput & { readonly destinationDirectory: string },
+    input: GitSourceInput,
     context: InvestigationWorkspaceContext,
-  ): Promise<Awaited<ReturnType<InvestigationSourceMaterializer["materialize"]>>> {
+  ): Promise<PreparedGitSource> {
+    return (
+      await this.#materializeRepository(input, context, {
+        depth: 0,
+        ancestors: new Set(),
+        budget: { modules: 0, entries: 0 },
+      })
+    ).prepared;
+  }
+
+  async #materializeRepository(
+    input: GitSourceInput,
+    context: InvestigationWorkspaceContext,
+    graph: GitGraphScope,
+  ): Promise<GitRepositoryNode> {
     context.signal.throwIfAborted();
     const task = structuredClone(input.task);
     if (task.executionPolicy.mode === "snapshot_only")
@@ -215,7 +260,11 @@ export class ProductionInvestigationGitSourceMaterializer
         "Snapshot-only tasks must not materialize repository source.",
       );
     assertCanonicalRepository(task.repository.fullName);
-    const repository = this.#repositories.get(task.repository.fullName.toLowerCase());
+    // Nested repositories are admitted only through a frozen, validated gitlink declaration.
+    const repository =
+      graph.depth === 0
+        ? this.#repositories.get(task.repository.fullName.toLowerCase())
+        : task.repository.fullName;
     if (repository === undefined)
       throw failure(
         "SOURCE_REPOSITORY_NOT_ALLOWED",
@@ -243,6 +292,22 @@ export class ProductionInvestigationGitSourceMaterializer
       subject.kind === "original_pr" || subject.kind === "remote_branch" ? subject.baseSha : null;
     assertSha(sourceSha);
     if (baseSha !== null) assertSha(baseSha);
+    const repositoryIdentity = `${repository.toLowerCase()}\0${sourceSha}`;
+    if (graph.ancestors.has(repositoryIdentity))
+      throw failure(
+        "SOURCE_SUBMODULE_UNSUPPORTED",
+        "The pinned submodule graph contains an ancestry cycle.",
+      );
+    if (
+      graph.depth > 0 &&
+      (graph.depth > (this.#options.maximumSubmoduleDepth ?? 4) ||
+        ++graph.budget.modules > (this.#options.maximumSubmodules ?? 32))
+    )
+      throw failure(
+        "SOURCE_SUBMODULE_LIMIT_EXCEEDED",
+        "The pinned submodule graph exceeds its count or depth limit.",
+      );
+    const ancestors = new Set([...graph.ancestors, repositoryIdentity]);
     if (
       subject.kind === "original_pr" &&
       hash(Buffer.from(`${subject.baseSha}\0${subject.headSha}`, "utf8")) !== subject.revisionKey
@@ -345,7 +410,8 @@ export class ProductionInvestigationGitSourceMaterializer
     // Git link objects are safe to retain as verified target text in any original checkout.
     // This never authorizes a filesystem link or supplies the referenced target's semantics.
     const allowInertSymlinks =
-      subject.kind !== "local_patch" && this.#options.restorePatchSubject === undefined;
+      graph.depth > 0 ||
+      (subject.kind !== "local_patch" && this.#options.restorePatchSubject === undefined);
     const allowImmutableSourceDiscovery =
       task.executionPolicy.mode === "source_read" && allowInertSymlinks;
     const inertSymlinks = new Map<
@@ -353,13 +419,23 @@ export class ProductionInvestigationGitSourceMaterializer
       { readonly path: string; readonly revisionSha: string }
     >();
     let sourceTree: ReadonlyMap<string, GitSourceTreeEntry> = new Map();
+    const revisionTrees = new Map<string, readonly GitSourceTreeEntry[]>();
     const assertGitRevisionTree = async (revisionSha: string) => {
+      if (revisionTrees.has(revisionSha)) return;
       const entries = this.#assertGitTree(
         await run(["ls-tree", "-r", "-z", "--full-tree", revisionSha]),
         allowInertSymlinks,
       );
-      if (revisionSha === sourceSha)
+      revisionTrees.set(revisionSha, entries);
+      if (revisionSha === sourceSha) {
         sourceTree = new Map(entries.map((entry) => [entry.path, entry]));
+        graph.budget.entries += entries.length;
+        if (graph.budget.entries > (this.#options.maximumTreeEntries ?? 250_000))
+          throw failure(
+            "SOURCE_SUBMODULE_LIMIT_EXCEEDED",
+            "The complete pinned source graph exceeds its aggregate entry limit.",
+          );
+      }
       for (const { path, mode } of entries)
         if (mode === "120000") inertSymlinks.set(`${revisionSha}\0${path}`, { path, revisionSha });
     };
@@ -370,6 +446,7 @@ export class ProductionInvestigationGitSourceMaterializer
         "--no-tags",
         "--no-recurse-submodules",
         "--no-write-fetch-head",
+        ...(graph.depth === 0 ? [] : ["--depth=1"]),
         "--",
         url,
         sha,
@@ -387,6 +464,47 @@ export class ProductionInvestigationGitSourceMaterializer
       mergeBase = decode(await run(["merge-base", "--all", baseSha, sourceSha])).trim();
       assertSha(mergeBase);
       await assertGitRevisionTree(mergeBase);
+    }
+    const ownSourceTree = sourceTree;
+    const gitlinks = [...revisionTrees].flatMap(([revisionSha, entries]) =>
+      entries
+        .filter((entry) => entry.mode === "160000")
+        .map((entry) => ({ path: entry.path, revisionSha, commitSha: entry.blobId })),
+    );
+    const children: Array<{ path: string; node: GitRepositoryNode }> = [];
+    const currentLinks = [...ownSourceTree.values()].filter((entry) => entry.mode === "160000");
+    let declarations: ReturnType<typeof parsePinnedGitSubmodules> = [];
+    if (currentLinks.length > 0) {
+      const configuration = ownSourceTree.get(".gitmodules");
+      if (configuration === undefined || !["100644", "100755"].includes(configuration.mode))
+        throw failure(
+          "SOURCE_SUBMODULE_UNSUPPORTED",
+          "Pinned submodules require a regular, frozen .gitmodules declaration.",
+        );
+      let config: Uint8Array;
+      try {
+        config = await run([
+          "config",
+          "--no-includes",
+          "--null",
+          `--blob=${sourceSha}:.gitmodules`,
+          "--list",
+        ]);
+      } catch (error) {
+        if (error instanceof InvestigationGitSourceError && error.code === "SOURCE_GIT_FAILED")
+          throw failure(
+            "SOURCE_SUBMODULE_UNSUPPORTED",
+            "The pinned submodule declarations could not be parsed.",
+          );
+        throw error;
+      }
+      declarations = parsePinnedGitSubmodules(
+        config,
+        currentLinks.map((entry) => ({
+          path: entry.path,
+          commitSha: entry.blobId,
+        })),
+      );
     }
     await run(["checkout", "--quiet", "--detach", "--force", sourceSha]);
     // core.symlinks=false must preserve link blobs as ordinary target-text files, never targets.
@@ -406,6 +524,84 @@ export class ProductionInvestigationGitSourceMaterializer
           "A materialized symlink does not contain its exact inert Git target text.",
         );
     }
+    if (declarations.length > 0) {
+      for (const declaration of declarations) {
+        let directory = root;
+        for (const segment of declaration.path.split("/")) {
+          directory = win32.join(directory, segment);
+          if ((await this.#fs.lstat(directory)) === null) await this.#fs.createDirectory(directory);
+          await this.#assertPath(directory, "directory");
+        }
+        const childSubject: InvestigationSubjectV1 = {
+          id: subject.id,
+          repositoryId: task.repository.id,
+          workItemId: task.workItem.id,
+          kind: "source_commit",
+          commitSha: declaration.commitSha,
+          revisionKey: createCanonicalResult({
+            repository: declaration.repository,
+            commitSha: declaration.commitSha,
+          }).sha256,
+        };
+        try {
+          const node = await this.#materializeRepository(
+            {
+              ...input,
+              task: {
+                ...task,
+                repository: { ...task.repository, fullName: declaration.repository },
+                subjects: [childSubject],
+                subjectRef: childSubject.id,
+              },
+              destinationDirectory: directory,
+            },
+            context,
+            { depth: graph.depth + 1, ancestors, budget: graph.budget },
+          );
+          children.push({ path: declaration.path, node });
+        } catch (error) {
+          if (error instanceof InvestigationGitSourceError && error.code === "SOURCE_GIT_FAILED")
+            throw failure(
+              "SOURCE_SUBMODULE_UNAVAILABLE",
+              "A public pinned submodule commit could not be acquired.",
+            );
+          throw error;
+        }
+      }
+      const combined = new Map(ownSourceTree);
+      for (const child of children) {
+        for (const [path, entry] of child.node.sourceTree) {
+          const mountedPath = `${child.path}/${path}`;
+          combined.set(mountedPath, { ...entry, path: mountedPath });
+        }
+        for (const entry of child.node.prepared.binding.inertSymlinks ?? []) {
+          const mounted = { ...entry, path: `${child.path}/${entry.path}` };
+          inertSymlinks.set(`${mounted.revisionSha}\0${mounted.path}`, mounted);
+        }
+      }
+      sourceTree = combined;
+    }
+    const submodules = children.flatMap(({ path, node }) => [
+      {
+        path,
+        repository: node.repository,
+        commitSha: node.sourceSha,
+        parentPath: null as string | null,
+        parentCommitSha: sourceSha,
+      },
+      ...(node.prepared.binding.submodules ?? []).map((entry) => ({
+        ...entry,
+        path: `${path}/${entry.path}`,
+        parentPath: entry.parentPath === null ? path : `${path}/${entry.parentPath}`,
+      })),
+    ]);
+    const sourceNode = (path: string): { node: GitRepositoryNode; path: string } | null => {
+      for (const child of children) {
+        if (path.startsWith(`${child.path}/`))
+          return { node: child.node, path: path.slice(child.path.length + 1) };
+      }
+      return null;
+    };
     const metadataPaths = ["config", "HEAD", "index"].map((name) => win32.join(gitDirectory, name));
     const metadata = await Promise.all(
       metadataPaths.map(async (path) => {
@@ -482,13 +678,59 @@ export class ProductionInvestigationGitSourceMaterializer
             "The source repository contains an external object or history override.",
           );
       }
+      for (const child of children) {
+        try {
+          await child.node.assertMetadata();
+        } catch (error) {
+          if (
+            error instanceof InvestigationGitSourceError &&
+            error.code === "SOURCE_BINDING_MISMATCH"
+          )
+            throw failure(
+              "SOURCE_SUBMODULE_BINDING_MISMATCH",
+              "A pinned submodule's control metadata changed.",
+            );
+          throw error;
+        }
+      }
     };
     const capture = async (signal: AbortSignal) => {
       await assertMetadata();
+      for (const child of children) await child.node.prepared.assertBinding();
       const indexPath = win32.join(gitDirectory, `investigation-index-${randomUUID()}`);
       const extra = { GIT_INDEX_FILE: indexPath };
       await run(["read-tree", sourceSha], signal, extra);
       await run(["add", "--all", "--", "."], signal, extra);
+      const indexListing = decode(await run(["ls-files", "--stage", "-z"], signal, extra));
+      if (indexListing !== "" && !indexListing.endsWith("\0"))
+        throw failure(
+          "SOURCE_SUBMODULE_BINDING_MISMATCH",
+          "The staged source topology listing is incomplete.",
+        );
+      const stagedTopology = new Map<string, string>();
+      for (const record of indexListing.split("\0").filter(Boolean)) {
+        const match = /^(100644|100755|120000|160000) ([a-f0-9]{40}) 0\t([^\0]+)$/u.exec(record);
+        if (match === null)
+          throw failure(
+            "SOURCE_SUBMODULE_BINDING_MISMATCH",
+            "The staged source topology is invalid.",
+          );
+        if (match[1] === "160000" || match[3] === ".gitmodules")
+          stagedTopology.set(match[3]!, `${match[1]}:${match[2]}`);
+      }
+      const frozenTopology = new Map(
+        [...ownSourceTree.values()]
+          .filter((entry) => entry.mode === "160000" || entry.path === ".gitmodules")
+          .map((entry) => [entry.path, `${entry.mode}:${entry.blobId}`]),
+      );
+      if (
+        stagedTopology.size !== frozenTopology.size ||
+        [...frozenTopology].some(([path, object]) => stagedTopology.get(path) !== object)
+      )
+        throw failure(
+          "SOURCE_SUBMODULE_UNSUPPORTED",
+          "Saved patches cannot add, remove or change pinned submodule topology.",
+        );
       const bytes = await run(
         [
           "diff",
@@ -498,6 +740,7 @@ export class ProductionInvestigationGitSourceMaterializer
           "--no-ext-diff",
           "--no-textconv",
           "--no-renames",
+          "--ignore-submodules=all",
           sourceSha,
           "--",
         ],
@@ -512,15 +755,21 @@ export class ProductionInvestigationGitSourceMaterializer
       await this.#assertPath(indexPath, "file");
       await this.#fs.removeFile(indexPath);
       await assertMetadata();
+      for (const child of children) await child.node.prepared.assertBinding();
       return bytes;
     };
     const mutable =
+      graph.depth === 0 &&
       task.executionPolicy.mode === "execute" &&
       task.executionPolicy.allowRepositoryExecution &&
       task.executionPolicy.authorizationRef !== null &&
       (task.kind === "issue-fix" || task.kind === "feature-implement");
     const patchSubject =
-      subject.kind === "local_patch" ? subject : this.#options.restorePatchSubject;
+      graph.depth > 0
+        ? undefined
+        : subject.kind === "local_patch"
+          ? subject
+          : this.#options.restorePatchSubject;
     if (
       patchSubject !== undefined &&
       patchSubject !== subject &&
@@ -582,6 +831,40 @@ export class ProductionInvestigationGitSourceMaterializer
         decode(await run(["merge-base", "--all", baseSha, sourceSha])).trim() !== mergeBase
       )
         throw failure("SOURCE_BINDING_MISMATCH", "The frozen PR merge base changed.");
+      for (const child of children) {
+        try {
+          await child.node.prepared.assertBinding();
+        } catch (error) {
+          if (
+            error instanceof InvestigationGitSourceError &&
+            error.code === "SOURCE_BINDING_MISMATCH"
+          )
+            throw failure(
+              "SOURCE_SUBMODULE_BINDING_MISMATCH",
+              "The pinned submodule source no longer matches its recorded identity.",
+            );
+          throw error;
+        }
+      }
+      if (
+        gitlinks.length > 0 &&
+        (
+          await run([
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--ignore-submodules=all",
+            sourceSha,
+            "--",
+            ".gitmodules",
+          ])
+        ).byteLength !== 0
+      )
+        throw failure(
+          "SOURCE_SUBMODULE_BINDING_MISMATCH",
+          "Frozen submodule declarations cannot be changed by this task.",
+        );
       if (!mutable) {
         if (originalPatch === null) {
           const changes = await run([
@@ -591,6 +874,7 @@ export class ProductionInvestigationGitSourceMaterializer
             "--no-ext-diff",
             "--no-textconv",
             "--no-renames",
+            ...(children.length === 0 ? [] : ["--ignore-submodules=all"]),
             sourceSha,
             "--",
           ]);
@@ -620,7 +904,35 @@ export class ProductionInvestigationGitSourceMaterializer
     const checkoutRepresentations = new Map<string, { digest: string; byteLength: number }>();
     const assertReadBinding = async (file?: InvestigationSourceFile) => {
       await assertMetadata();
-      if (file === undefined || mutable) return;
+      if (file === undefined) return;
+      const child = sourceNode(file.path);
+      if (child !== null) {
+        try {
+          await child.node.prepared.assertReadBinding!({ ...file, path: child.path });
+        } catch (error) {
+          if (
+            error instanceof InvestigationGitSourceError &&
+            error.code === "SOURCE_BINDING_MISMATCH"
+          )
+            throw failure(
+              "SOURCE_SUBMODULE_BINDING_MISMATCH",
+              "The observed submodule file differs from its pinned source.",
+            );
+          throw error;
+        }
+        return;
+      }
+      const ownEntry = ownSourceTree.get(file.path);
+      if (ownEntry?.mode === "160000") {
+        const pointer = `Subproject commit ${ownEntry.blobId}\n`;
+        if (file.content !== pointer || file.digest !== hash(Buffer.from(pointer, "utf8")))
+          throw failure(
+            "SOURCE_SUBMODULE_BINDING_MISMATCH",
+            "A submodule pointer does not match the frozen parent commit.",
+          );
+        return;
+      }
+      if (mutable) return;
       if (originalPatch !== null) {
         await assertBinding();
         return;
@@ -670,6 +982,61 @@ export class ProductionInvestigationGitSourceMaterializer
         "The source file bytes do not match the original Git blob or its pinned checkout representation.",
       );
     };
+    const readBlob = async (kind: "blob" | "-s", path: string): Promise<Uint8Array> => {
+      const child = sourceNode(path);
+      return child === null
+        ? run(["cat-file", kind, `${sourceSha}:${path}`])
+        : child.node.readBlob(kind, child.path);
+    };
+    const grep = async (argumentsList: readonly string[]): Promise<Uint8Array> => {
+      const outputs: Uint8Array[] = [await run(argumentsList, context.signal, {}, true)];
+      let totalBytes = outputs[0]!.byteLength;
+      for (const child of children) {
+        const nestedArguments = [...argumentsList];
+        const revisionIndex = nestedArguments.indexOf("--") - 1;
+        if (nestedArguments[revisionIndex] !== sourceSha)
+          throw failure(
+            "SOURCE_SUBMODULE_BINDING_MISMATCH",
+            "The graph search must bind its exact source revision.",
+          );
+        nestedArguments[revisionIndex] = child.node.sourceSha;
+        const bytes = await child.node.grep(nestedArguments);
+        const text = decode(bytes);
+        if (text !== "" && !text.endsWith("\0"))
+          throw failure(
+            "SOURCE_SUBMODULE_BINDING_MISMATCH",
+            "A pinned submodule search result is incomplete.",
+          );
+        const prefixed =
+          text === ""
+            ? ""
+            : text
+                .slice(0, -1)
+                .split("\0")
+                .map((record) => {
+                  const prefix = `${child.node.sourceSha}:`;
+                  if (!record.startsWith(prefix))
+                    throw failure(
+                      "SOURCE_SUBMODULE_BINDING_MISMATCH",
+                      "A submodule search result names an unexpected revision.",
+                    );
+                  const path = record.slice(prefix.length);
+                  if (!child.node.sourceTree.has(path))
+                    throw failure(
+                      "SOURCE_SUBMODULE_BINDING_MISMATCH",
+                      "A submodule search result is outside its frozen tree.",
+                    );
+                  return `${sourceSha}:${child.path}/${path}\0`;
+                })
+                .join("");
+        const mounted = Buffer.from(prefixed, "utf8");
+        totalBytes += mounted.byteLength;
+        if (totalBytes > this.#options.limits.maximumOutputBytes)
+          throw dependencyLimit("The combined source graph search output budget was exceeded.");
+        outputs.push(mounted);
+      }
+      return Buffer.concat(outputs);
+    };
     let prDiff:
       | Promise<{
           manifest: InvestigationPrDiffManifest;
@@ -685,7 +1052,16 @@ export class ProductionInvestigationGitSourceMaterializer
       await assertReadBinding();
       const comparisonBase = mergeBase;
       const listing = decode(
-        await run(["diff", "--name-status", "-z", "--no-renames", comparisonBase, sourceSha, "--"]),
+        await run([
+          "diff",
+          "--name-status",
+          "-z",
+          "--no-renames",
+          "--ignore-submodules=none",
+          comparisonBase,
+          sourceSha,
+          "--",
+        ]),
       );
       if (listing !== "" && !listing.endsWith("\0"))
         throw failure(
@@ -810,16 +1186,22 @@ export class ProductionInvestigationGitSourceMaterializer
             "--no-ext-diff",
             "--no-textconv",
             "--no-renames",
+            "--ignore-submodules=none",
+            "--submodule=short",
             comparisonBase,
             sourceSha,
             "--",
             path,
           ]),
         );
-        if (status !== "added")
-          append("base", await run(["cat-file", "blob", `${comparisonBase}:${path}`]));
-        if (status !== "deleted")
-          append("head", await run(["cat-file", "blob", `${sourceSha}:${path}`]));
+        const revisionContent = async (revision: string): Promise<Uint8Array> => {
+          const entry = revisionTrees.get(revision)?.find((candidate) => candidate.path === path);
+          return entry?.mode === "160000"
+            ? Buffer.from(`Subproject commit ${entry.blobId}\n`, "utf8")
+            : run(["cat-file", "blob", `${revision}:${path}`]);
+        };
+        if (status !== "added") append("base", await revisionContent(comparisonBase));
+        if (status !== "deleted") append("head", await revisionContent(sourceSha));
         files.push({ path, previousPath: null, status, chunkIds });
       }
       const document = {
@@ -905,7 +1287,7 @@ export class ProductionInvestigationGitSourceMaterializer
           const assertOrdinarySourcePath = (path: string) => {
             this.#assertGitTree(Buffer.from(`100644 blob ${sourceSha}\t${path}\0`, "utf8"));
             const entry = sourceTree.get(path);
-            if (entry === undefined || entry.mode === "120000")
+            if (entry === undefined || entry.mode === "120000" || entry.mode === "160000")
               throw failure(
                 "SOURCE_DEPENDENCY_UNAVAILABLE",
                 "A dependency path is not an ordinary source file in the exact frozen source tree.",
@@ -920,10 +1302,14 @@ export class ProductionInvestigationGitSourceMaterializer
               );
           };
           const unsupportedSeedPaths = seedPaths.filter((path) => {
+            this.#assertGitTree(Buffer.from(`100644 blob ${sourceSha}\t${path}\0`, "utf8"));
+            if (sourceTree.get(path)?.mode === "160000") return true;
             assertOrdinarySourcePath(path);
             return !isDependencySourcePath(path);
           });
-          const supportedSeedPaths = seedPaths.filter((path) => isDependencySourcePath(path));
+          const supportedSeedPaths = seedPaths.filter(
+            (path) => !unsupportedSeedPaths.includes(path),
+          );
           const files = new Map<string, InvestigationSourceDependencies["files"][number]>();
           const scanned = new Map<
             string,
@@ -941,7 +1327,7 @@ export class ProductionInvestigationGitSourceMaterializer
             if (existing !== undefined) return existing;
             if (scanned.size >= limits.maximumFiles)
               throw dependencyLimit("The complete source identity scan file budget was exceeded.");
-            const bytes = await run(["cat-file", "blob", `${sourceSha}:${path}`]);
+            const bytes = await readBlob("blob", path);
             identityScanBytes += bytes.byteLength;
             if (identityScanBytes > limits.maximumIdentityScanBytes)
               throw dependencyLimit("The complete source identity scan byte budget was exceeded.");
@@ -1016,28 +1402,23 @@ export class ProductionInvestigationGitSourceMaterializer
             });
             const frontier = [...new Set(frontierAnchors.map((anchor) => anchor.name))].sort();
             const output = decode(
-              await run(
-                [
-                  "grep",
-                  "-a",
-                  "-F",
-                  "-w",
-                  "-l",
-                  "-z",
-                  "--no-color",
-                  "--no-textconv",
-                  "--full-name",
-                  ...frontier.flatMap((symbol) => ["-e", symbol]),
-                  sourceSha,
-                  "--",
-                  ...[...dependencySourceExtensions].map(
-                    (extension) => `:(glob,icase)**/*.${extension}`,
-                  ),
-                ],
-                context.signal,
-                {},
-                true,
-              ),
+              await grep([
+                "grep",
+                "-a",
+                "-F",
+                "-w",
+                "-l",
+                "-z",
+                "--no-color",
+                "--no-textconv",
+                "--full-name",
+                ...frontier.flatMap((symbol) => ["-e", symbol]),
+                sourceSha,
+                "--",
+                ...[...dependencySourceExtensions].map(
+                  (extension) => `:(glob,icase)**/*.${extension}`,
+                ),
+              ]),
             );
             if (output !== "" && !output.endsWith("\0"))
               throw failure(
@@ -1202,7 +1583,12 @@ export class ProductionInvestigationGitSourceMaterializer
           const assertSource = (path: string) => {
             this.#assertGitTree(Buffer.from(`100644 blob ${sourceSha}\t${path}\0`, "utf8"));
             const entry = sourceTree.get(path);
-            if (entry === undefined || entry.mode === "120000" || !isDependencySourcePath(path))
+            if (
+              entry === undefined ||
+              entry.mode === "120000" ||
+              entry.mode === "160000" ||
+              !isDependencySourcePath(path)
+            )
               throw failure(
                 "SOURCE_DEPENDENCY_UNAVAILABLE",
                 "A source context path is not an ordinary eligible file in the frozen tree.",
@@ -1248,7 +1634,7 @@ export class ProductionInvestigationGitSourceMaterializer
               return null;
             }
             if (!mandatory) {
-              const sizeText = decode(await run(["cat-file", "-s", `${sourceSha}:${path}`])).trim();
+              const sizeText = decode(await readBlob("-s", path)).trim();
               if (!/^[0-9]+$/u.test(sizeText) || !Number.isSafeInteger(Number(sizeText)))
                 throw failure(
                   "SOURCE_DEPENDENCY_UNAVAILABLE",
@@ -1259,7 +1645,7 @@ export class ProductionInvestigationGitSourceMaterializer
                 return null;
               }
             }
-            const bytes = await run(["cat-file", "blob", `${sourceSha}:${path}`]);
+            const bytes = await readBlob("blob", path);
             identityScanBytes += bytes.byteLength;
             if (identityScanBytes > limits.maximumIdentityScanBytes)
               throw dependencyLimit("The complete source identity scan byte budget was exceeded.");
@@ -1352,27 +1738,22 @@ export class ProductionInvestigationGitSourceMaterializer
                   )
                 : symbols;
             const text = decode(
-              await run(
-                [
-                  "grep",
-                  "-a",
-                  ...(kind === "definition" ? ["-E"] : ["-F", "-w"]),
-                  "-l",
-                  "-z",
-                  "--no-color",
-                  "--no-textconv",
-                  "--full-name",
-                  ...patterns.flatMap((pattern) => ["-e", pattern]),
-                  sourceSha,
-                  "--",
-                  ...[...dependencySourceExtensions].map(
-                    (extension) => `:(glob,icase)**/*.${extension}`,
-                  ),
-                ],
-                context.signal,
-                {},
-                true,
-              ),
+              await grep([
+                "grep",
+                "-a",
+                ...(kind === "definition" ? ["-E"] : ["-F", "-w"]),
+                "-l",
+                "-z",
+                "--no-color",
+                "--no-textconv",
+                "--full-name",
+                ...patterns.flatMap((pattern) => ["-e", pattern]),
+                sourceSha,
+                "--",
+                ...[...dependencySourceExtensions].map(
+                  (extension) => `:(glob,icase)**/*.${extension}`,
+                ),
+              ]),
             );
             if (text !== "" && !text.endsWith("\0"))
               throw failure(
@@ -1697,13 +2078,19 @@ export class ProductionInvestigationGitSourceMaterializer
     };
 
     await assertBinding();
-    return {
+    const prepared: PreparedGitSource = {
       binding: {
         subjectRef: subject.id,
         revisionKey: subject.revisionKey,
         sourceSha,
         patchDigest: subject.kind === "local_patch" ? subject.patchDigest : null,
         artifactRef: subject.kind === "local_patch" ? subject.artifactRef : null,
+        ...(submodules.length === 0
+          ? {}
+          : { submodules: Object.freeze(submodules.map((entry) => Object.freeze(entry))) }),
+        ...(gitlinks.length === 0
+          ? {}
+          : { gitlinks: Object.freeze(gitlinks.map((entry) => Object.freeze(entry))) }),
         ...(inertSymlinks.size === 0
           ? {}
           : {
@@ -1721,8 +2108,10 @@ export class ProductionInvestigationGitSourceMaterializer
       assertBinding,
       ...(originalPatch === null ? { assertReadBinding } : {}),
       capturePatch: async (signal) => {
-        await assertCurrentTree();
-        return capture(signal);
+        await assertBinding();
+        const bytes = await capture(signal);
+        await assertBinding();
+        return bytes;
       },
       async readPrDiffManifest() {
         await assertReadBinding();
@@ -1737,6 +2126,17 @@ export class ProductionInvestigationGitSourceMaterializer
       readPrDiffChunks,
       readSourceDependencies,
       readSourceContext,
+    };
+    return {
+      repository,
+      sourceSha,
+      sourceTree,
+      run,
+      prepared,
+      assertMetadata,
+      readBlob,
+      grep,
+      children,
     };
   }
 
@@ -1819,6 +2219,7 @@ export class ProductionInvestigationGitSourceMaterializer
       throw failure("SOURCE_TREE_INVALID", "The Git tree listing is incomplete.");
     const paths = new Map<string, string>();
     const entries: GitSourceTreeEntry[] = [];
+    const leaves = new Set<string>();
     const records = text.split("\0").filter(Boolean);
     if (records.length > (this.#options.maximumTreeEntries ?? 250_000))
       throw failure(
@@ -1826,14 +2227,25 @@ export class ProductionInvestigationGitSourceMaterializer
         "The complete Git tree exceeds its explicit entry budget.",
       );
     for (const record of records) {
-      const match = /^(100644|100755|120000) blob ([a-f0-9]{40})\t([^\0]+)$/u.exec(record);
-      if (match === null || (match[1] === "120000" && !allowInertSymlinks))
+      const match = /^(100644|100755|120000|160000) (blob|commit) ([a-f0-9]{40})\t([^\0]+)$/u.exec(
+        record,
+      );
+      if (
+        match === null ||
+        (match[1] === "160000" ? match[2] !== "commit" : match[2] !== "blob") ||
+        (match[1] === "120000" && !allowInertSymlinks)
+      )
         throw failure(
           "SOURCE_TREE_UNSUPPORTED",
-          "Git symlinks require an original checkout with verified inert target-text representation; patched link representations, submodules, and other non-regular entries are unsupported.",
+          "Git symlinks require verified inert target text, and submodules require pinned commit entries; other source tree representations are unsupported.",
         );
-      const path = match[3]!;
-      entries.push({ path, mode: match[1] as GitSourceTreeEntry["mode"], blobId: match[2]! });
+      const path = match[4]!;
+      if (paths.has(path.toLowerCase()))
+        throw failure(
+          "SOURCE_PATH_UNSAFE",
+          "The Git tree contains duplicate or overlapping file entries.",
+        );
+      entries.push({ path, mode: match[1] as GitSourceTreeEntry["mode"], blobId: match[3]! });
       const segments = path.split("/");
       for (let length = 1; length <= segments.length; length++) {
         const segment = segments[length - 1]!;
@@ -1846,6 +2258,8 @@ export class ProductionInvestigationGitSourceMaterializer
         )
           throw failure("SOURCE_PATH_UNSAFE", "The Git tree contains an unsafe Windows path.");
         const prefix = segments.slice(0, length).join("/");
+        if (length < segments.length && leaves.has(prefix.toLowerCase()))
+          throw failure("SOURCE_PATH_UNSAFE", "A Git tree file overlaps another source path.");
         assertWindowsLocalAbsolutePath(
           `C:\\source\\${prefix.replaceAll("/", "\\")}`,
           "Git tree path",
@@ -1856,6 +2270,7 @@ export class ProductionInvestigationGitSourceMaterializer
           throw failure("SOURCE_PATH_UNSAFE", "The Git tree has paths that collide on Windows.");
         paths.set(prefix.toLowerCase(), prefix);
       }
+      leaves.add(path.toLowerCase());
     }
     return entries;
   }

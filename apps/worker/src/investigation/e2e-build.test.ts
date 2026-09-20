@@ -34,6 +34,9 @@ import {
 } from "./e2e-build.js";
 
 type BuildInput = Parameters<typeof performE2eBuild>[0];
+type BoundSubmodule = NonNullable<
+  NonNullable<BuildInput["workspace"]["sourceBinding"]>["submodules"]
+>[number];
 
 const headSha = "a".repeat(40);
 const projectContent =
@@ -95,6 +98,17 @@ function sourceBinding() {
     sourceSha: headSha,
     patchDigest: null as string | null,
     artifactRef: null,
+    submodules: [] as BoundSubmodule[],
+  };
+}
+
+function submodule(path: string, parent?: BoundSubmodule): BoundSubmodule {
+  return {
+    path,
+    repository: "example/dependency",
+    commitSha: createHash("sha1").update(path).digest("hex"),
+    parentPath: parent?.path ?? null,
+    parentCommitSha: parent?.commitSha ?? headSha,
   };
 }
 
@@ -212,6 +226,15 @@ async function fixture(overrides: Partial<E2eBuildRequest> = {}) {
     cleanupRun,
     allProcessCalls,
   };
+}
+
+async function addSubmodules(
+  f: Awaited<ReturnType<typeof fixture>>,
+  submodules: readonly BoundSubmodule[],
+): Promise<void> {
+  f.binding.submodules.push(...submodules);
+  for (const { path } of submodules)
+    await mkdir(win32.join(f.sourceDirectory, path, ".git"), { recursive: true });
 }
 
 async function writeApplicationOutputs(spec: ProcessLaunchSpec): Promise<void> {
@@ -567,6 +590,188 @@ describe.skipIf(process.platform !== "win32")("E2E build provenance", () => {
       TMP: f.sourceDirectory,
     });
   });
+
+  it("cleans pinned dependencies deepest first with exact roots and source checks around every cleanup", async () => {
+    const f = await fixture();
+    const parent = submodule("vendor/library");
+    const nested = submodule("vendor/library/deps/nested", parent);
+    const sibling = submodule("vendor/other");
+    await addSubmodules(f, [sibling, parent, nested]);
+    const expectedDirectories = [nested.path, parent.path, sibling.path].map((path) =>
+      win32.join(f.sourceDirectory, path),
+    );
+    expectedDirectories.push(f.sourceDirectory);
+    const events: string[] = [];
+    f.assertSourceBinding.mockImplementation(async () => {
+      events.push("verify");
+    });
+    for (const directory of expectedDirectories)
+      await writeFile(win32.join(directory, "Directory.Build.targets"), "Injected build input.");
+    f.cleanupRun.mockImplementation(async (spec) => {
+      events.push(`clean:${spec.workingDirectory}`);
+      await rm(win32.join(spec.workingDirectory, "Directory.Build.targets"));
+      return { exitCode: 0, stdout: "Removed untracked build inputs.", stderr: "" };
+    });
+    f.run.mockImplementation(async (spec) => {
+      for (const directory of expectedDirectories)
+        await expect(
+          readFile(win32.join(directory, "Directory.Build.targets")),
+        ).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      expect(await readFile(f.projectPath, "utf8")).toBe(projectContent);
+      await writeOutputs(spec, f.input.request.outputs);
+      return { exitCode: 0, stdout: "Build succeeded.", stderr: "" };
+    });
+    await performE2eBuild(f.input);
+    expect(f.cleanupRun.mock.calls.map(([spec]) => spec.workingDirectory)).toEqual(
+      expectedDirectories,
+    );
+    for (const [index, directory] of expectedDirectories.entries()) {
+      const [spec, signal] = f.cleanupRun.mock.calls[index]!;
+      expect(spec.arguments.slice(0, 2)).toEqual([
+        `--git-dir=${win32.join(directory, ".git")}`,
+        `--work-tree=${directory}`,
+      ]);
+      expect(spec.arguments.slice(-4)).toEqual(["clean", "-ffdqx", "--", "."]);
+      expect(spec.arguments).toContain("submodule.recurse=false");
+      expect(spec.environment).toMatchObject({
+        HOME: directory,
+        USERPROFILE: directory,
+        XDG_CONFIG_HOME: directory,
+        TEMP: directory,
+        TMP: directory,
+        GIT_CONFIG_GLOBAL: "NUL",
+      });
+      expect(signal).toBe(f.input.signal);
+      const eventIndex = events.indexOf(`clean:${directory}`);
+      expect(events.slice(eventIndex - 1, eventIndex + 2)).toEqual([
+        "verify",
+        `clean:${directory}`,
+        "verify",
+      ]);
+    }
+    expect(f.allProcessCalls.mock.calls.map(([spec]) => spec.executable)).toEqual([
+      ...expectedDirectories.map(() => gitExecutablePath),
+      tools.msbuild,
+    ]);
+  });
+
+  it("accepts ordinary bound dependency paths that are not build request paths", async () => {
+    const f = await fixture();
+    const dependency = submodule("@vendor/-library%name,;");
+    await addSubmodules(f, [dependency]);
+    await performE2eBuild(f.input);
+    expect(f.cleanupRun.mock.calls.map(([spec]) => spec.workingDirectory)).toEqual([
+      win32.join(f.sourceDirectory, dependency.path),
+      f.sourceDirectory,
+    ]);
+    expect(f.run).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "",
+    "../outside",
+    "vendor\\library",
+    "/outside",
+    "C:/outside",
+    "vendor/../outside",
+    "vendor/.git/hooks",
+    "vendor//library",
+    "vendor/NUL",
+    "vendor/library.",
+    "vendor/library ",
+  ])("rejects unsafe bound dependency paths before any cleanup: %s", async (path) => {
+    const f = await fixture();
+    f.binding.submodules.push(submodule(path));
+    await expect(performE2eBuild(f.input)).rejects.toMatchObject({
+      code: "E2E_BUILD_SOURCE_INVALID",
+    });
+    expect(f.allProcessCalls).not.toHaveBeenCalled();
+  });
+
+  it("rejects ambiguous bound dependency roots before any cleanup", async () => {
+    const f = await fixture();
+    await addSubmodules(f, [submodule("vendor/library"), submodule("VENDOR/LIBRARY")]);
+    await expect(performE2eBuild(f.input)).rejects.toMatchObject({
+      code: "E2E_BUILD_SOURCE_INVALID",
+    });
+    expect(f.allProcessCalls).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "gitfile", "junction"] as const)(
+    "rejects a dependency with %s Git metadata before any cleanup",
+    async (kind) => {
+      const f = await fixture();
+      const dependency = submodule("vendor/library");
+      f.binding.submodules.push(dependency);
+      const directory = win32.join(f.sourceDirectory, dependency.path);
+      const gitDirectory = win32.join(directory, ".git");
+      await mkdir(directory, { recursive: true });
+      if (kind === "gitfile") await writeFile(gitDirectory, "gitdir: C:/Outside/control\n");
+      else if (kind === "junction")
+        await symlink(win32.join(f.sourceDirectory, ".git"), gitDirectory, "junction");
+      await expect(performE2eBuild(f.input)).rejects.toMatchObject({
+        code: "E2E_BUILD_SOURCE_INVALID",
+      });
+      expect(f.allProcessCalls).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["checkout", "Git metadata"] as const)(
+    "rejects replacement of a later dependency's %s during cleanup",
+    async (target) => {
+      const f = await fixture();
+      const first = submodule("vendor/first");
+      const later = submodule("vendor/later");
+      await addSubmodules(f, [later, first]);
+      const laterDirectory = win32.join(f.sourceDirectory, later.path);
+      const laterGitDirectory = win32.join(laterDirectory, ".git");
+      f.cleanupRun.mockImplementationOnce(async () => {
+        await rename(
+          target === "checkout" ? laterDirectory : laterGitDirectory,
+          win32.join(f.root, "retired-dependency"),
+        );
+        await mkdir(laterGitDirectory, { recursive: true });
+        return { exitCode: 0, stdout: "Source cleanup completed.", stderr: "" };
+      });
+      await expect(performE2eBuild(f.input)).rejects.toMatchObject({
+        code: "E2E_BUILD_SOURCE_INVALID",
+      });
+      expect(f.cleanupRun.mock.calls.map(([spec]) => spec.workingDirectory)).toEqual([
+        win32.join(f.sourceDirectory, first.path),
+      ]);
+      expect(f.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["failed", "binding drift", "cancelled"] as const)(
+    "stops before root cleanup and compilation when dependency cleanup is %s",
+    async (outcome) => {
+      const f = await fixture();
+      const dependency = submodule("vendor/library");
+      await addSubmodules(f, [dependency]);
+      const controller = new AbortController();
+      let drifted = false;
+      f.assertSourceBinding.mockImplementation(async () => {
+        if (drifted) throw new Error("The pinned dependency binding changed.");
+      });
+      f.cleanupRun.mockImplementation(async () => {
+        if (outcome === "binding drift") drifted = true;
+        else if (outcome === "cancelled")
+          controller.abort(new Error("Dependency cleanup cancelled."));
+        return { exitCode: outcome === "failed" ? 1 : 0, stdout: "", stderr: "" };
+      });
+      const build = performE2eBuild({ ...f.input, signal: controller.signal });
+      if (outcome === "cancelled")
+        await expect(build).rejects.toThrow("Dependency cleanup cancelled.");
+      else await expect(build).rejects.toMatchObject({ code: "E2E_BUILD_SOURCE_INVALID" });
+      expect(f.cleanupRun.mock.calls.map(([spec]) => spec.workingDirectory)).toEqual([
+        win32.join(f.sourceDirectory, dependency.path),
+      ]);
+      expect(f.run).not.toHaveBeenCalled();
+    },
+  );
 
   it("removes injected build inputs before the compiler can observe them", async () => {
     const f = await fixture();

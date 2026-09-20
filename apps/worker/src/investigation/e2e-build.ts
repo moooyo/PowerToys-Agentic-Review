@@ -693,9 +693,21 @@ async function cleanBuildInputs(
     );
   }
   try {
-    const gitDirectory = win32.join(source.sourceDirectory, ".git");
-    const sourceDirectories = await directoryChain(gitDirectory);
     await assertSourceUnchanged(input, source.headSha, source.projectPath, source.projectDigest);
+    const checkoutDirectories = boundBuildCheckoutDirectories(input, source.sourceDirectory);
+    // Capture every checkout before any cleanup can replace a later dependency's directory.
+    const sourceDirectories = new Map<string, BigIntStats>();
+    for (const checkoutDirectory of checkoutDirectories) {
+      for (const [path, identity] of await directoryChain(win32.join(checkoutDirectory, ".git"))) {
+        const original = sourceDirectories.get(path);
+        if (
+          original !== undefined &&
+          (original.dev !== identity.dev || original.ino !== identity.ino)
+        )
+          throw new Error("An owned source directory changed before cleanup.");
+        sourceDirectories.set(path, identity);
+      }
+    }
     const environment = {
       ...Object.fromEntries(
         Object.entries(input.environment)
@@ -704,9 +716,6 @@ async function cleanBuildInputs(
             ["SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT"].includes(name),
           ),
       ),
-      HOME: source.sourceDirectory,
-      USERPROFILE: source.sourceDirectory,
-      XDG_CONFIG_HOME: source.sourceDirectory,
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_SYSTEM: "NUL",
       GIT_CONFIG_GLOBAL: "NUL",
@@ -721,48 +730,56 @@ async function cleanBuildInputs(
       GIT_EDITOR: "",
       LC_ALL: "C",
       LANG: "C",
-      TEMP: source.sourceDirectory,
-      TMP: source.sourceDirectory,
     };
-    const spec: ProcessLaunchSpec = {
-      executable: input.gitExecutablePath,
-      arguments: [
-        `--git-dir=${gitDirectory}`,
-        `--work-tree=${source.sourceDirectory}`,
-        "-c",
-        "core.hooksPath=NUL",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.untrackedCache=false",
-        "-c",
-        "core.protectNTFS=true",
-        "-c",
-        "core.longpaths=true",
-        "-c",
-        "submodule.recurse=false",
-        "-c",
-        "gc.auto=0",
-        "-c",
-        "maintenance.auto=false",
-        "clean",
-        "-ffdqx",
-        "--",
-        ".",
-      ],
-      workingDirectory: source.sourceDirectory,
-      environmentMode: "replace",
-      environment,
-      limits: { ...input.limits },
-    };
-    assertValidProcessLaunchSpec(spec);
-    await assertDirectoryIdentities(sourceDirectories);
-    input.signal.throwIfAborted();
-    const result = await input.run(spec, input.signal);
-    input.signal.throwIfAborted();
-    await assertDirectoryIdentities(sourceDirectories);
-    if (result.exitCode !== 0) throw new Error("The owned source cleanup failed.");
-    await assertSourceUnchanged(input, source.headSha, source.projectPath, source.projectDigest);
+    for (const checkoutDirectory of checkoutDirectories) {
+      const spec: ProcessLaunchSpec = {
+        executable: input.gitExecutablePath,
+        arguments: [
+          `--git-dir=${win32.join(checkoutDirectory, ".git")}`,
+          `--work-tree=${checkoutDirectory}`,
+          "-c",
+          "core.hooksPath=NUL",
+          "-c",
+          "core.fsmonitor=false",
+          "-c",
+          "core.untrackedCache=false",
+          "-c",
+          "core.protectNTFS=true",
+          "-c",
+          "core.longpaths=true",
+          "-c",
+          "submodule.recurse=false",
+          "-c",
+          "gc.auto=0",
+          "-c",
+          "maintenance.auto=false",
+          "clean",
+          "-ffdqx",
+          "--",
+          ".",
+        ],
+        workingDirectory: checkoutDirectory,
+        environmentMode: "replace",
+        environment: {
+          ...environment,
+          HOME: checkoutDirectory,
+          USERPROFILE: checkoutDirectory,
+          XDG_CONFIG_HOME: checkoutDirectory,
+          TEMP: checkoutDirectory,
+          TMP: checkoutDirectory,
+        },
+        limits: { ...input.limits },
+      };
+      assertValidProcessLaunchSpec(spec);
+      await assertSourceUnchanged(input, source.headSha, source.projectPath, source.projectDigest);
+      await assertDirectoryIdentities(sourceDirectories);
+      input.signal.throwIfAborted();
+      const result = await input.run(spec, input.signal);
+      input.signal.throwIfAborted();
+      await assertDirectoryIdentities(sourceDirectories);
+      await assertSourceUnchanged(input, source.headSha, source.projectPath, source.projectDigest);
+      if (result.exitCode !== 0) throw new Error("The owned source cleanup failed.");
+    }
   } catch {
     input.signal.throwIfAborted();
     throw failure(
@@ -770,6 +787,39 @@ async function cleanBuildInputs(
       "The owned source checkout could not be safely cleaned and reverified.",
     );
   }
+}
+
+function boundBuildCheckoutDirectories(input: E2eBuildInput, sourceDirectory: string): string[] {
+  const seen = new Set<string>();
+  const submodules = (input.workspace.sourceBinding?.submodules ?? []).map(({ path }) => {
+    if (
+      typeof path !== "string" ||
+      path.length > 4_096 ||
+      path.includes("\\") ||
+      win32.isAbsolute(path) ||
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: Bound paths must reject control bytes.
+      /[\u0000-\u001f\u007f:]/u.test(path) ||
+      path
+        .split("/")
+        .some(
+          (part) => part === "" || part === "." || part === ".." || part.toLowerCase() === ".git",
+        )
+    )
+      throw new Error("A bound dependency path is unsafe.");
+    const directory = win32.join(sourceDirectory, path);
+    assertWindowsLocalAbsolutePath(directory, "bound dependency checkout", false);
+    if (!within(sourceDirectory, directory) || samePath(sourceDirectory, directory))
+      throw new Error("A bound dependency path escaped the source root.");
+    const key = pathKey(directory);
+    if (seen.has(key)) throw new Error("A bound dependency checkout is duplicated.");
+    seen.add(key);
+    return { directory, depth: path.split("/").length, path };
+  });
+  submodules.sort(
+    (left, right) =>
+      right.depth - left.depth || (left.path < right.path ? -1 : left.path > right.path ? 1 : 0),
+  );
+  return [...submodules.map(({ directory }) => directory), sourceDirectory];
 }
 
 function validateBuildRoot(root: string, sourceDirectory: string): string {

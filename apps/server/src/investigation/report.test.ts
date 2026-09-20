@@ -9,6 +9,7 @@ import {
   type InvestigationReportCollection,
   type InvestigationReportPartV1,
   type InvestigationResultV1,
+  type InvestigationSourceProvenance,
   projectInvestigationCheckpointPresentation,
   validateInvestigationResult,
 } from "@agentic-review/contracts";
@@ -324,6 +325,37 @@ function fixture(
   ];
   sealResult(result);
   return { result, input: submission(result, checkpoint, task, attempt) };
+}
+
+function sourceProvenanceFixture() {
+  const { input, result } = fixture(2, "completed", "local_checkout");
+  const primary = input.task.subjects.find((subject) => subject.id === input.task.subjectRef);
+  if (primary?.kind !== "original_pr") throw new Error("Fixture PR subject is missing.");
+  const provenance: InvestigationSourceProvenance = {
+    subjectRef: primary.id,
+    sourceSha: primary.headSha,
+    submodules: [
+      {
+        path: "vendor/library",
+        repository: "Example/Library",
+        commitSha: "a".repeat(40),
+        parentPath: null,
+        parentCommitSha: primary.headSha,
+      },
+      {
+        path: "vendor/library/deps/nested",
+        repository: "Example/Nested",
+        commitSha: "b".repeat(40),
+        parentPath: "vendor/library",
+        parentCommitSha: "a".repeat(40),
+      },
+    ],
+  };
+  input.checkpoint.runtime.sourceProvenance = structuredClone(provenance);
+  result.context.sourceProvenance = structuredClone(provenance);
+  sealCheckpoint(input.checkpoint);
+  sealResult(result);
+  return { result, input: submission(result, input.checkpoint, input.task, input.attempt) };
 }
 
 function expectCode(run: () => unknown, code: string): void {
@@ -647,6 +679,80 @@ describe("assembleInvestigationReport", () => {
       ),
     ).toBe(false);
     expect(assembleInvestigationReport(input)).toEqual(result);
+  });
+
+  it("seals persisted source provenance into the full report, transport header, and logical digest", () => {
+    const { input, result } = sourceProvenanceFixture();
+    const assembled = assembleInvestigationReport(input);
+    expect(assembled).toEqual(result);
+    expect(assembled.context.sourceProvenance).toEqual(input.checkpoint.runtime.sourceProvenance);
+    expect(reportHeader(assembled).context.sourceProvenance).toEqual(
+      input.checkpoint.runtime.sourceProvenance,
+    );
+    const originalDigest = assembled.report.logicalContentDigest;
+    assembled.context.sourceProvenance!.submodules[1]!.commitSha = "c".repeat(40);
+    sealResult(assembled);
+    expect(assembled.report.logicalContentDigest).not.toBe(originalDigest);
+    expect(input.checkpoint.runtime.sourceProvenance).toEqual(result.context.sourceProvenance);
+  });
+
+  it("keeps legacy reports without registered source provenance unchanged", () => {
+    const { input, result } = fixture();
+    expect(input.checkpoint.runtime).not.toHaveProperty("sourceProvenance");
+    expect(assembleInvestigationReport(input)).toEqual(result);
+    expect(reportHeader(result).context).not.toHaveProperty("sourceProvenance");
+  });
+
+  it.each(["add", "change", "drop"] as const)(
+    "rejects header attempts to %s accepted source provenance even with recomputed report digests",
+    (mutation) => {
+      const { input, result } = sourceProvenanceFixture();
+      if (mutation === "add") {
+        delete input.checkpoint.runtime.sourceProvenance;
+        sealCheckpoint(input.checkpoint);
+      }
+      if (mutation === "change")
+        result.context.sourceProvenance!.submodules[1]!.repository = "Example/Forged";
+      if (mutation === "drop") delete result.context.sourceProvenance;
+      sealResult(result);
+      const changed = submission(result, input.checkpoint, input.task, input.attempt);
+      expectCode(() => assembleInvestigationReport(changed), "report_context_mismatch");
+    },
+  );
+
+  it.each(["subjectRef", "sourceSha", "parentPath", "parentCommitSha"] as const)(
+    "rejects corrupted saved source provenance independently of a matching header: %s",
+    (field) => {
+      const { input, result } = sourceProvenanceFixture();
+      const provenance = input.checkpoint.runtime.sourceProvenance!;
+      if (field === "subjectRef") provenance.subjectRef = "foreign-primary";
+      if (field === "sourceSha") provenance.sourceSha = "c".repeat(40);
+      if (field === "parentPath") provenance.submodules[1]!.parentPath = null;
+      if (field === "parentCommitSha") provenance.submodules[1]!.parentCommitSha = "c".repeat(40);
+      result.context.sourceProvenance = structuredClone(provenance);
+      sealCheckpoint(input.checkpoint);
+      sealResult(result);
+      const corrupted = submission(result, input.checkpoint, input.task, input.attempt);
+      expectCode(() => assembleInvestigationReport(corrupted), "invalid_source_provenance");
+    },
+  );
+
+  it.each([
+    "snapshot",
+    "unauthorized_execution",
+    "not_allowed",
+    "foreign_repository",
+    "foreign_work_item",
+  ] as const)("rejects saved provenance outside the source policy: %s", (scope) => {
+    const { input } = sourceProvenanceFixture();
+    if (scope === "snapshot") input.task.executionPolicy.mode = "snapshot_only";
+    if (scope === "unauthorized_execution") input.task.executionPolicy.mode = "execute";
+    if (scope === "not_allowed") input.task.executionPolicy.allowedSubjectRefs = [];
+    if (scope === "foreign_repository") input.task.subjects[0]!.repositoryId = "foreign-repository";
+    if (scope === "foreign_work_item") input.task.subjects[0]!.workItemId = "foreign-work-item";
+    input.checkpoint.taskBindingDigest = investigationTaskBindingDigest(input.task);
+    sealCheckpoint(input.checkpoint);
+    expectCode(() => assembleInvestigationReport(input), "invalid_source_provenance");
   });
 
   it.each(["id", "path", "subject", "requiredWork", "missing"] as const)(

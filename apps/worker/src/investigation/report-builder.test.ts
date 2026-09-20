@@ -743,7 +743,79 @@ describe("investigation report builder", () => {
     const submission = buildInvestigationReportSubmission(input);
     expect(submission.header.context.modelExecutions).toBeUndefined();
     expect(Object.hasOwn(submission.header.context, "modelExecutions")).toBe(false);
+    expect(Object.hasOwn(submission.header.context, "sourceProvenance")).toBe(false);
   });
+
+  it("copies accepted source provenance into the sealed header and its logical digest", () => {
+    const input = fixture();
+    const legacy = buildInvestigationReportSubmission(input);
+    const provenance = {
+      subjectRef: input.task.subjectRef,
+      sourceSha: "c".repeat(40),
+      submodules: [
+        {
+          path: "deps/library",
+          repository: "vendor/library",
+          commitSha: "a".repeat(40),
+          parentPath: null,
+          parentCommitSha: "c".repeat(40),
+        },
+        {
+          path: "deps/library/nested",
+          repository: "vendor/helper",
+          commitSha: "b".repeat(40),
+          parentPath: "deps/library",
+          parentCommitSha: "a".repeat(40),
+        },
+      ],
+    };
+    input.checkpoint.runtime.sourceProvenance = structuredClone(provenance);
+    input.checkpoint = seal(input.checkpoint);
+    const submission = buildInvestigationReportSubmission(input);
+    expect(submission.header.context.sourceProvenance).toEqual(provenance);
+    expect(submission.header.report.logicalContentDigest).not.toBe(
+      legacy.header.report.logicalContentDigest,
+    );
+    expect(submission.manifest.logicalContentDigest).toBe(
+      submission.header.report.logicalContentDigest,
+    );
+    expect(submission.header.context.sourceProvenance).not.toBe(
+      input.checkpoint.runtime.sourceProvenance,
+    );
+    submission.header.context.sourceProvenance!.submodules[0]!.repository = "changed/report-copy";
+    expect(input.checkpoint.runtime.sourceProvenance).toEqual(provenance);
+    expect(buildInvestigationReportSubmission(input).manifest.logicalContentDigest).toBe(
+      submission.manifest.logicalContentDigest,
+    );
+  });
+
+  it.each(["subject", "root revision", "parent chain", "repository URL"])(
+    "rejects invalid accepted source provenance during report assembly: %s",
+    (mutation) => {
+      const input = fixture();
+      const provenance = {
+        subjectRef: input.task.subjectRef,
+        sourceSha: "c".repeat(40),
+        submodules: [
+          {
+            path: "deps/library",
+            repository: "vendor/library",
+            commitSha: "a".repeat(40),
+            parentPath: null,
+            parentCommitSha: "c".repeat(40),
+          },
+        ],
+      };
+      if (mutation === "subject") provenance.subjectRef = "another-subject";
+      if (mutation === "root revision") provenance.sourceSha = "f".repeat(40);
+      if (mutation === "parent chain") provenance.submodules[0]!.parentCommitSha = "f".repeat(40);
+      if (mutation === "repository URL")
+        provenance.submodules[0]!.repository = "https://github.com/vendor/library";
+      input.checkpoint.runtime.sourceProvenance = provenance;
+      input.checkpoint = seal(input.checkpoint);
+      expectBuildError(() => buildInvestigationReportSubmission(input), "INVALID_INPUT");
+    },
+  );
 
   it("copies trusted model history with known and unknown identities across adopted attempts", () => {
     const input = fixture();

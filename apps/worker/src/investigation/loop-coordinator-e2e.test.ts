@@ -11,6 +11,7 @@ import {
 import {
   applyInvestigationLoopRound,
   applyInvestigationRuntimeCheckpoint,
+  applyInvestigationSourceProvenanceCheckpoint,
   createInvestigationCheckpoint,
   interruptInvestigationLoop,
   restoreInvestigationCheckpoint,
@@ -217,6 +218,11 @@ function fixture() {
         });
       } else if (request.kind === "execution") {
         current = applyInvestigationRuntimeCheckpoint(current, request.execution, { recordedAt });
+      } else if (request.kind === "source_provenance") {
+        current = applyInvestigationSourceProvenanceCheckpoint(current, request.provenance, {
+          task,
+          recordedAt,
+        });
       } else if (request.kind === "interrupt") {
         current = interruptInvestigationLoop(
           current,
@@ -374,73 +380,103 @@ function recoveryRunner(processHost: ProcessHostClient) {
 }
 
 describe("E2E coordinator durable execution", () => {
-  it("persists observations before continuing, uploads media once, and binds analysis to accepted execution", async () => {
-    const f = fixture();
-    const dispositions = vi.fn(async () => undefined);
-    const execute = vi.fn<E2eAgentRunner["execute"]>(async (input) => {
-      f.order.push("e2e-model");
-      expect(f.current().runtime.e2eExecution).toEqual({
-        attemptId: f.claim.attempt.id,
-        status: "started",
-        startedAt: recordedAt,
-        completedAt: null,
+  it.each([false, true])(
+    "persists observations before continuing, uploads media once, and binds analysis to accepted execution: source provenance=%s",
+    async (withProvenance) => {
+      const f = fixture();
+      const binding = f.workspace.sourceBinding!;
+      const provenance = withProvenance
+        ? {
+            subjectRef: binding.subjectRef,
+            sourceSha: binding.sourceSha,
+            submodules: [
+              {
+                path: "deps/library",
+                repository: "vendor/library",
+                commitSha: "a".repeat(40),
+                parentPath: null,
+                parentCommitSha: binding.sourceSha,
+              },
+            ],
+          }
+        : undefined;
+      if (provenance !== undefined)
+        Object.assign(binding, { submodules: structuredClone(provenance.submodules) });
+      const dispositions = vi.fn(async () => undefined);
+      const execute = vi.fn<E2eAgentRunner["execute"]>(async (input) => {
+        f.order.push("e2e-model");
+        expect(f.current().runtime.e2eExecution).toEqual({
+          attemptId: f.claim.attempt.id,
+          status: "started",
+          startedAt: recordedAt,
+          completedAt: null,
+        });
+        expect(input.checkpoint).toEqual(f.current());
+        expect(input.checkpoint?.runtime.sourceProvenance).toEqual(provenance);
+        const runtime = finishedRuntime(f.claim, input.checkpoint!);
+        const observation = { evidence: runtime.evidence, artifacts: runtime.artifacts };
+        await input.onRuntimeObservation!(observation);
+        expect(f.current().runtime.evidence).toEqual(runtime.evidence);
+        expect(f.current().runtime.artifacts).toEqual(runtime.artifacts);
+        expect(f.current().round).toBe(0);
+        expect(f.submissions).toHaveLength(0);
+        await input.onRuntimeObservation!(observation);
+        return buildE2eAgentExecutionResult(input, runtime, {
+          tokens: 73,
+          source: "cli",
+          invocationId: "synthetic-e2e-invocation",
+        });
       });
-      expect(input.checkpoint).toEqual(f.current());
-      const runtime = finishedRuntime(f.claim, input.checkpoint!);
-      const observation = { evidence: runtime.evidence, artifacts: runtime.artifacts };
-      await input.onRuntimeObservation!(observation);
-      expect(f.current().runtime.evidence).toEqual(runtime.evidence);
-      expect(f.current().runtime.artifacts).toEqual(runtime.artifacts);
-      expect(f.current().round).toBe(0);
-      expect(f.submissions).toHaveLength(0);
-      await input.onRuntimeObservation!(observation);
-      return buildE2eAgentExecutionResult(input, runtime, {
-        tokens: 73,
-        source: "cli",
-        invocationId: "synthetic-e2e-invocation",
+
+      await f.run({ execute, markUsageDisposition: dispositions });
+
+      expect(execute).toHaveBeenCalledOnce();
+      const prefix = provenance === undefined ? [] : ["checkpoint:source_provenance"];
+      expect(f.order.slice(0, prefix.length + 3)).toEqual([
+        ...prefix,
+        "checkpoint:execution",
+        "e2e-model",
+        "artifact-uploaded",
+      ]);
+      expect(f.client.uploadArtifact).toHaveBeenCalledOnce();
+      expect(f.workspace.readArtifact).toHaveBeenCalledOnce();
+      expect(vi.mocked(f.client.uploadArtifact).mock.calls[0]?.[1].contentBase64).toBe(
+        screenshotBytes.toString("base64"),
+      );
+      const analysis = f.requests.find((request) => request.kind === "analysis");
+      const acceptedExecution = f.analysisInputs[0]!;
+      expect(analysis?.kind).toBe("analysis");
+      if (analysis?.kind !== "analysis") throw new Error("An accepted analysis is required.");
+      expect(analysis.round.inputCheckpointRef).toEqual({
+        id: acceptedExecution.id,
+        version: acceptedExecution.version,
+        digest: acceptedExecution.digest,
       });
-    });
-
-    await f.run({ execute, markUsageDisposition: dispositions });
-
-    expect(execute).toHaveBeenCalledOnce();
-    expect(f.order.slice(0, 3)).toEqual(["checkpoint:execution", "e2e-model", "artifact-uploaded"]);
-    expect(f.client.uploadArtifact).toHaveBeenCalledOnce();
-    expect(f.workspace.readArtifact).toHaveBeenCalledOnce();
-    expect(vi.mocked(f.client.uploadArtifact).mock.calls[0]?.[1].contentBase64).toBe(
-      screenshotBytes.toString("base64"),
-    );
-    const analysis = f.requests.find((request) => request.kind === "analysis");
-    const acceptedExecution = f.analysisInputs[0]!;
-    expect(analysis?.kind).toBe("analysis");
-    if (analysis?.kind !== "analysis") throw new Error("An accepted analysis is required.");
-    expect(analysis.round.inputCheckpointRef).toEqual({
-      id: acceptedExecution.id,
-      version: acceptedExecution.version,
-      digest: acceptedExecution.digest,
-    });
-    expect(acceptedExecution.runtime.e2eExecution?.status).toBe("completed");
-    expect(f.current().consumed).toMatchObject({ rounds: 1, tokens: 73 });
-    expect(f.submissions[0]?.header.outcome).toBe("completed");
-    expect(dispositions).toHaveBeenCalledExactlyOnceWith("synthetic-e2e-invocation", "accepted");
-    expect(f.order.slice(-4)).toEqual([
-      "report-finalized",
-      "workspace-cleaned",
-      "desktop-guard-released",
-      "server-slot-released",
-    ]);
-    expect(f.client.cleanup).toHaveBeenCalledWith(
-      f.claim.task.id,
-      {
-        lease: f.claim.lease,
-        ownedProcessesStopped: true,
-        desktopRestored: true,
-      },
-      expect.any(AbortSignal),
-    );
-    expect(f.unconfirmed).not.toHaveBeenCalled();
-    expect(f.forbidden).not.toHaveBeenCalled();
-  });
+      expect(acceptedExecution.runtime.e2eExecution?.status).toBe("completed");
+      expect(acceptedExecution.runtime.sourceProvenance).toEqual(provenance);
+      expect(f.current().consumed).toMatchObject({ rounds: 1, tokens: 73 });
+      expect(f.submissions[0]?.header.outcome).toBe("completed");
+      expect(f.submissions[0]?.header.context.sourceProvenance).toEqual(provenance);
+      expect(dispositions).toHaveBeenCalledExactlyOnceWith("synthetic-e2e-invocation", "accepted");
+      expect(f.order.slice(-4)).toEqual([
+        "report-finalized",
+        "workspace-cleaned",
+        "desktop-guard-released",
+        "server-slot-released",
+      ]);
+      expect(f.client.cleanup).toHaveBeenCalledWith(
+        f.claim.task.id,
+        {
+          lease: f.claim.lease,
+          ownedProcessesStopped: true,
+          desktopRestored: true,
+        },
+        expect.any(AbortSignal),
+      );
+      expect(f.unconfirmed).not.toHaveBeenCalled();
+      expect(f.forbidden).not.toHaveBeenCalled();
+    },
+  );
 
   it("seals previously accepted execution on a new attempt without another model, desktop operation, or upload", async () => {
     const f = fixture();

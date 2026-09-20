@@ -10,6 +10,7 @@ import type {
   InvestigationModelOutputRejection,
   InvestigationPrDiffManifestV1,
   InvestigationRuntimeState,
+  InvestigationSourceProvenance,
   InvestigationTaskV1,
   InvestigationUnacceptedModelUsage,
   InvestigationVersionRef,
@@ -18,6 +19,7 @@ import {
   isCorrectableInvestigationModelOutputIssue,
   validateInvestigationModelExecutions,
   validateInvestigationPrDiffManifest,
+  validateInvestigationSourceProvenance,
 } from "@agentic-review/contracts";
 
 export class InvestigationLoopError extends Error {
@@ -1462,6 +1464,14 @@ function assertRuntimeTransition(
     "source_coverage_is_trusted",
     "Execution receipts cannot change the trusted source manifest or claim model delivery.",
   );
+  requireCondition(
+    checkpoint.runtime.sourceProvenance === undefined
+      ? runtime.sourceProvenance === undefined
+      : runtime.sourceProvenance !== undefined &&
+          unchanged(checkpoint.runtime.sourceProvenance, runtime.sourceProvenance),
+    "source_provenance_is_trusted",
+    "Execution receipts cannot add, replace, or remove the trusted source provenance.",
+  );
   for (const [kind, entries] of Object.entries({
     runtime_evidence: runtime.evidence,
     runtime_artifact: runtime.artifacts,
@@ -1731,6 +1741,107 @@ export function applyInvestigationSourceCoverage(
 }
 
 export const applyInvestigationSourceCheckpoint = applyInvestigationSourceCoverage;
+
+/** Preserve exact dependency pins before any model or execution work, including delivery recovery. */
+export function applyInvestigationSourceProvenanceCheckpoint(
+  checkpoint: InvestigationLoopCheckpointV1,
+  provenance: InvestigationSourceProvenance,
+  options: {
+    readonly task: InvestigationTaskV1;
+    readonly recordedAt: string;
+    readonly durationMs?: number;
+  },
+): InvestigationLoopCheckpointV1 {
+  assertInvestigationCheckpointIntegrity(checkpoint);
+  requireCondition(
+    checkpoint.stopReason === "continuing",
+    "loop_already_stopped",
+    "Source provenance registration requires an active investigation attempt.",
+  );
+  const { task } = options;
+  requireCondition(
+    task.id === checkpoint.taskId &&
+      checkpoint.taskBindingDigest === investigationTaskBindingDigest(task),
+    "checkpoint_task_binding_mismatch",
+    "Source provenance must belong to the exact frozen task.",
+  );
+  const subject = task.subjects.find((entry) => entry.id === task.subjectRef);
+  requireCondition(
+    (task.executionPolicy.mode === "source_read" ||
+      (task.executionPolicy.mode === "execute" &&
+        task.executionPolicy.allowRepositoryExecution &&
+        task.executionPolicy.authorizationRef !== null)) &&
+      task.executionPolicy.allowedSubjectRefs.includes(task.subjectRef) &&
+      subject !== undefined &&
+      subject.repositoryId === task.repository.id &&
+      subject.workItemId === task.workItem.id,
+    "source_provenance_not_authorized",
+    "Source provenance requires authorized materialization of the task's primary subject.",
+  );
+  const validation = validateInvestigationSourceProvenance(provenance, {
+    subjectRef: task.subjectRef,
+    subjects: task.subjects,
+  });
+  requireCondition(
+    validation.valid,
+    "invalid_source_provenance",
+    validation.errors.map((entry) => entry.message).join(" "),
+  );
+  const previous = checkpoint.runtime.sourceProvenance;
+  requireCondition(
+    previous === undefined || unchanged(previous, provenance),
+    "source_provenance_changed",
+    "Resume must preserve the exact registered dependency paths and immutable pins.",
+  );
+  if (previous === undefined)
+    requireCondition(
+      checkpoint.round === 0 &&
+        checkpoint.consumed.rounds === 0 &&
+        checkpoint.consumed.tokens === 0 &&
+        checkpoint.runtime.startedSteps.length === 0 &&
+        checkpoint.runtime.completedSteps.length === 0 &&
+        checkpoint.runtime.completedStepIds.length === 0 &&
+        checkpoint.runtime.evidence.length === 0 &&
+        checkpoint.runtime.artifacts.length === 0 &&
+        checkpoint.runtime.checks.length === 0 &&
+        checkpoint.runtime.subjects.length === 0 &&
+        checkpoint.runtime.e2eExecution === undefined &&
+        checkpoint.runtime.e2e === undefined &&
+        (checkpoint.runtime.modelExecutions?.length ?? 0) === 0 &&
+        (checkpoint.runtime.modelOutputRejections?.length ?? 0) === 0 &&
+        (checkpoint.runtime.unacceptedModelUsage?.length ?? 0) === 0,
+      "source_provenance_registration_too_late",
+      "The first source provenance receipt must precede model or repository execution.",
+    );
+  const durationMs = options.durationMs ?? 0;
+  const totalDurationMs = checkpoint.consumed.durationMs + durationMs;
+  requireCondition(
+    Number.isSafeInteger(durationMs) && durationMs >= 0 && Number.isSafeInteger(totalDurationMs),
+    "invalid_worker_consumption",
+    "Trusted elapsed duration and its accumulated total must be nonnegative safe integers.",
+  );
+  const runtime = {
+    ...structuredClone(checkpoint.runtime),
+    sourceProvenance: structuredClone(provenance),
+  };
+  const reportBytes = Math.max(
+    checkpoint.consumed.reportBytes,
+    retainedReportBytes(checkpoint.analysis, runtime),
+  );
+  return sealCheckpoint({
+    ...structuredClone(checkpoint),
+    version: checkpoint.version + 1,
+    previousCheckpointRef: reference(checkpoint),
+    runtime,
+    recordedAt: options.recordedAt,
+    consumed: { ...checkpoint.consumed, durationMs: totalDurationMs, reportBytes },
+    stopReason:
+      reportBytes > checkpoint.budget.maxReportBytes ||
+      totalDurationMs >= checkpoint.budget.maxDurationMs
+        ? "budget_exhausted"
+        : "continuing",
+  });
+}
 
 function assertNondecreasingBudget(previous: InvestigationBudget, next: InvestigationBudget): void {
   for (const field of ["maxRounds", "maxDurationMs", "maxTokens", "maxReportBytes"] as const) {

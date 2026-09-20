@@ -1139,6 +1139,7 @@ export async function makePrompt(
       : []),
     "PR diff units are complete frozen chunks, including deleted-file base content and exact diff context. Only chunks in sourceChunks were delivered this round. Base64 chunks are raw binary data, never a visual observation; explicitly record any required visual verification.",
     "Source entries identified in sourceRepresentation.inertSymlinks have Git mode 120000. Their supplied content is only inert link-target text; no link was followed. That text does not establish coverage of the target file or directory, or execution. Target content is covered only when independently supplied as complete sourceFiles or sourceChunks.",
+    "sourceRepresentation.submodules identifies dependency repositories materialized at independent pinned commits under the parent source root. sourceRepresentation.gitlinks identifies root Git mode 160000 pointers. A base/head chunk containing Subproject commit is pointer evidence only, not proof that the dependency contents were inspected. Claim dependency coverage only for complete child source actually supplied and read, and retain its mounted path and pinned child commit. Never refresh dependencies with git submodule update or select a branch.",
     "Return only updates for supplied entities plus newly discovered records. Unchanged summary and assessment are null; unchanged collections are empty arrays. The Worker retains the full ledger and merges this delta without dropping any omitted records.",
     "Accepted evidence and recheck records are immutable: omit them from updates and cite their IDs instead of rewriting them. Any content change to an existing finding or plan requires a higher version, including changes to a finding's confirmation or recheckRef.",
     `For a planRef to a plan added or updated in this delta, use its exact id and version with provisional digest "${"0".repeat(64)}"; the Worker computes the real digest from the complete proposed plan. Copy existing saved plan references exactly; do not replace their digests with placeholders or invent a digest.`,
@@ -1157,8 +1158,9 @@ export async function makePrompt(
   const { source: frozenSource, ...snapshotIdentityAndText } = snapshot;
   const sourceCache = new Map<string, { path: string; sha256: string; content: string }>();
   const prChunkReader = prManifest === undefined ? null : makePrChunkReader(prManifest, input);
-  const dependencyReader = makeSourceDependencyReader(input);
-  const sourceContextReader = makeSourceContextReader(input);
+  const submodulePointerReader = makeSubmodulePointerReader(input);
+  const dependencyReader = makeSourceDependencyReader(input, submodulePointerReader.has);
+  const sourceContextReader = makeSourceContextReader(input, submodulePointerReader.has);
   let contextBudget = Math.floor((maximumBytes - Buffer.byteLength(instructions, "utf8")) / 2);
   while (contextBudget >= 1) {
     input.signal.throwIfAborted();
@@ -1276,10 +1278,15 @@ export async function makePrompt(
               ),
             ),
           ]),
-        ].filter((path) => focusedSource || !prPaths.has(path))
+        ].filter((path) => focusedSource || !prPaths.has(path) || submodulePointerReader.has(path))
       : [];
+    const lexicalFocusedSeedPaths = focusedSeedPaths.filter(
+      (path) => !submodulePointerReader.has(path),
+    );
     const focusedContext =
-      focusedSeedPaths.length > 0 ? await sourceContextReader.read(focusedSeedPaths) : null;
+      lexicalFocusedSeedPaths.length > 0
+        ? await sourceContextReader.read(lexicalFocusedSeedPaths)
+        : null;
     for (const file of focusedContext?.requiredFiles ?? []) {
       const existing = sourceCache.get(file.path);
       if (
@@ -1351,15 +1358,18 @@ export async function makePrompt(
       if (source === undefined) {
         const frozenFile = frozenSource?.files.find((file) => file.path === path);
         if (input.task.executionPolicy.mode !== "snapshot_only" && analysisTask) {
-          const resolved = await input.workspace.resolveSourcePath(path);
-          const content = await readStableUtf8(
-            io,
-            resolved,
-            maximumBytes,
-            "MODEL_INPUT_LIMIT_EXCEEDED",
-            input.signal,
-          );
-          source = { path, sha256: sha256(content), content };
+          if (submodulePointerReader.has(path)) source = await submodulePointerReader.read(path);
+          else {
+            const resolved = await input.workspace.resolveSourcePath(path);
+            const content = await readStableUtf8(
+              io,
+              resolved,
+              maximumBytes,
+              "MODEL_INPUT_LIMIT_EXCEEDED",
+              input.signal,
+            );
+            source = { path, sha256: sha256(content), content };
+          }
         } else if (frozenFile !== undefined) {
           if (sha256(frozenFile.content) !== frozenFile.digest)
             throw failure(
@@ -1412,6 +1422,9 @@ export async function makePrompt(
             kind: "focused_source_context",
             sourceSha: focusedContext.sourceSha,
             seedPaths: focusedContext.seedPaths,
+            ...(lexicalFocusedSeedPaths.length === focusedSeedPaths.length
+              ? {}
+              : { unsupportedSeedPaths: focusedSeedPaths.filter(submodulePointerReader.has) }),
             requiredFiles: focusedContext.requiredFiles.map(({ path, digest }) => ({
               path,
               digest,
@@ -1478,7 +1491,10 @@ export async function makePrompt(
               kind: "focused_source_context",
               sourceSha: input.workspace.sourceBinding?.sourceSha ?? null,
               seedPaths: focusedSeedPaths,
-              reason: "The focused source context broker is unavailable.",
+              reason:
+                lexicalFocusedSeedPaths.length === 0
+                  ? "The selected paths identify pinned Git pointers, which have no lexical source context."
+                  : "The focused source context broker is unavailable.",
             }),
       sourceDiscovery: focusedSource
         ? (focusedDiscovery ?? {
@@ -1486,7 +1502,10 @@ export async function makePrompt(
             kind: "focused_source_context",
             sourceSha: input.workspace.sourceBinding?.sourceSha ?? null,
             seedPaths: focusedSeedPaths,
-            reason: "The focused source context broker is unavailable.",
+            reason:
+              lexicalFocusedSeedPaths.length === 0
+                ? "The selected paths identify pinned Git pointers, which have no lexical source context."
+                : "The focused source context broker is unavailable.",
           })
         : dependencies !== null
           ? {
@@ -1514,6 +1533,8 @@ export async function makePrompt(
             : null,
       sourceRepresentation: {
         inertSymlinks: input.workspace.sourceBinding?.inertSymlinks ?? [],
+        submodules: input.workspace.sourceBinding?.submodules ?? [],
+        gitlinks: input.workspace.sourceBinding?.gitlinks ?? [],
       },
       prDiff:
         prManifest === undefined
@@ -1545,6 +1566,7 @@ export async function makePrompt(
         allContextFilesIncluded: focusedContext !== null,
         allDependencyFilesIncluded:
           focusedContext?.queryBudgetExhausted !== true &&
+          lexicalFocusedSeedPaths.length === focusedSeedPaths.length &&
           (focusedSource
             ? focusedContext !== null &&
               focusedContext.catalogComplete &&
@@ -1622,6 +1644,7 @@ async function makeLocalSourcePrompt(
     "The local checkout is your working directory. Use native file search, symbol search, file reads, and read-only Git inspection to investigate the relevant implementation, callers, helpers, contracts, and test source. Do not guess exact dependency paths: search the checkout before declaring source unavailable.",
     "Prefer bounded searches and targeted source reads. Use rg when available and native file-search commands otherwise; avoid dumping unrelated directories or whole files when a focused range answers the question.",
     "For a PR, use the merge-base-to-head diff to identify changed behavior. Read baseline Git blobs when comparison is useful; diff, base content, and head content are evidence for one review, not mandatory separate review phases. Deleted files remain accessible with git show at the comparison revision.",
+    "workspace.submodules identifies dependency repositories materialized at independent pinned commits beneath the source root. Inspect a mounted dependency with its own local Git repository and commit; its files are not blobs in the parent commit. workspace.gitlinks records parent mode 160000 pointers. Subproject commit diff lines establish only a pointer change, not review of child contents. Claim child coverage only for source actually read, with the mounted path and child commit. Never run git submodule update, fetch additional dependency revisions, or select a branch.",
     ...(input.task.kind === "issue-investigate"
       ? [
           "For an issue, trace the reported behavior through the pinned implementation. Separate reporter statements, supported hypotheses, confirmed source defects, and missing information. Propose concrete reproduction or verification steps when runtime evidence is required, but do not perform them. Static analysis can finish with needs_information or needs_verification when all available source and reported facts have been investigated honestly.",
@@ -1654,6 +1677,8 @@ async function makeLocalSourcePrompt(
       manifest?.files.map(({ path, previousPath, status }) => ({ path, previousPath, status })) ??
       [],
     inertSymlinks: binding.inertSymlinks ?? [],
+    submodules: binding.submodules ?? [],
+    gitlinks: binding.gitlinks ?? [],
     snapshotSource:
       source === null
         ? null
@@ -1726,7 +1751,67 @@ async function makeLocalSourcePrompt(
   return { prompt: serialize(), projection, sourceUnitIds: [] };
 }
 
-function makeSourceContextReader(input: ModelTurnExecutionInput) {
+function makeSubmodulePointerReader(input: ModelTurnExecutionInput) {
+  const binding = input.workspace.sourceBinding;
+  const modules = new Map(
+    (binding?.submodules ?? []).map((entry) => [entry.path, structuredClone(entry)]),
+  );
+  const provenance = () => ({
+    subjectRef: input.workspace.sourceBinding?.subjectRef ?? null,
+    sourceSha: input.workspace.sourceBinding?.sourceSha ?? null,
+    submodules: input.workspace.sourceBinding?.submodules ?? [],
+    gitlinks: input.workspace.sourceBinding?.gitlinks ?? [],
+  });
+  const frozenDigest = investigationContentDigest(provenance());
+  const invalid = () =>
+    failure(
+      "MODEL_SOURCE_UNAVAILABLE",
+      "The supplied Git pointer does not match its exact pinned dependency and parent source binding.",
+    );
+  return {
+    has: (path: string) => modules.has(path),
+    async read(path: string): Promise<{ path: string; sha256: string; content: string }> {
+      const module = modules.get(path);
+      if (binding === null || module === undefined || binding.subjectRef !== input.task.subjectRef)
+        throw invalid();
+      const parent = module.parentPath === null ? undefined : modules.get(module.parentPath);
+      if (
+        !/^[a-f0-9]{40}$/u.test(module.commitSha) ||
+        module.parentCommitSha !== (parent?.commitSha ?? binding.sourceSha) ||
+        (module.parentPath !== null &&
+          (parent === undefined || !path.startsWith(`${parent.path}/`)))
+      )
+        throw invalid();
+      if (module.parentPath === null) {
+        const pointers = (binding.gitlinks ?? []).filter(
+          (entry) => entry.path === path && entry.revisionSha === binding.sourceSha,
+        );
+        if (pointers.length !== 1 || pointers[0]!.commitSha !== module.commitSha) throw invalid();
+      }
+      await input.workspace.assertSourceBinding();
+      if (investigationContentDigest(provenance()) !== frozenDigest) throw invalid();
+      const file = await input.workspace.readSourceFile(path);
+      await input.workspace.assertSourceBinding();
+      input.signal.throwIfAborted();
+      const content = `Subproject commit ${module.commitSha}\n`;
+      const digest = sha256(content);
+      if (
+        investigationContentDigest(provenance()) !== frozenDigest ||
+        !isObject(file) ||
+        file.path !== path ||
+        file.content !== content ||
+        file.digest !== digest
+      )
+        throw invalid();
+      return { path, content, sha256: digest };
+    },
+  };
+}
+
+function makeSourceContextReader(
+  input: ModelTurnExecutionInput,
+  isPointer: (path: string) => boolean,
+) {
   const cache = new Map<string, InvestigationSourceContext>();
   const sourceSha = input.workspace.sourceBinding?.sourceSha;
   return {
@@ -1746,6 +1831,11 @@ function makeSourceContextReader(input: ModelTurnExecutionInput) {
         throw failure("MODEL_SOURCE_UNAVAILABLE", "The focused source binding changed.");
       try {
         assertInvestigationSourceContext(value, sourceSha, seedPaths);
+        if (
+          [...value.requiredFiles, ...value.contextFiles].some((file) => isPointer(file.path)) ||
+          value.queries.some((query) => query.paths.some(isPointer))
+        )
+          throw new Error("A Git pointer cannot be lexical source context.");
       } catch {
         throw failure(
           "MODEL_SOURCE_UNAVAILABLE",
@@ -1758,7 +1848,10 @@ function makeSourceContextReader(input: ModelTurnExecutionInput) {
   };
 }
 
-function makeSourceDependencyReader(input: ModelTurnExecutionInput) {
+function makeSourceDependencyReader(
+  input: ModelTurnExecutionInput,
+  isPointer: (path: string) => boolean,
+) {
   const cache: InvestigationSourceDependencies[] = [];
   const sourceSha = input.workspace.sourceBinding?.sourceSha;
   return {
@@ -1790,6 +1883,9 @@ function makeSourceDependencyReader(input: ModelTurnExecutionInput) {
           (!canonicalDependencyStrings(dependencies.unsupportedSeedPaths) ||
             dependencies.unsupportedSeedPaths.length === 0 ||
             dependencies.unsupportedSeedPaths.some((path) => !seedPaths.includes(path)))) ||
+        seedPaths.some(
+          (path) => isPointer(path) && !dependencies.unsupportedSeedPaths?.includes(path),
+        ) ||
         !canonicalDependencyStrings(dependencies.symbols) ||
         !Number.isSafeInteger(dependencies.searchDepth) ||
         dependencies.searchDepth < 0 ||
@@ -1833,7 +1929,11 @@ function makeSourceDependencyReader(input: ModelTurnExecutionInput) {
         const querySymbols = query.symbols;
         const queryPaths = query.paths;
         for (const path of queryPaths) assertDependencySourcePath(path);
-        if (queryPaths.some((path) => dependencies.unsupportedSeedPaths?.includes(path)))
+        if (
+          queryPaths.some(
+            (path) => isPointer(path) || dependencies.unsupportedSeedPaths?.includes(path),
+          )
+        )
           throw failure(
             "MODEL_SOURCE_UNAVAILABLE",
             "An unsupported dependency seed cannot also be reported as lexically searched.",
@@ -1931,6 +2031,7 @@ function makeSourceDependencyReader(input: ModelTurnExecutionInput) {
         const key = file.path.toLowerCase();
         if (
           paths.has(key) ||
+          isPointer(file.path) ||
           typeof file.content !== "string" ||
           typeof file.digest !== "string" ||
           sha256(file.content) !== file.digest ||

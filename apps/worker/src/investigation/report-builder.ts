@@ -31,6 +31,7 @@ import {
   PositiveIntegerSchema,
   projectInvestigationCheckpointPresentation,
   validateInvestigationModelExecutions,
+  validateInvestigationSourceProvenance,
   validateInvestigationTask,
   validateInvestigationTokenUsage,
 } from "@agentic-review/contracts";
@@ -164,6 +165,9 @@ export function buildInvestigationReportSubmission(
   );
   const plans = reportPlans(input, analysis.plans, sourceReportRef);
   const context: InvestigationResultV1["context"] = {
+    ...(checkpoint.runtime.sourceProvenance === undefined
+      ? {}
+      : { sourceProvenance: structuredClone(checkpoint.runtime.sourceProvenance) }),
     ...(checkpoint.runtime.e2e === undefined
       ? {}
       : { e2e: structuredClone(checkpoint.runtime.e2e) }),
@@ -375,6 +379,11 @@ function validateInput(input: BuildInvestigationReportSubmissionInput): void {
       checkpoint.adoptedAttemptIds,
       checkpoint.round,
     ).valid ||
+    (checkpoint.runtime.sourceProvenance !== undefined &&
+      !validateInvestigationSourceProvenance(checkpoint.runtime.sourceProvenance, {
+        subjectRef: task.subjectRef,
+        subjects: task.subjects,
+      }).valid) ||
     !checkpoint.adoptedAttemptIds.includes(attempt.id) ||
     checkpoint.subjectRevisionKey !==
       task.subjects.find((subject) => subject.id === task.subjectRef)?.revisionKey ||

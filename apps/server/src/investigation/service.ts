@@ -45,12 +45,14 @@ import {
   isInvestigationStaticTaskKind,
   Sha256Schema,
   validateInvestigationAnalysisForTask,
+  validateInvestigationSourceProvenance,
   validateInvestigationTask,
 } from "@agentic-review/contracts";
 import {
   applyInvestigationLoopRound,
   applyInvestigationRuntimeCheckpoint,
   applyInvestigationSourceCoverage,
+  applyInvestigationSourceProvenanceCheckpoint,
   createInvestigationCheckpoint,
   hasInvestigationSemanticProgress,
   increaseInvestigationBudget,
@@ -1944,6 +1946,8 @@ export class InvestigationService {
   ) {
     if (request.kind === "rejected_analysis")
       return this.workerRejectedAnalysisCheckpoint(worker, taskId, request);
+    if (request.kind === "source_provenance")
+      return this.workerSourceProvenanceCheckpoint(worker, taskId, request);
     const { task, record } = this.lease(worker, taskId, request.lease);
     const checkpoint = this.required<InvestigationLoopCheckpointV1>("checkpoints", taskId);
     const key = `checkpoint:${record.attempt.id}:${request.kind}:${request.kind === "analysis" ? request.round.round : investigationContentDigest(request)}`;
@@ -2344,6 +2348,70 @@ export class InvestigationService {
         this.options.onTaskProgress?.(task, next, record.attempt);
     });
     return { checkpoint: next };
+  }
+
+  private workerSourceProvenanceCheckpoint(
+    worker: InvestigationWorkerPrincipal,
+    taskId: string,
+    request: Extract<InvestigationCheckpointRequest, { kind: "source_provenance" }>,
+  ) {
+    return this.store.transaction(() => {
+      const { task, record } = this.lease(worker, taskId, request.lease);
+      const checkpoint = this.required<InvestigationLoopCheckpointV1>("checkpoints", taskId);
+      requireCondition(
+        !record.cancelRequested,
+        409,
+        "cancellation_requested",
+        "Cancellation was accepted; no new source provenance may be registered.",
+      );
+      const primary = task.subjects.find((subject) => subject.id === task.subjectRef);
+      requireCondition(
+        (task.executionPolicy.mode === "source_read" ||
+          (task.executionPolicy.mode === "execute" &&
+            task.executionPolicy.allowRepositoryExecution &&
+            task.executionPolicy.authorizationRef !== null)) &&
+          task.executionPolicy.allowedSubjectRefs.includes(task.subjectRef) &&
+          primary?.repositoryId === task.repository.id &&
+          primary.workItemId === task.workItem.id,
+        403,
+        "source_provenance_not_authorized",
+        "Source provenance requires source access to the frozen primary subject.",
+      );
+      const validation = validateInvestigationSourceProvenance(request.provenance, task);
+      requireCondition(
+        validation.valid,
+        400,
+        "invalid_source_provenance",
+        `Source provenance must preserve the frozen source and dependency pins: ${validation.errors.map((issue) => issue.message).join(" ")}`,
+      );
+      if (checkpoint.runtime.sourceProvenance !== undefined) {
+        requireCondition(
+          investigationContentDigest(checkpoint.runtime.sourceProvenance) ===
+            investigationContentDigest(request.provenance),
+          409,
+          "source_provenance_conflict",
+          "Accepted source provenance cannot be replaced with different content.",
+        );
+        // A delayed acknowledgement must preserve every subsequently accepted checkpoint.
+        return { checkpoint };
+      }
+      requireCondition(
+        investigationUsageInvocations(this.store, taskId).length === 0,
+        409,
+        "source_provenance_registration_too_late",
+        "Source provenance must be registered before any model invocation begins.",
+      );
+      const recordedAt = this.time();
+      const next = applyInvestigationSourceProvenanceCheckpoint(checkpoint, request.provenance, {
+        task,
+        recordedAt,
+        durationMs: Math.max(0, Date.parse(recordedAt) - Date.parse(checkpoint.recordedAt)),
+      });
+      this.store.put("checkpoints", taskId, next);
+      recordMeaningfulInvestigationProgress(this.store, taskId, record.attempt.id, recordedAt);
+      this.options.onTaskProgress?.(task, next, record.attempt);
+      return { checkpoint: next };
+    });
   }
 
   private workerRejectedAnalysisCheckpoint(

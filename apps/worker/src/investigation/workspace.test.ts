@@ -313,6 +313,7 @@ async function prepareSource(
     "maximumInputBytes" | "maximumArtifactBytes"
   > = {},
   useFastReads = false,
+  bindingDetails: Partial<InvestigationSourceBinding> = {},
 ) {
   let fs: MemoryFileSystem;
   const assertBinding = vi.fn(async () => undefined);
@@ -330,7 +331,7 @@ async function prepareSource(
           fs.add(win32.join(destinationDirectory, ...components), "file", content);
         }
         return {
-          binding: sourceBinding(value),
+          binding: { ...sourceBinding(value), ...bindingDetails },
           assertBinding,
           ...(useFastReads ? { assertReadBinding } : {}),
         };
@@ -1327,6 +1328,285 @@ describe("native investigation attempt workspaces", () => {
     });
     expect(assertBinding).not.toHaveBeenCalled();
     expect(await fs.readDirectory(root)).toEqual([]);
+  });
+
+  it("copies and deeply freezes pinned dependency provenance before exposing the workspace", async () => {
+    const value = withSource(input());
+    const binding = {
+      ...sourceBinding(value),
+      submodules: [
+        {
+          path: "deps/library",
+          repository: "vendor/library",
+          commitSha: "a".repeat(40),
+          parentPath: null,
+          parentCommitSha: sourceBinding(value).sourceSha,
+        },
+        {
+          path: "deps/library/nested/helper",
+          repository: "vendor/helper",
+          commitSha: "b".repeat(40),
+          parentPath: "deps/library",
+          parentCommitSha: "a".repeat(40),
+        },
+      ],
+      gitlinks: [
+        {
+          path: "deps/library",
+          revisionSha: sourceBinding(value).sourceSha,
+          commitSha: "a".repeat(40),
+        },
+      ],
+      inertSymlinks: [{ path: "deps/library/link", revisionSha: "a".repeat(40) }],
+    };
+    const { provider, context } = setup({
+      materialize: async () => ({ binding, assertBinding: async () => undefined }),
+    });
+    const workspace = await provider.prepare(value, context);
+    const frozen = workspace.sourceBinding!;
+    expect(frozen).toEqual(binding);
+    expect(Object.isFrozen(frozen)).toBe(true);
+    for (const entries of [frozen.submodules, frozen.gitlinks, frozen.inertSymlinks]) {
+      expect(Object.isFrozen(entries)).toBe(true);
+      for (const entry of entries!) expect(Object.isFrozen(entry)).toBe(true);
+    }
+    binding.submodules[0]!.commitSha = "c".repeat(40);
+    binding.gitlinks[0]!.path = "elsewhere";
+    binding.inertSymlinks[0]!.path = "elsewhere";
+    expect(frozen.submodules![0]!.commitSha).toBe("a".repeat(40));
+    expect(frozen.gitlinks![0]!.path).toBe("deps/library");
+    expect(frozen.inertSymlinks![0]!.path).toBe("deps/library/link");
+    await workspace.assertSourceBinding();
+  });
+
+  it.each([
+    "unsafe path",
+    "duplicate mount",
+    "URL instead of repository",
+    "wrong root commit",
+    "missing parent",
+    "wrong nested commit",
+    "case-aliased parent",
+    "duplicate gitlink",
+    "conflicting head gitlink",
+  ])("rejects %s in pinned dependency provenance before exposing source", async (corruption) => {
+    const value = withSource(input());
+    const binding = {
+      ...sourceBinding(value),
+      submodules: [
+        {
+          path: "deps/library",
+          repository: "vendor/library",
+          commitSha: "a".repeat(40),
+          parentPath: null as string | null,
+          parentCommitSha: sourceBinding(value).sourceSha,
+        },
+        {
+          path: "deps/library/nested",
+          repository: "vendor/helper",
+          commitSha: "b".repeat(40),
+          parentPath: "deps/library" as string | null,
+          parentCommitSha: "a".repeat(40),
+        },
+      ],
+      gitlinks: [
+        {
+          path: "deps/library",
+          revisionSha: sourceBinding(value).sourceSha,
+          commitSha: "a".repeat(40),
+        },
+      ],
+    };
+    if (corruption === "unsafe path") binding.submodules[0]!.path = "deps/../escape";
+    if (corruption === "duplicate mount")
+      binding.submodules.push({ ...binding.submodules[0]!, path: "DEPS/library" });
+    if (corruption === "URL instead of repository")
+      binding.submodules[0]!.repository = "https://github.com/vendor/library.git";
+    if (corruption === "wrong root commit") binding.submodules[0]!.parentCommitSha = "f".repeat(40);
+    if (corruption === "missing parent") binding.submodules[1]!.parentPath = "deps/missing";
+    if (corruption === "wrong nested commit")
+      binding.submodules[1]!.parentCommitSha = "f".repeat(40);
+    if (corruption === "case-aliased parent") binding.submodules[1]!.path = "DEPS/library/nested";
+    if (corruption === "duplicate gitlink")
+      binding.gitlinks.push({ ...binding.gitlinks[0]!, path: "DEPS/library" });
+    if (corruption === "conflicting head gitlink") binding.gitlinks[0]!.commitSha = "f".repeat(40);
+    const assertBinding = vi.fn(async () => undefined);
+    const { fs, provider, context } = setup({
+      materialize: async () => ({ binding, assertBinding }),
+    });
+    await expect(provider.prepare(value, context)).rejects.toMatchObject({
+      code: "SOURCE_BINDING_MISMATCH",
+    });
+    expect(assertBinding).not.toHaveBeenCalled();
+    expect(await fs.readDirectory(root)).toEqual([]);
+  });
+
+  it.each([
+    "deps/library",
+    "deps/library/file.txt",
+    "DEPS/LIBRARY/new.txt",
+    ".gitmodules",
+    "config/.gitmodules",
+  ])(
+    "rejects parent patch writes to protected dependency path %s before any edit",
+    async (path) => {
+      const value = editableInput();
+      const f = await prepareSource(value, { "src/file.txt": "Original source\n" }, {}, false, {
+        submodules: [
+          {
+            path: "deps/library",
+            repository: "vendor/library",
+            commitSha: "a".repeat(40),
+            parentPath: null,
+            parentCommitSha: sourceBinding(value).sourceSha,
+          },
+        ],
+      });
+      await expect(
+        f.workspace.applyEdits({
+          allowedPaths: ["src/file.txt", path],
+          edits: [
+            {
+              path: "src/file.txt",
+              expectedDigest: textDigest("Original source\n"),
+              content: "Changed source\n",
+            },
+            { path, expectedDigest: null, content: "Uncapturable dependency mutation\n" },
+          ],
+        }),
+      ).rejects.toMatchObject({ code: "SOURCE_EDIT_NOT_AUTHORIZED" });
+      expect(await f.workspace.readSourceFile("src/file.txt")).toMatchObject({
+        content: "Original source\n",
+      });
+    },
+  );
+
+  it("retains parent-source edit authorization when pinned dependencies are present", async () => {
+    const value = editableInput();
+    const f = await prepareSource(value, { "src/file.txt": "Original source\n" }, {}, false, {
+      submodules: [
+        {
+          path: "deps/library",
+          repository: "vendor/library",
+          commitSha: "a".repeat(40),
+          parentPath: null,
+          parentCommitSha: sourceBinding(value).sourceSha,
+        },
+      ],
+    });
+    await f.workspace.applyEdits({
+      allowedPaths: ["src/file.txt"],
+      edits: [
+        {
+          path: "src/file.txt",
+          expectedDigest: textDigest("Original source\n"),
+          content: "Changed source\n",
+        },
+      ],
+    });
+    expect(await f.workspace.readSourceFile("src/file.txt")).toMatchObject({
+      content: "Changed source\n",
+    });
+  });
+
+  it("reads an exact nested submodule mount as verified Git pointer text while rejecting ordinary directories", async () => {
+    const value = withSource(input());
+    const f = await prepareSource(
+      value,
+      { "deps/library/nested/file.txt": "Child source\n", "src/file.txt": "Parent source\n" },
+      {},
+      true,
+      {
+        submodules: [
+          {
+            path: "deps/library",
+            repository: "vendor/library",
+            commitSha: "a".repeat(40),
+            parentPath: null,
+            parentCommitSha: sourceBinding(value).sourceSha,
+          },
+          {
+            path: "deps/library/nested",
+            repository: "vendor/helper",
+            commitSha: "b".repeat(40),
+            parentPath: "deps/library",
+            parentCommitSha: "a".repeat(40),
+          },
+        ],
+      },
+    );
+    f.assertReadBinding.mockClear();
+    const content = `Subproject commit ${"b".repeat(40)}\n`;
+    const pointer = { path: "deps/library/nested", content, digest: textDigest(content) };
+    expect(await f.workspace.readSourceFile("deps/library/nested")).toEqual(pointer);
+    expect(f.assertReadBinding.mock.calls).toEqual([[undefined], [pointer]]);
+    await expect(f.workspace.readSourceFile("src")).rejects.toMatchObject({
+      code: "WORKSPACE_PATH_UNSAFE",
+    });
+    await expect(f.workspace.readSourceFile("deps")).rejects.toMatchObject({
+      code: "WORKSPACE_PATH_UNSAFE",
+    });
+  });
+
+  it.each(["identity replacement", "reparse point", "ordinary file"])(
+    "does not return a submodule pointer after its directory changes to %s during the binding check",
+    async (mutation) => {
+      const value = withSource(input());
+      const f = await prepareSource(
+        value,
+        { "deps/library/file.txt": "Child source\n" },
+        {},
+        true,
+        {
+          submodules: [
+            {
+              path: "deps/library",
+              repository: "vendor/library",
+              commitSha: "a".repeat(40),
+              parentPath: null,
+              parentCommitSha: sourceBinding(value).sourceSha,
+            },
+          ],
+        },
+      );
+      const mount = win32.join(f.workspace.sourceDirectory!, "deps", "library");
+      f.assertReadBinding.mockImplementation(async (file) => {
+        if (file?.path !== "deps/library") return;
+        if (mutation === "identity replacement")
+          f.fs.change(mount, { identity: "replaced-directory" });
+        if (mutation === "reparse point") f.fs.change(mount, { reparsePoint: true });
+        if (mutation === "ordinary file") f.fs.change(mount, { kind: "file" });
+      });
+      await expect(f.workspace.readSourceFile("deps/library")).rejects.toMatchObject({
+        code:
+          mutation === "identity replacement" ? "SOURCE_BINDING_MISMATCH" : "WORKSPACE_PATH_UNSAFE",
+      });
+    },
+  );
+
+  it("propagates a materializer rejection of a submodule pointer instead of returning its declared pin", async () => {
+    const value = withSource(input());
+    const f = await prepareSource(value, { "deps/library/file.txt": "Child source\n" }, {}, true, {
+      submodules: [
+        {
+          path: "deps/library",
+          repository: "vendor/library",
+          commitSha: "a".repeat(40),
+          parentPath: null,
+          parentCommitSha: sourceBinding(value).sourceSha,
+        },
+      ],
+    });
+    f.assertReadBinding.mockImplementation(async (file) => {
+      if (file !== undefined)
+        throw new InvestigationWorkspaceError(
+          "SOURCE_BINDING_MISMATCH",
+          "The exact Git pointer changed.",
+        );
+    });
+    await expect(f.workspace.readSourceFile("deps/library")).rejects.toThrow(
+      "The exact Git pointer changed.",
+    );
   });
 
   it("binds a derived patch artifact only to nonempty recaptured worktree bytes", async () => {

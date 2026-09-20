@@ -13,6 +13,7 @@ import {
   applyInvestigationLoopRound,
   applyInvestigationRuntimeCheckpoint,
   applyInvestigationSourceCheckpoint,
+  applyInvestigationSourceProvenanceCheckpoint,
   createInvestigationCheckpoint,
   interruptInvestigationLoop,
   investigationContentDigest,
@@ -176,6 +177,11 @@ function fixture(
           task,
           recordedAt,
         });
+      else if (request.kind === "source_provenance")
+        current = applyInvestigationSourceProvenanceCheckpoint(current, request.provenance, {
+          task,
+          recordedAt,
+        });
       else if (request.kind === "rejected_analysis") {
         const tokens = invocationTokens.get(request.invocationId);
         if (tokens === undefined)
@@ -325,7 +331,134 @@ function fixture(
   };
 }
 
+function attachPinnedDependency(f: ReturnType<typeof fixture>) {
+  const sourceSha = "b".repeat(40);
+  const previous = f.claim.task.subjects.find((entry) => entry.id === f.claim.task.subjectRef)!;
+  const source = {
+    id: previous.id,
+    kind: "source_commit" as const,
+    repositoryId: previous.repositoryId,
+    workItemId: previous.workItemId,
+    revisionKey: investigationContentDigest({ kind: "source_commit", commitSha: sourceSha }),
+    commitSha: sourceSha,
+  };
+  f.claim.task.subjects = f.claim.task.subjects.map((entry) =>
+    entry.id === source.id ? source : entry,
+  );
+  f.claim.task.executionPolicy.mode = "source_read";
+  f.claim.inputSnapshot.subjectRevisionKey = source.revisionKey;
+  const checkpoint = createInvestigationCheckpoint({
+    task: f.claim.task,
+    attemptId: f.claim.attempt.id,
+    checkpointId: f.claim.checkpoint!.id,
+    leaseVersion: f.claim.attempt.leaseVersion,
+    recordedAt,
+  });
+  f.claim.checkpoint = checkpoint;
+  f.replaceCurrent(checkpoint);
+  const provenance = {
+    subjectRef: source.id,
+    sourceSha,
+    submodules: [
+      {
+        path: "deps/library",
+        repository: "vendor/library",
+        commitSha: "a".repeat(40),
+        parentPath: null,
+        parentCommitSha: sourceSha,
+      },
+    ],
+  };
+  const workspace = {
+    ...f.workspace,
+    sourceDirectory: "C:\\fixture\\attempt\\source",
+    sourceBinding: {
+      subjectRef: source.id,
+      revisionKey: source.revisionKey,
+      sourceSha,
+      patchDigest: null,
+      artifactRef: null,
+      submodules: structuredClone(provenance.submodules),
+    },
+  };
+  f.prepare.mockResolvedValue(workspace);
+  return { provenance, workspace };
+}
+
 describe("InvestigationLoopCoordinator", () => {
+  it("registers trusted source provenance before model dispatch without consuming an analysis round", async () => {
+    const f = fixture(0);
+    const { provenance, workspace } = attachPinnedDependency(f);
+    const execute = f.model.execute;
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      expect(input.checkpoint?.round).toBe(0);
+      expect(input.checkpoint?.runtime.sourceProvenance).toEqual(provenance);
+      expect(f.order[0]).toBe("checkpoint:source_provenance");
+      workspace.sourceBinding.submodules[0]!.repository = "changed/original-input";
+      return modelRound(input, proposedAnalysis(f.initial.result), "discovery");
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(f.current().runtime.sourceProvenance).toEqual(provenance);
+    expect(f.submissions[0]?.header.context.sourceProvenance).toEqual(provenance);
+    expect(f.current().consumed.rounds).toBe(1);
+  });
+
+  it.each(["changed", "missing"])(
+    "blocks a %s prepared dependency graph before model dispatch and preserves registered provenance",
+    async (mutation) => {
+      const f = fixture(0);
+      const { provenance, workspace } = attachPinnedDependency(f);
+      const checkpoint = applyInvestigationSourceProvenanceCheckpoint(
+        f.claim.checkpoint!,
+        provenance,
+        { task: f.claim.task, recordedAt },
+      );
+      f.claim.checkpoint = checkpoint;
+      f.replaceCurrent(checkpoint);
+      if (mutation === "changed") workspace.sourceBinding.submodules[0]!.commitSha = "f".repeat(40);
+      else workspace.sourceBinding.submodules.length = 0;
+      await f.coordinator.execute(f.claim, f.shutdown.signal);
+      expect(f.model.execute).not.toHaveBeenCalled();
+      expect(f.current().runtime.sourceProvenance).toEqual(provenance);
+      expect(f.submissions[0]?.header).toMatchObject({
+        outcome: "blocked",
+        context: { sourceProvenance: provenance },
+      });
+      expect(f.order).not.toContain("checkpoint:source_provenance");
+    },
+  );
+
+  it("reuses registered provenance when source preparation confirms the same graph", async () => {
+    const f = fixture(0);
+    const { provenance } = attachPinnedDependency(f);
+    const checkpoint = applyInvestigationSourceProvenanceCheckpoint(
+      f.claim.checkpoint!,
+      provenance,
+      { task: f.claim.task, recordedAt },
+    );
+    f.claim.checkpoint = checkpoint;
+    f.replaceCurrent(checkpoint);
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.order).not.toContain("checkpoint:source_provenance");
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.submissions[0]?.header.context.sourceProvenance).toEqual(provenance);
+  });
+
+  it("does not dispatch a model if the provenance acknowledgement omits the registered graph", async () => {
+    const f = fixture(0);
+    attachPinnedDependency(f);
+    const original = vi.mocked(f.client.checkpoint).getMockImplementation()!;
+    vi.mocked(f.client.checkpoint).mockImplementation(async (taskId, request, signal) => {
+      if (request.kind === "source_provenance") return { checkpoint: structuredClone(f.current()) };
+      return original(taskId, request, signal);
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).not.toHaveBeenCalled();
+    expect(f.current().runtime.sourceProvenance).toBeUndefined();
+    expect(f.submissions[0]?.header.outcome).toBe("failed");
+  });
+
   it("seals a complete fresh snapshot investigation after one model invocation", async () => {
     const f = fixture(0);
     expect(f.current().runtime.reviewMode).toBe("local_snapshot");
@@ -686,6 +819,32 @@ describe("InvestigationLoopCoordinator", () => {
       outcome: "blocked",
       report: { completeness: "partial" },
     });
+  });
+
+  it.each([
+    "SOURCE_SUBMODULE_UNAVAILABLE",
+    "SOURCE_SUBMODULE_UNSUPPORTED",
+    "SOURCE_SUBMODULE_LIMIT_EXCEEDED",
+    "SOURCE_SUBMODULE_BINDING_MISMATCH",
+  ])("reports %s as a safe actionable prerequisite before model dispatch", async (code) => {
+    const f = fixture();
+    f.prepare.mockRejectedValue(
+      Object.assign(new Error("private-token=secret unsafe upstream text"), { code }),
+    );
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).not.toHaveBeenCalled();
+    const interrupt = vi
+      .mocked(f.client.checkpoint)
+      .mock.calls.find(([, request]) => request.kind === "interrupt")?.[1];
+    expect(interrupt).toMatchObject({ modelInvocationState: "not_started" });
+    expect(f.submissions[0]?.header).toMatchObject({
+      outcome: "blocked",
+      report: { completeness: "partial" },
+    });
+    expect(JSON.stringify(interrupt)).toContain(code);
+    expect(JSON.stringify(interrupt)).toContain("resuming");
+    expect(JSON.stringify(interrupt)).not.toContain("private-token");
+    expect(JSON.stringify(interrupt)).not.toContain("unsafe upstream text");
   });
 
   it("does not declare pre-dispatch zero consumption after entering the model runner", async () => {
@@ -1058,39 +1217,53 @@ describe("InvestigationLoopCoordinator", () => {
     ).not.toHaveProperty("modelUsage");
   });
 
-  it("delivers an already complete checkpoint without preparing a workspace or repeating any work", async () => {
-    const f = fixture();
-    const input = {
-      task: f.claim.task,
-      attempt: f.claim.attempt,
-      checkpoint: f.claim.checkpoint,
-      signal: f.shutdown.signal,
-      workspace: f.workspace,
-    };
-    const discovery = modelRound(input, proposedAnalysis(f.initial.result), "discovery");
-    const first = applyInvestigationLoopRound(f.claim.checkpoint!, discovery.round, {
-      recordedAt,
-      usage: { durationMs: 10, tokens: 100, reportBytes: 0 },
-    });
-    const analysis = structuredClone(first.analysis);
-    analysis.rechecks = f.initial.result.report.recheck.records.map((record) => ({
-      ...record,
-      round: 2,
-    }));
-    const final = modelRound({ ...input, checkpoint: first }, analysis, "finalize");
-    const complete = applyInvestigationLoopRound(first, final.round, {
-      recordedAt,
-      usage: { durationMs: 10, tokens: 100, reportBytes: 0 },
-    });
-    f.claim.checkpoint = complete;
-    f.replaceCurrent(complete);
-    await f.coordinator.execute(f.claim, f.shutdown.signal);
-    expect(f.prepare).not.toHaveBeenCalled();
-    expect(f.model.execute).not.toHaveBeenCalled();
-    expect(f.plan.execute).not.toHaveBeenCalled();
-    expect(f.workspace.cleanup).not.toHaveBeenCalled();
-    expect(f.submissions[0]?.header.outcome).toBe("completed");
-  });
+  it.each([false, true])(
+    "delivers an already complete checkpoint without preparing a workspace or repeating any work: source provenance=%s",
+    async (withProvenance) => {
+      const f = fixture();
+      const provenance = withProvenance ? attachPinnedDependency(f).provenance : undefined;
+      if (provenance !== undefined) {
+        const checkpoint = applyInvestigationSourceProvenanceCheckpoint(
+          f.claim.checkpoint!,
+          provenance,
+          { task: f.claim.task, recordedAt },
+        );
+        f.claim.checkpoint = checkpoint;
+        f.replaceCurrent(checkpoint);
+      }
+      const input = {
+        task: f.claim.task,
+        attempt: f.claim.attempt,
+        checkpoint: f.claim.checkpoint,
+        signal: f.shutdown.signal,
+        workspace: f.workspace,
+      };
+      const discovery = modelRound(input, proposedAnalysis(f.initial.result), "discovery");
+      const first = applyInvestigationLoopRound(f.claim.checkpoint!, discovery.round, {
+        recordedAt,
+        usage: { durationMs: 10, tokens: 100, reportBytes: 0 },
+      });
+      const analysis = structuredClone(first.analysis);
+      analysis.rechecks = f.initial.result.report.recheck.records.map((record) => ({
+        ...record,
+        round: 2,
+      }));
+      const final = modelRound({ ...input, checkpoint: first }, analysis, "finalize");
+      const complete = applyInvestigationLoopRound(first, final.round, {
+        recordedAt,
+        usage: { durationMs: 10, tokens: 100, reportBytes: 0 },
+      });
+      f.claim.checkpoint = complete;
+      f.replaceCurrent(complete);
+      await f.coordinator.execute(f.claim, f.shutdown.signal);
+      expect(f.prepare).not.toHaveBeenCalled();
+      expect(f.model.execute).not.toHaveBeenCalled();
+      expect(f.plan.execute).not.toHaveBeenCalled();
+      expect(f.workspace.cleanup).not.toHaveBeenCalled();
+      expect(f.submissions[0]?.header.outcome).toBe("completed");
+      expect(f.submissions[0]?.header.context.sourceProvenance).toEqual(provenance);
+    },
+  );
 
   it("does not claim zero token consumption when the CLI omitted usage", async () => {
     const f = fixture();

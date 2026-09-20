@@ -525,6 +525,8 @@ describe("E2E interruption recovery", () => {
       scope: frozenScope,
       executionPolicy: task.executionPolicy,
       sourceDirectory: f.input.workspace.sourceDirectory,
+      submodules: [],
+      gitlinks: [],
       inertSymlinks: [],
       changedPaths: ["converter.cs"],
       evidenceDirectory: "C:/Attempts/evidence",
@@ -633,6 +635,130 @@ describe("E2E interruption recovery", () => {
     expect(prompt).toContain("a build or scenario that needs real symlink semantics\nis Blocked");
     expect(prompt).toContain("Do not follow an external target, create real links");
     expect(prompt).toContain("When video recording is available, capture a short video");
+  });
+
+  it("exposes pinned dependency provenance without claiming child review from root gitlink changes", () => {
+    const f = recoveryFixture();
+    const sourceSha = f.input.workspace.sourceBinding!.sourceSha;
+    const dependencySha = "f".repeat(40);
+    const nestedSha = "c".repeat(40);
+    const baseSha = "d".repeat(40);
+    expect(new Set([sourceSha, dependencySha, nestedSha, baseSha]).size).toBe(4);
+    const submodules = [
+      {
+        path: "vendor/library",
+        repository: "example/library",
+        commitSha: dependencySha,
+        parentPath: null,
+        parentCommitSha: sourceSha,
+      },
+      {
+        path: "vendor/library/deps/nested",
+        repository: "example/nested",
+        commitSha: nestedSha,
+        parentPath: "vendor/library",
+        parentCommitSha: dependencySha,
+      },
+    ];
+    const gitlinks = [
+      { path: "vendor/library", revisionSha: sourceSha, commitSha: dependencySha },
+      { path: "vendor/library", revisionSha: baseSha, commitSha: "e".repeat(40) },
+    ];
+    const currentLinks = [
+      { path: "root-link", revisionSha: sourceSha },
+      { path: "vendor/library/link", revisionSha: dependencySha },
+      { path: "vendor/library/deps/nested/link", revisionSha: nestedSha },
+      { path: "vendor/library-sibling/link", revisionSha: sourceSha },
+    ];
+    const prompt = createE2ePrompt({
+      snapshot: frozenInputFixture(f.input).snapshot,
+      input: {
+        ...f.input,
+        workspace: {
+          ...f.input.workspace,
+          sourceBinding: {
+            ...f.input.workspace.sourceBinding!,
+            submodules,
+            gitlinks,
+            inertSymlinks: [
+              ...currentLinks,
+              { path: "vendor/library/old-link", revisionSha: baseSha },
+              { path: "vendor/library/root-revision-link", revisionSha: sourceSha },
+              { path: "vendor/library/deps/nested/parent-link", revisionSha: dependencySha },
+              { path: "vendor/library-sibling/wrong-owner-link", revisionSha: dependencySha },
+            ],
+          },
+        },
+      },
+      changedPaths: ["vendor/library"],
+      mergeBaseSha: baseSha,
+      endpoint: "http://127.0.0.1:1234",
+      capability: "synthetic-capability",
+      directory: "C:/Attempts/evidence",
+    });
+    const envelope = JSON.parse(prompt.split("Trusted task envelope:\n")[1]!);
+    expect(envelope.submodules).toEqual(submodules);
+    expect(envelope.gitlinks).toEqual(gitlinks);
+    expect(envelope.inertSymlinks).toEqual(currentLinks);
+    expect(prompt).toContain("dependency snapshots mounted beneath sourceDirectory");
+    expect(prompt).toContain(
+      "Never refresh them with git submodule update, fetch, pull, or a branch checkout",
+    );
+    expect(prompt).toContain(
+      "A root gitlink pointer change does not mean the child repository contents were reviewed or\nverified",
+    );
+  });
+
+  it("selects symlink ownership by the longest mount path when repositories share a commit identity", () => {
+    const f = recoveryFixture();
+    const sharedSha = f.input.workspace.sourceBinding!.sourceSha;
+    const nestedSha = "c".repeat(40);
+    const links = [
+      { path: "root-link", revisionSha: sharedSha },
+      { path: "vendor/library/link", revisionSha: sharedSha },
+      { path: "vendor/library/deps/nested/link", revisionSha: nestedSha },
+      { path: "vendor/library-sibling/link", revisionSha: sharedSha },
+    ];
+    const prompt = createE2ePrompt({
+      snapshot: frozenInputFixture(f.input).snapshot,
+      input: {
+        ...f.input,
+        workspace: {
+          ...f.input.workspace,
+          sourceBinding: {
+            ...f.input.workspace.sourceBinding!,
+            submodules: [
+              {
+                path: "vendor/library",
+                repository: "example/library",
+                commitSha: sharedSha,
+                parentPath: null,
+                parentCommitSha: sharedSha,
+              },
+              {
+                path: "vendor/library/deps/nested",
+                repository: "example/nested",
+                commitSha: nestedSha,
+                parentPath: "vendor/library",
+                parentCommitSha: sharedSha,
+              },
+            ],
+            inertSymlinks: [
+              ...links,
+              { path: "vendor/library/deps/nested/ancestor-revision-link", revisionSha: sharedSha },
+              { path: "vendor/library-sibling/nested-revision-link", revisionSha: nestedSha },
+            ],
+          },
+        },
+      },
+      changedPaths: ["vendor/library"],
+      mergeBaseSha: "d".repeat(40),
+      endpoint: "http://127.0.0.1:1234",
+      capability: "synthetic-capability",
+      directory: "C:/Attempts/evidence",
+    });
+    const envelope = JSON.parse(prompt.split("Trusted task envelope:\n")[1]!);
+    expect(envelope.inertSymlinks).toEqual(links);
   });
 
   it("recovers accepted observations without calling a model or tools again", async () => {

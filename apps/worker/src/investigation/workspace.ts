@@ -40,6 +40,20 @@ export interface InvestigationSourceBinding {
     readonly path: string;
     readonly revisionSha: string;
   }[];
+  /** Independently pinned dependency repositories mounted beneath this task's source root. */
+  readonly submodules?: readonly {
+    readonly path: string;
+    readonly repository: string;
+    readonly commitSha: string;
+    readonly parentPath: string | null;
+    readonly parentCommitSha: string;
+  }[];
+  /** Root-repository gitlink pointers; these records do not claim child-source coverage. */
+  readonly gitlinks?: readonly {
+    readonly path: string;
+    readonly revisionSha: string;
+    readonly commitSha: string;
+  }[];
 }
 
 export interface InvestigationArtifactInput {
@@ -696,8 +710,8 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
           },
           context,
         );
-        binding = Object.freeze({ ...materializedSource.binding });
-        validateBinding(input.task, binding);
+        validateBinding(input.task, materializedSource.binding);
+        binding = freezeSourceBinding(materializedSource.binding);
         if (snapshot.source !== null && binding.artifactRef !== snapshot.source.artifactRef) {
           throw failure(
             "SOURCE_BINDING_MISMATCH",
@@ -1311,6 +1325,7 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
         const allowed = new Set<string>();
         for (const relativePath of allowedPaths) {
           const path = pathKey(resolveEditableSourcePath(layout.source, relativePath));
+          assertEditableDependencyPath(binding!, relativePath);
           if (allowed.has(path)) {
             throw failure(
               "SOURCE_EDIT_NOT_AUTHORIZED",
@@ -1330,6 +1345,7 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
         for (const edit of edits) {
           context.signal.throwIfAborted();
           const target = pathKey(resolveEditableSourcePath(layout.source, edit.path));
+          assertEditableDependencyPath(binding!, edit.path);
           if (!allowed.has(target) || targets.has(target)) {
             throw failure(
               "SOURCE_EDIT_NOT_AUTHORIZED",
@@ -1574,6 +1590,21 @@ export class ProductionInvestigationWorkspaceProvider implements InvestigationWo
         },
         readSourceFile: async (relativePath) => {
           await assertSourceReadBinding();
+          const absolutePath = resolveEditableSourcePath(layout.source, relativePath);
+          const path = win32.relative(layout.source, absolutePath).replaceAll("\\", "/");
+          const submodule = binding?.submodules?.find((entry) => entry.path === path);
+          if (submodule !== undefined) {
+            const before = await guard.assertPath(absolutePath, "directory");
+            const content = `Subproject commit ${submodule.commitSha}\n`;
+            const observed = { path, content, digest: digest(Buffer.from(content, "utf8")) };
+            await assertSourceReadBinding(observed);
+            if ((await guard.assertPath(absolutePath, "directory")).identity !== before.identity)
+              throw failure(
+                "SOURCE_BINDING_MISMATCH",
+                "The pinned dependency directory changed while its Git pointer was being inspected.",
+              );
+            return observed;
+          }
           const observed = await inspectSourceFile(relativePath);
           await assertSourceReadBinding(observed);
           return { path: observed.path, content: observed.content, digest: observed.digest };
@@ -2114,6 +2145,32 @@ function validateSnapshot(input: InvestigationWorkspaceInput): InvestigationInpu
   return snapshot;
 }
 
+function freezeSourceBinding(binding: InvestigationSourceBinding): InvestigationSourceBinding {
+  const frozen = structuredClone(binding);
+  for (const values of [frozen.inertSymlinks, frozen.submodules, frozen.gitlinks]) {
+    if (values === undefined) continue;
+    for (const value of values) Object.freeze(value);
+    Object.freeze(values);
+  }
+  return Object.freeze(frozen);
+}
+
+function assertEditableDependencyPath(binding: InvestigationSourceBinding, path: string): void {
+  if ((binding.submodules?.length ?? 0) === 0) return;
+  const canonical = path.replaceAll("\\", "/").toLowerCase();
+  if (
+    canonical.split("/").some((component) => component === ".gitmodules") ||
+    binding.submodules!.some((entry) => {
+      const mount = entry.path.toLowerCase();
+      return canonical === mount || canonical.startsWith(`${mount}/`);
+    })
+  )
+    throw failure(
+      "SOURCE_EDIT_NOT_AUTHORIZED",
+      "Pinned dependency repositories and their Git module definitions cannot be changed by a parent-repository patch.",
+    );
+}
+
 function validateBinding(task: InvestigationTaskV1, binding: InvestigationSourceBinding): void {
   const subject = task.subjects.find((candidate) => candidate.id === binding.subjectRef);
   if (
@@ -2145,6 +2202,102 @@ function validateBinding(task: InvestigationTaskV1, binding: InvestigationSource
       "SOURCE_BINDING_MISMATCH",
       "The materialized source SHA or patch digest does not match the task subject.",
     );
+  }
+  const invalid: () => never = () => {
+    throw failure(
+      "SOURCE_BINDING_MISMATCH",
+      "Pinned dependency provenance must preserve unique canonical paths and its exact parent commit chain.",
+    );
+  };
+  const canonicalPath = (value: unknown): value is string => {
+    if (typeof value !== "string" || value.length === 0 || value.length > 4_096) return false;
+    try {
+      const root = "C:\\source-binding";
+      const resolved = resolveEditableSourcePath(root, value);
+      return win32.relative(root, resolved).replaceAll("\\", "/") === value;
+    } catch {
+      return false;
+    }
+  };
+  const commit = (value: unknown): value is string =>
+    typeof value === "string" && /^[a-f0-9]{40}$/u.test(value);
+  if (binding.submodules !== undefined) {
+    if (!Array.isArray(binding.submodules) || binding.submodules.length > 128) invalid();
+    const modules = new Map<
+      string,
+      NonNullable<InvestigationSourceBinding["submodules"]>[number]
+    >();
+    const pathPrefixes = new Map<string, string>();
+    for (const entry of binding.submodules) {
+      if (
+        !hasExactKeys(entry, [
+          "path",
+          "repository",
+          "commitSha",
+          "parentPath",
+          "parentCommitSha",
+        ]) ||
+        !canonicalPath(entry.path) ||
+        typeof entry.repository !== "string" ||
+        entry.repository.length > 256 ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(entry.repository) ||
+        entry.repository
+          .split("/")
+          .some((part: string) => part.endsWith(".") || part.toLowerCase().endsWith(".git")) ||
+        !commit(entry.commitSha) ||
+        !commit(entry.parentCommitSha) ||
+        (entry.parentPath !== null && !canonicalPath(entry.parentPath)) ||
+        modules.has(entry.path.toLowerCase())
+      )
+        invalid();
+      const components = entry.path.split("/");
+      for (let length = 1; length <= components.length; length++) {
+        const prefix = components.slice(0, length).join("/");
+        const prior = pathPrefixes.get(prefix.toLowerCase());
+        if (prior !== undefined && prior !== prefix) invalid();
+        pathPrefixes.set(prefix.toLowerCase(), prefix);
+      }
+      modules.set(entry.path.toLowerCase(), entry);
+    }
+    for (const entry of modules.values()) {
+      const parents = [...modules.values()]
+        .filter((candidate) =>
+          entry.path.toLowerCase().startsWith(`${candidate.path.toLowerCase()}/`),
+        )
+        .sort((left, right) => right.path.length - left.path.length);
+      const parent = parents[0];
+      if (
+        entry.parentPath !== (parent?.path ?? null) ||
+        entry.parentCommitSha !== (parent?.commitSha ?? binding.sourceSha) ||
+        (parent !== undefined && !entry.path.startsWith(`${parent.path}/`))
+      )
+        invalid();
+    }
+  }
+  if (binding.gitlinks !== undefined) {
+    if (!Array.isArray(binding.gitlinks) || binding.gitlinks.length > 384) invalid();
+    const pointers = new Set<string>();
+    for (const entry of binding.gitlinks) {
+      if (
+        !hasExactKeys(entry, ["path", "revisionSha", "commitSha"]) ||
+        !canonicalPath(entry.path) ||
+        !commit(entry.revisionSha) ||
+        !commit(entry.commitSha)
+      )
+        invalid();
+      const identity = `${entry.revisionSha}\0${entry.path.toLowerCase()}`;
+      if (pointers.has(identity)) invalid();
+      pointers.add(identity);
+      if (entry.revisionSha === binding.sourceSha && binding.submodules !== undefined) {
+        const mounted = binding.submodules.find((candidate) => candidate.path === entry.path);
+        if (
+          mounted === undefined ||
+          mounted.parentPath !== null ||
+          mounted.commitSha !== entry.commitSha
+        )
+          invalid();
+      }
+    }
   }
 }
 

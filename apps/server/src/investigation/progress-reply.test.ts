@@ -6,6 +6,7 @@ import {
   type InvestigationUsageSummary,
   unavailableInvestigationTokenUsage,
 } from "@agentic-review/contracts";
+import { createInvestigationCheckpoint } from "@agentic-review/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InvestigationAutomaticReplySettings } from "./auto-reply-settings.js";
 import {
@@ -261,6 +262,211 @@ function harness(
 }
 
 describe("assignment progress comment outbox", () => {
+  // Diagnostic identifiers are displayed literally after Markdown underscore escaping.
+  const diagnosticText = (body: string | null) => body?.replaceAll("\\_", "_") ?? "";
+  const sourceBlockers = [
+    [
+      "SOURCE_TREE_UNSUPPORTED",
+      "repository entry the worker cannot safely prepare",
+      "supports the repository's source layout",
+    ],
+    [
+      "SOURCE_SUBMODULE_UNAVAILABLE",
+      "pinned submodule commit could not be obtained",
+      "availability of the recorded commit",
+    ],
+    [
+      "SOURCE_SUBMODULE_UNSUPPORTED",
+      "submodule configuration the worker cannot safely prepare",
+      "supports this submodule configuration",
+    ],
+    [
+      "SOURCE_SUBMODULE_LIMIT_EXCEEDED",
+      "exceeded the worker's configured source limits",
+      "submodule source limits and repository size",
+    ],
+    [
+      "SOURCE_SUBMODULE_BINDING_MISMATCH",
+      "did not match the commit recorded by its parent repository",
+      "prepare the exact pinned commits",
+    ],
+  ] as const;
+
+  it.each(sourceBlockers)(
+    "publishes controlled source blocker %s without private details",
+    async (code, reason, action) => {
+      const h = harness();
+      h.enqueue();
+      await h.run();
+      const blocked = createInvestigationPreview("pr", {
+        outcome: "blocked",
+        findingCount: 0,
+      }).result;
+      blocked.diagnostics = [
+        {
+          id: "source-blocker",
+          code,
+          category: "blocker",
+          retryable: true,
+          message:
+            "Private diagnostic C:\\private\\submodule https://private.example/repo.git?token=private-source-token",
+          evidenceRefs: [],
+          prerequisiteRefs: [],
+        },
+      ];
+      h.store.put("attempts", blocked.context.attempt.id, {
+        attempt: {
+          ...h.fixture.attempt,
+          id: blocked.context.attempt.id,
+          number: blocked.context.attempt.number,
+          taskId: h.task.id,
+          state: "blocked",
+        },
+      });
+      const task = h.transition("blocked", blocked);
+      await h.run();
+      expect(h.receipt()).toMatchObject({ stage: "failed", state: "sent", externalId: "9001" });
+      expect(diagnosticText(h.receipt().body)).toContain(code);
+      expect(h.receipt().body).toContain(reason);
+      expect(h.receipt().body).toContain(action);
+      expect(h.receipt().body).not.toMatch(
+        /private-source-token|private\.example|C:\\private|Private diagnostic/u,
+      );
+      h.publisher.update(task);
+      await h.run();
+      expect(diagnosticText(h.receipt().body)).toContain(code);
+      expect(
+        h.mutations.mock.calls.filter(([request]) => request.externalId === null),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("uses only the latest terminal diagnostic and falls back for an unknown blocker", async () => {
+    const h = harness();
+    h.enqueue();
+    const blocked = createInvestigationPreview("pr", {
+      outcome: "blocked",
+      findingCount: 0,
+    }).result;
+    const diagnostic = {
+      id: "old-blocker",
+      code: "SOURCE_SUBMODULE_UNAVAILABLE",
+      category: "blocker" as const,
+      retryable: true,
+      message: "Private earlier source failure.",
+      evidenceRefs: [],
+      prerequisiteRefs: [],
+    };
+    blocked.diagnostics = [
+      diagnostic,
+      {
+        ...diagnostic,
+        id: "current-blocker",
+        code: "PRIVATE_UNKNOWN_BLOCKER",
+        message: "private-unknown-reason",
+      },
+    ];
+    h.store.put("attempts", blocked.context.attempt.id, {
+      attempt: { ...h.fixture.attempt, state: "blocked" },
+    });
+    h.transition("blocked", blocked);
+    await h.run();
+    expect(h.receipt().body).toContain("waiting for required information");
+    expect(diagnosticText(h.receipt().body)).not.toContain("SOURCE_SUBMODULE_UNAVAILABLE");
+    expect(diagnosticText(h.receipt().body)).not.toContain("PRIVATE_UNKNOWN_BLOCKER");
+    expect(h.receipt().body).not.toContain("private-unknown-reason");
+  });
+
+  it.each(["current", "previous"] as const)(
+    "uses source blocker checkpoints only from the %s attempt",
+    async (which) => {
+      const h = harness();
+      h.enqueue();
+      const latest = {
+        ...h.fixture.attempt,
+        id: "latest-source-attempt",
+        number: 2,
+        state: "blocked" as const,
+      };
+      h.store.put("attempts", latest.id, { attempt: latest });
+      const checkpoint = createInvestigationCheckpoint({
+        task: h.task,
+        attemptId: which === "current" ? latest.id : h.fixture.attempt.id,
+        checkpointId: "source-blocker-checkpoint",
+        leaseVersion: latest.leaseVersion,
+        recordedAt: h.now().toISOString(),
+      });
+      checkpoint.stopReason = "blocked";
+      checkpoint.analysis.diagnostics = [
+        {
+          id: "source-blocker",
+          code: "SOURCE_SUBMODULE_UNAVAILABLE",
+          category: "blocker",
+          retryable: true,
+          message: "private-checkpoint-reason",
+          evidenceRefs: [],
+          prerequisiteRefs: [],
+        },
+      ];
+      h.store.put("checkpoints", h.task.id, checkpoint);
+      h.transition("blocked");
+      await h.run();
+      if (which === "current")
+        expect(diagnosticText(h.receipt().body)).toContain("SOURCE_SUBMODULE_UNAVAILABLE");
+      else {
+        expect(h.receipt().body).toContain("waiting for required information");
+        expect(diagnosticText(h.receipt().body)).not.toContain("SOURCE_SUBMODULE_UNAVAILABLE");
+      }
+      expect(h.receipt().body).not.toContain("private-checkpoint-reason");
+    },
+  );
+
+  it("does not reuse a blocked report reason from a previous attempt or Task", async () => {
+    const h = harness();
+    h.enqueue();
+    const blocked = createInvestigationPreview("pr", {
+      outcome: "blocked",
+      findingCount: 0,
+    }).result;
+    blocked.diagnostics = [
+      {
+        id: "source-blocker",
+        code: "SOURCE_SUBMODULE_UNAVAILABLE",
+        category: "blocker",
+        retryable: true,
+        message: "private-old-report-reason",
+        evidenceRefs: [],
+        prerequisiteRefs: [],
+      },
+    ];
+    h.store.put("attempts", "new-attempt", {
+      attempt: { ...h.fixture.attempt, id: "new-attempt", number: 2, state: "blocked" },
+    });
+    const previous = h.transition("blocked", blocked);
+    await h.run();
+    expect(h.receipt().body).toContain("waiting for required information");
+    expect(diagnosticText(h.receipt().body)).not.toContain("SOURCE_SUBMODULE_UNAVAILABLE");
+    h.clock.value += 1;
+    const nextTask: InvestigationTaskV1 = {
+      ...h.task,
+      id: "new-conversation-task",
+      state: "queued",
+      createdAt: h.now().toISOString(),
+      updatedAt: h.now().toISOString(),
+    };
+    h.store.put("tasks", nextTask.id, nextTask);
+    h.enqueue(nextTask);
+    await h.run();
+    const before = h.receipt();
+    h.publisher.update(previous, blocked);
+    await h.run();
+    expect(h.receipt()).toEqual(before);
+    expect(diagnosticText(h.receipt().body)).not.toContain("SOURCE_SUBMODULE_UNAVAILABLE");
+    expect(h.mutations.mock.calls.filter(([request]) => request.externalId === null)).toHaveLength(
+      1,
+    );
+  });
+
   it("coalesces same-phase usage without checkpoints and merges completion immediately", async () => {
     const usage: InvestigationUsageSummary = {
       usage: unavailableInvestigationTokenUsage(),

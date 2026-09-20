@@ -1,4 +1,5 @@
 import { type Static, type TProperties, Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import {
   DateTimeSchema,
   EntityIdSchema,
@@ -142,6 +143,33 @@ export const InvestigationSubjectV1Schema = Type.Union([
   }),
 ]);
 export type InvestigationSubjectV1 = Static<typeof InvestigationSubjectV1Schema>;
+
+const sourceProvenanceCommit = Type.String({
+  minLength: 40,
+  maxLength: 40,
+  pattern: "^[a-f0-9]{40}$",
+});
+const sourceProvenancePath = Type.String({ minLength: 1, maxLength: 4_096 });
+/** Trusted materialization metadata; a dependency pin does not establish review coverage. */
+export const InvestigationSourceProvenanceSchema = object({
+  subjectRef: EntityIdSchema,
+  sourceSha: sourceProvenanceCommit,
+  submodules: Type.Array(
+    object({
+      path: sourceProvenancePath,
+      repository: Type.String({
+        minLength: 3,
+        maxLength: 256,
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(?![\\s\\S])",
+      }),
+      commitSha: sourceProvenanceCommit,
+      parentPath: Type.Union([sourceProvenancePath, Type.Null()]),
+      parentCommitSha: sourceProvenanceCommit,
+    }),
+    { minItems: 1, maxItems: 128 },
+  ),
+});
+export type InvestigationSourceProvenance = Static<typeof InvestigationSourceProvenanceSchema>;
 
 export const InvestigationPrerequisiteSchema = object({
   id: EntityIdSchema,
@@ -679,6 +707,7 @@ export const InvestigationReportMetadataSchema = object({
 export type InvestigationReportMetadata = Static<typeof InvestigationReportMetadataSchema>;
 export const InvestigationResultContextSchema = object({
   e2e: Type.Optional(InvestigationE2eResultSchema),
+  sourceProvenance: Type.Optional(InvestigationSourceProvenanceSchema),
   repository: InvestigationRepositorySchema,
   workItem: InvestigationWorkItemSchema,
   task: object({
@@ -765,6 +794,7 @@ export type InvestigationUnacceptedModelUsage = Static<
 export const InvestigationRuntimeStateSchema = object({
   e2eExecution: Type.Optional(InvestigationE2eExecutionSchema),
   e2e: Type.Optional(InvestigationE2eResultSchema),
+  sourceProvenance: Type.Optional(InvestigationSourceProvenanceSchema),
   reviewMode: Type.Optional(
     Type.Union([Type.Literal("local_checkout"), Type.Literal("local_snapshot")]),
   ),
@@ -1194,6 +1224,11 @@ export const InvestigationCheckpointRequestSchema = Type.Union([
     manifest: InvestigationPrDiffManifestV1Schema,
   }),
   object({
+    kind: Type.Literal("source_provenance"),
+    lease: InvestigationWorkerLeaseSchema,
+    provenance: InvestigationSourceProvenanceSchema,
+  }),
+  object({
     kind: Type.Literal("execution"),
     lease: InvestigationWorkerLeaseSchema,
     execution: InvestigationRuntimeStateSchema,
@@ -1312,6 +1347,180 @@ export interface InvestigationSemanticValidation {
   errors: InvestigationSemanticIssue[];
 }
 
+/** Rejects malformed or misbound trusted provenance, including corrupted persisted report data. */
+export function validateInvestigationSourceProvenance(
+  provenance: unknown,
+  binding: { readonly subjectRef: string; readonly subjects: readonly InvestigationSubjectV1[] },
+): InvestigationSemanticValidation {
+  const errors: InvestigationSemanticIssue[] = [];
+  const add = (path: string, code: string, message: string) => {
+    errors.push({ path, code, message });
+  };
+  try {
+    if (!Value.Check(InvestigationSourceProvenanceSchema, provenance)) {
+      add(
+        Value.Errors(InvestigationSourceProvenanceSchema, provenance).First()?.path ?? "",
+        "INVALID_SOURCE_PROVENANCE",
+        "Source provenance must contain a bounded dependency graph with complete immutable pins.",
+      );
+      return { valid: false, errors };
+    }
+    const subjects = binding.subjects.filter((subject) => subject.id === binding.subjectRef);
+    const subject =
+      subjects.length === 1 && Value.Check(InvestigationSubjectV1Schema, subjects[0])
+        ? subjects[0]
+        : undefined;
+    if (provenance.subjectRef !== binding.subjectRef || subject === undefined)
+      add(
+        "/subjectRef",
+        "SOURCE_PROVENANCE_SUBJECT_MISMATCH",
+        "Source provenance must identify the task's unique primary subject.",
+      );
+    const expectedSha =
+      subject?.kind === "source_commit"
+        ? subject.commitSha
+        : subject?.kind === "original_pr" || subject?.kind === "remote_branch"
+          ? subject.headSha
+          : subject?.kind === "local_patch"
+            ? subject.baseSha
+            : null;
+    if (provenance.sourceSha !== expectedSha)
+      add(
+        "/sourceSha",
+        "SOURCE_PROVENANCE_REVISION_MISMATCH",
+        "Source provenance must preserve the primary subject's exact materialized source commit.",
+      );
+    if (subject?.kind === "local_patch") {
+      const bases = binding.subjects.filter((entry) => entry.id === subject.baseSubjectRef);
+      const base =
+        bases.length === 1 && Value.Check(InvestigationSubjectV1Schema, bases[0])
+          ? bases[0]
+          : undefined;
+      const baseSha =
+        base?.kind === "source_commit"
+          ? base.commitSha
+          : base?.kind === "original_pr" || base?.kind === "remote_branch"
+            ? base.headSha
+            : null;
+      if (
+        base?.repositoryId !== subject.repositoryId ||
+        base?.workItemId !== subject.workItemId ||
+        baseSha !== subject.baseSha
+      )
+        add(
+          "/sourceSha",
+          "SOURCE_PROVENANCE_BASE_MISMATCH",
+          "A local patch must preserve one frozen source base subject from the same repository and work item at its exact baseSha.",
+        );
+    }
+    const modules = new Map<string, InvestigationSourceProvenance["submodules"][number]>();
+    const paths: { components: string[]; folded: string[] }[] = [];
+    for (const [index, entry] of provenance.submodules.entries()) {
+      const path = `/submodules/${index}`;
+      const validPath = isCanonicalSourceProvenancePath(entry.path);
+      if (!validPath)
+        add(
+          `${path}/path`,
+          "SOURCE_PROVENANCE_PATH_INVALID",
+          "Dependency paths must be canonical relative Windows paths outside Git control metadata.",
+        );
+      if (entry.parentPath !== null && !isCanonicalSourceProvenancePath(entry.parentPath))
+        add(
+          `${path}/parentPath`,
+          "SOURCE_PROVENANCE_PATH_INVALID",
+          "Parent paths must use the same canonical source-relative representation.",
+        );
+      if (
+        entry.repository
+          .split("/")
+          .some((part) => part.endsWith(".") || part.toLowerCase().endsWith(".git"))
+      )
+        add(
+          `${path}/repository`,
+          "SOURCE_PROVENANCE_REPOSITORY_INVALID",
+          "Dependency repositories must use canonical owner/repository names without URL or Git suffixes.",
+        );
+      if (!validPath) continue;
+      const key = entry.path.toLowerCase();
+      if (modules.has(key))
+        add(
+          `${path}/path`,
+          "SOURCE_PROVENANCE_DUPLICATE_PATH",
+          "Each mounted dependency path must be unique, including case-insensitive aliases.",
+        );
+      modules.set(key, entry);
+      const components = entry.path.split("/");
+      const folded = components.map((component) => component.toLowerCase());
+      // Compare bounded component lists without retaining every expanding path prefix.
+      if (
+        paths.some((prior) => {
+          const length = Math.min(components.length, prior.components.length);
+          for (let component = 0; component < length; component++) {
+            if (folded[component] !== prior.folded[component]) break;
+            if (components[component] !== prior.components[component]) return true;
+          }
+          return false;
+        })
+      )
+        add(
+          `${path}/path`,
+          "SOURCE_PROVENANCE_PATH_ALIAS",
+          "Dependency paths must preserve one exact spelling for every shared directory prefix.",
+        );
+      paths.push({ components, folded });
+    }
+    for (const [index, entry] of provenance.submodules.entries()) {
+      if (!isCanonicalSourceProvenancePath(entry.path)) continue;
+      const parent = [...modules.values()]
+        .filter((candidate) =>
+          entry.path.toLowerCase().startsWith(`${candidate.path.toLowerCase()}/`),
+        )
+        .sort((left, right) => right.path.length - left.path.length)[0];
+      if (
+        entry.parentPath !== (parent?.path ?? null) ||
+        entry.parentCommitSha !== (parent?.commitSha ?? provenance.sourceSha)
+      )
+        add(
+          `/submodules/${index}/parentPath`,
+          "SOURCE_PROVENANCE_PARENT_MISMATCH",
+          "Each dependency must name its nearest mounted parent and that parent's exact commit; root dependencies bind to sourceSha.",
+        );
+    }
+  } catch {
+    add(
+      "",
+      "INVALID_SOURCE_PROVENANCE",
+      "Source provenance could not be safely read as an immutable dependency graph.",
+    );
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+function isCanonicalSourceProvenancePath(value: string): boolean {
+  if (value.length === 0 || value.length > 4_096 || value.includes("\\")) return false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 32 || code === 127 || '<>:"|?*'.includes(value[index]!)) return false;
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(++index);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return false;
+  }
+  return value.split("/").every((part) => {
+    if (
+      part === "" ||
+      part === "." ||
+      part === ".." ||
+      part.toLowerCase() === ".git" ||
+      /[. ]$/u.test(part)
+    )
+      return false;
+    return !/^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|CLOCK\$|COM[1-9]|LPT[1-9])$/u.test(
+      part.split(".", 1)[0]!.toUpperCase(),
+    );
+  });
+}
+
 /** Validates accepted model history without inventing identities for unrecorded rounds. */
 export function validateInvestigationModelExecutions(
   executions: readonly InvestigationModelExecution[],
@@ -1400,6 +1609,13 @@ export function validateInvestigationResult(
     );
   };
   const subjects = unique(result.context.subjects, "/context/subjects");
+  if (result.context.sourceProvenance !== undefined)
+    errors.push(
+      ...validateInvestigationSourceProvenance(result.context.sourceProvenance, {
+        subjectRef: result.context.task.subjectRef,
+        subjects: result.context.subjects,
+      }).errors.map((issue) => ({ ...issue, path: `/context/sourceProvenance${issue.path}` })),
+    );
   const findings = unique(result.findings, "/findings");
   const evidence = unique(result.verificationEvidence, "/verificationEvidence");
   const artifacts = unique(result.artifacts, "/artifacts");
