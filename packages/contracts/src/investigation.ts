@@ -18,6 +18,10 @@ import {
   InvestigationPlanStepStartedSchema,
 } from "./investigation-execution.js";
 import {
+  InvestigationModelOutputRejectionIssueSchema,
+  InvestigationModelOutputRejectionSchema,
+} from "./investigation-model-output.js";
+import {
   InvestigationPrDiffManifestV1Schema,
   InvestigationSourceCoverageSchema,
   validateInvestigationSourceCoverage,
@@ -767,6 +771,7 @@ export const InvestigationRuntimeStateSchema = object({
   sourceCoverage: Type.Optional(InvestigationSourceCoverageSchema),
   modelExecutions: Type.Optional(Type.Array(InvestigationModelExecutionSchema)),
   unacceptedModelUsage: Type.Optional(Type.Array(InvestigationUnacceptedModelUsageSchema)),
+  modelOutputRejections: Type.Optional(Type.Array(InvestigationModelOutputRejectionSchema)),
   completedStepIds: ids,
   checks: Type.Array(InvestigationValidationCheckSchema),
   evidence: Type.Array(InvestigationEvidenceV1Schema),
@@ -1167,6 +1172,14 @@ export type InvestigationHeartbeatRequest = Static<typeof InvestigationHeartbeat
 export type InvestigationHeartbeatResponse = Static<typeof InvestigationHeartbeatResponseSchema>;
 export const InvestigationCheckpointRequestSchema = Type.Union([
   object({
+    kind: Type.Literal("rejected_analysis"),
+    lease: InvestigationWorkerLeaseSchema,
+    inputCheckpointRef: InvestigationVersionRefSchema,
+    round: PositiveIntegerSchema,
+    invocationId: EntityIdSchema,
+    issue: InvestigationModelOutputRejectionIssueSchema,
+  }),
+  object({
     kind: Type.Literal("analysis"),
     invocationId: Type.Optional(EntityIdSchema),
     lease: InvestigationWorkerLeaseSchema,
@@ -1198,7 +1211,12 @@ export const InvestigationCheckpointRequestSchema = Type.Union([
       Type.Literal("interrupted"),
     ]),
     diagnostics: Type.Array(InvestigationDiagnosticSchema),
-    modelUsage: Type.Optional(Type.Omit(InvestigationUnacceptedModelUsageSchema, ["attemptId"])),
+    modelUsage: Type.Optional(
+      object({
+        ...Type.Omit(InvestigationUnacceptedModelUsageSchema, ["attemptId"]).properties,
+        invocationId: Type.Optional(EntityIdSchema),
+      }),
+    ),
   }),
 ]);
 export const InvestigationCheckpointResponseSchema = object({

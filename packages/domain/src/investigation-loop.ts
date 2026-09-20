@@ -7,12 +7,15 @@ import type {
   InvestigationLoopCheckpointV1,
   InvestigationLoopRoundV1,
   InvestigationModelIdentity,
+  InvestigationModelOutputRejection,
   InvestigationPrDiffManifestV1,
   InvestigationRuntimeState,
   InvestigationTaskV1,
   InvestigationUnacceptedModelUsage,
+  InvestigationVersionRef,
 } from "@agentic-review/contracts";
 import {
+  isCorrectableInvestigationModelOutputIssue,
   validateInvestigationModelExecutions,
   validateInvestigationPrDiffManifest,
 } from "@agentic-review/contracts";
@@ -163,6 +166,30 @@ export function assertInvestigationCheckpointIntegrity(
     "invalid_model_execution_history",
     modelExecutions.errors.map((issue) => issue.message).join(" "),
   );
+  const rejectionInvocations = new Set<string>();
+  const rejectionRounds = new Set<string>();
+  for (const rejection of checkpoint.runtime.modelOutputRejections ?? []) {
+    const key = JSON.stringify([rejection.attemptId, rejection.round]);
+    requireCondition(
+      Object.keys(rejection).sort().join(",") === "attemptId,invocationId,issue,recordedAt,round" &&
+        checkpoint.adoptedAttemptIds.includes(rejection.attemptId) &&
+        Number.isSafeInteger(rejection.round) &&
+        rejection.round > 0 &&
+        rejection.round <= checkpoint.round + 1 &&
+        typeof rejection.invocationId === "string" &&
+        rejection.invocationId.length <= 128 &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]*$(?![\s\S])/.test(rejection.invocationId) &&
+        isCorrectableInvestigationModelOutputIssue(rejection.issue) &&
+        typeof rejection.recordedAt === "string" &&
+        Number.isFinite(Date.parse(rejection.recordedAt)) &&
+        !rejectionInvocations.has(rejection.invocationId) &&
+        !rejectionRounds.has(key),
+      "invalid_model_output_rejection_history",
+      "Model output rejections must identify unique invocations and rounds in adopted attempts using only safe structural metadata.",
+    );
+    rejectionInvocations.add(rejection.invocationId);
+    rejectionRounds.add(key);
+  }
   const usageKeys = new Set<string>();
   let knownTokens = 0;
   for (const usage of checkpoint.runtime.unacceptedModelUsage ?? []) {
@@ -1086,6 +1113,109 @@ export function applyInvestigationLoopRound(
   return sealCheckpoint(next);
 }
 
+export type RejectInvestigationModelOutputInput = Omit<
+  InvestigationModelOutputRejection,
+  "recordedAt"
+> & { readonly inputCheckpointRef: InvestigationVersionRef };
+
+/** Charge a rejected proposal without accepting its analysis or consuming an analysis round. */
+export function rejectInvestigationModelOutput(
+  checkpoint: InvestigationLoopCheckpointV1,
+  rejection: RejectInvestigationModelOutputInput,
+  options: {
+    readonly recordedAt: string;
+    readonly durationMs: number;
+    readonly accountedTokens: number;
+  },
+): InvestigationLoopCheckpointV1 {
+  assertInvestigationCheckpointIntegrity(checkpoint);
+  requireCondition(
+    checkpoint.stopReason === "continuing",
+    "loop_already_stopped",
+    "Model output correction requires an active investigation attempt.",
+  );
+  requireCondition(
+    rejection.attemptId === checkpoint.attemptId,
+    "model_output_rejection_attempt_mismatch",
+    "A rejected proposal must belong to the active attempt.",
+  );
+  requireCondition(
+    unchanged(rejection.inputCheckpointRef, reference(checkpoint)),
+    "stale_checkpoint_reference",
+    "A rejected proposal must reference the exact accepted input checkpoint.",
+  );
+  requireCondition(
+    rejection.round === checkpoint.round + 1,
+    "round_sequence_mismatch",
+    "A rejected proposal must identify the next unaccepted analysis round.",
+  );
+  requireCondition(
+    isCorrectableInvestigationModelOutputIssue(rejection.issue),
+    "model_output_rejection_not_correctable",
+    "Only ordinary duplicate IDs or unresolved record references at safe structural paths may be corrected.",
+  );
+  const previousRejections = checkpoint.runtime.modelOutputRejections ?? [];
+  requireCondition(
+    !previousRejections.some((entry) => entry.invocationId === rejection.invocationId),
+    "model_output_rejection_invocation_reused",
+    "A model invocation can be rejected only once.",
+  );
+  requireCondition(
+    !previousRejections.some(
+      (entry) => entry.attemptId === rejection.attemptId && entry.round === rejection.round,
+    ),
+    "model_output_correction_exhausted",
+    "Only one rejected proposal may be corrected per attempt and analysis round.",
+  );
+  const totalDurationMs = checkpoint.consumed.durationMs + options.durationMs;
+  requireCondition(
+    Number.isSafeInteger(options.durationMs) &&
+      options.durationMs >= 0 &&
+      Number.isSafeInteger(totalDurationMs) &&
+      Number.isSafeInteger(options.accountedTokens) &&
+      options.accountedTokens >= checkpoint.consumed.tokens,
+    "invalid_worker_consumption",
+    "Elapsed time must be nonnegative and the accounting ledger total must preserve prior token consumption.",
+  );
+  const runtime = structuredClone(checkpoint.runtime);
+  runtime.modelOutputRejections = [
+    ...previousRejections.map((entry) => structuredClone(entry)),
+    {
+      attemptId: rejection.attemptId,
+      round: rejection.round,
+      invocationId: rejection.invocationId,
+      issue: structuredClone(rejection.issue),
+      recordedAt: options.recordedAt,
+    },
+  ];
+  const reportBytes = Math.max(
+    checkpoint.consumed.reportBytes,
+    retainedReportBytes(checkpoint.analysis, runtime),
+  );
+  const next = sealCheckpoint({
+    ...structuredClone(checkpoint),
+    version: checkpoint.version + 1,
+    previousCheckpointRef: reference(checkpoint),
+    recordedAt: options.recordedAt,
+    runtime,
+    consumed: {
+      ...checkpoint.consumed,
+      durationMs: totalDurationMs,
+      tokens: options.accountedTokens,
+      reportBytes,
+    },
+    stopReason:
+      checkpoint.consumed.rounds >= checkpoint.budget.maxRounds ||
+      totalDurationMs >= checkpoint.budget.maxDurationMs ||
+      options.accountedTokens >= checkpoint.budget.maxTokens ||
+      reportBytes > checkpoint.budget.maxReportBytes
+        ? "budget_exhausted"
+        : "continuing",
+  });
+  assertInvestigationCheckpointIntegrity(next);
+  return next;
+}
+
 export function interruptInvestigationLoop(
   checkpoint: InvestigationLoopCheckpointV1,
   reason: "blocked" | "failed" | "error" | "cancelled" | "interrupted" | "budget_exhausted",
@@ -1315,6 +1445,14 @@ function assertRuntimeTransition(
           unchanged(checkpoint.runtime.modelExecutions, runtime.modelExecutions),
     "model_execution_history_is_trusted",
     "Execution receipts cannot add, replace, or remove accepted analysis model identities.",
+  );
+  requireCondition(
+    checkpoint.runtime.modelOutputRejections === undefined
+      ? runtime.modelOutputRejections === undefined
+      : runtime.modelOutputRejections !== undefined &&
+          unchanged(checkpoint.runtime.modelOutputRejections, runtime.modelOutputRejections),
+    "model_output_rejection_history_is_trusted",
+    "Execution receipts cannot add, replace, or remove model output rejection history.",
   );
   const previousSource = checkpoint.runtime.sourceCoverage;
   requireCondition(

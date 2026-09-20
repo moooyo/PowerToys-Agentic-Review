@@ -5,6 +5,7 @@ import {
   type InvestigationLoopCheckpointV1,
   type InvestigationOutcome,
   type InvestigationRuntimeState,
+  isCorrectableInvestigationModelOutputIssue,
   validateInvestigationAnalysisForTask,
 } from "@agentic-review/contracts";
 import {
@@ -23,7 +24,13 @@ import {
 } from "./attempt-heartbeat.js";
 import type { E2eAgentRunner } from "./e2e-agent-runner.js";
 import type { InvestigationWorkerClient } from "./http-client.js";
-import type { ModelTurnExecutionResult, ModelTurnRunner } from "./model-turn-runner.js";
+import { safeModelOutputValidationMessage } from "./model-output-diagnostics.js";
+import {
+  getModelOutputCorrection,
+  type ModelTurnExecutionInput,
+  type ModelTurnExecutionResult,
+  type ModelTurnRunner,
+} from "./model-turn-runner.js";
 import { type InvestigationPlanExecutor, isInvestigationPlanTask } from "./plan-executor.js";
 import { createInvestigationProgressReporter } from "./progress-reporter.js";
 import { buildInvestigationReportSubmission } from "./report-builder.js";
@@ -111,6 +118,8 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
     let pendingInvocationId: string | undefined;
     let pendingInvocationAccepted = false;
     let pendingUsageComplete = false;
+    let correction: ModelTurnExecutionInput["correction"];
+    let correctedRound: number | undefined;
     const modelRunner =
       claim.task.kind === "pr-e2e" ? this.options.e2eAgentRunner : this.options.modelTurnRunner;
     const budget = new AbortController();
@@ -166,6 +175,23 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             if (pendingInvocationId !== undefined)
               await modelRunner?.markUsageDisposition?.(pendingInvocationId, "accepted");
             pendingInvocationId = undefined;
+          }
+          if (request.kind === "rejected_analysis") {
+            const retained = checkpoint.runtime.modelOutputRejections?.find(
+              (entry) => entry.invocationId === request.invocationId,
+            );
+            if (
+              checkpoint.round !== request.round - 1 ||
+              retained?.attemptId !== claim.attempt.id ||
+              retained.round !== request.round ||
+              investigationContentDigest(retained.issue) !==
+                investigationContentDigest(request.issue)
+            )
+              throw new Error("The rejected model invocation was not retained by its checkpoint.");
+            // The acknowledged rejection already charged this invocation through the ledger.
+            pendingModelUsage = undefined;
+            pendingInvocationId = undefined;
+            pendingUsageComplete = false;
           }
           if (checkpoint.stopReason === "budget_exhausted") {
             throw new InvestigationExecutionStopped(
@@ -358,6 +384,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             onUsage: observeUsage,
             onActivity: progress.onActivity,
             usageLease: claim.lease,
+            ...(correction === undefined ? {} : { correction }),
           };
           let e2eOutcome: InvestigationOutcome | undefined;
           let turn: ModelTurnExecutionResult;
@@ -407,7 +434,58 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             };
             e2eOutcome = result.outcome;
           } else {
-            turn = await modelRunner.execute(modelInput);
+            try {
+              turn = await modelRunner.execute(modelInput);
+            } catch (error) {
+              const proposedCorrection = getModelOutputCorrection(error);
+              if (
+                (claim.task.kind !== "pr-review" && claim.task.kind !== "issue-investigate") ||
+                executionSignal.aborted ||
+                proposedCorrection === null ||
+                !isCorrectableInvestigationModelOutputIssue(proposedCorrection.issue) ||
+                correctedRound === modelRound ||
+                checkpoint.runtime.modelOutputRejections?.some(
+                  (entry) => entry.attemptId === claim.attempt.id && entry.round === modelRound,
+                ) ||
+                pendingInvocationId === undefined ||
+                pendingModelUsage?.tokens === undefined ||
+                pendingModelUsage.tokens === null ||
+                !pendingUsageComplete ||
+                !cleanupConfirmed ||
+                modelRunner.markUsageDisposition === undefined ||
+                findUnconfirmedProcess(error) !== null
+              )
+                throw error;
+              const issue = {
+                ...proposedCorrection.issue,
+                paths: [...proposedCorrection.issue.paths].sort(),
+              };
+              // This promise includes durable receipt delivery; failure cannot admit another call.
+              await modelRunner.markUsageDisposition(pendingInvocationId, "rejected");
+              await accepted({
+                kind: "rejected_analysis",
+                lease: claim.lease,
+                inputCheckpointRef: {
+                  id: checkpoint.id,
+                  version: checkpoint.version,
+                  digest: checkpoint.digest,
+                },
+                round: modelRound,
+                invocationId: pendingInvocationId,
+                issue,
+              });
+              if (checkpoint.stopReason !== "continuing")
+                throw new InvestigationExecutionStopped(
+                  "failed",
+                  "MODEL_CORRECTION_NOT_ADMITTED",
+                  "The rejected-output checkpoint did not admit another model invocation.",
+                );
+              correctedRound = modelRound;
+              correction = { ...proposedCorrection, issue };
+              lastAccountedAt = this.#now();
+              lastAccountedDuration = checkpoint.consumed.durationMs;
+              continue;
+            }
           }
           // Custom runners can return their complete usage without emitting intermediate observations.
           observeUsage(turn.usage);
@@ -461,6 +539,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             ...(turn.modelIdentity === undefined ? {} : { modelIdentity: turn.modelIdentity }),
           });
           pendingModelUsage = undefined;
+          correction = undefined;
           lastAccountedAt = this.#now();
           lastAccountedDuration = checkpoint.consumed.durationMs;
           this.options.logger.info("Investigation checkpoint accepted.", {
@@ -539,7 +618,16 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
                 pendingModelUsage === undefined
                   ? { modelInvocationState: "not_started" as const }
                   : {}),
-                ...(pendingModelUsage === undefined ? {} : { modelUsage: pendingModelUsage }),
+                ...(pendingModelUsage === undefined
+                  ? {}
+                  : {
+                      modelUsage: {
+                        ...pendingModelUsage,
+                        ...(pendingInvocationId === undefined
+                          ? {}
+                          : { invocationId: pendingInvocationId }),
+                      },
+                    }),
               },
               reportSignal,
             ),
@@ -719,6 +807,13 @@ function classifyStop(error: unknown): {
   readonly code: string;
   readonly message: string;
 } {
+  const validationMessage = safeModelOutputValidationMessage(error);
+  if (validationMessage !== null)
+    return {
+      outcome: "failed",
+      code: "MODEL_OUTPUT_INVALID",
+      message: validationMessage,
+    };
   if (error instanceof InvestigationExecutionStopped) return error;
   if (error instanceof InvestigationTaskCancelled)
     return {

@@ -41,6 +41,7 @@ import {
   InvestigationCreateTaskRequestV1Schema,
   InvestigationInputSnapshotV1Schema,
   investigationTaskRequiresE2e,
+  isCorrectableInvestigationModelOutputIssue,
   isInvestigationStaticTaskKind,
   Sha256Schema,
   validateInvestigationAnalysisForTask,
@@ -57,6 +58,7 @@ import {
   investigationContentDigest,
   projectInvestigationTokenConsumption,
   projectRecordedE2eAnalysis,
+  rejectInvestigationModelOutput,
   restoreCompletedInvestigationForDelivery,
   restoreInvestigationCheckpoint,
 } from "@agentic-review/domain";
@@ -1940,6 +1942,8 @@ export class InvestigationService {
     taskId: string,
     request: InvestigationCheckpointRequest,
   ) {
+    if (request.kind === "rejected_analysis")
+      return this.workerRejectedAnalysisCheckpoint(worker, taskId, request);
     const { task, record } = this.lease(worker, taskId, request.lease);
     const checkpoint = this.required<InvestigationLoopCheckpointV1>("checkpoints", taskId);
     const key = `checkpoint:${record.attempt.id}:${request.kind}:${request.kind === "analysis" ? request.round.round : investigationContentDigest(request)}`;
@@ -2090,13 +2094,59 @@ export class InvestigationService {
           "A pre-dispatch declaration cannot replace a recorded model invocation or execution start.",
         );
       }
-      const acceptedAnalysis =
-        request.modelUsage === undefined
+      const modelUsage = request.modelUsage;
+      const interruptedInvocation =
+        modelUsage?.invocationId === undefined
           ? undefined
-          : this.store.get<CheckpointAcceptanceRecord>(
+          : invocations.find((receipt) => receipt.invocationId === modelUsage.invocationId);
+      const invocationBinding =
+        modelUsage?.invocationId === undefined
+          ? undefined
+          : this.store.get<{ attemptId: string; round: number }>(
               "idempotency",
-              `checkpoint:${record.attempt.id}:analysis:${request.modelUsage.round}`,
+              `model-usage-analysis:${modelUsage.invocationId}`,
             );
+      if (modelUsage?.invocationId !== undefined)
+        requireCondition(
+          interruptedInvocation !== undefined &&
+            interruptedInvocation.taskId === taskId &&
+            interruptedInvocation.attemptId === record.attempt.id &&
+            (task.kind === "pr-e2e"
+              ? interruptedInvocation.purpose === "e2e"
+              : ["analysis", "recheck"].includes(interruptedInvocation.purpose)) &&
+            interruptedInvocation.usage.totalTokens === modelUsage.tokens &&
+            (invocationBinding === undefined ||
+              (invocationBinding.attemptId === record.attempt.id &&
+                invocationBinding.round === modelUsage.round)),
+          409,
+          "model_usage_receipt_conflict",
+          "Interrupted model usage must identify the exact invocation and trusted token receipt for this task, attempt, and round.",
+        );
+      const acceptedRejection =
+        modelUsage?.invocationId === undefined
+          ? undefined
+          : checkpoint.runtime.modelOutputRejections?.find(
+              (rejection) => rejection.invocationId === modelUsage.invocationId,
+            );
+      if (acceptedRejection !== undefined)
+        requireCondition(
+          acceptedRejection.attemptId === record.attempt.id &&
+            acceptedRejection.round === modelUsage!.round &&
+            interruptedInvocation?.disposition === "rejected" &&
+            interruptedInvocation.completeness === "complete",
+          409,
+          "model_usage_receipt_conflict",
+          "A retained rejected invocation must match its original correction checkpoint.",
+        );
+      const acceptedAnalysis =
+        modelUsage === undefined
+          ? undefined
+          : modelUsage.invocationId !== undefined && invocationBinding === undefined
+            ? undefined
+            : this.store.get<CheckpointAcceptanceRecord>(
+                "idempotency",
+                `checkpoint:${record.attempt.id}:analysis:${modelUsage.round}`,
+              );
       if (acceptedAnalysis !== undefined) {
         requireCondition(
           acceptedAnalysis.checkpoint.taskId === taskId &&
@@ -2115,10 +2165,17 @@ export class InvestigationService {
           "This accepted analysis round already has a different token usage receipt.",
         );
       }
-      // An accepted analysis response may have been lost after its atomic write. Its usage
-      // is already charged, and a completed checkpoint remains available for delivery.
+      // Lost acknowledgements cannot double-charge usage or replace later accepted analysis
+      // with the old rejected proposal's failure. Cancellation still stops an active loop.
+      const obsoleteRejectedInterruption =
+        acceptedRejection !== undefined &&
+        checkpoint.round >= acceptedRejection.round &&
+        !record.cancelRequested &&
+        request.reason !== "cancelled";
       next =
-        acceptedAnalysis !== undefined && checkpoint.stopReason === "complete"
+        obsoleteRejectedInterruption ||
+        ((acceptedAnalysis !== undefined || acceptedRejection !== undefined) &&
+          checkpoint.stopReason === "complete")
           ? checkpoint
           : interruptInvestigationLoop(
               checkpoint,
@@ -2126,7 +2183,11 @@ export class InvestigationService {
               this.time(),
               request.diagnostics,
               durationMs,
-              acceptedAnalysis === undefined ? request.modelUsage : undefined,
+              acceptedAnalysis === undefined &&
+                acceptedRejection === undefined &&
+                modelUsage !== undefined
+                ? { round: modelUsage.round, tokens: modelUsage.tokens }
+                : undefined,
             );
     } else {
       requireCondition(
@@ -2283,6 +2344,101 @@ export class InvestigationService {
         this.options.onTaskProgress?.(task, next, record.attempt);
     });
     return { checkpoint: next };
+  }
+
+  private workerRejectedAnalysisCheckpoint(
+    worker: InvestigationWorkerPrincipal,
+    taskId: string,
+    request: Extract<InvestigationCheckpointRequest, { kind: "rejected_analysis" }>,
+  ) {
+    return this.store.transaction(() => {
+      const { task, record } = this.lease(worker, taskId, request.lease);
+      requireCondition(
+        isInvestigationStaticTaskKind(task.kind) && !investigationTaskRequiresE2e(task),
+        403,
+        "model_output_correction_not_authorized",
+        "Only a static investigation may correct a rejected analysis output.",
+      );
+      requireCondition(
+        !record.cancelRequested,
+        409,
+        "cancellation_requested",
+        "This task must stop before correcting further analysis.",
+      );
+      requireCondition(
+        isCorrectableInvestigationModelOutputIssue(request.issue),
+        400,
+        "model_output_correction_not_safe",
+        "Only duplicate analysis identifiers and ordinary dangling references may be corrected.",
+      );
+      const issue = {
+        rule: request.issue.rule,
+        paths: [...new Set(request.issue.paths)].sort(),
+      };
+      const checkpoint = this.required<InvestigationLoopCheckpointV1>("checkpoints", taskId);
+      const key = `checkpoint:${record.attempt.id}:rejected_analysis:${request.invocationId}`;
+      const digest = investigationContentDigest({ ...request, issue });
+      const accepted = this.store.get<CheckpointAcceptanceRecord>("idempotency", key);
+      if (accepted !== undefined) {
+        requireCondition(
+          accepted.digest === digest,
+          409,
+          "idempotency_conflict",
+          "This rejected model invocation already contains different checkpoint content.",
+        );
+        // A lost acknowledgement may be retried after another accepted checkpoint.
+        // Return the durable current state so recovery cannot roll the Worker back.
+        return { checkpoint };
+      }
+      const invocation = investigationUsageInvocation(this.store, request.invocationId);
+      requireCondition(
+        invocation !== undefined &&
+          invocation.taskId === taskId &&
+          invocation.attemptId === record.attempt.id &&
+          ["analysis", "recheck"].includes(invocation.purpose) &&
+          ["completed", "failed"].includes(invocation.state) &&
+          invocation.disposition === "rejected" &&
+          invocation.completeness === "complete" &&
+          invocation.usage.totalTokens !== null,
+        409,
+        "rejected_analysis_usage_mismatch",
+        "Correction must identify a rejected terminal model invocation with complete trusted usage for this attempt.",
+      );
+      const usage = this.usageSummary(taskId);
+      requireCondition(
+        usage.activeInvocationCount === 0 &&
+          usage.unknownInvocationCount === 0 &&
+          usage.usage.totalTokens !== null,
+        409,
+        "rejected_analysis_usage_unsettled",
+        "Every model invocation must have complete terminal usage before another correction is admitted.",
+      );
+      requireCondition(
+        !this.store.has("idempotency", `model-usage-analysis:${request.invocationId}`),
+        409,
+        "analysis_invocation_already_used",
+        "An accepted analysis invocation cannot also authorize an output correction.",
+      );
+      const recordedAt = this.time();
+      const next = rejectInvestigationModelOutput(
+        checkpoint,
+        {
+          attemptId: record.attempt.id,
+          inputCheckpointRef: request.inputCheckpointRef,
+          round: request.round,
+          invocationId: request.invocationId,
+          issue,
+        },
+        {
+          recordedAt,
+          durationMs: Math.max(0, Date.parse(recordedAt) - Date.parse(checkpoint.recordedAt)),
+          accountedTokens: usage.reportedTokens,
+        },
+      );
+      this.store.put("checkpoints", taskId, next);
+      this.store.insert("idempotency", key, { digest, checkpoint: next });
+      return { checkpoint: next };
+    });
   }
 
   workerPart(

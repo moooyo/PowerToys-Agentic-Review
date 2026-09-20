@@ -11,7 +11,12 @@ import {
   InvestigationModelEditsV1Schema,
   type InvestigationModelInvocationReceipt,
 } from "@agentic-review/contracts";
-import { createInvestigationCheckpoint, investigationContentDigest } from "@agentic-review/domain";
+import {
+  applyInvestigationSourceCoverage,
+  createInvestigationCheckpoint,
+  investigationContentDigest,
+  rejectInvestigationModelOutput,
+} from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
 import { ProcessHostRequestError } from "../execution/process-host-client.js";
 import {
@@ -31,6 +36,7 @@ import {
 import {
   createModelTurnRunner,
   createStaticModelJsonRunner,
+  getModelOutputCorrection,
   type ModelTurnExecutionInput,
   type ModelTurnFileIO,
   type ModelTurnFileStat,
@@ -388,6 +394,7 @@ function prChunkFixture(
       path?: string;
     })[];
     status?: "deleted" | "modified";
+    fullDiffPaths?: readonly string[];
     findingCount?: number;
     options?: Partial<ModelTurnRunnerOptions>;
   } = {},
@@ -403,7 +410,7 @@ function prChunkFixture(
           id: "full-diff",
           subjectRef: pr.task.subjectRef,
           kind: "full_diff",
-          paths: [],
+          paths: [...(settings.fullDiffPaths ?? [])],
           requiredWork: "Review the complete frozen PR diff.",
           status: "pending" as const,
           evidenceRefs: [],
@@ -413,25 +420,44 @@ function prChunkFixture(
       unresolvedUnitRefs: ["full-diff"],
     },
   };
-  const chunks: NonNullable<typeof settings.chunks> = settings.chunks ?? [
-    {
-      id: "deleted-diff",
-      kind: "diff" as const,
-      content:
-        "diff --git a/src/deleted.ts b/src/deleted.ts\n@@ -1 +0,0 @@\n-export const removed = true;\n",
-    },
-    { id: "deleted-base", kind: "base" as const, content: "export const removed = true;\n" },
-  ];
+  const chunks: NonNullable<typeof settings.chunks> =
+    settings.chunks ??
+    (settings.status === "modified"
+      ? [
+          {
+            id: "modified-diff",
+            kind: "diff",
+            content: "@@ -1 +1 @@\n-export const removed = false;\n+export const removed = true;\n",
+          },
+          { id: "modified-base", kind: "base", content: "export const removed = false;\n" },
+          { id: "modified-head", kind: "head", content: "export const removed = true;\n" },
+        ]
+      : [
+          {
+            id: "deleted-diff",
+            kind: "diff" as const,
+            content:
+              "diff --git a/src/deleted.ts b/src/deleted.ts\n@@ -1 +0,0 @@\n-export const removed = true;\n",
+          },
+          { id: "deleted-base", kind: "base" as const, content: "export const removed = true;\n" },
+        ]);
   const contents = new Map(chunks.map((chunk) => [chunk.id, chunk.content]));
-  const descriptors = chunks.map(({ id, kind, content, path }, ordinal) => ({
-    id,
-    path: path ?? "src/deleted.ts",
-    kind,
-    ordinal,
-    encoding: "utf8" as const,
-    contentDigest: hash(content),
-    byteLength: Buffer.byteLength(content),
-  }));
+  const streamOrdinals = new Map<string, number>();
+  const descriptors = chunks.map(({ id, kind, content, path }) => {
+    const sourcePath = path ?? "src/deleted.ts";
+    const stream = JSON.stringify([sourcePath, kind]);
+    const ordinal = streamOrdinals.get(stream) ?? 0;
+    streamOrdinals.set(stream, ordinal + 1);
+    return {
+      id,
+      path: sourcePath,
+      kind,
+      ordinal,
+      encoding: "utf8" as const,
+      contentDigest: hash(content),
+      byteLength: Buffer.byteLength(content),
+    };
+  });
   const subject = task.subjects[0]!;
   if (subject.kind !== "original_pr")
     throw new Error("The synthetic PR subject must be immutable.");
@@ -615,6 +641,25 @@ function selectFullDiff(p: ReturnType<typeof prChunkFixture>): void {
   p.checkpoint.round = 1;
 }
 
+function useLocalCheckout(p: ReturnType<typeof prChunkFixture>): void {
+  const manifest = p.checkpoint.runtime.sourceCoverage?.manifest;
+  if (manifest === undefined) throw new Error("The synthetic source manifest must be registered.");
+  const initial = createInvestigationCheckpoint({
+    task: p.task,
+    attemptId: p.pr.attempt.id,
+    checkpointId: p.checkpoint.id,
+    leaseVersion: p.pr.attempt.leaseVersion,
+    recordedAt: p.task.updatedAt,
+  });
+  Object.assign(
+    p.checkpoint,
+    applyInvestigationSourceCoverage(initial, manifest, {
+      task: p.task,
+      recordedAt: p.task.updatedAt,
+    }),
+  );
+}
+
 describe("investigation model turn runner", () => {
   it("lets a fresh snapshot-only issue finish in its first static invocation", async () => {
     const f = fixture({ findingCount: 0 });
@@ -650,10 +695,7 @@ describe("investigation model turn runner", () => {
 
   it("uses the pinned local checkout and a diff entry point without preselecting dependency paths", async () => {
     const p = prChunkFixture();
-    p.checkpoint.runtime.reviewMode = "local_checkout";
-    p.checkpoint.analysis.coverage.includedUnits =
-      p.checkpoint.analysis.coverage.includedUnits.filter((unit) => unit.kind !== "pr_diff_chunk");
-    p.checkpoint.analysis.coverage.unresolvedUnitRefs = ["full-diff"];
+    useLocalCheckout(p);
     const discover = vi.fn();
     const workspace = {
       ...p.workspace,
@@ -693,10 +735,7 @@ describe("investigation model turn runner", () => {
         { id: "large-base", kind: "base", content: "export const removed = true;\n" },
       ],
     });
-    p.checkpoint.runtime.reviewMode = "local_checkout";
-    p.checkpoint.analysis.coverage.includedUnits =
-      p.checkpoint.analysis.coverage.includedUnits.filter((unit) => unit.kind !== "pr_diff_chunk");
-    p.checkpoint.analysis.coverage.unresolvedUnitRefs = ["full-diff"];
+    useLocalCheckout(p);
     const result = await makePrompt(p.input, p.f.io, 32 * 1024, 1024 * 1024);
     const context = JSON.parse(
       result.prompt
@@ -1733,7 +1772,7 @@ describe("investigation model turn runner", () => {
   it("reuses the round chunk cache after reducing the complete source projection", async () => {
     const chunks = ["first", "second", "third"].map((id) => ({
       id,
-      kind: "base" as const,
+      kind: id === "first" ? ("diff" as const) : ("base" as const),
       content: id[0]!.repeat(40 * 1024),
     }));
     const p = prChunkFixture({ chunks, options: { maximumInputBytes: 128 * 1024 } });
@@ -1977,11 +2016,10 @@ describe("investigation model turn runner", () => {
   it.each([false, true])(
     "deduplicates selected dependency files only when complete content agrees: conflict=%s",
     async (conflict) => {
-      const p = prChunkFixture();
-      selectFullDiff(p);
       const path = "src/shared-caller.ts";
+      const p = prChunkFixture({ fullDiffPaths: [path] });
+      selectFullDiff(p);
       const content = "export const sourceIdentity = true;\n";
-      p.checkpoint.analysis.coverage.includedUnits[0]!.paths = [path];
       p.f.files.set(
         win32.join(p.f.input.workspace.attemptDirectory, "source", path),
         Buffer.from(content),
@@ -2315,6 +2353,9 @@ describe("investigation model turn runner", () => {
           { id: "first", kind, content: "First source line.\nSecond source line.\n" },
           { id: "second", kind, content: "Third source line.\nFourth source line.\n" },
           { id: "third", kind, content: "Fifth source line.\nSixth source line.\n" },
+          ...(status === "modified"
+            ? [{ id: "baseline", kind: "base" as const, content: "Original source baseline.\n" }]
+            : []),
         ],
       });
       const readSourceDependencies = attachSourceDependencies(p);
@@ -2381,7 +2422,7 @@ describe("investigation model turn runner", () => {
   it("falls back to the legacy chunk adapter and caches each chunk for budget retries", async () => {
     const chunks = ["first", "second", "third"].map((id) => ({
       id,
-      kind: "base" as const,
+      kind: id === "first" ? ("diff" as const) : ("base" as const),
       content: id[0]!.repeat(40 * 1024),
     }));
     const p = prChunkFixture({ chunks, options: { maximumInputBytes: 128 * 1024 } });
@@ -2588,16 +2629,156 @@ describe("investigation model turn runner", () => {
   });
 
   it.each([
-    ["not-json", "MODEL_OUTPUT_INVALID"],
-    [JSON.stringify({ schemaVersion: "JobEnvelope", findings: [] }), "MODEL_OUTPUT_INVALID"],
+    ["not-json", "MODEL_OUTPUT_INVALID", "invalid_json"],
+    [
+      JSON.stringify({ schemaVersion: "JobEnvelope", findings: [] }),
+      "MODEL_OUTPUT_INVALID",
+      "response_schema",
+    ],
   ])(
     "rejects invalid or legacy final output and cleans its owned control directory",
-    async (outputText, code) => {
+    async (outputText, code, rule) => {
       const f = fixture({ outputText });
-      await expect(f.runner.execute(f.input)).rejects.toMatchObject({ code });
+      await expect(f.runner.execute(f.input)).rejects.toMatchObject({ code, rule });
       expect(f.io.removeDirectory).toHaveBeenCalledOnce();
     },
   );
+
+  it("retains a safe rejection path after a completed response loses its temporary files", async () => {
+    const f = fixture();
+    f.round.analysis.assessment.evidenceRefs = ["private-snapshot-reference"];
+    let rejected: unknown;
+    try {
+      await f.runner.execute(f.input);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toMatchObject({
+      code: "MODEL_OUTPUT_INVALID",
+      rule: "reference_outside_batch",
+      paths: ["/analysis/assessment/evidenceRefs/0"],
+    });
+    expect(String(rejected)).not.toContain("private-snapshot-reference");
+    expect(f.io.removeDirectory).toHaveBeenCalledOnce();
+    const correction = getModelOutputCorrection(rejected)!;
+    expect(correction.previousResponse?.analysis.assessment?.evidenceRefs).toEqual([
+      "private-snapshot-reference",
+    ]);
+    correction.previousResponse!.analysis.summary = "Changed caller copy";
+    expect(getModelOutputCorrection(rejected)?.previousResponse?.analysis.summary).not.toBe(
+      "Changed caller copy",
+    );
+  });
+
+  it.each([false, true])(
+    "uses the acknowledged checkpoint and bounds untrusted correction context: %s",
+    async (bounded) => {
+      const f = fixture(bounded ? { options: { maximumInputBytes: 64 * 1024 } } : {});
+      const startedAt = f.input.attempt.startedAt;
+      if (startedAt === null)
+        throw new Error("The correction fixture must have a started attempt.");
+      const checkpoint = createInvestigationCheckpoint({
+        task: f.input.task,
+        checkpointId: "correction-checkpoint",
+        attemptId: f.input.attempt.id,
+        leaseVersion: 1,
+        recordedAt: startedAt,
+      });
+      const launch = f.start.getMockImplementation()!;
+      f.start.mockImplementation(async (...args) => {
+        const managed = await launch(...args);
+        f.files.set(
+          win32.join(f.roundDirectory, "round-result.json"),
+          Buffer.from(JSON.stringify(roundDelta(f.round))),
+        );
+        return managed;
+      });
+      const originalReferences = [...f.round.analysis.assessment.evidenceRefs];
+      if (bounded) f.round.analysis.summary = "x".repeat(90_000);
+      f.round.analysis.assessment.evidenceRefs = ["missing-proposed-evidence"];
+      let rejected: unknown;
+      try {
+        await f.runner.execute({ ...f.input, checkpoint });
+      } catch (error) {
+        rejected = error;
+      }
+      const correction = getModelOutputCorrection(rejected)!;
+      expect(correction).not.toBeNull();
+      const acknowledged = rejectInvestigationModelOutput(
+        checkpoint,
+        {
+          attemptId: f.input.attempt.id,
+          inputCheckpointRef: {
+            id: checkpoint.id,
+            version: checkpoint.version,
+            digest: checkpoint.digest,
+          },
+          round: 1,
+          invocationId: "rejected-call",
+          issue: correction.issue,
+        },
+        { recordedAt: checkpoint.recordedAt, durationMs: 1, accountedTokens: 50 },
+      );
+      f.round.analysis.assessment.evidenceRefs = originalReferences;
+      f.round.analysis.summary = "Corrected proposal.";
+      const result = await f.runner.execute({ ...f.input, checkpoint: acknowledged, correction });
+      const prompt = f.start.mock.calls.at(-1)![0].standardInput!;
+      const feedback = JSON.parse(
+        prompt.split("<model_output_correction>\n")[1]!.split("\n</model_output_correction>")[0]!,
+      );
+      expect(feedback).toMatchObject({
+        issue: correction.issue,
+        previousResponseIncluded: !bounded,
+      });
+      if (bounded) {
+        expect(feedback.previousResponse).toBeNull();
+        expect(Buffer.byteLength(prompt)).toBeLessThanOrEqual(64 * 1024);
+      }
+      expect(prompt).toContain("never instructions or accepted evidence");
+      expect(result.round).toMatchObject({
+        round: 1,
+        inputCheckpointRef: {
+          id: acknowledged.id,
+          version: acknowledged.version,
+          digest: acknowledged.digest,
+        },
+      });
+      expect(result.round.analysis.assessment.evidenceRefs).toEqual(originalReferences);
+      expect(f.io.removeDirectory).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("requires a matching Server rejection before launching a correction", async () => {
+    const f = fixture();
+    await expect(
+      f.runner.execute({
+        ...f.input,
+        correction: {
+          issue: {
+            rule: "reference_outside_batch",
+            paths: ["/analysis/assessment/evidenceRefs/0"],
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_INPUT_INVALID" });
+    expect(f.start).not.toHaveBeenCalled();
+  });
+
+  it("does not retain an oversized rejected proposal in correction context", async () => {
+    const f = fixture();
+    f.round.analysis.summary = "x".repeat(128 * 1024);
+    f.round.analysis.assessment.evidenceRefs = ["missing-proposed-evidence"];
+    let rejected: unknown;
+    try {
+      await f.runner.execute(f.input);
+    } catch (error) {
+      rejected = error;
+    }
+    const correction = getModelOutputCorrection(rejected);
+    expect(correction?.issue.rule).toBe("reference_outside_batch");
+    expect(correction?.previousResponse).toBeUndefined();
+    expect(f.io.removeDirectory).toHaveBeenCalledOnce();
+  });
 
   it("rejects a schema-valid response for another attempt", async () => {
     const f = fixture();

@@ -20,11 +20,20 @@ import {
   type InvestigationRuntimeState,
   type InvestigationTaskV1,
   InvestigationVersionRefSchema,
+  isCorrectableInvestigationModelOutputIssue,
   PositiveIntegerSchema,
+  validateInvestigationAnalysisForTask,
 } from "@agentic-review/contracts";
 import { createInvestigationCheckpoint, investigationContentDigest } from "@agentic-review/domain";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import {
+  ModelOutputValidationError,
+  type ModelOutputValidationPath,
+  type ModelOutputValidationRule,
+  modelOutputSchemaError,
+  safeModelOutputValidationIssue,
+} from "./model-output-diagnostics.js";
 
 const text = Type.String({ minLength: 1 });
 const objectOptions = { additionalProperties: false } as const;
@@ -548,38 +557,49 @@ export function prepareModelTurnProjection(input: {
 export function mergeModelTurnDelta(
   projection: ModelTurnProjection,
   delta: InvestigationModelTurnDeltaV1,
+  trustedContext?: {
+    readonly task: InvestigationTaskV1;
+    readonly runtime?: InvestigationRuntimeState;
+  },
 ): InvestigationLoopRoundV1 {
   if (!Value.Check(InvestigationModelTurnDeltaV1Schema, delta))
-    invalid("The model response does not match the bounded delta schema.");
+    throw modelOutputSchemaError(InvestigationModelTurnDeltaV1Schema, delta, "delta");
   const context = projection.context;
-  if (
-    delta.taskId !== context.task.id ||
-    delta.attemptId !== context.attempt.id ||
-    delta.round !== context.round ||
-    delta.phase !== projection.phase ||
-    !same(delta.inputCheckpointRef, context.inputCheckpointRef)
-  )
-    invalid(
-      "The model delta does not match its projected task, attempt, checkpoint, round, and phase.",
-    );
+  for (const [field, matches] of [
+    ["taskId", delta.taskId === context.task.id],
+    ["attemptId", delta.attemptId === context.attempt.id],
+    ["round", delta.round === context.round],
+    ["phase", delta.phase === projection.phase],
+    ["inputCheckpointRef", same(delta.inputCheckpointRef, context.inputCheckpointRef)],
+  ] as const)
+    if (!matches) invalid("delta_binding", [field]);
   const base = projection.baseAnalysis;
   const update = delta.analysis;
+  const issues = outputValidationCollector();
   const trustedObservationIds = new Set(
     (projectionObservations.get(projection) ?? context.observations).map((entry) => entry.id),
   );
-  if (update.evidence.some((entry) => trustedObservationIds.has(entry.id)))
-    invalid("Model evidence cannot replace a Worker observation identity.");
+  const collidingEvidenceIndex = update.evidence.findIndex((entry) =>
+    trustedObservationIds.has(entry.id),
+  );
+  if (collidingEvidenceIndex !== -1)
+    issues.add("trusted_evidence_collision", [
+      "analysis",
+      "evidence",
+      collidingEvidenceIndex,
+      "id",
+    ]);
   const next = structuredClone(base);
   next.coverage.includedUnits = mergeRecords(
     base.coverage.includedUnits,
     update.coverageUnits,
     new Set(projection.selectedUnitIds),
-    "coverage unit",
-    (old, value) => {
+    "coverageUnits",
+    issues.add,
+    (old, value, path) => {
       const { status: _oldStatus, evidenceRefs: _oldEvidence, ...oldDefinition } = old;
       const { status: _newStatus, evidenceRefs: _newEvidence, ...newDefinition } = value;
-      if (!same(oldDefinition, newDefinition))
-        invalid("A coverage update cannot change frozen required work or its subject.");
+      if (!same(oldDefinition, newDefinition)) issues.add("coverage_definition_changed", path);
     },
   );
   for (const name of collectionNames) {
@@ -589,9 +609,10 @@ export function mergeModelTurnDelta(
       update[name],
       new Set(context.analysis[name].map((entry) => entry.id)),
       name,
-      (old, value) => {
+      issues.add,
+      (old, value, path) => {
         if ((name === "evidence" || name === "rechecks") && !same(old, value))
-          invalid(`Accepted ${name} records are immutable.`);
+          issues.add("immutable_record_changed", path);
         if (name === "candidates") {
           const previous = old as InvestigationAnalysisV1["candidates"][number];
           const current = value as InvestigationAnalysisV1["candidates"][number];
@@ -599,7 +620,7 @@ export function mergeModelTurnDelta(
             previous.subjectRef !== current.subjectRef ||
             previous.discoveredRound !== current.discoveredRound
           )
-            invalid("A candidate update must preserve its subject and discovery round.");
+            issues.add("candidate_identity_changed", path);
         }
         if (name === "findings" || name === "plans") {
           const previous = old as { id: string; version: number };
@@ -608,7 +629,7 @@ export function mergeModelTurnDelta(
             current.version < previous.version ||
             (current.version === previous.version && !same(old, value))
           )
-            invalid(`Changing an existing ${name} record requires a newer content version.`);
+            issues.add("record_version_invalid", [...path, "version"]);
         }
       },
     );
@@ -616,24 +637,61 @@ export function mergeModelTurnDelta(
   }
   const visibleFindingIds = new Set(projection.selectedFindingIds);
   const removed = new Set(update.removedFindingIds);
-  for (const id of removed) {
+  for (const [index, id] of update.removedFindingIds.entries()) {
+    const path = ["analysis", "removedFindingIds", index] as const;
     if (!visibleFindingIds.has(id) || !base.findings.some((finding) => finding.id === id))
-      invalid("A delta cannot remove a finding outside its supplied batch.");
+      issues.add("finding_removal_outside_batch", path);
     if (update.findings.some((finding) => finding.id === id))
-      invalid("A delta cannot both update and remove the same finding.");
+      issues.add("finding_update_removed", path);
     const owners = next.candidates.filter((candidate) => candidate.findingId === id);
     if (
       owners.length === 0 ||
       owners.some((candidate) => candidate.status !== "withdrawn" && candidate.status !== "merged")
     )
-      invalid(
-        "Removing a finding requires retained withdrawal or merge records for every owning candidate.",
-      );
+      issues.add("finding_owner_required", path);
   }
   next.findings = next.findings.filter((finding) => !removed.has(finding.id));
   if (update.summary !== null) next.summary = update.summary;
   if (update.assessment !== null) next.assessment = structuredClone(update.assessment);
-  validateReferences(projection, delta);
+  validateReferences(projection, delta, issues.add);
+  if (trustedContext !== undefined) {
+    const validateScope = (analysis: InvestigationAnalysisV1) =>
+      validateInvestigationAnalysisForTask(trustedContext.task, analysis, trustedContext.runtime);
+    for (const issue of validateScope(next).errors)
+      issues.add(
+        "task_scope_violation",
+        nativeScopeIssuePath(issue.path, next, trustedContext.runtime),
+      );
+    if (issues.hasDuplicateRecords()) {
+      // Last-wins assembly cannot hide an unauthorized earlier copy of a duplicate proposal.
+      const audit = structuredClone(next);
+      const auditedCollections = [
+        "findings",
+        "candidates",
+        "rechecks",
+        "evidence",
+        "plans",
+        "nextActions",
+      ] as const;
+      for (const name of auditedCollections)
+        Object.assign(audit, { [name]: [...audit[name], ...update[name]] });
+      for (const issue of validateScope(audit).errors) {
+        const path = nativeScopeIssuePath(issue.path, audit, trustedContext.runtime);
+        const collection = path[1];
+        if (
+          path[0] === "analysis" &&
+          typeof collection === "string" &&
+          auditedCollections.some((name) => name === collection) &&
+          typeof path[2] === "number"
+        ) {
+          const count = next[collection as (typeof auditedCollections)[number]].length;
+          if (path[2] >= count) path[2] -= count;
+        }
+        issues.add("task_scope_violation", path);
+      }
+    }
+  }
+  issues.throwIfAny();
   next.coverage.completedUnitRefs = next.coverage.includedUnits
     .filter((unit) => unit.status === "completed")
     .map((unit) => unit.id);
@@ -763,8 +821,65 @@ function byteLength(value: unknown): number {
 function same(left: unknown, right: unknown): boolean {
   return investigationContentDigest(left) === investigationContentDigest(right);
 }
-function invalid(message: string): never {
-  throw new ModelTurnProjectionError("MODEL_OUTPUT_INVALID", message);
+function invalid(rule: ModelOutputValidationRule, path: ModelOutputValidationPath): never {
+  throw new ModelOutputValidationError(rule, path);
+}
+
+type RecordOutputIssue = (rule: ModelOutputValidationRule, path: ModelOutputValidationPath) => void;
+
+/** Inspect every schema-valid record before deciding whether its failure permits correction. */
+function outputValidationCollector(): {
+  readonly add: RecordOutputIssue;
+  readonly throwIfAny: () => void;
+  readonly hasDuplicateRecords: () => boolean;
+} {
+  let duplicateRecords = false;
+  let selected:
+    | {
+        readonly rule: ModelOutputValidationRule;
+        readonly correctable: boolean;
+        readonly path: ModelOutputValidationPath;
+        readonly relatedPaths: ModelOutputValidationPath[];
+      }
+    | undefined;
+  return {
+    add(rule, path) {
+      const error = new ModelOutputValidationError(rule, path);
+      const issue = safeModelOutputValidationIssue(error)!;
+      if (issue.rule === "duplicate_record_id") duplicateRecords = true;
+      const correctable = isCorrectableInvestigationModelOutputIssue(issue);
+      if (selected === undefined || (selected.correctable && !correctable)) {
+        selected = { rule: issue.rule, correctable, path, relatedPaths: [] };
+      } else if (selected.rule === issue.rule && selected.relatedPaths.length < 7) {
+        selected.relatedPaths.push(path);
+      }
+    },
+    throwIfAny() {
+      if (selected !== undefined)
+        throw new ModelOutputValidationError(selected.rule, selected.path, selected.relatedPaths);
+    },
+    hasDuplicateRecords: () => duplicateRecords,
+  };
+}
+
+/** Native validation paths are structural metadata; preserve only actual numeric array indexes. */
+function nativeScopeIssuePath(
+  path: string,
+  analysis: InvestigationAnalysisV1,
+  runtime: InvestigationRuntimeState | undefined,
+): (string | number)[] {
+  const fromRuntime = path === "/runtime" || path.startsWith("/runtime/");
+  const segments: (string | number)[] = fromRuntime ? [] : ["analysis"];
+  let parent: unknown = fromRuntime ? { runtime } : analysis;
+  for (const encoded of path.split("/").slice(1)) {
+    const key = encoded.replaceAll("~1", "/").replaceAll("~0", "~");
+    segments.push(Array.isArray(parent) && /^(0|[1-9][0-9]{0,5})$/u.test(key) ? Number(key) : key);
+    parent =
+      typeof parent === "object" && parent !== null && Object.hasOwn(parent, key)
+        ? (parent as Record<string, unknown>)[key]
+        : undefined;
+  }
+  return segments;
 }
 
 function pendingRecords(
@@ -1002,22 +1117,43 @@ function evidenceDependencyIds(
 }
 
 function collectReferenceIds(value: unknown, key: string): string[] {
-  const found: string[] = [];
+  return collectReferences(value, key).map((reference) => reference.id);
+}
+
+interface ModelReference {
+  readonly id: string;
+  readonly path: readonly (string | number)[];
+}
+
+function collectReferences(
+  value: unknown,
+  key: string,
+  path: readonly (string | number)[] = [],
+): ModelReference[] {
+  const found: ModelReference[] = [];
   if (value === null || typeof value !== "object") return found;
+  if (Array.isArray(value)) {
+    for (const [index, entry] of value.entries())
+      found.push(...collectReferences(entry, key, [...path, index]));
+    return found;
+  }
   for (const [name, child] of Object.entries(value)) {
+    const childPath = [...path, name];
     if (name === key || (key === "planRef" && name.endsWith("PlanRef"))) {
-      if (typeof child === "string") found.push(child);
+      if (typeof child === "string") found.push({ id: child, path: childPath });
       else if (Array.isArray(child))
-        found.push(...child.filter((entry): entry is string => typeof entry === "string"));
+        for (const [index, entry] of child.entries()) {
+          if (typeof entry === "string") found.push({ id: entry, path: [...childPath, index] });
+        }
       else if (
         child !== null &&
         typeof child === "object" &&
         "id" in child &&
         typeof child.id === "string"
       )
-        found.push(child.id);
+        found.push({ id: child.id, path: [...childPath, "id"] });
     } else if (child !== null && typeof child === "object")
-      found.push(...collectReferenceIds(child, key));
+      found.push(...collectReferences(child, key, childPath));
   }
   return found;
 }
@@ -1026,19 +1162,22 @@ function mergeRecords<T extends { id: string }>(
   base: readonly T[],
   updates: readonly T[],
   visible: ReadonlySet<string>,
-  name: string,
-  validateUpdate?: (previous: T, current: T) => void,
+  name: CollectionName | "coverageUnits",
+  recordIssue: RecordOutputIssue,
+  validateUpdate?: (previous: T, current: T, path: readonly (string | number)[]) => void,
 ): T[] {
-  const entries = new Map(base.map((entry) => [entry.id, entry]));
+  const accepted = new Map(base.map((entry) => [entry.id, entry]));
+  const entries = new Map(accepted);
   const seen = new Set<string>();
-  for (const update of updates) {
-    if (seen.has(update.id)) invalid(`The model delta contains duplicate ${name} IDs.`);
+  for (const [index, update] of updates.entries()) {
+    const path = ["analysis", name, index] as const;
+    if (seen.has(update.id)) recordIssue("duplicate_record_id", [...path, "id"]);
     seen.add(update.id);
-    const previous = entries.get(update.id);
+    // A duplicate proposed ID is not an accepted record. Validate each copy against the ledger.
+    const previous = accepted.get(update.id);
     if (previous !== undefined) {
-      if (!visible.has(update.id))
-        invalid(`The model delta modifies ${name} ${update.id} outside its supplied batch.`);
-      validateUpdate?.(previous, update);
+      if (!visible.has(update.id)) recordIssue("record_outside_batch", [...path, "id"]);
+      validateUpdate?.(previous, update, path);
     }
     entries.set(update.id, structuredClone(update));
   }
@@ -1048,6 +1187,7 @@ function mergeRecords<T extends { id: string }>(
 function validateReferences(
   projection: ModelTurnProjection,
   delta: InvestigationModelTurnDeltaV1,
+  recordIssue: RecordOutputIssue,
 ): void {
   const context = projection.context;
   const update = delta.analysis;
@@ -1066,54 +1206,73 @@ function validateReferences(
   const existingDrafts = new Map(
     projection.baseAnalysis.findings.map((finding) => [finding.feedbackDraft.id, finding]),
   );
-  for (const draft of update.feedbackDrafts) {
+  for (const [index, draft] of update.feedbackDrafts.entries()) {
     const owner = existingDrafts.get(draft.id);
     if (
       owner !== undefined &&
       (!projection.selectedFindingIds.includes(owner.id) || !same(owner.feedbackDraft, draft))
     )
-      invalid("An embedded finding draft can only change through its supplied owning finding.");
+      recordIssue("embedded_draft_update", ["analysis", "feedbackDrafts", index]);
   }
-  for (const finding of update.findings) {
+  for (const [index, finding] of update.findings.entries()) {
     const owner = existingDrafts.get(finding.feedbackDraft.id);
     if (owner !== undefined && owner.id !== finding.id)
-      invalid("A finding cannot take over another finding's draft identity.");
+      recordIssue("draft_identity_collision", [
+        "analysis",
+        "findings",
+        index,
+        "feedbackDraft",
+        "id",
+      ]);
   }
-  const check = (
-    references: readonly string[],
-    allowed: ReadonlySet<string>,
-    kind: string,
-  ): void => {
-    if (references.some((id) => !allowed.has(id)))
-      invalid(`The model delta references ${kind} outside its supplied batch or new records.`);
+  const check = (references: readonly ModelReference[], allowed: ReadonlySet<string>): void => {
+    for (const reference of references)
+      if (!allowed.has(reference.id)) recordIssue("reference_outside_batch", reference.path);
   };
-  check(collectReferenceIds(update, "evidenceRefs"), evidence, "evidence");
-  check(collectReferenceIds(update, "planRef"), plans, "plans");
-  check(collectReferenceIds(update, "draftRef"), drafts, "drafts");
-  check(collectReferenceIds(update, "subjectRef"), subjects, "subjects");
+  check(collectReferences(update, "evidenceRefs", ["analysis"]), evidence);
+  check(collectReferences(update, "planRef", ["analysis"]), plans);
+  check(collectReferences(update, "draftRef", ["analysis"]), drafts);
+  check(collectReferences(update, "subjectRef", ["analysis"]), subjects);
   check(
-    update.candidates.flatMap((entry) => (entry.findingId === null ? [] : [entry.findingId])),
+    update.candidates.flatMap((entry, index) =>
+      entry.findingId === null
+        ? []
+        : [{ id: entry.findingId, path: ["analysis", "candidates", index, "findingId"] }],
+    ),
     findings,
-    "findings",
   );
   check(
-    update.candidates.flatMap((entry) =>
-      entry.mergedIntoCandidateId === null ? [] : [entry.mergedIntoCandidateId],
+    update.candidates.flatMap((entry, index) =>
+      entry.mergedIntoCandidateId === null
+        ? []
+        : [
+            {
+              id: entry.mergedIntoCandidateId,
+              path: ["analysis", "candidates", index, "mergedIntoCandidateId"],
+            },
+          ],
     ),
     candidates,
-    "candidates",
   );
   check(
-    update.rechecks.map((entry) => entry.findingId),
+    update.rechecks.map((entry, index) => ({
+      id: entry.findingId,
+      path: ["analysis", "rechecks", index, "findingId"],
+    })),
     findings,
-    "findings",
   );
   const rechecks = ids("rechecks");
   check(
-    update.findings.flatMap((entry) =>
-      entry.confirmation.recheckRef === null ? [] : [entry.confirmation.recheckRef],
+    update.findings.flatMap((entry, index) =>
+      entry.confirmation.recheckRef === null
+        ? []
+        : [
+            {
+              id: entry.confirmation.recheckRef,
+              path: ["analysis", "findings", index, "confirmation", "recheckRef"],
+            },
+          ],
     ),
     rechecks,
-    "rechecks",
   );
 }

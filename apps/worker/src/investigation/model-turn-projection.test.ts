@@ -2,6 +2,7 @@ import {
   createInvestigationPreview as createInvestigationFixture,
   type InvestigationAnalysisV1,
   type InvestigationLoopCheckpointV1,
+  isCorrectableInvestigationModelOutputIssue,
 } from "@agentic-review/contracts";
 import {
   applyInvestigationLoopRound,
@@ -11,6 +12,10 @@ import {
 } from "@agentic-review/domain";
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
+import {
+  ModelOutputValidationError,
+  safeModelOutputValidationIssue,
+} from "./model-output-diagnostics.js";
 import {
   InvestigationModelCandidateSchema,
   type InvestigationModelTurnDeltaV1,
@@ -288,6 +293,669 @@ function recheckDelta(projection: ModelTurnProjection): InvestigationModelTurnDe
   }
   return delta;
 }
+
+function outputFailure(
+  projection: ModelTurnProjection,
+  delta: InvestigationModelTurnDeltaV1,
+  trustedContext?: Parameters<typeof mergeModelTurnDelta>[2],
+): ModelOutputValidationError {
+  try {
+    mergeModelTurnDelta(projection, delta, trustedContext);
+  } catch (error) {
+    expect(error).toBeInstanceOf(ModelOutputValidationError);
+    return error as ModelOutputValidationError;
+  }
+  throw new Error("The synthetic delta must fail model output validation.");
+}
+
+function newIssueFinding(projection: ModelTurnProjection) {
+  const finding = structuredClone(
+    createInvestigationFixture("bug", { findingCount: 1 }).result.findings[0]!,
+  );
+  finding.subjectRef = projection.context.task.subjectRef;
+  finding.locations = finding.locations.map((location) => ({
+    ...location,
+    subjectRef: finding.subjectRef,
+  }));
+  finding.evidenceRefs = [];
+  finding.rootCause.evidenceRefs = [];
+  finding.confirmation.evidenceRefs = [];
+  finding.confirmation.recheckRef = null;
+  finding.fixRecommendation.planRef = null;
+  finding.feedbackDraft.suggestion = null;
+  return finding;
+}
+
+function newIssuePlan(projection: ModelTurnProjection): InvestigationAnalysisV1["plans"][number] {
+  return {
+    id: "synthetic-verification-plan",
+    version: 1,
+    kind: "verification",
+    subjectRef: projection.context.task.subjectRef,
+    title: "Verify the recorded issue hypothesis",
+    rationale: "A saved experiment is needed before claiming a reproduced failure.",
+    prerequisites: [],
+    steps: [
+      {
+        id: "observe",
+        description: "Observe the reported behavior.",
+        expectedObservation: "Record the actual outcome.",
+        checkIds: [],
+      },
+    ],
+    acceptanceCriteria: ["Retain the actual observed result."],
+  };
+}
+
+describe("safe model delta validation diagnostics", () => {
+  it.each(["ordinary reference", "duplicate"] as const)(
+    "does not let a correctable %s hide a PR assessment on an Issue task",
+    (kind) => {
+      const projection = snapshotProjection();
+      const { task } = createInvestigationFixture("bug", { findingCount: 0 });
+      const delta = emptyDelta(projection);
+      const evidence = {
+        id: "new-evidence",
+        subjectRef: task.subjectRef,
+        source: "static_analysis" as const,
+        summary: "Synthetic analysis.",
+        evidenceRefs: kind === "ordinary reference" ? ["missing-evidence"] : [],
+      };
+      delta.analysis.evidence =
+        kind === "duplicate" ? [evidence, structuredClone(evidence)] : [evidence];
+      delta.analysis.assessment = {
+        kind: "pr",
+        subjectRef: task.subjectRef,
+        summary: "The wrong work item classification.",
+        evidenceRefs: [],
+        reviewConclusion: { status: "inconclusive", rationale: "Synthetic review." },
+        e2eAssessment: {
+          level: "not_needed",
+          rationale: "No runtime claim.",
+          planRef: null,
+          scenarioIds: [],
+          prerequisiteRefs: [],
+          linkedValidationReportRefs: [],
+        },
+      };
+      expect(
+        isCorrectableInvestigationModelOutputIssue(
+          safeModelOutputValidationIssue(outputFailure(projection, delta)),
+        ),
+      ).toBe(true);
+      const error = outputFailure(projection, delta, { task });
+      expect(error).toMatchObject({
+        rule: "task_scope_violation",
+        paths: ["/analysis/assessment/kind"],
+      });
+      expect(
+        isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error)),
+      ).toBe(false);
+    },
+  );
+
+  it("preserves the primary assessment subject even when another subject is visible and authorized", () => {
+    const original = snapshotProjection();
+    const { task } = createInvestigationFixture("bug", { findingCount: 0 });
+    const secondary = { ...task.subjects[0]!, id: "authorized-secondary-subject" };
+    task.subjects.push(secondary);
+    task.executionPolicy.allowedSubjectRefs.push(secondary.id);
+    const projection: ModelTurnProjection = {
+      ...original,
+      context: { ...original.context, subjects: [...original.context.subjects, secondary] },
+    };
+    const delta = emptyDelta(projection);
+    delta.analysis.assessment = { ...projection.baseAnalysis.assessment, subjectRef: secondary.id };
+    delta.analysis.evidence = [
+      {
+        id: "new-evidence",
+        subjectRef: task.subjectRef,
+        source: "static_analysis",
+        summary: "Synthetic analysis.",
+        evidenceRefs: ["missing-evidence"],
+      },
+    ];
+    const error = outputFailure(projection, delta, { task });
+    expect(error).toMatchObject({
+      rule: "task_scope_violation",
+      paths: ["/analysis/assessment/subjectRef"],
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      false,
+    );
+  });
+
+  it("audits an unauthorized earlier duplicate copy that last-wins assembly would otherwise hide", () => {
+    const original = snapshotProjection();
+    const { task } = createInvestigationFixture("bug", { findingCount: 0 });
+    const secondary = { ...task.subjects[0]!, id: "visible-but-unauthorized-subject" };
+    task.subjects.push(secondary);
+    const projection: ModelTurnProjection = {
+      ...original,
+      context: { ...original.context, subjects: [...original.context.subjects, secondary] },
+    };
+    const delta = emptyDelta(projection);
+    const evidence = {
+      id: "duplicate-evidence",
+      subjectRef: secondary.id,
+      source: "static_analysis" as const,
+      summary: "Synthetic analysis.",
+      evidenceRefs: [],
+    };
+    delta.analysis.evidence = [evidence, { ...evidence, subjectRef: task.subjectRef }];
+    const error = outputFailure(projection, delta, { task });
+    expect(error).toMatchObject({
+      rule: "task_scope_violation",
+      paths: ["/analysis/evidence/0/subjectRef"],
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      false,
+    );
+  });
+
+  it("keeps trusted runtime scope failures outside the model analysis path", () => {
+    const projection = snapshotProjection();
+    const { task, attempt } = createInvestigationFixture("bug", { findingCount: 0 });
+    const runtime = createInvestigationCheckpoint({
+      task,
+      attemptId: attempt.id,
+      checkpointId: "runtime-scope-checkpoint",
+      leaseVersion: attempt.leaseVersion,
+      recordedAt: task.updatedAt,
+    }).runtime;
+    runtime.reviewMode = "local_checkout";
+    const delta = emptyDelta(projection);
+    delta.analysis.evidence = [
+      {
+        id: "new-evidence",
+        subjectRef: task.subjectRef,
+        source: "static_analysis",
+        summary: "Synthetic analysis.",
+        evidenceRefs: ["missing-evidence"],
+      },
+    ];
+    const error = outputFailure(projection, delta, { task, runtime });
+    expect(error).toMatchObject({ rule: "task_scope_violation", paths: ["/runtime/reviewMode"] });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      false,
+    );
+  });
+
+  it("retains ordinary reference correction eligibility after complete native task scope validation", () => {
+    const projection = snapshotProjection();
+    const { task } = createInvestigationFixture("bug", { findingCount: 0 });
+    const delta = emptyDelta(projection);
+    delta.analysis.evidence = [
+      {
+        id: "new-evidence",
+        subjectRef: task.subjectRef,
+        source: "static_analysis",
+        summary: "Synthetic analysis.",
+        evidenceRefs: ["missing-evidence"],
+      },
+    ];
+    const error = outputFailure(projection, delta, { task });
+    expect(error).toMatchObject({
+      rule: "reference_outside_batch",
+      paths: ["/analysis/evidence/0/evidenceRefs/0"],
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      true,
+    );
+  });
+
+  it("rejects a foreign subject even when an ordinary missing reference appears first", () => {
+    const projection = snapshotProjection();
+    const original = structuredClone(projection.baseAnalysis);
+    const delta = emptyDelta(projection);
+    delta.analysis.evidence = [
+      {
+        id: "new-evidence",
+        subjectRef: "foreign-subject",
+        source: "static_analysis",
+        summary: "This proposed evidence is outside the supplied subject scope.",
+        evidenceRefs: ["missing-evidence"],
+      },
+    ];
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({
+      rule: "reference_outside_batch",
+      paths: ["/analysis/evidence/0/subjectRef"],
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      false,
+    );
+    expect(projection.baseAnalysis).toEqual(original);
+  });
+
+  it("does not let a duplicate proposed record hide its foreign subject", () => {
+    const projection = snapshotProjection();
+    const delta = emptyDelta(projection);
+    const entry = {
+      id: "duplicate-evidence",
+      subjectRef: projection.context.task.subjectRef,
+      source: "static_analysis" as const,
+      summary: "Synthetic analysis.",
+      evidenceRefs: [],
+    };
+    delta.analysis.evidence = [entry, { ...entry, subjectRef: "foreign-subject" }];
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({
+      rule: "reference_outside_batch",
+      paths: ["/analysis/evidence/1/subjectRef"],
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      false,
+    );
+  });
+
+  it("checks frozen coverage definitions after detecting a duplicate coverage ID", () => {
+    const projection = snapshotProjection();
+    const delta = emptyDelta(projection);
+    const unit = projection.context.analysis.coverageUnits[0]!;
+    delta.analysis.coverageUnits = [
+      unit,
+      { ...unit, requiredWork: "An unauthorized replacement scope." },
+    ];
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({
+      rule: "coverage_definition_changed",
+      paths: ["/analysis/coverageUnits/1"],
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      false,
+    );
+  });
+
+  it("does not let a duplicate candidate hide a later accepted evidence mutation", () => {
+    const f = fixture(1);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    const delta = emptyDelta(projection);
+    const candidate = { ...projection.context.analysis.candidates[0]!, id: "new-candidate" };
+    delta.analysis.candidates = [candidate, structuredClone(candidate)];
+    delta.analysis.evidence = [
+      { ...projection.context.analysis.evidence[0]!, summary: "Changed accepted evidence." },
+    ];
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({
+      rule: "immutable_record_changed",
+      paths: ["/analysis/evidence/0"],
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      false,
+    );
+  });
+
+  it.each(["duplicate", "ordinary reference"] as const)(
+    "preserves the hidden-record boundary in a delta that also has a correctable %s error",
+    (kind) => {
+      const f = fixture(20);
+      const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 12 * 1024 });
+      const omitted = f.checkpoint.analysis.findings.find(
+        (finding) => !projection.selectedFindingIds.includes(finding.id),
+      )!;
+      expect(omitted).toBeDefined();
+      const delta = emptyDelta(projection);
+      if (kind === "duplicate") {
+        const finding = newIssueFinding(projection);
+        delta.analysis.findings = [finding, structuredClone(finding)];
+      } else {
+        delta.analysis.evidence = [
+          {
+            id: "new-evidence",
+            subjectRef: projection.context.task.subjectRef,
+            source: "static_analysis",
+            summary: "Synthetic analysis.",
+            evidenceRefs: ["missing-evidence"],
+          },
+        ];
+      }
+      const index = delta.analysis.findings.length;
+      delta.analysis.findings.push({ ...omitted, version: omitted.version + 1 });
+      const error = outputFailure(projection, delta);
+      expect(error).toMatchObject({
+        rule: "record_outside_batch",
+        paths: [`/analysis/findings/${index}/id`],
+      });
+      expect(
+        isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error)),
+      ).toBe(false);
+    },
+  );
+
+  it("retains bounded correctable duplicate diagnostics without treating new proposals as accepted evidence", () => {
+    const projection = snapshotProjection();
+    const delta = emptyDelta(projection);
+    delta.analysis.evidence = Array.from({ length: 12 }, (_, index) => ({
+      id: "duplicate-proposed-evidence",
+      subjectRef: projection.context.task.subjectRef,
+      source: "static_analysis" as const,
+      summary: `Proposed content ${index}.`,
+      evidenceRefs: [],
+    }));
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({
+      rule: "duplicate_record_id",
+      paths: Array.from({ length: 8 }, (_, index) => `/analysis/evidence/${index + 1}/id`),
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      true,
+    );
+    expect(projection.baseAnalysis.evidence).toEqual([]);
+  });
+
+  it("aggregates ordinary missing references while keeping the rejected delta out of the ledger", () => {
+    const projection = snapshotProjection();
+    const delta = emptyDelta(projection);
+    delta.analysis.evidence = [
+      {
+        id: "new-evidence",
+        subjectRef: projection.context.task.subjectRef,
+        source: "static_analysis",
+        summary: "Synthetic analysis.",
+        evidenceRefs: ["missing-first", "missing-second"],
+      },
+    ];
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({
+      rule: "reference_outside_batch",
+      paths: ["/analysis/evidence/0/evidenceRefs/0", "/analysis/evidence/0/evidenceRefs/1"],
+    });
+    expect(isCorrectableInvestigationModelOutputIssue(safeModelOutputValidationIssue(error))).toBe(
+      true,
+    );
+    expect(projection.baseAnalysis.evidence).toEqual([]);
+  });
+
+  it.each(["taskId", "attemptId", "round", "phase", "inputCheckpointRef"] as const)(
+    "locates the mismatched %s binding without retaining its rejected value",
+    (field) => {
+      const projection = snapshotProjection();
+      const delta = emptyDelta(projection);
+      const privateValue = "private-binding-value-never-disclosed";
+      if (field === "taskId" || field === "attemptId") delta[field] = privateValue;
+      else if (field === "round") delta.round += 1;
+      else if (field === "phase") delta.phase = "finalize";
+      else delta.inputCheckpointRef = { ...delta.inputCheckpointRef!, id: privateValue };
+      const error = outputFailure(projection, delta);
+      expect(error).toMatchObject({
+        code: "MODEL_OUTPUT_INVALID",
+        rule: "delta_binding",
+        paths: [`/${field}`],
+      });
+      expect(error.message).not.toContain(privateValue);
+    },
+  );
+
+  it("keeps schema failures typed and does not expose invalid response content", () => {
+    const projection = snapshotProjection();
+    const delta = emptyDelta(projection);
+    Object.assign(delta, { schemaVersion: "private-invalid-version-never-disclosed" });
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({ rule: "delta_schema", paths: ["/schemaVersion"] });
+    expect(error.message).not.toContain("private-invalid-version-never-disclosed");
+  });
+
+  it.each(["evidence", "plans", "feedbackDrafts"] as const)(
+    "locates the second duplicate %s record without exposing its ID or content",
+    (collection) => {
+      const projection = snapshotProjection();
+      const delta = emptyDelta(projection);
+      const privateId = "private-duplicate-id-never-disclosed";
+      if (collection === "evidence") {
+        const entry = {
+          id: privateId,
+          subjectRef: projection.context.task.subjectRef,
+          source: "static_analysis" as const,
+          summary: "Private response content.",
+          evidenceRefs: [],
+        };
+        delta.analysis.evidence = [entry, structuredClone(entry)];
+      } else if (collection === "plans") {
+        const entry = { ...newIssuePlan(projection), id: privateId };
+        delta.analysis.plans = [entry, structuredClone(entry)];
+      } else {
+        const entry = { id: privateId, body: "Private response content.", suggestion: null };
+        delta.analysis.feedbackDrafts = [entry, structuredClone(entry)];
+      }
+      const error = outputFailure(projection, delta);
+      expect(error).toMatchObject({
+        rule: "duplicate_record_id",
+        paths: [`/analysis/${collection}/1/id`],
+      });
+      expect(error.message).not.toContain(privateId);
+      expect(error.message).not.toContain("Private response content.");
+    },
+  );
+
+  it("identifies a frozen coverage mutation without copying the proposed required work", () => {
+    const projection = snapshotProjection();
+    const delta = emptyDelta(projection);
+    delta.analysis.coverageUnits = [
+      { ...projection.context.analysis.coverageUnits[0]!, requiredWork: "Private narrowed scope." },
+    ];
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({
+      rule: "coverage_definition_changed",
+      paths: ["/analysis/coverageUnits/0"],
+    });
+    expect(error.message).not.toContain("Private narrowed scope.");
+  });
+
+  it("identifies a Worker evidence identity collision before merging model evidence", () => {
+    const f = fixture(0);
+    f.checkpoint.runtime.evidence.push({
+      id: "private-worker-observation-id",
+      subjectRef: f.task.subjectRef,
+      source: "executor_observation",
+      authority: "worker",
+      summary: "Trusted synthetic observation.",
+      artifactRefs: [],
+      evidenceRefs: [],
+      provenance: {
+        taskId: f.task.id,
+        attemptId: f.attempt.id,
+        producer: "Synthetic executor",
+        recordedAt: f.task.updatedAt,
+      },
+    });
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    const delta = emptyDelta(projection);
+    delta.analysis.evidence = [
+      {
+        id: "private-worker-observation-id",
+        subjectRef: f.task.subjectRef,
+        source: "static_analysis",
+        summary: "A model cannot overwrite this observation.",
+        evidenceRefs: [],
+      },
+    ];
+    const error = outputFailure(projection, delta);
+    expect(error).toMatchObject({
+      rule: "trusted_evidence_collision",
+      paths: ["/analysis/evidence/0/id"],
+    });
+    expect(error.message).not.toContain("private-worker-observation-id");
+  });
+
+  const referenceCases: ReadonlyArray<{
+    name: string;
+    path: string;
+    set: (
+      projection: ModelTurnProjection,
+      delta: InvestigationModelTurnDeltaV1,
+      id: string,
+    ) => void;
+  }> = [
+    {
+      name: "evidence",
+      path: "/analysis/evidence/0/evidenceRefs/0",
+      set: (projection, delta, id) => {
+        delta.analysis.evidence = [
+          {
+            id: "new-evidence",
+            subjectRef: projection.context.task.subjectRef,
+            source: "reporter_statement",
+            summary: "Synthetic reporter statement.",
+            evidenceRefs: [id],
+          },
+        ];
+      },
+    },
+    {
+      name: "finding plan",
+      path: "/analysis/findings/0/fixRecommendation/planRef/id",
+      set: (projection, delta, id) => {
+        const finding = newIssueFinding(projection);
+        finding.fixRecommendation.planRef = { id, version: 1, digest: "0".repeat(64) };
+        delta.analysis.findings = [finding];
+      },
+    },
+    {
+      name: "embedded location subject",
+      path: "/analysis/findings/0/locations/0/subjectRef",
+      set: (projection, delta, id) => {
+        const finding = newIssueFinding(projection);
+        finding.locations = [
+          { kind: "behavior", subjectRef: id, description: "Synthetic behavior." },
+        ];
+        delta.analysis.findings = [finding];
+      },
+    },
+    {
+      name: "draft",
+      path: "/analysis/nextActions/0/draftRef",
+      set: (projection, delta, id) => {
+        delta.analysis.nextActions = [
+          {
+            id: "comment-action",
+            action: "comment",
+            taskKind: null,
+            label: "Review the draft",
+            reason: "The draft is a proposal only.",
+            recommended: true,
+            subjectRef: projection.context.task.subjectRef,
+            planRef: null,
+            draftRef: id,
+            validationReportRef: null,
+            prerequisiteRefs: [],
+          },
+        ];
+      },
+    },
+    {
+      name: "candidate finding",
+      path: "/analysis/candidates/0/findingId",
+      set: (projection, delta, id) => {
+        delta.analysis.candidates = [
+          {
+            ...createInvestigationFixture("bug", { findingCount: 1 }).result.report.loop
+              .candidates[0]!,
+            id: "new-candidate",
+            subjectRef: projection.context.task.subjectRef,
+            status: "unresolved",
+            findingId: id,
+            findingVersion: 1,
+            evidenceRefs: [],
+            mergedIntoCandidateId: null,
+          },
+        ];
+      },
+    },
+    {
+      name: "candidate merge target",
+      path: "/analysis/candidates/0/mergedIntoCandidateId",
+      set: (projection, delta, id) => {
+        delta.analysis.candidates = [
+          {
+            ...createInvestigationFixture("bug", { findingCount: 1 }).result.report.loop
+              .candidates[0]!,
+            id: "new-candidate",
+            subjectRef: projection.context.task.subjectRef,
+            status: "merged",
+            findingId: null,
+            findingVersion: null,
+            evidenceRefs: [],
+            mergedIntoCandidateId: id,
+          },
+        ];
+      },
+    },
+    {
+      name: "recheck finding",
+      path: "/analysis/rechecks/0/findingId",
+      set: (projection, delta, id) => {
+        delta.analysis.rechecks = [
+          {
+            id: "new-recheck",
+            findingId: id,
+            findingVersion: 1,
+            subjectRef: projection.context.task.subjectRef,
+            round: projection.context.round,
+            evidenceRefs: [],
+            conclusion: "Synthetic review.",
+            unresolvedQuestions: [],
+          },
+        ];
+      },
+    },
+    {
+      name: "finding recheck",
+      path: "/analysis/findings/0/confirmation/recheckRef",
+      set: (projection, delta, id) => {
+        const finding = newIssueFinding(projection);
+        finding.confirmation.recheckRef = id;
+        delta.analysis.findings = [finding];
+      },
+    },
+  ];
+  it.each(referenceCases)(
+    "locates the unresolved $name reference without exposing it",
+    ({ path, set }) => {
+      const projection = snapshotProjection();
+      const delta = emptyDelta(projection);
+      const privateId = "private-reference-never-disclosed";
+      set(projection, delta, privateId);
+      expect(Value.Check(InvestigationModelTurnDeltaV1Schema, delta)).toBe(true);
+      const error = outputFailure(projection, delta);
+      expect(error).toMatchObject({ rule: "reference_outside_batch", paths: [path] });
+      expect(error.message).not.toContain(privateId);
+      expect(projection.baseAnalysis.findings).toEqual([]);
+    },
+  );
+
+  it("reports a missing Issue reproduction plan while accepting its provisional digest when supplied", () => {
+    const projection = snapshotProjection();
+    const delta = emptyDelta(projection);
+    const assessment = structuredClone(
+      createInvestigationFixture("bug", { findingCount: 0 }).result.assessment,
+    );
+    if (assessment.kind !== "bug") throw new Error("The synthetic assessment must describe a bug.");
+    const plan = newIssuePlan(projection);
+    assessment.subjectRef = projection.context.task.subjectRef;
+    assessment.evidenceRefs = [];
+    assessment.reproduction.evidenceRefs = [];
+    assessment.reproduction.planRef = {
+      id: plan.id,
+      version: plan.version,
+      digest: "0".repeat(64),
+    };
+    delta.analysis.assessment = assessment;
+    expect(outputFailure(projection, delta)).toMatchObject({
+      rule: "reference_outside_batch",
+      paths: ["/analysis/assessment/reproduction/planRef/id"],
+    });
+    delta.analysis.plans = [plan];
+    const merged = mergeModelTurnDelta(projection, delta);
+    expect(merged.analysis.assessment).toEqual(assessment);
+    const normalized = normalizeInvestigationAnalysisPlanReferences(merged.analysis);
+    if (normalized.assessment.kind !== "bug")
+      throw new Error("The normalized assessment must describe a bug.");
+    expect(normalized.assessment.reproduction.planRef?.digest).toBe(
+      investigationContentDigest(plan),
+    );
+  });
+});
 
 describe("bounded investigation model context", () => {
   it("lets a fresh snapshot-only investigation finish without an empty finalize batch", () => {
@@ -635,7 +1303,10 @@ describe("bounded investigation model context", () => {
     delta.analysis.findings = [
       { ...omitted, version: omitted.version + 1, title: "An unprovided finding was changed." },
     ];
-    expect(() => mergeModelTurnDelta(projection, delta)).toThrow(/outside its supplied batch/u);
+    expect(outputFailure(projection, delta)).toMatchObject({
+      rule: "record_outside_batch",
+      paths: ["/analysis/findings/0/id"],
+    });
   });
 
   it("includes complete transitive evidence and every owning candidate for a selected finding", () => {
@@ -665,7 +1336,10 @@ describe("bounded investigation model context", () => {
     const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
     const delta = emptyDelta(projection);
     delta.analysis.removedFindingIds = [...projection.selectedFindingIds];
-    expect(() => mergeModelTurnDelta(projection, delta)).toThrow(/every owning candidate/u);
+    expect(outputFailure(projection, delta)).toMatchObject({
+      rule: "finding_owner_required",
+      paths: ["/analysis/removedFindingIds/0"],
+    });
     delta.analysis.candidates = projection.context.analysis.candidates.map((candidate) => ({
       ...candidate,
       status: "withdrawn",
@@ -722,15 +1396,24 @@ describe("bounded investigation model context", () => {
     const delta = emptyDelta(projection);
     const candidate = projection.context.analysis.candidates[0]!;
     delta.analysis.candidates = [candidate, candidate];
-    expect(() => mergeModelTurnDelta(projection, delta)).toThrow(/duplicate/u);
+    expect(outputFailure(projection, delta)).toMatchObject({
+      rule: "duplicate_record_id",
+      paths: ["/analysis/candidates/1/id"],
+    });
     delta.analysis.candidates = [];
     delta.analysis.evidence = [
       { ...projection.context.analysis.evidence[0]!, summary: "Changed accepted evidence." },
     ];
-    expect(() => mergeModelTurnDelta(projection, delta)).toThrow(/immutable/u);
+    expect(outputFailure(projection, delta)).toMatchObject({
+      rule: "immutable_record_changed",
+      paths: ["/analysis/evidence/0"],
+    });
     delta.analysis.evidence = [];
     delta.round += 1;
-    expect(() => mergeModelTurnDelta(projection, delta)).toThrow(/does not match/u);
+    expect(outputFailure(projection, delta)).toMatchObject({
+      rule: "delta_binding",
+      paths: ["/round"],
+    });
   });
 
   it.each(["reporter_statement", "static_analysis"] as const)(
@@ -753,7 +1436,7 @@ describe("bounded investigation model context", () => {
         },
       ];
       expect(() => mergeModelTurnDelta(projection, delta)).toThrow(
-        /references evidence outside its supplied batch or new records/u,
+        /references a record outside its supplied batch or new records/u,
       );
     },
   );
@@ -1348,7 +2031,7 @@ describe("bounded investigation model context", () => {
       const invalidUpdate = emptyDelta(projection);
       invalidUpdate.analysis.coverageUnits = [{ ...completed, status: "blocked" }];
       expect(() => mergeModelTurnDelta(projection, invalidUpdate)).toThrow(
-        ModelTurnProjectionError,
+        ModelOutputValidationError,
       );
     },
   );

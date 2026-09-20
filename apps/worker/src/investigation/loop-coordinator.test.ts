@@ -16,6 +16,7 @@ import {
   createInvestigationCheckpoint,
   interruptInvestigationLoop,
   investigationContentDigest,
+  rejectInvestigationModelOutput,
   restoreInvestigationCheckpoint,
 } from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
@@ -26,6 +27,7 @@ import {
   InvestigationLoopCoordinator,
   type InvestigationLoopCoordinatorOptions,
 } from "./loop-coordinator.js";
+import { ModelOutputValidationError } from "./model-output-diagnostics.js";
 import type {
   ModelTurnExecutionInput,
   ModelTurnExecutionResult,
@@ -150,6 +152,7 @@ function fixture(
   const order: string[] = [];
   const parts: InvestigationReportPartV1[] = [];
   const submissions: InvestigationFinalizeRequest[] = [];
+  const invocationTokens = new Map<string, number>();
   const client: InvestigationWorkerClient = {
     claim: vi.fn(async () => claim),
     heartbeat: vi.fn(async () => ({
@@ -173,14 +176,25 @@ function fixture(
           task,
           recordedAt,
         });
-      else {
+      else if (request.kind === "rejected_analysis") {
+        const tokens = invocationTokens.get(request.invocationId);
+        if (tokens === undefined)
+          throw new Error("The rejected invocation has no fixture receipt.");
+        current = rejectInvestigationModelOutput(
+          current,
+          { ...request, attemptId: attempt.id },
+          { recordedAt, durationMs: 0, accountedTokens: current.consumed.tokens + tokens },
+        );
+      } else {
         current = interruptInvestigationLoop(
           current,
           request.reason === "error" ? "failed" : request.reason,
           recordedAt,
           request.diagnostics,
           0,
-          request.modelUsage,
+          request.modelUsage === undefined
+            ? undefined
+            : { round: request.modelUsage.round, tokens: request.modelUsage.tokens },
         );
       }
       return { checkpoint: structuredClone(current) };
@@ -307,6 +321,7 @@ function fixture(
     order,
     parts,
     submissions,
+    invocationTokens,
   };
 }
 
@@ -687,6 +702,360 @@ describe("InvestigationLoopCoordinator", () => {
         .mocked(f.client.checkpoint)
         .mock.calls.find(([, request]) => request.kind === "interrupt")?.[1],
     ).not.toHaveProperty("modelInvocationState");
+  });
+
+  it("retains safe validation diagnostics and completed usage without accepting the rejected round", async () => {
+    const f = fixture();
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      input.onUsage?.({ tokens: 371, source: "cli" });
+      const error = new ModelOutputValidationError("reference_outside_batch", [
+        "analysis",
+        "assessment",
+        "evidenceRefs",
+      ]);
+      error.message = "private-token-from-model";
+      throw error;
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.current().round).toBe(0);
+    expect(f.current().consumed.tokens).toBe(371);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.submissions[0]?.header.outcome).toBe("failed");
+    expect(f.current().analysis.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "MODEL_OUTPUT_INVALID",
+          message: expect.stringContaining(
+            "[reference_outside_batch] at /analysis/assessment/evidenceRefs",
+          ),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(f.parts)).not.toContain("private-token-from-model");
+    expect(JSON.stringify(f.submissions)).not.toContain("private-token-from-model");
+  });
+
+  it("does not copy arbitrary model validation exceptions into the terminal report", async () => {
+    const f = fixture();
+    vi.mocked(f.model.execute).mockRejectedValue(
+      Object.assign(new Error("private-token-from-model"), {
+        code: "MODEL_OUTPUT_INVALID",
+        rule: "reference_outside_batch",
+      }),
+    );
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.current().analysis.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "MODEL_OUTPUT_INVALID",
+          message:
+            "The investigation executor or model protocol failed; the last accepted checkpoint was retained.",
+        }),
+      ]),
+    );
+    expect(JSON.stringify(f.parts)).not.toContain("private-token-from-model");
+    expect(JSON.stringify(f.submissions)).not.toContain("private-token-from-model");
+  });
+
+  it("corrects one rejected static response after receipt and checkpoint acknowledgement", async () => {
+    const f = fixture(0);
+    const issue = {
+      rule: "reference_outside_batch",
+      paths: ["/analysis/candidates/0/findingId", "/analysis/candidates/1/findingId"],
+    };
+    f.invocationTokens.set("rejected-call", 371);
+    f.model.markUsageDisposition = vi.fn(async (_invocationId, disposition) => {
+      f.order.push(`disposition:${disposition}`);
+    });
+    vi.mocked(f.model.execute)
+      .mockImplementationOnce(async (input) => {
+        input.onUsage?.({
+          tokens: 371,
+          source: "cli",
+          invocationId: "rejected-call",
+          completeness: "complete",
+        });
+        throw new ModelOutputValidationError(
+          "reference_outside_batch",
+          ["analysis", "candidates", 1, "findingId"],
+          [["analysis", "candidates", 0, "findingId"]],
+        );
+      })
+      .mockImplementationOnce(async (input) => {
+        f.order.push("corrected-model");
+        expect(input.correction).toMatchObject({ issue });
+        expect(input.checkpoint?.round).toBe(0);
+        expect(input.checkpoint?.consumed.tokens).toBe(371);
+        expect(input.checkpoint?.version).toBeGreaterThan(f.claim.checkpoint!.version);
+        const result = modelRound(input, proposedAnalysis(f.initial.result), "discovery");
+        return { ...result, usage: { ...result.usage, invocationId: "accepted-call" } };
+      });
+
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+
+    expect(f.model.execute).toHaveBeenCalledTimes(2);
+    expect(f.model.markUsageDisposition).toHaveBeenNthCalledWith(1, "rejected-call", "rejected");
+    expect(f.model.markUsageDisposition).toHaveBeenNthCalledWith(2, "accepted-call", "accepted");
+    expect(f.order.indexOf("disposition:rejected")).toBeLessThan(
+      f.order.indexOf("checkpoint:rejected_analysis"),
+    );
+    expect(f.order.indexOf("checkpoint:rejected_analysis")).toBeLessThan(
+      f.order.indexOf("corrected-model"),
+    );
+    expect(f.current().round).toBe(1);
+    expect(f.current().consumed).toMatchObject({ tokens: 471, rounds: 1 });
+    expect(f.current().runtime.modelOutputRejections).toHaveLength(1);
+    expect(f.current().runtime.unacceptedModelUsage ?? []).toEqual([]);
+    const analysisRequest = vi
+      .mocked(f.client.checkpoint)
+      .mock.calls.map(([, request]) => request)
+      .find((request) => request.kind === "analysis");
+    expect(analysisRequest).toMatchObject({
+      invocationId: "accepted-call",
+      usage: { tokens: 100 },
+    });
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+  });
+
+  it("stops after the one correction and retains only its final unaccepted usage", async () => {
+    const f = fixture(0);
+    f.invocationTokens.set("rejected-call", 371);
+    f.model.markUsageDisposition = vi.fn(async () => undefined);
+    let invocation = 0;
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      invocation++;
+      input.onUsage?.({
+        tokens: invocation === 1 ? 371 : 17,
+        source: "cli",
+        invocationId: invocation === 1 ? "rejected-call" : "failed-correction",
+        completeness: "complete",
+      });
+      throw new ModelOutputValidationError("duplicate_record_id", [
+        "analysis",
+        "candidates",
+        0,
+        "id",
+      ]);
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledTimes(2);
+    expect(f.current().round).toBe(0);
+    expect(f.current().consumed.tokens).toBe(388);
+    expect(f.current().runtime.modelOutputRejections).toHaveLength(1);
+    expect(f.current().runtime.unacceptedModelUsage).toEqual([
+      { attemptId: f.claim.attempt.id, round: 1, tokens: 17 },
+    ]);
+    expect(f.current().analysis.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "MODEL_OUTPUT_INVALID" })]),
+    );
+    expect(f.submissions[0]?.header.outcome).toBe("failed");
+  });
+
+  it("respects a correction already recorded for the same attempt and round", async () => {
+    const f = fixture(0);
+    const previous = f.claim.checkpoint!;
+    const retained = rejectInvestigationModelOutput(
+      previous,
+      {
+        attemptId: f.claim.attempt.id,
+        inputCheckpointRef: { id: previous.id, version: previous.version, digest: previous.digest },
+        round: 1,
+        invocationId: "previous-rejected-call",
+        issue: { rule: "duplicate_record_id", paths: ["/analysis/candidates/0/id"] },
+      },
+      { recordedAt, durationMs: 0, accountedTokens: 31 },
+    );
+    f.claim.checkpoint = retained;
+    f.replaceCurrent(retained);
+    f.model.markUsageDisposition = vi.fn(async () => undefined);
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      input.onUsage?.({
+        tokens: 17,
+        source: "cli",
+        invocationId: "current-call",
+        completeness: "complete",
+      });
+      throw new ModelOutputValidationError("duplicate_record_id", [
+        "analysis",
+        "candidates",
+        0,
+        "id",
+      ]);
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.current().consumed.tokens).toBe(48);
+    expect(f.current().runtime.modelOutputRejections).toHaveLength(1);
+    expect(f.order).not.toContain("checkpoint:rejected_analysis");
+  });
+
+  it.each([
+    "unknown",
+    "partial",
+    "missing_identity",
+    "unsafe_reference",
+    "cleanup",
+    "forged",
+  ] as const)("does not correct a response with %s state", async (condition) => {
+    const f = fixture(0);
+    f.model.markUsageDisposition = vi.fn(async () => undefined);
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      input.onUsage?.({
+        tokens: condition === "unknown" ? null : 371,
+        source: condition === "unknown" ? "unavailable" : "cli",
+        ...(condition === "missing_identity" ? {} : { invocationId: "rejected-call" }),
+        completeness: condition === "partial" ? "partial" : "complete",
+      });
+      if (condition === "forged")
+        throw Object.assign(new Error("private-token"), {
+          code: "MODEL_OUTPUT_INVALID",
+          rule: "duplicate_record_id",
+          paths: ["/analysis/candidates/0/id"],
+        });
+      const error = new ModelOutputValidationError("reference_outside_batch", [
+        "analysis",
+        "candidates",
+        0,
+        condition === "unsafe_reference" ? "subjectRef" : "findingId",
+      ]);
+      if (condition === "cleanup")
+        Object.assign(error, { cause: { code: "MODEL_PROCESS_CLEANUP_UNCONFIRMED" } });
+      throw error;
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.order).not.toContain("checkpoint:rejected_analysis");
+    expect(f.submissions[0]?.header.outcome).toBe("failed");
+    expect(JSON.stringify(f.submissions)).not.toContain("private-token");
+  });
+
+  it("does not start a correction after the rejected call exhausts its token budget", async () => {
+    const f = fixture(0);
+    const tokens = f.claim.task.budget.maxTokens;
+    f.invocationTokens.set("rejected-call", tokens);
+    f.model.markUsageDisposition = vi.fn(async () => undefined);
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      input.onUsage?.({
+        tokens,
+        source: "cli",
+        invocationId: "rejected-call",
+        completeness: "complete",
+      });
+      throw new ModelOutputValidationError("duplicate_record_id", [
+        "analysis",
+        "candidates",
+        0,
+        "id",
+      ]);
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.current().consumed.tokens).toBe(tokens);
+    expect(f.current().runtime.unacceptedModelUsage ?? []).toEqual([]);
+    expect(f.current().runtime.modelOutputRejections).toHaveLength(1);
+    expect(f.submissions[0]?.header.outcome).toBe("interrupted");
+  });
+
+  it("retries a lost rejection acknowledgement before dispatching the correction", async () => {
+    const f = fixture(0);
+    f.invocationTokens.set("rejected-call", 371);
+    f.model.markUsageDisposition = vi.fn(async () => undefined);
+    const checkpoint = vi.mocked(f.client.checkpoint).getMockImplementation()!;
+    let retained: Awaited<ReturnType<typeof f.client.checkpoint>> | undefined;
+    let rejectionRequests = 0;
+    vi.mocked(f.client.checkpoint).mockImplementation(async (...args) => {
+      if (args[1].kind !== "rejected_analysis") return checkpoint(...args);
+      rejectionRequests++;
+      if (retained === undefined) {
+        retained = await checkpoint(...args);
+        throw Object.assign(new Error("The rejection acknowledgement was lost."), {
+          retryable: true,
+        });
+      }
+      return retained;
+    });
+    vi.mocked(f.model.execute).mockImplementationOnce(async (input) => {
+      input.onUsage?.({
+        tokens: 371,
+        source: "cli",
+        invocationId: "rejected-call",
+        completeness: "complete",
+      });
+      throw new ModelOutputValidationError("duplicate_record_id", [
+        "analysis",
+        "candidates",
+        0,
+        "id",
+      ]);
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(rejectionRequests).toBe(2);
+    expect(f.model.execute).toHaveBeenCalledTimes(2);
+    expect(f.current().consumed.tokens).toBe(471);
+    expect(f.current().runtime.modelOutputRejections).toHaveLength(1);
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+  });
+
+  it("requires a rejected usage receipt acknowledgement before another model call", async () => {
+    const f = fixture(0);
+    f.model.markUsageDisposition = vi.fn(async () => {
+      throw new Error("Receipt delivery failed.");
+    });
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      input.onUsage?.({
+        tokens: 371,
+        source: "cli",
+        invocationId: "rejected-call",
+        completeness: "complete",
+      });
+      throw new ModelOutputValidationError("duplicate_record_id", [
+        "analysis",
+        "candidates",
+        0,
+        "id",
+      ]);
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.order).not.toContain("checkpoint:rejected_analysis");
+    expect(f.current().consumed.tokens).toBe(371);
+    expect(f.submissions[0]?.header.outcome).toBe("failed");
+  });
+
+  it("honors shutdown after rejection acknowledgement without accounting its usage twice", async () => {
+    const f = fixture(0);
+    f.invocationTokens.set("rejected-call", 371);
+    f.model.markUsageDisposition = vi.fn(async () => undefined);
+    const checkpoint = vi.mocked(f.client.checkpoint).getMockImplementation()!;
+    vi.mocked(f.client.checkpoint).mockImplementation(async (...args) => {
+      const response = await checkpoint(...args);
+      if (args[1].kind === "rejected_analysis") f.shutdown.abort(new InvestigationWorkerShutdown());
+      return response;
+    });
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      input.onUsage?.({
+        tokens: 371,
+        source: "cli",
+        invocationId: "rejected-call",
+        completeness: "complete",
+      });
+      throw new ModelOutputValidationError("duplicate_record_id", [
+        "analysis",
+        "candidates",
+        0,
+        "id",
+      ]);
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.current().consumed.tokens).toBe(371);
+    expect(f.current().runtime.unacceptedModelUsage ?? []).toEqual([]);
+    expect(f.submissions[0]?.header.outcome).toBe("interrupted");
+    expect(
+      vi
+        .mocked(f.client.checkpoint)
+        .mock.calls.find(([, request]) => request.kind === "interrupt")?.[1],
+    ).not.toHaveProperty("modelUsage");
   });
 
   it("delivers an already complete checkpoint without preparing a workspace or repeating any work", async () => {

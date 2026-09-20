@@ -27,6 +27,7 @@ export * from "./investigation-auth.js";
 export * from "./investigation-comments.js";
 export * from "./investigation-e2e.js";
 export * from "./investigation-execution.js";
+export * from "./investigation-model-output.js";
 export * from "./investigation-output.js";
 export * from "./investigation-preview.js";
 export * from "./investigation-progress.js";
