@@ -27,6 +27,8 @@ import {
   describeE2eBuildFailure,
   type E2eBuildRecord,
   type E2eBuildRequest,
+  getE2eBuildCapturedOutput,
+  parseE2eMsbuildToolchain,
   performE2eBuild,
   resolveE2eSolutionTarget,
   validateE2eBuildArtifact,
@@ -254,6 +256,56 @@ async function applicationFixture() {
 }
 
 describe("E2E build request boundaries", () => {
+  it.each([
+    { vcToolsVersion: "14.50.35717", platformToolset: "v145" },
+    { vcToolsVersion: "14.44.35207", platformToolset: "v143" },
+  ])("accepts only a compatible exact deployment toolchain: %j", (value) => {
+    expect(parseE2eMsbuildToolchain(value)).toEqual(value);
+    expect(Object.isFrozen(parseE2eMsbuildToolchain(value))).toBe(true);
+  });
+
+  it.each([
+    null,
+    { vcToolsVersion: "14.50.35717" },
+    { vcToolsVersion: "14.50.35717", platformToolset: "v143" },
+    { vcToolsVersion: "14.44.35207", platformToolset: "v145" },
+    { vcToolsVersion: "14.50.35717\n", platformToolset: "v145" },
+    { vcToolsVersion: "14.50.35717;Unsafe=true", platformToolset: "v145" },
+    { vcToolsVersion: "14.50.35717", platformToolset: "v145", arguments: ["-target:Unsafe"] },
+  ])("rejects malformed or inconsistent deployment toolchain selection: %j", (value) => {
+    expect(() => parseE2eMsbuildToolchain(value)).toThrow();
+  });
+
+  it("retains bounded full build output separately from the short diagnostic preview", () => {
+    const stdout = `${"compiler details\n".repeat(6000)}error C2653: missing namespace\n`;
+    const error = describeE2eBuildFailure({ exitCode: 1, stdout, stderr: "" });
+    const captured = getE2eBuildCapturedOutput(error)!;
+    expect(captured).toEqual({
+      stdout,
+      stderr: "",
+      outputTruncated: false,
+      captureLimitBytes: 1024 * 1024,
+      retainedBytes: Buffer.byteLength(stdout),
+    });
+    expect(error.diagnostics?.outputTruncated).toBe(true);
+    expect(Buffer.byteLength(error.diagnostics!.stdout)).toBeLessThanOrEqual(16_384);
+    const modified = { ...captured, stdout: "changed copy" };
+    expect(modified.stdout).not.toBe(getE2eBuildCapturedOutput(error)!.stdout);
+  });
+
+  it("does not label an upstream-truncated build transcript as complete", () => {
+    const error = describeE2eBuildFailure({
+      exitCode: 1,
+      stdout: "tail",
+      stderr: "",
+      outputTruncated: true,
+    });
+    expect(getE2eBuildCapturedOutput(error)).toMatchObject({
+      outputTruncated: true,
+      stdout: "tail",
+    });
+  });
+
   it.each(["error", "fatal"])(
     "prioritizes an explicit %s over an earlier compiler warning",
     (severity) => {
@@ -396,6 +448,9 @@ describe("E2E build request boundaries", () => {
     { command: "msbuild App.csproj" },
     { executable: "C:\\Untrusted\\msbuild.exe" },
     { environment: { MSBuildExtensionsPath: "C:\\Untrusted" } },
+    { msbuildToolchain: { vcToolsVersion: "14.50.35717", platformToolset: "v145" } },
+    { vcToolsVersion: "14.50.35717" },
+    { platformToolset: "v145" },
     { configuration: "Release;CustomProperty=true" },
     { platform: "x64;CustomProperty=true" },
     { outputs: [] },
@@ -452,6 +507,130 @@ describe("E2E build request boundaries", () => {
 });
 
 describe.skipIf(process.platform !== "win32")("E2E build provenance", () => {
+  it.each(["msbuild", "dotnet"] as const)(
+    "pins MSVC with explicit trusted global properties through %s and seals that configuration",
+    async (tool) => {
+      const f = await fixture({ tool });
+      const toolchain = { vcToolsVersion: "14.50.35717", platformToolset: "v145" as const };
+      const result = await performE2eBuild({ ...f.input, msbuildToolchain: toolchain });
+      const spec = f.run.mock.calls[0]![0];
+      expect(spec.arguments).toContain("-property:VCToolsVersion=14.50.35717");
+      expect(spec.arguments).toContain("-property:PlatformToolset=v145");
+      expect(result.invocation).toMatchObject({
+        compilerExecutable: tools[tool],
+        compilerSha256: null,
+        headSha,
+        projectPath: f.input.request.projectPath,
+        configuration: "Release",
+        platform: "x64",
+        msbuildToolchain: toolchain,
+      });
+      expect(result.invocation?.command).toEqual(result.command);
+      expect(Object.isFrozen(result.invocation)).toBe(true);
+    },
+  );
+
+  it("preserves automatic toolset selection when no trusted pin is configured", async () => {
+    const f = await fixture();
+    const result = await performE2eBuild(f.input);
+    expect(
+      f.run.mock.calls[0]![0].arguments.some((arg) => /VCToolsVersion|PlatformToolset/u.test(arg)),
+    ).toBe(false);
+    expect(result.invocation?.msbuildToolchain).toBeUndefined();
+  });
+
+  it.each([
+    "VCToolsVersion",
+    "platformtoolset",
+    "VCToolsInstallDir",
+    "VCTargetsPath",
+    "CLToolPath",
+    "CLToolExe",
+    "VCInstallDir",
+    "CL",
+    "_CL_",
+  ])(
+    "rejects environment %s overriding an explicit deployment pin before any process",
+    async (name) => {
+      const f = await fixture();
+      await expect(
+        performE2eBuild({
+          ...f.input,
+          msbuildToolchain: { vcToolsVersion: "14.50.35717", platformToolset: "v145" },
+          environment: { ...environment, [name]: "untrusted override" },
+        }),
+      ).rejects.toMatchObject({ code: "E2E_BUILD_TOOL_UNAVAILABLE" });
+      expect(f.allProcessCalls).not.toHaveBeenCalled();
+      expect(f.readSourceFile).not.toHaveBeenCalled();
+    },
+  );
+
+  it("records the actual verified compiler executable digest with the pinned invocation", async () => {
+    const f = await fixture();
+    const executable = win32.join(f.root, "MSBuild.exe");
+    await writeFile(executable, "Synthetic pinned compiler bytes");
+    const expected = digest("Synthetic pinned compiler bytes");
+    const result = await performE2eBuild({
+      ...f.input,
+      tools: { msbuild: executable },
+      toolDigests: { msbuild: expected },
+    });
+    expect(result.invocation?.compilerSha256).toBe(expected);
+    expect(result.invocation?.compilerExecutable).toBe(executable);
+  });
+
+  it("rejects a compiler digest mismatch before source preparation or process execution", async () => {
+    const f = await fixture();
+    const executable = win32.join(f.root, "MSBuild.exe");
+    await writeFile(executable, "Changed compiler bytes");
+    await expect(
+      performE2eBuild({
+        ...f.input,
+        tools: { msbuild: executable },
+        toolDigests: { msbuild: "0".repeat(64) },
+      }),
+    ).rejects.toMatchObject({ code: "E2E_BUILD_TOOL_UNAVAILABLE" });
+    expect(f.allProcessCalls).not.toHaveBeenCalled();
+    expect(f.readSourceFile).not.toHaveBeenCalled();
+  });
+
+  it("preserves deployment compatibility for a hardlinked compiler with a matching verified digest", async () => {
+    const f = await fixture();
+    const original = win32.join(f.root, "compiler-original.exe");
+    const executable = win32.join(f.root, "MSBuild.exe");
+    const content = "Synthetic shared deployment compiler bytes";
+    await writeFile(original, content);
+    await link(original, executable);
+    const result = await performE2eBuild({
+      ...f.input,
+      tools: { msbuild: executable },
+      toolDigests: { msbuild: digest(content) },
+    });
+    expect(result.invocation?.compilerSha256).toBe(digest(content));
+    expect(await readFile(original, "utf8")).toBe(content);
+  });
+
+  it("retains the source and compiler invocation when the pinned compiler fails", async () => {
+    const f = await fixture();
+    f.run.mockResolvedValue({ exitCode: 1, stdout: "error C2653: missing namespace", stderr: "" });
+    const error = await performE2eBuild({
+      ...f.input,
+      msbuildToolchain: { vcToolsVersion: "14.50.35717", platformToolset: "v145" },
+    }).catch((value: unknown) => value);
+    expect(error).toMatchObject({
+      code: "E2E_BUILD_FAILED",
+      diagnostics: {
+        invocation: {
+          compilerExecutable: tools.msbuild,
+          headSha,
+          projectDigest: digest(projectContent),
+          configuration: "Release",
+          msbuildToolchain: { vcToolsVersion: "14.50.35717", platformToolset: "v145" },
+        },
+      },
+    });
+  });
+
   it("builds a verified CRLF checkout project using its observed-byte digest", async () => {
     const f = await fixture();
     const checkout = '<Project Sdk="Microsoft.NET.Sdk">\r\n  <PropertyGroup />\r\n</Project>\r\n';

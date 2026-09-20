@@ -24,6 +24,17 @@ function environment(): Record<string, string> {
   };
 }
 
+function msbuildEnvironment(): Record<string, string> {
+  return {
+    ...environment(),
+    INVESTIGATION_WORKER_EXECUTABLES_JSON: JSON.stringify({
+      msbuild: { path: "D:\\TrustedTools\\MSBuild\\MSBuild.exe", sha256: "d".repeat(64) },
+    }),
+    INVESTIGATION_WORKER_MSBUILD_VC_TOOLS_VERSION: "14.38.33130",
+    INVESTIGATION_WORKER_MSBUILD_PLATFORM_TOOLSET: "v143",
+  };
+}
+
 describe("native investigation Worker configuration", () => {
   it("loads the native token and never forwards ambient service or Git credentials", () => {
     const input: Record<string, string> = {
@@ -371,5 +382,170 @@ describe("native investigation Worker configuration", () => {
         }),
       }),
     ).toThrow(/path and sha256/);
+  });
+
+  it("omits an MSBuild toolchain from legacy configuration even when MSBuild is configured", () => {
+    const input = msbuildEnvironment();
+    delete input.INVESTIGATION_WORKER_MSBUILD_VC_TOOLS_VERSION;
+    delete input.INVESTIGATION_WORKER_MSBUILD_PLATFORM_TOOLSET;
+    expect(loadInvestigationWorkerRuntimeConfig(environment())).not.toHaveProperty(
+      "msbuildToolchain",
+    );
+    expect(loadInvestigationWorkerRuntimeConfig(input)).not.toHaveProperty("msbuildToolchain");
+  });
+
+  it.each([
+    ["14.30.12345", "v143"],
+    ["14.49.99999", "v143"],
+    ["14.50.35717", "v145"],
+    ["14.99.99999", "v145"],
+  ])("loads the exact deployment compiler pin %s with %s", (vcToolsVersion, platformToolset) => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...msbuildEnvironment(),
+      INVESTIGATION_WORKER_MSBUILD_VC_TOOLS_VERSION: vcToolsVersion,
+      INVESTIGATION_WORKER_MSBUILD_PLATFORM_TOOLSET: platformToolset,
+      INVESTIGATION_WORKER_PLAN_ENVIRONMENT_JSON: JSON.stringify({ INCLUDE: "D:\\Sdk\\include" }),
+    });
+    expect(config.msbuildToolchain).toEqual({ vcToolsVersion, platformToolset });
+    expect(config.planEnvironment).toEqual({ INCLUDE: "D:\\Sdk\\include" });
+    expect(config.executables.msbuild).toEqual({
+      path: "D:\\TrustedTools\\MSBuild\\MSBuild.exe",
+      sha256: "d".repeat(64),
+    });
+  });
+
+  it.each([
+    "INVESTIGATION_WORKER_MSBUILD_VC_TOOLS_VERSION",
+    "INVESTIGATION_WORKER_MSBUILD_PLATFORM_TOOLSET",
+  ])("rejects a partially configured MSBuild pin missing %s", (name) => {
+    const input = msbuildEnvironment();
+    delete input[name];
+    expect(() => loadInvestigationWorkerRuntimeConfig(input)).toThrow(
+      /MSBUILD_VC_TOOLS_VERSION.*MSBUILD_PLATFORM_TOOLSET must be configured together/,
+    );
+  });
+
+  it.each([
+    ["", ""],
+    ["", "v143"],
+    ["14.38.33130", ""],
+    ["14.29.33130", "v143"],
+    ["14.100.33130", "v145"],
+    ["14.3.33130", "v143"],
+    ["14.38.3313", "v143"],
+    ["15.38.33130", "v143"],
+    ["14.38.33130", "v145"],
+    ["14.50.35717", "v143"],
+    ["14.38.33130", "v142"],
+    ["14.38.33130", "V143"],
+    ["14.38.33130;Other=1", "v143"],
+    ["14.38.33130 -p:Other=1", "v143"],
+    ["14.38.33130", "v143;Other=1"],
+    ["14.38.33130\n", "v143"],
+    ["14.38.33130\r\n", "v143"],
+    ["14.38.33130", "v143\n"],
+    ["14.38.33130", "v143\r\n"],
+    ["14.38.33130\0", "v143"],
+    ["14.38.33130", "v143\u0001"],
+    [" 14.38.33130", "v143"],
+  ])("rejects an invalid deployment compiler pin %j with %j", (vcToolsVersion, platformToolset) => {
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...msbuildEnvironment(),
+        INVESTIGATION_WORKER_MSBUILD_VC_TOOLS_VERSION: vcToolsVersion,
+        INVESTIGATION_WORKER_MSBUILD_PLATFORM_TOOLSET: platformToolset,
+      }),
+    ).toThrow(
+      /INVESTIGATION_WORKER_MSBUILD_VC_TOOLS_VERSION.*supported, compatible compiler version and toolset/,
+    );
+  });
+
+  it.each([
+    {},
+    { dotnet: { path: "D:\\TrustedTools\\dotnet.exe", sha256: "d".repeat(64) } },
+    { MSBuild: { path: "D:\\TrustedTools\\MSBuild.exe", sha256: "d".repeat(64) } },
+  ])("requires the exact deployment-owned msbuild executable entry: %j", (executables) => {
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...msbuildEnvironment(),
+        INVESTIGATION_WORKER_EXECUTABLES_JSON: JSON.stringify(executables),
+      }),
+    ).toThrow(/INVESTIGATION_WORKER_EXECUTABLES_JSON.*deployment-owned msbuild/);
+  });
+
+  it.each([
+    "vcTOOLSversion",
+    "PLATFORMtoolSET",
+    "vCToolsINSTALLdir",
+    "VCTargetsPath",
+    "clToolPath",
+    "CLtoolEXE",
+    "VCInstallDir",
+    "cL",
+    "_cL_",
+  ])("rejects a case-insensitive plan environment override of the pinned compiler: %s", (name) => {
+    const override =
+      name.toUpperCase() === "VCTOOLSVERSION"
+        ? "14.38.33130"
+        : name.toUpperCase() === "PLATFORMTOOLSET"
+          ? "v143"
+          : "D:\\OtherToolchain";
+    expect(() =>
+      loadInvestigationWorkerRuntimeConfig({
+        ...msbuildEnvironment(),
+        INVESTIGATION_WORKER_PLAN_ENVIRONMENT_JSON: JSON.stringify({ [name]: override }),
+      }),
+    ).toThrow(
+      new RegExp(
+        `INVESTIGATION_WORKER_PLAN_ENVIRONMENT_JSON conflicts with the pinned MSBuild toolchain through ${name.toUpperCase()}`,
+      ),
+    );
+  });
+
+  it("preserves legacy plan environment compiler settings when there is no explicit pin", () => {
+    const input = msbuildEnvironment();
+    delete input.INVESTIGATION_WORKER_MSBUILD_VC_TOOLS_VERSION;
+    delete input.INVESTIGATION_WORKER_MSBUILD_PLATFORM_TOOLSET;
+    input.INVESTIGATION_WORKER_PLAN_ENVIRONMENT_JSON = JSON.stringify({
+      VCToolsVersion: "14.29.30133",
+      PlatformToolset: "v142",
+      VCToolsInstallDir: "D:\\LegacyCompiler",
+      VCTargetsPath: "D:\\LegacyTargets",
+      CLToolPath: "D:\\LegacyCompiler\\bin",
+      CLToolExe: "cl.exe",
+      VCInstallDir: "D:\\LegacyVisualStudio",
+      CL: "/DLEGACY_TOOLCHAIN",
+      _CL_: "/I D:\\LegacyHeaders",
+    });
+    const config = loadInvestigationWorkerRuntimeConfig(input);
+    expect(config).not.toHaveProperty("msbuildToolchain");
+    expect(config.planEnvironment).toEqual({
+      VCTOOLSVERSION: "14.29.30133",
+      PLATFORMTOOLSET: "v142",
+      VCTOOLSINSTALLDIR: "D:\\LegacyCompiler",
+      VCTARGETSPATH: "D:\\LegacyTargets",
+      CLTOOLPATH: "D:\\LegacyCompiler\\bin",
+      CLTOOLEXE: "cl.exe",
+      VCINSTALLDIR: "D:\\LegacyVisualStudio",
+      CL: "/DLEGACY_TOOLCHAIN",
+      _CL_: "/I D:\\LegacyHeaders",
+    });
+  });
+
+  it("does not infer a compiler pin or plan overrides from ambient MSBuild variables", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      VCToolsVersion: "14.38.33130",
+      PlatformToolset: "v143",
+      VCToolsInstallDir: "D:\\AmbientCompiler",
+      VCTargetsPath: "D:\\AmbientTargets",
+      CLToolPath: "D:\\AmbientCompiler\\bin",
+      CLToolExe: "cl.exe",
+      VCInstallDir: "D:\\AmbientVisualStudio",
+      CL: "/DAMBIENT_TOOLCHAIN",
+      _CL_: "/I D:\\AmbientHeaders",
+    });
+    expect(config).not.toHaveProperty("msbuildToolchain");
+    expect(config.planEnvironment).toEqual({});
   });
 });

@@ -68,6 +68,95 @@ class FakeProcessHost implements ProcessHostClient {
 }
 
 describe("ProductionManagedProcessRunner", () => {
+  it.each([false, true])(
+    "retains bounded complete failure output only when explicitly requested: enabled=%s",
+    async (enabled) => {
+      const processHost = new FakeProcessHost();
+      const stdout = "compiler diagnostic\n".repeat(5000);
+      const stderr = "error C2653: missing namespace\n";
+      processHost.startHandler = async () =>
+        managedProcess(stdout, stderr, exitEvent({ exitCode: 1 }));
+      const runner = new ProductionManagedProcessRunner({ retainFailureOutput: enabled });
+      const error = await runner
+        .run(launchSpec(1024 * 1024), {
+          processHost,
+          signal: new AbortController().signal,
+        })
+        .catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(ManagedProcessRunError);
+      expect(error).toMatchObject({
+        code: "NON_ZERO_EXIT",
+        exitCode: 1,
+        stderr,
+        outputTruncated: !enabled,
+      });
+      expect((error as ManagedProcessRunError).stdout).toBe(
+        enabled ? stdout : stdout.slice(-65_536),
+      );
+    },
+  );
+
+  it("still bounds and labels failure output when full-retention capture overflows", async () => {
+    const processHost = new FakeProcessHost();
+    processHost.startHandler = async () =>
+      managedProcess("x".repeat(20_000), "error tail", exitEvent({ exitCode: 1 }));
+    const error = await new ProductionManagedProcessRunner({ retainFailureOutput: true })
+      .run(launchSpec(4096), {
+        processHost,
+        signal: new AbortController().signal,
+      })
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: "OUTPUT_TRUNCATED", outputTruncated: true });
+    expect(
+      Buffer.byteLength((error as ManagedProcessRunError).stdout) +
+        Buffer.byteLength((error as ManagedProcessRunError).stderr),
+    ).toBeLessThanOrEqual(4096);
+  });
+
+  it.each([Buffer.alloc(200_000, 0xff), Buffer.from([0xff, 0xe4, 0xb8])])(
+    "marks invalid UTF-8 as partial without growing retained text past its shared capture budget",
+    async (bytes) => {
+      const processHost = new FakeProcessHost();
+      processHost.startHandler = async () =>
+        managedProcess(bytes, bytes, exitEvent({ exitCode: 1 }));
+      const error = await new ProductionManagedProcessRunner({ retainFailureOutput: true })
+        .run(launchSpec(1024 * 1024), {
+          processHost,
+          signal: new AbortController().signal,
+        })
+        .catch((value: unknown) => value);
+      expect(error).toMatchObject({ code: "NON_ZERO_EXIT", outputTruncated: true });
+      expect(
+        Buffer.byteLength((error as ManagedProcessRunError).stdout) +
+          Buffer.byteLength((error as ManagedProcessRunError).stderr),
+      ).toBeLessThanOrEqual(1024 * 1024);
+    },
+  );
+
+  it("marks a failed output stream as partial even when every delivered byte fit the capture budget", async () => {
+    const processHost = new FakeProcessHost();
+    processHost.startHandler = async () => ({
+      ...managedProcess("", "", exitEvent({ exitCode: 1 })),
+      stdout: Readable.from(
+        (async function* () {
+          yield Buffer.from("partial compiler output");
+          throw new Error("Synthetic stream failure");
+        })(),
+      ),
+    });
+    const error = await new ProductionManagedProcessRunner({ retainFailureOutput: true })
+      .run(launchSpec(), {
+        processHost,
+        signal: new AbortController().signal,
+      })
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({
+      code: "OUTPUT_READ_FAILED",
+      outputTruncated: true,
+      stdout: "partial compiler output",
+    });
+  });
+
   it("reports only non-empty observed stdout and stderr chunks without passing their text", async () => {
     const processHost = new FakeProcessHost();
     processHost.startHandler = async () => ({

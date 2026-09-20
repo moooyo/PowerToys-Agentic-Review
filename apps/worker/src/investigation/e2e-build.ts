@@ -19,6 +19,64 @@ import {
 } from "../execution/process-host-protocol.js";
 import type { PreparedInvestigationWorkspace } from "./workspace.js";
 
+export interface E2eMsbuildToolchain {
+  readonly vcToolsVersion: string;
+  readonly platformToolset: "v143" | "v145";
+}
+
+/** Only deployment configuration may select a supported, exact MSVC toolset. */
+export function parseE2eMsbuildToolchain(value: unknown): E2eMsbuildToolchain {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw failure("E2E_BUILD_TOOL_UNAVAILABLE", "The deployment MSBuild toolchain is invalid.");
+  const entry = value as Record<string, unknown>;
+  const version = entry.vcToolsVersion;
+  if (
+    Object.keys(entry).length !== 2 ||
+    !Object.hasOwn(entry, "vcToolsVersion") ||
+    !Object.hasOwn(entry, "platformToolset") ||
+    typeof version !== "string" ||
+    !/^14\.[3-9][0-9]\.[0-9]{5}(?![\s\S])/u.test(version) ||
+    entry.platformToolset !== (Number(version.split(".")[1]) < 50 ? "v143" : "v145")
+  )
+    throw failure(
+      "E2E_BUILD_TOOL_UNAVAILABLE",
+      "The deployment MSBuild toolchain must use a compatible exact version and platform toolset.",
+    );
+  return Object.freeze({
+    vcToolsVersion: version,
+    platformToolset: entry.platformToolset as "v143" | "v145",
+  });
+}
+
+export interface E2eBuildInvocation {
+  /** Verified build driver identity (MSBuild/dotnet), not an observed cl.exe version. */
+  readonly compilerExecutable: string;
+  readonly compilerSha256: string | null;
+  readonly tool: E2eBuildRequest["tool"];
+  readonly projectPath: string;
+  readonly projectDigest: string;
+  readonly headSha: string;
+  readonly configuration: E2eBuildRequest["configuration"];
+  readonly platform: E2eBuildRequest["platform"] | null;
+  readonly command: readonly string[];
+  /** Explicit requested MSBuild global properties; remote inventory verifies installed CL/STL. */
+  readonly msbuildToolchain?: E2eMsbuildToolchain;
+}
+
+export interface E2eBuildCapturedOutput {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly outputTruncated: boolean;
+  readonly captureLimitBytes: number;
+  readonly retainedBytes: number;
+}
+
+const capturedBuildOutput = new WeakMap<E2eBuildError, E2eBuildCapturedOutput>();
+export function getE2eBuildCapturedOutput(error: E2eBuildError): E2eBuildCapturedOutput | null {
+  const output = capturedBuildOutput.get(error);
+  return output === undefined ? null : structuredClone(output);
+}
+
 export interface E2eBuildRequest {
   readonly tool: "msbuild" | "dotnet";
   readonly projectPath: string;
@@ -45,6 +103,7 @@ export interface E2eBuildRecord {
   readonly projectDigest: string;
   readonly tool: E2eBuildRequest["tool"];
   readonly command: readonly string[];
+  readonly invocation?: E2eBuildInvocation;
   readonly artifacts: readonly E2eBuildArtifact[];
   readonly manifestDigest: string;
   readonly manifestFileCount: number;
@@ -66,6 +125,8 @@ export interface E2eBuildInput {
   readonly buildRootDirectory: string;
   /** Deployment-pinned compiler paths; model requests only select the dictionary key. */
   readonly tools: Readonly<Partial<Record<E2eBuildRequest["tool"], string>>>;
+  readonly toolDigests?: Readonly<Partial<Record<E2eBuildRequest["tool"], string>>>;
+  readonly msbuildToolchain?: E2eMsbuildToolchain;
   /** Deployment-pinned Git used only for fixed preparation of the owned source checkout. */
   readonly gitExecutablePath: string;
   readonly environment: Readonly<Record<string, string>>;
@@ -105,9 +166,19 @@ export interface E2eBuildDiagnostics {
   readonly stdout: string;
   readonly stderr: string;
   readonly outputTruncated: boolean;
+  readonly invocation?: E2eBuildInvocation;
+  readonly capture?: {
+    readonly artifactRef: string;
+    readonly captureLimitBytes: number;
+    readonly retainedBytes: number;
+    readonly outputTruncated: boolean;
+  };
 }
 
-export function describeE2eBuildFailure(value: unknown): E2eBuildError {
+export function describeE2eBuildFailure(
+  value: unknown,
+  invocation?: E2eBuildInvocation,
+): E2eBuildError {
   const result =
     value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const stdout = typeof result.stdout === "string" ? result.stdout : "";
@@ -120,6 +191,7 @@ export function describeE2eBuildFailure(value: unknown): E2eBuildError {
     return bytes.subarray(start).toString("utf8");
   };
   const diagnostics: E2eBuildDiagnostics = {
+    ...(invocation === undefined ? {} : { invocation: structuredClone(invocation) }),
     exitCode:
       typeof result.exitCode === "number" && Number.isSafeInteger(result.exitCode)
         ? result.exitCode
@@ -139,11 +211,36 @@ export function describeE2eBuildFailure(value: unknown): E2eBuildError {
     lines.find((line) => !warning(line) && /\b(?:MSB|NU|CS)[0-9]{4}\b/iu.test(line)) ??
     lines.at(-1) ??
     (value instanceof Error ? value.message : "No compiler diagnostics were reported.");
-  return new E2eBuildError(
+  const error = new E2eBuildError(
     "E2E_BUILD_FAILED",
     `The controlled compiler did not complete successfully (exit ${diagnostics.exitCode ?? "unknown"}). ${detail.slice(0, 2_048)}`,
     diagnostics,
   );
+  const captureLimitBytes = 1024 * 1024;
+  const totalBytes = Buffer.byteLength(stdout, "utf8") + Buffer.byteLength(stderr, "utf8");
+  const captured =
+    totalBytes <= captureLimitBytes
+      ? { stdout, stderr }
+      : { stdout: tail(stdout), stderr: tail(stderr) };
+  capturedBuildOutput.set(
+    error,
+    Object.freeze({
+      ...captured,
+      outputTruncated:
+        result.outputTruncated === true ||
+        [
+          "OUTPUT_TRUNCATED",
+          "INVALID_UTF8_OUTPUT",
+          "OUTPUT_READ_FAILED",
+          "PROCESS_START_FAILED",
+        ].includes(String(result.code)) ||
+        totalBytes > captureLimitBytes,
+      captureLimitBytes,
+      retainedBytes:
+        Buffer.byteLength(captured.stdout, "utf8") + Buffer.byteLength(captured.stderr, "utf8"),
+    }),
+  );
+  return error;
 }
 
 interface ArtifactObservation {
@@ -207,6 +304,35 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
       "Controlled E2E builds require the Windows Worker.",
     );
   const executable = configuredCompiler(input.tools, request.tool);
+  const toolchain =
+    input.msbuildToolchain !== undefined
+      ? parseE2eMsbuildToolchain(input.msbuildToolchain)
+      : undefined;
+  if (toolchain !== undefined) assertToolchainEnvironment(input.environment);
+  let compilerSha256: string | null = null;
+  const configuredDigest = input.toolDigests?.[request.tool];
+  if (configuredDigest !== undefined) {
+    if (!/^[a-f0-9]{64}(?![\s\S])/u.test(configuredDigest))
+      throw failure("E2E_BUILD_TOOL_UNAVAILABLE", "The configured compiler digest is invalid.");
+    try {
+      const observed = await observeArtifact(
+        executable,
+        win32.basename(executable),
+        0n,
+        0n,
+        false,
+        true,
+      );
+      if (observed.artifact.digest !== configuredDigest)
+        throw new Error("Compiler identity changed.");
+      compilerSha256 = observed.artifact.digest;
+    } catch {
+      throw failure(
+        "E2E_BUILD_TOOL_UNAVAILABLE",
+        "The compiler no longer matches its deployment-pinned executable identity.",
+      );
+    }
+  }
   const source = await readPinnedProject(input, request.projectPath);
   let solutionTarget: string | undefined;
   if (request.solutionProject !== undefined) {
@@ -255,7 +381,20 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
     source.absoluteProjectPath,
     outputDirectory,
     solutionTarget,
+    toolchain,
   );
+  const invocation: E2eBuildInvocation = Object.freeze({
+    compilerExecutable: executable,
+    compilerSha256,
+    tool: request.tool,
+    projectPath: request.projectPath,
+    projectDigest: source.projectDigest,
+    headSha: source.headSha,
+    configuration: request.configuration,
+    platform: request.platform ?? null,
+    command: Object.freeze([executable, ...args]),
+    ...(toolchain === undefined ? {} : { msbuildToolchain: toolchain }),
+  });
   const spec: ProcessLaunchSpec = {
     executable,
     arguments: args,
@@ -273,12 +412,12 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
     result = await input.run(spec, input.signal);
   } catch (error) {
     input.signal.throwIfAborted();
-    throw describeE2eBuildFailure(error);
+    throw describeE2eBuildFailure(error, invocation);
   }
   input.signal.throwIfAborted();
   const completedAtNs = await writeClockMarker(directory, "completed");
   await assertSourceUnchanged(input, source.headSha, request.projectPath, source.projectDigest);
-  if (result.exitCode !== 0) throw describeE2eBuildFailure(result);
+  if (result.exitCode !== 0) throw describeE2eBuildFailure(result, invocation);
   if (completedAtNs < startedAtNs)
     throw failure("E2E_BUILD_ARTIFACT_INVALID", "The build filesystem clock moved backwards.");
   await assertDirectoryIdentities(directoryIdentities);
@@ -339,6 +478,7 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
     projectDigest: source.projectDigest,
     tool: request.tool,
     command: Object.freeze([executable, ...args]),
+    invocation,
     artifacts: Object.freeze([...observations.values()].map(({ artifact }) => artifact)),
     manifestDigest: outputManifestDigest(manifest),
     manifestFileCount: manifest.size,
@@ -842,11 +982,18 @@ function compilerArguments(
   project: string,
   output: string,
   solutionTarget?: string,
+  toolchain?: E2eMsbuildToolchain,
 ): readonly string[] {
   // Forward slashes retain a trailing directory separator without Windows quote/backslash ambiguity.
   const directoryProperty = (path: string): string => `${path.replaceAll("\\", "/")}/`;
   // Keep each referenced project's intermediate layout instead of sharing obj/assets across projects.
   const properties = [
+    ...(toolchain === undefined
+      ? []
+      : [
+          `-property:VCToolsVersion=${toolchain.vcToolsVersion}`,
+          `-property:PlatformToolset=${toolchain.platformToolset}`,
+        ]),
     ...(request.platform === undefined ? [] : [`-property:Platform=${request.platform}`]),
     "-property:UseSharedCompilation=false",
     "-noAutoResponse",
@@ -901,6 +1048,25 @@ function buildEnvironment(
     ),
     ...overrides,
   };
+}
+
+function assertToolchainEnvironment(environment: E2eBuildInput["environment"]): void {
+  const overrides = new Set([
+    "VCTOOLSVERSION",
+    "PLATFORMTOOLSET",
+    "VCTOOLSINSTALLDIR",
+    "VCTARGETSPATH",
+    "CLTOOLPATH",
+    "CLTOOLEXE",
+    "VCINSTALLDIR",
+    "CL",
+    "_CL_",
+  ]);
+  if (Object.keys(environment).some((name) => overrides.has(name.toUpperCase())))
+    throw failure(
+      "E2E_BUILD_TOOL_UNAVAILABLE",
+      "Explicit MSBuild toolchain selection cannot be combined with environment overrides for compiler paths, versions, or flags.",
+    );
 }
 
 async function ensureDirectory(path: string): Promise<void> {
@@ -1069,6 +1235,7 @@ async function observeArtifact(
   startedAtNs: bigint,
   completedAtNs: bigint,
   enforceBuildWindow = true,
+  allowTrustedBinaryHardlinks = false,
 ): Promise<ArtifactObservation> {
   try {
     await directoryChain(win32.dirname(path));
@@ -1077,7 +1244,7 @@ async function observeArtifact(
       !original.isFile() ||
       isLink(original) ||
       !samePath(await realpath(path), path) ||
-      original.nlink !== 1n ||
+      (allowTrustedBinaryHardlinks ? original.nlink < 1n : original.nlink !== 1n) ||
       original.size < 0n ||
       original.size > BigInt(Number.MAX_SAFE_INTEGER) ||
       (enforceBuildWindow &&
@@ -1090,7 +1257,7 @@ async function observeArtifact(
       throw new Error("Artifact was not produced inside the compiler output interval.");
     const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
-      if (!sameFile(original, await handle.stat({ bigint: true })))
+      if (!sameFile(original, await handle.stat({ bigint: true }), allowTrustedBinaryHardlinks))
         throw new Error("Artifact was replaced while opening.");
       const hash = createHash("sha256");
       const buffer = Buffer.alloc(65_536);
@@ -1104,8 +1271,8 @@ async function observeArtifact(
       }
       if (
         byteLength !== Number(original.size) ||
-        !sameFile(original, await handle.stat({ bigint: true })) ||
-        !sameFile(original, await lstat(path, { bigint: true }))
+        !sameFile(original, await handle.stat({ bigint: true }), allowTrustedBinaryHardlinks) ||
+        !sameFile(original, await lstat(path, { bigint: true }), allowTrustedBinaryHardlinks)
       )
         throw new Error("Artifact changed while reading.");
       await directoryChain(win32.dirname(path));
@@ -1124,11 +1291,15 @@ async function observeArtifact(
   }
 }
 
-function sameFile(left: BigIntStats, right: BigIntStats): boolean {
+function sameFile(
+  left: BigIntStats,
+  right: BigIntStats,
+  allowTrustedBinaryHardlinks = false,
+): boolean {
   return (
     right.isFile() &&
     !isLink(right) &&
-    right.nlink === 1n &&
+    right.nlink === (allowTrustedBinaryHardlinks ? left.nlink : 1n) &&
     left.dev === right.dev &&
     left.ino === right.ino &&
     left.size === right.size &&
@@ -1187,6 +1358,7 @@ function buildIdentity(record: Omit<E2eBuildRecord, "identity">): string {
       projectDigest: record.projectDigest,
       tool: record.tool,
       command: record.command,
+      ...(record.invocation === undefined ? {} : { invocation: record.invocation }),
       artifacts: record.artifacts,
       manifestDigest: record.manifestDigest,
       manifestFileCount: record.manifestFileCount,

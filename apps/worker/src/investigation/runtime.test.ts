@@ -261,6 +261,31 @@ function desktopGuardFixture(events: string[]): AttemptDesktopGuard {
 }
 
 describe("production investigation runtime composition", () => {
+  it("passes only deployment-pinned build tool identity and MSVC selection into the E2E runner", async () => {
+    const f = fixture();
+    const msbuildToolchain = { vcToolsVersion: "14.50.35717", platformToolset: "v145" as const };
+    const msbuild = { path: "C:\\BuildTools\\MSBuild.exe", sha256: "d".repeat(64) };
+    const config = {
+      ...f.config,
+      msbuildToolchain,
+      executables: { ...f.config.executables, msbuild },
+    };
+    const runtime = await createInvestigationExecutionRuntime(config, logger, {
+      ...f.dependencies,
+      verifyDeployment: async () => ({
+        processHostPath: config.processHost.path,
+        gitPath: config.git.path,
+        cliPath: config.cli.path,
+        executables: { msbuild: "D:\\VerifiedTools\\MSBuild.exe" },
+      }),
+    });
+    expect(f.captured.e2e?.msbuildToolchain).toEqual(msbuildToolchain);
+    expect(f.captured.e2e?.buildTools).toEqual({ msbuild: "D:\\VerifiedTools\\MSBuild.exe" });
+    expect(f.captured.e2e?.buildToolDigests).toEqual({ msbuild: msbuild.sha256 });
+    expect(f.captured.e2e?.environment).not.toHaveProperty("VCToolsVersion");
+    await runtime.stop();
+  });
+
   it("preserves server E2E cancellation, the renewed lease, and cleanup", async () => {
     const f = fixture();
     const heartbeat = {

@@ -829,3 +829,195 @@ describe("E2E interruption recovery", () => {
     expect(f.createTools).not.toHaveBeenCalled();
   });
 });
+
+describe("trusted E2E build blockers", () => {
+  const buildFailure = (overrides: Partial<E2eToolReceipt> = {}): E2eToolReceipt => ({
+    id: "failed-build",
+    operation: "build",
+    status: "blocked",
+    assertion: false,
+    summary: "Private compiler transcript is not a public summary.",
+    observed: {
+      errorCode: "E2E_BUILD_FAILED",
+      error: "C:\\private\\source\\format.h(359): error C2653: private diagnostic content",
+      buildDiagnostics: {
+        stdout: "format.h: error C2061: private symbol details",
+        stderr: "format.h: error C2653: repeated diagnostic",
+      },
+    },
+    artifactRefs: ["build-log"],
+    ...overrides,
+  });
+  const projectFailure = (
+    receipts: readonly E2eToolReceipt[] = [buildFailure()],
+    artifacts: readonly { id: string; kind: string }[] = [{ id: "build-log", kind: "log" }],
+  ) =>
+    projectE2eResult(
+      { summary: "Untrusted model text containing ghp_private_model_secret", features: [] },
+      receipts,
+      artifacts,
+      ["converter.cs"],
+      headSha,
+      [],
+      [],
+    );
+
+  it("retains typed compiler blockers before feature registration without inventing executed coverage", () => {
+    const result = projectFailure();
+    expect(result.outcome).toBe("blocked");
+    expect(result.e2e.blockers).toEqual([
+      {
+        stage: "build",
+        code: "E2E_BUILD_FAILED",
+        diagnosticCodes: ["C2653", "C2061"],
+        evidenceRefs: ["failed-build"],
+      },
+    ]);
+    expect(result.e2e.features).toHaveLength(1);
+    expect(result.e2e.features[0]).toMatchObject({
+      title: "Uncovered PR changes",
+      outcome: "not_run",
+    });
+    expect(result.e2e.features[0]!.assertions[0]!.evidenceRefs).toEqual([]);
+    expect(JSON.stringify(result.e2e)).not.toMatch(/private|ghp_|format\.h/u);
+  });
+
+  it.each([
+    "E2E_BUILD_REQUEST_INVALID",
+    "E2E_BUILD_TOOL_UNAVAILABLE",
+    "E2E_BUILD_SOURCE_INVALID",
+    "E2E_BUILD_ARTIFACT_INVALID",
+    "E2E_BUILD_RECORD_INVALID",
+  ])("retains the controlled %s failure classification", (code) => {
+    expect(projectFailure([buildFailure({ observed: { errorCode: code } })]).e2e.blockers).toEqual([
+      {
+        stage: "build",
+        code,
+        diagnosticCodes: [],
+        evidenceRefs: ["failed-build"],
+      },
+    ]);
+  });
+
+  it("uses a fixed fallback for unknown build errors without publishing their text or code", () => {
+    const result = projectFailure([
+      buildFailure({
+        observed: {
+          errorCode: "PRIVATE_CREDENTIAL_VALUE",
+          error: "Do not copy ghp_compiler_secret or https://private.invalid",
+        },
+      }),
+    ]);
+    expect(result.e2e.blockers?.[0]).toMatchObject({
+      code: "E2E_BUILD_OPERATION_BLOCKED",
+      diagnosticCodes: [],
+    });
+    expect(JSON.stringify(result.e2e)).not.toMatch(/PRIVATE|ghp_|private\.invalid/u);
+  });
+
+  it.each(["missing artifact", "wrong artifact kind", "wrong operation", "passed operation"])(
+    "does not establish a build blocker from %s",
+    (mutation) => {
+      const receipt = buildFailure({
+        ...(mutation === "wrong operation" ? { operation: "desktop-status" } : {}),
+        ...(mutation === "passed operation" ? { status: "passed" } : {}),
+      });
+      const artifacts =
+        mutation === "missing artifact"
+          ? []
+          : [
+              {
+                id: "build-log",
+                kind: mutation === "wrong artifact kind" ? "image" : "log",
+              },
+            ];
+      expect(projectFailure([receipt], artifacts).e2e.blockers).toBeUndefined();
+    },
+  );
+
+  it("groups repeated build failures while retaining distinct evidence identities and compiler codes", () => {
+    const result = projectFailure([
+      buildFailure(),
+      buildFailure(),
+      buildFailure({
+        id: "second-build",
+        observed: {
+          errorCode: "E2E_BUILD_FAILED",
+          error: "error MSB1009: project failed; error C2061: repeated",
+        },
+      }),
+    ]);
+    expect(result.e2e.blockers).toEqual([
+      {
+        stage: "build",
+        code: "E2E_BUILD_FAILED",
+        diagnosticCodes: ["C2653", "C2061", "MSB1009"],
+        evidenceRefs: ["failed-build", "second-build"],
+      },
+    ]);
+  });
+
+  it("rejects overflowing build evidence instead of silently dropping recorded failures", () => {
+    const receipts = Array.from({ length: 1_025 }, (_, index) =>
+      buildFailure({ id: `failed-build-${index}`, observed: { errorCode: "E2E_BUILD_FAILED" } }),
+    );
+    expect(projectFailure(receipts.slice(0, 1_024)).e2e.blockers![0]!.evidenceRefs).toHaveLength(
+      1_024,
+    );
+    expect(() => projectFailure(receipts)).toThrowError(
+      expect.objectContaining({ code: "MODEL_OUTPUT_LIMIT_EXCEEDED" }),
+    );
+  });
+
+  it("extracts only bounded compiler diagnostic code tokens, never arbitrary neighboring values", () => {
+    const result = projectFailure([
+      buildFailure({
+        observed: {
+          errorCode: "E2E_BUILD_FAILED",
+          error:
+            "private CS1234; error CS1234SECRET; error CS1234_SECRET; fatal error LNK1120: symbols; error NETSDK1045: version",
+          buildDiagnostics: {
+            stderr: Array.from({ length: 30 }, (_, index) => "error C" + (2000 + index)).join("\n"),
+          },
+        },
+      }),
+    ]);
+    const codes = result.e2e.blockers![0]!.diagnosticCodes;
+    expect(codes).toHaveLength(16);
+    expect(codes.slice(0, 2)).toEqual(["LNK1120", "NETSDK1045"]);
+    expect(codes).not.toContain("CS1234");
+    expect(codes.every((code) => /^(?:C|D|CS|MSB|NU|NETSDK|LNK)[0-9]{4,5}$/u.test(code))).toBe(
+      true,
+    );
+  });
+
+  it("does not retain a resolved build blocker after a verified build and completed assertions", () => {
+    const f = fixture();
+    const result = projectE2eResult(
+      f.result,
+      [buildFailure(), ...f.receipts],
+      [{ id: "build-log", kind: "log" }, ...f.artifacts],
+      f.paths,
+      headSha,
+      [f.plan],
+      [f.build],
+    );
+    expect(result.outcome).toBe("completed");
+    expect(result.e2e.blockers).toBeUndefined();
+  });
+
+  it("does not let a successful build for another revision hide the current build blocker", () => {
+    const f = fixture();
+    const result = projectE2eResult(
+      { summary: "No completed scenario", features: [] },
+      [buildFailure(), ...f.receipts],
+      [{ id: "build-log", kind: "log" }, ...f.artifacts],
+      f.paths,
+      headSha,
+      [],
+      [{ ...f.build, headSha: "f".repeat(40) }],
+    );
+    expect(result.e2e.blockers?.[0]?.code).toBe("E2E_BUILD_FAILED");
+    expect(result.outcome).toBe("blocked");
+  });
+});

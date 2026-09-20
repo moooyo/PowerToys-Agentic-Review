@@ -509,6 +509,17 @@ export async function createInvestigationExecutionRuntime(
     );
     const e2eAgentRunner = (dependencies.createE2eAgentRunner ?? createE2eAgentRunner)({
       modelOptions,
+      ...(config.msbuildToolchain === undefined
+        ? {}
+        : { msbuildToolchain: config.msbuildToolchain }),
+      buildToolDigests: {
+        ...(config.executables.msbuild === undefined
+          ? {}
+          : { msbuild: config.executables.msbuild.sha256 }),
+        ...(config.executables.dotnet === undefined
+          ? {}
+          : { dotnet: config.executables.dotnet.sha256 }),
+      },
       gitExecutablePath: binaries.gitPath,
       processHost,
       environment: planEnvironment,

@@ -5,6 +5,7 @@ import {
   assertWindowsLocalAbsolutePath,
   type ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
+import { type E2eMsbuildToolchain, parseE2eMsbuildToolchain } from "./e2e-build.js";
 import { assertCanonicalRepository } from "./git-source.js";
 import { type InvestigationWorkerRole, investigationTaskPool } from "./task-service.js";
 import {
@@ -46,6 +47,8 @@ export interface InvestigationWorkerRuntimeConfig {
   readonly modelEnvironment: Readonly<Record<string, string>>;
   readonly planEnvironment: Readonly<Record<string, string>>;
   readonly executables: Readonly<Record<string, InvestigationExecutableConfiguration>>;
+  /** Optional deployment-owned compiler selection for controlled MSBuild operations. */
+  readonly msbuildToolchain?: E2eMsbuildToolchain;
   readonly uiAdapters: Readonly<Record<string, InvestigationUiPlanAdapterConfiguration>>;
   readonly modelStaticConfiguration: {
     readonly verified: boolean;
@@ -75,6 +78,17 @@ const modelEnvironmentNames = new Set([
   "LANG",
   "LC_ALL",
   "TERM",
+]);
+const pinnedMsbuildEnvironmentConflicts = new Set([
+  "VCTOOLSVERSION",
+  "PLATFORMTOOLSET",
+  "VCTOOLSINSTALLDIR",
+  "VCTARGETSPATH",
+  "CLTOOLPATH",
+  "CLTOOLEXE",
+  "VCINSTALLDIR",
+  "CL",
+  "_CL_",
 ]);
 
 /** Loads only the native investigation configuration; no legacy Worker settings are accepted. */
@@ -232,6 +246,37 @@ export function loadInvestigationWorkerRuntimeConfig(
       sha256: digest(text(entry.sha256, "executable sha256"), "EXECUTABLES_JSON sha256"),
     };
   }
+  const vcToolsVersion = value("MSBUILD_VC_TOOLS_VERSION");
+  const platformToolset = value("MSBUILD_PLATFORM_TOOLSET");
+  let msbuildToolchain: E2eMsbuildToolchain | undefined;
+  if (vcToolsVersion !== undefined || platformToolset !== undefined) {
+    if (vcToolsVersion === undefined || platformToolset === undefined)
+      throw invalid(
+        "MSBUILD_VC_TOOLS_VERSION",
+        "and INVESTIGATION_WORKER_MSBUILD_PLATFORM_TOOLSET must be configured together",
+      );
+    if (!Object.hasOwn(executables, "msbuild"))
+      throw invalid(
+        "EXECUTABLES_JSON",
+        "must provide the deployment-owned msbuild executable when an MSBuild toolchain is pinned",
+      );
+    try {
+      msbuildToolchain = parseE2eMsbuildToolchain({ vcToolsVersion, platformToolset });
+    } catch {
+      throw invalid(
+        "MSBUILD_VC_TOOLS_VERSION",
+        "and INVESTIGATION_WORKER_MSBUILD_PLATFORM_TOOLSET must identify a supported, compatible compiler version and toolset",
+      );
+    }
+    const conflicts = Object.keys(planEnvironment).filter((name) =>
+      pinnedMsbuildEnvironmentConflicts.has(name),
+    );
+    if (conflicts.length > 0)
+      throw invalid(
+        "PLAN_ENVIRONMENT_JSON",
+        `conflicts with the pinned MSBuild toolchain through ${conflicts.join(", ")}`,
+      );
+  }
   const uiAdapters: Record<string, InvestigationUiPlanAdapterConfiguration> = {};
   for (const [id, entry] of Object.entries(
     jsonObject(value("UI_ADAPTERS_JSON"), "UI_ADAPTERS_JSON"),
@@ -335,6 +380,7 @@ export function loadInvestigationWorkerRuntimeConfig(
     modelEnvironment,
     planEnvironment,
     executables,
+    ...(msbuildToolchain === undefined ? {} : { msbuildToolchain }),
     uiAdapters,
     modelStaticConfiguration: {
       verified: boolean(value("STATIC_CONFIG_VERIFIED"), false, "STATIC_CONFIG_VERIFIED"),

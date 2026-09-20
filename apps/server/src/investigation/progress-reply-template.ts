@@ -3,6 +3,7 @@ import {
   type AutomaticReplyIdentity,
   type AutomaticReplyModelContext,
   type RenderedAutomaticReply,
+  recordedE2eBuildBlockers,
   recordedE2eRerunNextStep,
   redactAbsolutePosixPaths,
   renderAutomaticReplyIdentity,
@@ -395,6 +396,12 @@ function partialE2eResults(input: RenderProgressReplyInput): string {
       ? "The task exhausted its budget before completion."
       : "",
   ];
+  const buildBlockers = recordedE2eBuildBlockers(report);
+  if (buildBlockers.length > 0)
+    lines.push(
+      "**Recorded build blockers:**",
+      ...buildBlockers.map((blocker) => `- ${publicText(blocker)}`),
+    );
   const e2e = report.context.e2e;
   if (e2e === undefined) {
     const observations = report.verificationEvidence.filter(
@@ -497,7 +504,9 @@ function statusCard(input: RenderProgressReplyInput, status: ProgressReplyStatus
   }
   const label = statusLabel(input, status);
   const nextStep =
-    (["blocked", "failed"].includes(status) ? recordedE2eRerunNextStep(input.report) : undefined) ??
+    (["blocked", "failed", "interrupted", "cancelled"].includes(status)
+      ? recordedE2eRerunNextStep(input.report)
+      : undefined) ??
     context?.nextStep ??
     nextActions[status];
   return [

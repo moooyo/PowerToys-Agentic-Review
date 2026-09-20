@@ -62,6 +62,8 @@ export interface ManagedProcessRunner {
 export interface ProductionManagedProcessRunnerOptions {
   readonly maximumCapturedOutputBytes?: number;
   readonly maximumErrorPreviewBytes?: number;
+  /** Preserve failure output within the same bounded capture budget for durable build logs. */
+  readonly retainFailureOutput?: boolean;
 }
 
 const defaultMaximumCapturedOutputBytes = 1024 * 1024;
@@ -172,8 +174,10 @@ class StreamCapture {
 export class ProductionManagedProcessRunner implements ManagedProcessRunner {
   readonly #maximumCapturedOutputBytes: number;
   readonly #maximumErrorPreviewBytes: number;
+  readonly #retainFailureOutput: boolean;
 
   public constructor(options: ProductionManagedProcessRunnerOptions = {}) {
+    this.#retainFailureOutput = options.retainFailureOutput === true;
     this.#maximumCapturedOutputBytes = boundedInteger(
       options.maximumCapturedOutputBytes ?? defaultMaximumCapturedOutputBytes,
       "maximumCapturedOutputBytes",
@@ -242,13 +246,32 @@ export class ProductionManagedProcessRunner implements ManagedProcessRunner {
     const stdoutBytes = stdoutCapture.bytes();
     const stderrBytes = stderrCapture.bytes();
     const errorOutput = (): ManagedProcessErrorOutput => {
-      const stdout = outputPreview(stdoutBytes, this.#maximumErrorPreviewBytes);
-      const stderr = outputPreview(stderrBytes, this.#maximumErrorPreviewBytes);
+      let malformedUtf8 = false;
+      let completeOutput: { stdout: string; stderr: string } | undefined;
+      if (this.#retainFailureOutput && !budget.truncated) {
+        try {
+          const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+          completeOutput = {
+            stdout: decoder.decode(stdoutBytes),
+            stderr: decoder.decode(stderrBytes),
+          };
+        } catch {
+          malformedUtf8 = true;
+        }
+      }
+      const errorLimit = this.#retainFailureOutput
+        ? Math.min(this.#maximumErrorPreviewBytes, Math.floor(maximumCaptureBytes / 2))
+        : this.#maximumErrorPreviewBytes;
+      const stdout = completeOutput?.stdout ?? outputPreview(stdoutBytes, errorLimit);
+      const stderr = completeOutput?.stderr ?? outputPreview(stderrBytes, errorLimit);
       return {
         stdout,
         stderr,
         outputTruncated:
           budget.truncated ||
+          malformedUtf8 ||
+          stdoutOutcome.status === "rejected" ||
+          stderrOutcome.status === "rejected" ||
           (processOutcome.status === "fulfilled" && processOutcome.value.outputTruncated) ||
           Buffer.byteLength(stdout, "utf8") !== stdoutCapture.observedBytes ||
           Buffer.byteLength(stderr, "utf8") !== stderrCapture.observedBytes,

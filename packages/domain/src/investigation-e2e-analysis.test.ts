@@ -1,4 +1,8 @@
-import { createInvestigationPreview, type InvestigationE2eResult } from "@agentic-review/contracts";
+import {
+  createInvestigationPreview,
+  type InvestigationE2eBlocker,
+  type InvestigationE2eResult,
+} from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
 import { projectRecordedE2eAnalysis } from "./investigation-e2e-analysis.js";
 import { createInvestigationCheckpoint } from "./investigation-loop.js";
@@ -116,6 +120,49 @@ function fixture(outcome: FeatureOutcome = "passed") {
   return { task, checkpoint };
 }
 
+function addBuildBlocker(
+  input: ReturnType<typeof fixture>,
+  overrides: Partial<InvestigationE2eBlocker> = {},
+) {
+  const { task, checkpoint } = input;
+  const blocker: InvestigationE2eBlocker = {
+    stage: "build",
+    code: "E2E_BUILD_FAILED",
+    diagnosticCodes: ["MSB8020"],
+    evidenceRefs: ["build-observation"],
+    ...overrides,
+  };
+  checkpoint.runtime.artifacts.push({
+    id: "build-log",
+    taskId: task.id,
+    attemptId: checkpoint.runtime.e2eExecution!.attemptId,
+    subjectRef: task.subjectRef,
+    kind: "log",
+    name: "private-build-log-synthetic.txt",
+    mediaType: "text/plain",
+    digest: "b".repeat(64),
+    byteLength: 100,
+    availability: "available",
+  });
+  checkpoint.runtime.evidence.push({
+    id: "build-observation",
+    subjectRef: task.subjectRef,
+    source: "executor_observation",
+    authority: "worker",
+    summary: "C:\\private\\build.log contains synthetic-sensitive-worker-text",
+    artifactRefs: ["build-log"],
+    evidenceRefs: [],
+    provenance: {
+      taskId: task.id,
+      attemptId: checkpoint.runtime.e2eExecution!.attemptId,
+      producer: "e2e-tool-server",
+      recordedAt: "2026-09-19T00:00:30Z",
+    },
+  });
+  checkpoint.runtime.e2e!.blockers = [blocker];
+  return blocker;
+}
+
 describe("recorded E2E analysis projection", () => {
   it.each([
     ["passed", "completed"],
@@ -205,6 +252,151 @@ describe("recorded E2E analysis projection", () => {
     expect(analysis.diagnostics).toContainEqual(checkpoint.analysis.diagnostics[0]);
     expect(analysis.diagnostics.map((entry) => entry.code)).toContain("E2E_COVERAGE_BLOCKED");
     expect({ task, checkpoint }).toEqual(original);
+  });
+
+  it.each(["blocked", "failed"] as const)(
+    "prioritizes typed build reasons in %s results without adopting private Worker text",
+    (outcome) => {
+      const input = fixture(outcome === "blocked" ? "not_run" : "failed");
+      const { task, checkpoint } = input;
+      const blocker = addBuildBlocker(input);
+      checkpoint.runtime.e2e!.features[0]!.title = "Uncovered changed behavior";
+      checkpoint.runtime.e2e!.features[0]!.limitations = ["Required UI behavior was not verified."];
+      checkpoint.analysis.diagnostics = [
+        {
+          id: "generic-coverage",
+          code: "E2E_COVERAGE_BLOCKED",
+          category: "blocker",
+          message: "Generic uncovered explanation.",
+          retryable: false,
+          evidenceRefs: [],
+          prerequisiteRefs: [],
+        },
+        {
+          id: "stale-build-reason",
+          code: "E2E_BUILD_TOOL_UNAVAILABLE",
+          category: "blocker",
+          message: "Old untrusted blocker explanation.",
+          retryable: false,
+          evidenceRefs: [],
+          prerequisiteRefs: [],
+        },
+      ];
+      const original = structuredClone(input);
+      const projected = projectRecordedE2eAnalysis(
+        task,
+        checkpoint,
+        "Unrecorded model claims a passing build and all UI assertions executed.",
+      );
+
+      expect(projected.outcome).toBe(outcome);
+      expect(projected.analysis.summary).toContain("E2E_BUILD_FAILED: The build failed.");
+      expect(projected.analysis.summary).toContain("MSB8020");
+      expect(projected.analysis.summary.indexOf("E2E_BUILD_FAILED")).toBeLessThan(
+        projected.analysis.summary.indexOf("Uncovered"),
+      );
+      expect(projected.analysis.diagnostics).toEqual([
+        expect.objectContaining({
+          code: "E2E_BUILD_FAILED",
+          category: outcome === "failed" ? "error" : "blocker",
+          message: expect.stringContaining("MSB8020"),
+          evidenceRefs: blocker.evidenceRefs,
+        }),
+      ]);
+      expect(projected.analysis.limitations[0]).toMatchObject({
+        description: expect.stringContaining("E2E_BUILD_FAILED"),
+        evidenceRefs: blocker.evidenceRefs,
+      });
+      expect(projected.analysis.limitations[1]?.description).toBe(
+        "Required UI behavior was not verified.",
+      );
+      expect(projected.analysis.coverage.completedUnitRefs).toEqual([]);
+      expect(projected.analysis.assessment).toMatchObject({
+        summary: projected.analysis.summary,
+        e2eAssessment: { rationale: expect.stringContaining("E2E_BUILD_FAILED") },
+      });
+      for (const privateText of [
+        "synthetic-sensitive-worker-text",
+        "private-build-log-synthetic",
+        "C:\\private",
+        "Unrecorded model",
+        "Old untrusted blocker explanation",
+        "Generic uncovered explanation",
+      ])
+        expect(JSON.stringify(projected)).not.toContain(privateText);
+      expect(input).toEqual(original);
+    },
+  );
+
+  it("keeps build diagnostics stable across delivery recovery and removes resolved reasons", () => {
+    const input = fixture("blocked");
+    addBuildBlocker(input);
+    const first = projectRecordedE2eAnalysis(input.task, input.checkpoint);
+    const delivery = structuredClone(input.checkpoint);
+    delivery.id = "later-delivery-checkpoint";
+    delivery.attemptId = "later-delivery-attempt";
+    delivery.adoptedAttemptIds.push(delivery.attemptId);
+    delivery.analysis = structuredClone(first.analysis);
+    expect(projectRecordedE2eAnalysis(input.task, delivery)).toEqual(first);
+
+    delivery.runtime.e2e!.blockers![0] = {
+      ...delivery.runtime.e2e!.blockers![0]!,
+      code: "E2E_BUILD_RECORD_INVALID",
+      diagnosticCodes: [],
+    };
+    const changed = projectRecordedE2eAnalysis(input.task, delivery);
+    expect(changed.analysis.diagnostics.map((entry) => entry.code)).toEqual([
+      "E2E_BUILD_RECORD_INVALID",
+    ]);
+    expect(JSON.stringify(changed)).not.toContain("MSB8020");
+
+    const recovered = fixture("passed");
+    recovered.checkpoint.analysis = structuredClone(first.analysis);
+    const successful = projectRecordedE2eAnalysis(recovered.task, recovered.checkpoint);
+    expect(successful.outcome).toBe("completed");
+    expect(successful.analysis.diagnostics).toEqual([]);
+    expect(successful.analysis.limitations).toEqual([]);
+    expect(JSON.stringify(successful)).not.toContain("E2E_BUILD_FAILED");
+    expect(JSON.stringify(successful)).not.toContain("MSB8020");
+  });
+
+  it("rejects build reasons without their own exact Worker log and rejects completed blockers", () => {
+    const input = fixture("blocked");
+    addBuildBlocker(input);
+    input.checkpoint.runtime.artifacts[0]!.attemptId = "foreign-attempt";
+    expect(() => projectRecordedE2eAnalysis(input.task, input.checkpoint)).toThrow(
+      "Recorded E2E analysis must retain its exact PR revision and Worker evidence.",
+    );
+    const passed = fixture("passed");
+    addBuildBlocker(passed);
+    expect(() => projectRecordedE2eAnalysis(passed.task, passed.checkpoint)).toThrow(
+      "Recorded E2E analysis must retain its exact PR revision and Worker evidence.",
+    );
+  });
+
+  it("removes resolved generic E2E diagnostics after recovery while preserving accepted context", () => {
+    const failed = fixture("failed");
+    const blocked = fixture("blocked");
+    const recovered = fixture("passed");
+    const accepted = {
+      id: "accepted-context-diagnostic",
+      code: "ACCEPTED_CONTEXT",
+      category: "limitation" as const,
+      message: "Previously accepted context remains relevant.",
+      retryable: false,
+      evidenceRefs: [],
+      prerequisiteRefs: [],
+    };
+    recovered.checkpoint.analysis.diagnostics = [
+      ...projectRecordedE2eAnalysis(failed.task, failed.checkpoint).analysis.diagnostics,
+      ...projectRecordedE2eAnalysis(blocked.task, blocked.checkpoint).analysis.diagnostics,
+      accepted,
+    ];
+    const original = structuredClone(recovered.checkpoint);
+    const projected = projectRecordedE2eAnalysis(recovered.task, recovered.checkpoint);
+    expect(projected.outcome).toBe("completed");
+    expect(projected.analysis.diagnostics).toEqual([accepted]);
+    expect(recovered.checkpoint).toEqual(original);
   });
 
   const invalidCases: [string, (input: ReturnType<typeof fixture>) => void][] = [

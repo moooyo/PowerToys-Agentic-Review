@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { createInvestigationPreview } from "@agentic-review/contracts";
+import { createInvestigationPreview, type InvestigationResultV1 } from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
 import {
   defaultAutomaticReplyTemplates,
@@ -47,7 +47,198 @@ const render = (stage: ProgressReplyStage) =>
     ),
   });
 
+function blockedBuildReport(): InvestigationResultV1 {
+  const report = createInvestigationPreview("pr", { findingCount: 0, outcome: "blocked" }).result;
+  report.context.task.kind = "pr-e2e";
+  const subject = report.context.subjects.find(
+    (entry) => entry.id === report.context.task.subjectRef,
+  )!;
+  if (subject.kind !== "original_pr")
+    throw new Error("The synthetic report needs a pinned PR subject.");
+  report.context.e2e = {
+    headSha: subject.headSha,
+    buildIdentity: "No verified build was produced.",
+    blockers: [
+      {
+        stage: "build",
+        code: "E2E_BUILD_FAILED",
+        diagnosticCodes: ["C2653"],
+        evidenceRefs: ["build-receipt"],
+      },
+    ],
+    features: [
+      {
+        id: "uncovered",
+        title: "Uncovered PR changes",
+        paths: ["src/Calculator.cs"],
+        scenario: "Required feature coverage was not registered.",
+        userVisible: false,
+        outcome: "not_run",
+        assertions: [
+          {
+            id: "uncovered-assertion",
+            expected: "All changed features have coverage.",
+            observed: "No registered coverage.",
+            outcome: "not_run",
+            evidenceRefs: [],
+          },
+        ],
+        artifactRefs: [],
+        limitations: ["Required feature coverage is missing."],
+      },
+    ],
+    cleanup: { confirmed: true, recordedAt: timestamp, summary: "Owned processes exited." },
+  };
+  report.verificationEvidence = [
+    {
+      id: "build-receipt",
+      subjectRef: subject.id,
+      source: "executor_observation",
+      authority: "worker",
+      summary:
+        "Private build output: token=private-build-secret C:\\private\\source https://private.invalid/build",
+      artifactRefs: ["build-log"],
+      evidenceRefs: [],
+      provenance: {
+        taskId: report.context.task.id,
+        attemptId: report.context.attempt.id,
+        producer: "e2e-tool-server",
+        recordedAt: timestamp,
+      },
+    },
+  ];
+  report.artifacts = [
+    {
+      id: "build-log",
+      taskId: report.context.task.id,
+      attemptId: report.context.attempt.id,
+      subjectRef: subject.id,
+      kind: "log",
+      name: "private-build-log.json",
+      mediaType: "application/json",
+      digest: "a".repeat(64),
+      byteLength: 100,
+      availability: "available",
+    },
+  ];
+  return report;
+}
+
+function renderBlockedBuild(report: InvestigationResultV1): string {
+  return renderProgressReply({
+    stage: "failed",
+    template: defaultE2eProgressReplyTemplates.failed,
+    trigger: { ...trigger, eventName: "issue_comment", commandCommentId: 903 },
+    updatedAt: timestamp,
+    report,
+    failure: "The task is waiting for a required prerequisite.",
+    context: {
+      mode: "e2e",
+      status:
+        report.outcome === "failed" ||
+        report.outcome === "interrupted" ||
+        report.outcome === "cancelled"
+          ? report.outcome
+          : "blocked",
+    },
+  });
+}
+
 describe("assignment progress reply templates", () => {
+  it.each(["blocked", "failed"] as const)(
+    "publishes a bound build blocker for a %s task without adopting model prose or claiming test coverage",
+    (outcome) => {
+      const report = blockedBuildReport();
+      report.outcome = outcome;
+      const before = structuredClone(report);
+      const body = renderBlockedBuild(report);
+      expect(body).toContain("Recorded build blockers");
+      expect(body.replaceAll("\\_", "_")).toContain("E2E_BUILD_FAILED");
+      expect(body).toContain("The build failed.");
+      expect(body).toContain("C2653");
+      expect(body).toContain("Resolve the recorded build blockers in the Dashboard");
+      expect(body).toContain("request a new E2E run in a new PR comment");
+      expect(body).toContain("Recorded features: 0 passed, 0 failed, 0 blocked, 1 not run");
+      expect(body).toContain("Uncovered PR changes");
+      expect(body).not.toMatch(
+        /private-build-secret|C:\\private|private\.invalid|private-build-log|Private build output/u,
+      );
+      expect(report).toEqual(before);
+    },
+  );
+
+  it.each([
+    "task",
+    "attempt",
+    "artifact-attempt",
+    "head",
+    "authority",
+    "missing-log",
+    "code",
+    "diagnostic",
+  ] as const)("does not publish an unverified build blocker with invalid %s metadata", (kind) => {
+    const report = blockedBuildReport();
+    if (kind === "task") report.verificationEvidence[0]!.provenance.taskId = "foreign-task";
+    else if (kind === "attempt") {
+      report.verificationEvidence[0]!.provenance.attemptId = "unadopted-attempt";
+      report.artifacts[0]!.attemptId = "unadopted-attempt";
+    } else if (kind === "artifact-attempt") report.artifacts[0]!.attemptId = "different-attempt";
+    else if (kind === "head") report.context.e2e!.headSha = "f".repeat(40);
+    else if (kind === "authority") report.verificationEvidence[0]!.authority = "model";
+    else if (kind === "missing-log") report.artifacts = [];
+    else if (kind === "code")
+      Object.assign(report.context.e2e!.blockers![0]!, { code: "PRIVATE_BUILD_CODE" });
+    else report.context.e2e!.blockers![0]!.diagnosticCodes = ["token=private-diagnostic-value"];
+    const body = renderBlockedBuild(report);
+    expect(body).not.toContain("Recorded build blockers");
+    expect(body).not.toContain("C2653");
+    expect(body).not.toContain("Resolve the recorded build blockers in the Dashboard");
+    expect(body).not.toContain("PRIVATE_BUILD_CODE");
+    expect(body).not.toContain("private-diagnostic-value");
+    expect(body).toContain("1 not run");
+  });
+
+  it("preserves a blocker recorded by an adopted earlier attempt without rerunning its build", () => {
+    const report = blockedBuildReport();
+    const original = report.context.attempt.id;
+    report.context.attempt = { id: "delivery-recovery-attempt", number: 2 };
+    report.context.adoptedAttemptIds = [original, report.context.attempt.id];
+    const body = renderBlockedBuild(report);
+    expect(body).toContain("Recorded build blockers");
+    expect(body).toContain("C2653");
+    expect(body).toContain("Resuming this task only recovers and republishes its recorded result");
+  });
+
+  it("keeps old partial reports without typed blocker receipts on the safe fallback", () => {
+    const report = blockedBuildReport();
+    delete report.context.e2e!.blockers;
+    const body = renderBlockedBuild(report);
+    expect(body).not.toContain("Recorded build blockers");
+    expect(body).not.toContain("C2653");
+    expect(body).not.toContain("Private build output");
+    expect(body).toContain("1 not run");
+  });
+
+  it.each(["failed", "interrupted", "cancelled"] as const)(
+    "requires a new E2E request for a legacy %s session whose features were not run",
+    (outcome) => {
+      const report = blockedBuildReport();
+      report.outcome = outcome;
+      report.report.loop.stopReason = outcome === "failed" ? "error" : outcome;
+      delete report.context.e2e!.blockers;
+      const before = structuredClone(report);
+      const body = renderBlockedBuild(report);
+      expect(body).toContain("request a new E2E run in a new PR comment");
+      expect(body).toContain(
+        "Resuming this task only recovers and republishes its recorded result",
+      );
+      expect(body).toContain("Recorded features: 0 passed, 0 failed, 0 blocked, 1 not run");
+      expect(body).not.toContain("Recorded build blockers");
+      expect(body).not.toContain("C2653");
+      expect(report).toEqual(before);
+    },
+  );
+
   it("bounds and sanitizes partial E2E records without relaxing completed-report publication", () => {
     const report = createInvestigationPreview("pr", {
       findingCount: 0,
@@ -186,49 +377,52 @@ describe("assignment progress reply templates", () => {
     },
   );
 
-  it("keeps result-delivery recovery distinct from rerunning a failed E2E test", () => {
-    const report = createInvestigationPreview("pr", { findingCount: 0 }).result;
-    report.context.task.kind = "pr-e2e";
-    report.outcome = "failed";
-    report.context.e2e = {
-      headSha: "b".repeat(40),
-      buildIdentity: "Synthetic pinned build",
-      features: [
-        {
-          id: "feature-runtime",
-          title: "Preview",
-          paths: [],
-          scenario: "Open preview",
-          userVisible: true,
-          outcome: "passed",
-          artifactRefs: [],
-          limitations: [],
-          assertions: [
-            {
-              id: "assertion-runtime",
-              expected: "Preview opens",
-              observed: "Preview opened",
-              outcome: "passed",
-              evidenceRefs: [],
-            },
-          ],
-        },
-      ],
-      cleanup: { confirmed: true, recordedAt: timestamp, summary: "Owned processes exited." },
-    };
-    const recovery = "Explicitly resume the task to recover report delivery.";
-    const body = renderProgressReply({
-      stage: "failed",
-      template: defaultE2eProgressReplyTemplates.failed,
-      trigger: { ...trigger, eventName: "issue_comment", commandCommentId: 902 },
-      updatedAt: timestamp,
-      report,
-      failure: "Report delivery needs recovery.",
-      context: { mode: "e2e", status: "failed", nextStep: recovery },
-    });
-    expect(body).toContain(recovery);
-    expect(body).not.toContain("request a new E2E run");
-  });
+  it.each(["failed", "interrupted", "cancelled"] as const)(
+    "keeps result-delivery recovery distinct from rerunning a recorded passed E2E session after %s",
+    (outcome) => {
+      const report = createInvestigationPreview("pr", { findingCount: 0 }).result;
+      report.context.task.kind = "pr-e2e";
+      report.outcome = outcome;
+      report.context.e2e = {
+        headSha: "b".repeat(40),
+        buildIdentity: "Synthetic pinned build",
+        features: [
+          {
+            id: "feature-runtime",
+            title: "Preview",
+            paths: [],
+            scenario: "Open preview",
+            userVisible: true,
+            outcome: "passed",
+            artifactRefs: [],
+            limitations: [],
+            assertions: [
+              {
+                id: "assertion-runtime",
+                expected: "Preview opens",
+                observed: "Preview opened",
+                outcome: "passed",
+                evidenceRefs: [],
+              },
+            ],
+          },
+        ],
+        cleanup: { confirmed: true, recordedAt: timestamp, summary: "Owned processes exited." },
+      };
+      const recovery = "Explicitly resume the task to recover report delivery.";
+      const body = renderProgressReply({
+        stage: "failed",
+        template: defaultE2eProgressReplyTemplates.failed,
+        trigger: { ...trigger, eventName: "issue_comment", commandCommentId: 902 },
+        updatedAt: timestamp,
+        report,
+        failure: "Report delivery needs recovery.",
+        context: { mode: "e2e", status: outcome, nextStep: recovery },
+      });
+      expect(body).toContain(recovery);
+      expect(body).not.toContain("request a new E2E run");
+    },
+  );
 
   it.each([
     ["pull_request", "Static review"],

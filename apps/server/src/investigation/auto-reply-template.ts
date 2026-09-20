@@ -1,6 +1,8 @@
 import {
+  describeInvestigationE2eBlocker,
   EntityIdSchema,
   type InvestigationAssessment,
+  InvestigationE2eResultSchema,
   type InvestigationFindingV1,
   type InvestigationLocation,
   type InvestigationModelExecution,
@@ -8,6 +10,7 @@ import {
   type InvestigationResultV1,
   type InvestigationSubjectV1,
   type InvestigationUsageSummary,
+  validateInvestigationE2eBindings,
   validateInvestigationSourceProvenance,
 } from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
@@ -86,13 +89,58 @@ export function recordedE2eRerunNextStep(report?: InvestigationResultV1): string
     feature.outcome,
     ...feature.assertions.map((assertion) => assertion.outcome),
   ]);
+  const buildBlockers = recordedE2eBuildBlockers(report);
   const needsNewRun =
     report.outcome === "blocked" ||
+    buildBlockers.length > 0 ||
     !e2e.cleanup.confirmed ||
-    outcomes.some((outcome) => outcome === "blocked" || outcome === "failed");
+    outcomes.some(
+      (outcome) => outcome === "blocked" || outcome === "failed" || outcome === "not_run",
+    );
   return needsNewRun
-    ? "Resolve the recorded failures or blockers, then request a new E2E run in a new PR comment by mentioning the configured reviewer followed by the e2e command. Resuming this task only recovers and republishes its recorded result; it does not execute the tests again."
+    ? `${buildBlockers.length > 0 ? "Resolve the recorded build blockers in the Dashboard" : "Resolve the recorded failures or blockers"}, then request a new E2E run in a new PR comment by mentioning the configured reviewer followed by the e2e command. Resuming this task only recovers and republishes its recorded result; it does not execute the tests again.`
     : undefined;
+}
+
+/** Public build explanations come only from typed, source-bound Worker receipts. */
+export function recordedE2eBuildBlockers(report?: InvestigationResultV1): string[] {
+  const e2e = report?.context.e2e;
+  const blockers = e2e?.blockers;
+  if (
+    report?.context.task.kind !== "pr-e2e" ||
+    e2e === undefined ||
+    blockers === undefined ||
+    !Value.Check(InvestigationE2eResultSchema.properties.blockers, blockers)
+  )
+    return [];
+  const subject = report.context.subjects.find(
+    (entry) => entry.id === report.context.task.subjectRef,
+  );
+  if (
+    subject?.kind !== "original_pr" ||
+    validateInvestigationE2eBindings({
+      e2e,
+      taskId: report.context.task.id,
+      taskKind: report.context.task.kind,
+      subjectRef: subject.id,
+      headSha: subject.headSha,
+      completed: report.outcome === "completed",
+      artifacts: report.artifacts,
+      evidence: report.verificationEvidence,
+    }).length > 0
+  )
+    return [];
+  const attempts = new Set([report.context.attempt.id, ...report.context.adoptedAttemptIds]);
+  const evidence = new Map(report.verificationEvidence.map((entry) => [entry.id, entry]));
+  if (
+    blockers.some((blocker) =>
+      blocker.evidenceRefs.some(
+        (id) => !attempts.has(evidence.get(id)?.provenance.attemptId ?? ""),
+      ),
+    )
+  )
+    return [];
+  return blockers.map((blocker) => describeInvestigationE2eBlocker(blocker));
 }
 
 /** Usage is server-owned accounting data, never a number supplied by model prose. */
@@ -416,7 +464,10 @@ export interface AutomaticReplyModelContext {
   readonly adoptedAttemptIds: readonly string[];
 }
 
-function recordedModels(context: AutomaticReplyModelContext | undefined): string[] | null {
+function recordedModels(
+  context: AutomaticReplyModelContext | undefined,
+  allowUnspecifiedModels = false,
+): string[] | null {
   if (
     context === null ||
     typeof context !== "object" ||
@@ -443,7 +494,12 @@ function recordedModels(context: AutomaticReplyModelContext | undefined): string
       execution.round < 1 ||
       execution.round > rounds ||
       coveredRounds.has(execution.round) ||
-      !context.adoptedAttemptIds.includes(execution.attemptId) ||
+      !context.adoptedAttemptIds.includes(execution.attemptId)
+    )
+      return null;
+    coveredRounds.add(execution.round);
+    if (execution.model === null && allowUnspecifiedModels) continue;
+    if (
       typeof execution.model !== "string" ||
       execution.model.length === 0 ||
       execution.model.length > 256 ||
@@ -453,7 +509,6 @@ function recordedModels(context: AutomaticReplyModelContext | undefined): string
       redactPrivateText(execution.model, []) !== execution.model
     )
       return null;
-    coveredRounds.add(execution.round);
     models.add(execution.model === "gpt-6-astra" ? "GPT-6 Astra" : execution.model);
   }
   return [...models];
@@ -498,7 +553,13 @@ export function renderAutomaticReplyIdentity(
   const introduction = `I'm ${modelIdentity} running through Agentic Review on behalf of GitHub user \`@${identity.githubLogin}\`.`;
   if (report === undefined)
     return `${introduction} This update was generated by AI and may contain errors.`;
-  const modelDisclosure = models === undefined ? " The model identity was not fully recorded." : "";
+  const modelDisclosure =
+    models !== undefined
+      ? ""
+      : recordedModels(context, true) !== null &&
+          context!.modelExecutions.some((execution) => execution.model === null)
+        ? " The accepted analysis records do not specify every model name."
+        : " The model identity was not fully recorded.";
   if (report.context.task.kind === "pr-review")
     return `${introduction}${modelDisclosure} I'm performing this automated review. This review was generated by AI and may contain errors.`;
   if (report.context.task.kind === "pr-e2e")

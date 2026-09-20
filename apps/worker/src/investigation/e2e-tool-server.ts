@@ -24,6 +24,8 @@ import {
   E2eBuildError,
   type E2eBuildRecord,
   type E2eBuildRequest,
+  type E2eMsbuildToolchain,
+  getE2eBuildCapturedOutput,
   performE2eBuild,
   validateE2eBuildArtifact,
   validateE2eBuildFile,
@@ -74,6 +76,8 @@ export interface E2eToolServerOptions {
   readonly desktopDriverPath?: string;
   readonly changedPaths: readonly string[];
   readonly buildTools?: Readonly<Partial<Record<"msbuild" | "dotnet", string>>>;
+  readonly buildToolDigests?: Readonly<Partial<Record<"msbuild" | "dotnet", string>>>;
+  readonly msbuildToolchain?: E2eMsbuildToolchain;
   readonly onActivity?: (activity: ModelActivityObservation) => void;
   readonly onRuntimeObservation?: (observation: {
     readonly evidence: readonly InvestigationEvidenceV1[];
@@ -121,6 +125,7 @@ export class E2eToolServer {
   readonly #artifacts: InvestigationArtifactV1[] = [];
   readonly #processes = new Map<string, OwnedProcess>();
   readonly #runner = new ProductionManagedProcessRunner();
+  readonly #buildRunner = new ProductionManagedProcessRunner({ retainFailureOutput: true });
   readonly #commandExits: Promise<void>[] = [];
   readonly #toolLifetime = new AbortController();
   readonly #directory: string;
@@ -274,10 +279,16 @@ export class E2eToolServer {
           buildRootDirectory: this.#directory,
           gitExecutablePath: this.options.gitExecutablePath,
           tools: this.options.buildTools ?? {},
+          ...(this.options.buildToolDigests === undefined
+            ? {}
+            : { toolDigests: this.options.buildToolDigests }),
+          ...(this.options.msbuildToolchain === undefined
+            ? {}
+            : { msbuildToolchain: this.options.msbuildToolchain }),
           environment: this.#environment(),
           limits: this.options.processLimits,
           signal: AbortSignal.any([this.options.signal, this.#toolLifetime.signal]),
-          run: (spec, signal) => this.#run(spec, signal),
+          run: (spec, signal) => this.#run(spec, signal, true),
         });
         this.#builds.set(id, built);
         binding.buildRef = id;
@@ -633,6 +644,43 @@ export class E2eToolServer {
     } catch (error) {
       this.options.signal.throwIfAborted();
       status = "blocked";
+      let buildDiagnostics = error instanceof E2eBuildError ? error.diagnostics : undefined;
+      if (error instanceof E2eBuildError) {
+        const output = getE2eBuildCapturedOutput(error);
+        if (output !== null) {
+          const captured = await this.options.workspace.writeArtifact({
+            subjectRef: this.options.task.subjectRef,
+            kind: "log",
+            name: `e2e-build-output-${id}.json`,
+            mediaType: "application/json",
+            bytes: Buffer.from(
+              JSON.stringify({
+                schemaVersion: "E2eBuildCapturedOutputV1",
+                invocation: buildDiagnostics?.invocation ?? null,
+                exitCode: buildDiagnostics?.exitCode ?? null,
+                ...output,
+                retention: output.outputTruncated
+                  ? "partial_or_truncated"
+                  : "complete_within_capture_limit",
+              })
+                .split(this.#token)
+                .join("[REDACTED]"),
+              "utf8",
+            ),
+          });
+          artifacts.push(captured);
+          if (buildDiagnostics !== undefined)
+            buildDiagnostics = {
+              ...buildDiagnostics,
+              capture: {
+                artifactRef: captured.id,
+                captureLimitBytes: output.captureLimitBytes,
+                retainedBytes: output.retainedBytes,
+                outputTruncated: output.outputTruncated,
+              },
+            };
+        }
+      }
       observed = {
         error: error instanceof Error ? error.message : "The E2E operation could not complete.",
         ...(error !== null &&
@@ -642,9 +690,7 @@ export class E2eToolServer {
         /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
           ? { errorCode: error.code }
           : {}),
-        ...(error instanceof E2eBuildError && error.diagnostics !== undefined
-          ? { buildDiagnostics: error.diagnostics }
-          : {}),
+        ...(buildDiagnostics !== undefined ? { buildDiagnostics } : {}),
       };
     }
     observed = JSON.parse(JSON.stringify(observed).split(this.#token).join("[REDACTED]"));
@@ -960,7 +1006,7 @@ export class E2eToolServer {
       },
     };
   }
-  async #run(spec: ProcessLaunchSpec, signal: AbortSignal) {
+  async #run(spec: ProcessLaunchSpec, signal: AbortSignal, retainBuildOutput = false) {
     const host = this.options.processHost;
     const tracked: ProcessHostClient = {
       start: async (launch, cancellation, onDispatch) => {
@@ -992,7 +1038,7 @@ export class E2eToolServer {
       terminateAll: (reason) => host.terminateAll(reason),
       close: () => host.close(),
     };
-    return this.#runner.run(spec, {
+    return (retainBuildOutput ? this.#buildRunner : this.#runner).run(spec, {
       processHost: tracked,
       signal,
       onProgress: () => this.#activity("e2e.process.output"),

@@ -421,6 +421,9 @@ describe("verified automatic reply identity", () => {
       report.report.loop.completedRounds = 1.5;
     },
     (report: InvestigationResultV1) => {
+      report.context.modelExecutions![0]!.model = null;
+    },
+    (report: InvestigationResultV1) => {
       report.context.modelExecutions!.pop();
     },
     (report: InvestigationResultV1) => {
@@ -431,9 +434,6 @@ describe("verified automatic reply identity", () => {
     },
     (report: InvestigationResultV1) => {
       report.context.modelExecutions![0]!.attemptId = "unadopted-attempt";
-    },
-    (report: InvestigationResultV1) => {
-      report.context.modelExecutions![0]!.model = null;
     },
     (report: InvestigationResultV1) => {
       report.context.modelExecutions![0]!.model = "";
@@ -574,9 +574,6 @@ describe("verified automatic reply identity", () => {
       report.context.modelExecutions!.pop();
     },
     (report: InvestigationResultV1) => {
-      report.context.modelExecutions![0]!.model = null;
-    },
-    (report: InvestigationResultV1) => {
       report.context.modelExecutions![0]!.round = 2;
     },
     (report: InvestigationResultV1) => {
@@ -606,8 +603,30 @@ describe("verified automatic reply identity", () => {
     const report = preview();
     recordModels(report, [null]);
     report.context.modelExecutions![0]!.engine = "copilot";
-    expect(render(report)).toContain("model identity was not fully recorded");
+    expect(render(report)).toContain(
+      "The accepted analysis records do not specify every model name.",
+    );
+    expect(render(report)).not.toContain("model identity was not fully recorded");
     expect(render(report)).not.toContain("I'm copilot");
+  });
+
+  it("distinguishes an unspecified model name from incomplete or unadopted execution records", () => {
+    const report = preview();
+    recordModels(report, ["gpt-6-astra", null]);
+    expect(render(report)).toContain(
+      "The accepted analysis records do not specify every model name.",
+    );
+    expect(render(report)).not.toContain("I'm GPT-6 Astra");
+    report.context.modelExecutions![1]!.attemptId = "unadopted-attempt";
+    expect(render(report)).toContain("The model identity was not fully recorded.");
+    expect(render(report)).not.toContain(
+      "The accepted analysis records do not specify every model name.",
+    );
+    recordModels(report, []);
+    expect(render(report)).toContain("The model identity was not fully recorded.");
+    expect(render(report)).not.toContain(
+      "The accepted analysis records do not specify every model name.",
+    );
   });
 
   it.each(["provider:model", "a".repeat(200)])(

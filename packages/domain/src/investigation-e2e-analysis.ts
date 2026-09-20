@@ -1,9 +1,11 @@
 import {
+  describeInvestigationE2eBlocker,
   type InvestigationAnalysisV1,
   type InvestigationDiagnostic,
   type InvestigationLoopCheckpointV1,
   type InvestigationOutcome,
   type InvestigationTaskV1,
+  isInvestigationE2eBlockerCode,
   validateInvestigationE2eBindings,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "./investigation-loop.js";
@@ -68,10 +70,51 @@ export function projectRecordedE2eAnalysis(
   coverage.unresolvedUnitRefs = coverage.includedUnits
     .filter((unit) => unit.status !== "completed")
     .map((unit) => unit.id);
-  const summary = `E2E ${outcome}: ${e2e.features.map((feature) => `${feature.title} (${feature.outcome})`).join("; ")}`;
-  const diagnostics = structuredClone(checkpoint.analysis.diagnostics);
+  const blockers = e2e.blockers ?? [];
+  const blockerDescriptions = blockers.map(describeInvestigationE2eBlocker);
+  const featureSummary = e2e.features
+    .map((feature) => `${feature.title} (${feature.outcome})`)
+    .join("; ");
+  const summary =
+    blockerDescriptions.length === 0
+      ? `E2E ${outcome}: ${featureSummary}`
+      : `E2E ${outcome}: ${blockerDescriptions.join(" ")} Feature results: ${featureSummary}`;
+  const incompleteRationale = [
+    ...blockerDescriptions,
+    "E2E execution did not verify all required behavior; consult the feature results.",
+  ].join(" ");
+  const diagnostics = structuredClone(checkpoint.analysis.diagnostics).filter(
+    (entry) =>
+      !isInvestigationE2eBlockerCode(entry.code) &&
+      ((blockers.length === 0 && outcome !== "completed") ||
+        !["E2E_ASSERTION_FAILED", "E2E_COVERAGE_BLOCKED"].includes(entry.code)),
+  );
+  diagnostics.unshift(
+    ...blockers.map((blocker) => {
+      const diagnostic: Omit<InvestigationDiagnostic, "id"> = {
+        code: blocker.code,
+        category: outcome === "failed" ? "error" : "blocker",
+        message: describeInvestigationE2eBlocker(blocker),
+        retryable: false,
+        evidenceRefs: [...blocker.evidenceRefs],
+        prerequisiteRefs: [],
+      };
+      return {
+        id: `e2e-diagnostic:${investigationContentDigest({
+          taskId: task.id,
+          headSha: e2e.headSha,
+          diagnostic,
+        })}`,
+        ...diagnostic,
+      };
+    }),
+  );
   const code = outcome === "failed" ? "E2E_ASSERTION_FAILED" : "E2E_COVERAGE_BLOCKED";
-  if (outcome !== "completed" && !diagnostics.some((entry) => entry.code === code)) {
+  if (
+    outcome !== "completed" &&
+    blockers.length === 0 &&
+    !diagnostics.some((entry) => entry.code === code)
+  ) {
     const diagnostic: Omit<InvestigationDiagnostic, "id"> = {
       code,
       category: outcome === "failed" ? "error" : "blocker",
@@ -111,34 +154,51 @@ export function projectRecordedE2eAnalysis(
         rationale:
           outcome === "completed"
             ? "All required E2E feature assertions and media were observed for this revision."
-            : "E2E execution did not verify all required behavior; consult the feature results.",
+            : incompleteRationale,
         planRef: null,
         scenarioIds: e2e.features.map((feature) => feature.id),
         prerequisiteRefs: [],
         linkedValidationReportRefs: [],
       },
     },
-    limitations: e2e.features.flatMap((feature) =>
-      feature.limitations.map((description, index) => {
+    limitations: [
+      ...blockers.map((blocker) => {
         const limitation = {
-          description,
-          impact: `E2E coverage for ${feature.title}.`,
-          evidenceRefs: [
-            ...new Set(feature.assertions.flatMap((assertion) => assertion.evidenceRefs)),
-          ],
+          description: describeInvestigationE2eBlocker(blocker),
+          impact: "E2E build verification is blocked for this PR revision.",
+          evidenceRefs: [...blocker.evidenceRefs],
         };
         return {
-          id: `e2e-limitation:${investigationContentDigest({
+          id: `e2e-build-limitation:${investigationContentDigest({
             taskId: task.id,
             headSha: e2e.headSha,
-            featureId: feature.id,
-            index,
-            limitation,
+            blocker,
           })}`,
           ...limitation,
         };
       }),
-    ),
+      ...e2e.features.flatMap((feature) =>
+        feature.limitations.map((description, index) => {
+          const limitation = {
+            description,
+            impact: `E2E coverage for ${feature.title}.`,
+            evidenceRefs: [
+              ...new Set(feature.assertions.flatMap((assertion) => assertion.evidenceRefs)),
+            ],
+          };
+          return {
+            id: `e2e-limitation:${investigationContentDigest({
+              taskId: task.id,
+              headSha: e2e.headSha,
+              featureId: feature.id,
+              index,
+              limitation,
+            })}`,
+            ...limitation,
+          };
+        }),
+      ),
+    ],
   };
   return { analysis, outcome };
 }

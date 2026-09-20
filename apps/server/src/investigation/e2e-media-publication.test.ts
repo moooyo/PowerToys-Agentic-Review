@@ -195,6 +195,63 @@ function harness(uploader?: InvestigationMediaUploader, databasePath?: string) {
 }
 
 describe("durable E2E media publication", () => {
+  it("states that no upload is pending when a report has no publishable runtime media", async () => {
+    const upload = vi.fn<InvestigationMediaUploader["upload"]>();
+    const h = harness({ upload });
+    h.report.context.e2e!.features = h.report.context.e2e!.features.map((feature) => ({
+      ...feature,
+      outcome: "not_run" as const,
+      artifactRefs: [],
+      assertions: feature.assertions.map((assertion) => ({
+        ...assertion,
+        outcome: "not_run" as const,
+        evidenceRefs: [],
+      })),
+    }));
+    h.report.artifacts = [];
+    h.report.verificationEvidence = [];
+    h.saveReport();
+    const before = structuredClone(h.report);
+    h.media.prepare(h.report, h.task);
+    await h.media.publish(h.report.report.id);
+    expect(h.media.status(h.report.report.id)).toMatchObject({
+      state: "blocked",
+      totalCount: 0,
+      uploadedCount: 0,
+      blockers: [],
+    });
+    const body = h.media.render(h.report.report.id);
+    expect(body).toContain("No publishable screenshot or video evidence was recorded.");
+    expect(body).toContain("No upload is pending.");
+    expect(body).not.toContain("Evidence publication is blocked.");
+    expect(body).not.toContain("Blocked or pending");
+    expect(upload).not.toHaveBeenCalled();
+    expect(h.report).toEqual(before);
+  });
+
+  it("keeps an empty upload queue with invalid coverage distinct from absent media", async () => {
+    const upload = vi.fn<InvestigationMediaUploader["upload"]>();
+    const h = harness({ upload });
+    delete h.report.context.e2e;
+    h.saveReport();
+    h.media.prepare(h.report, h.task);
+    await h.media.publish(h.report.report.id);
+    const body = h.media.render(h.report.report.id);
+    expect(body).toContain("Evidence publication is blocked.");
+    expect(body).toContain("No upload is pending.");
+    expect(body).toContain("coverage_missing");
+    expect(body).not.toContain("No publishable screenshot or video evidence was recorded.");
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it("does not claim that evidence was absent when the publication manifest is unavailable", () => {
+    const h = harness();
+    const body = h.media.render(h.report.report.id);
+    expect(body).toContain("the E2E evidence manifest is unavailable");
+    expect(body).not.toContain("No publishable screenshot or video evidence was recorded.");
+    expect(body).not.toContain("No upload is pending.");
+  });
+
   it.each(["pr", "bug"] as const)(
     "never uploads static %s images or videos while retaining the text reply",
     async (kind) => {
@@ -316,7 +373,7 @@ describe("durable E2E media publication", () => {
   it("uploads bytes before rendering embeds and reuses receipts across comment retry and service restart", async () => {
     const h = harness();
     h.media.prepare(h.report, h.task);
-    expect(h.media.render(h.report.report.id)).toContain("pending");
+    expect(h.media.render(h.report.report.id)).toContain("Evidence upload is pending.");
     await h.media.publish(h.report.report.id);
     expect(h.fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
     expect(h.media.render(h.report.report.id)).toContain(`![feature.png](${imageUrl})`);
@@ -371,7 +428,28 @@ describe("durable E2E media publication", () => {
       restarted.uploads(h.report.report.id).every((receipt) => receipt.state === "unknown"),
     ).toBe(true);
     expect(restarted.render(h.report.report.id)).toContain("will not be sent again automatically");
+    expect(restarted.render(h.report.report.id)).toContain(
+      "Evidence upload status is unconfirmed.",
+    );
     expect(restarted.render(h.report.report.id)).not.toContain("connection closed");
+  });
+
+  it("retains a verified published image while another upload remains unconfirmed", async () => {
+    let calls = 0;
+    const upload = vi.fn<InvestigationMediaUploader["upload"]>(async (_input, beforeDispatch) => {
+      beforeDispatch();
+      if (++calls === 1) return { state: "uploaded", url: imageUrl };
+      throw new Error("Private transport failure.");
+    });
+    const h = harness({ upload });
+    h.media.prepare(h.report, h.task);
+    await h.media.publish(h.report.report.id);
+    const body = h.media.render(h.report.report.id);
+    expect(body).toContain("Evidence upload status is unconfirmed.");
+    expect(body).toContain(imageUrl);
+    expect(body).toContain("will not be sent again automatically");
+    expect(body).not.toContain("Private transport failure.");
+    expect(body).not.toContain("No publishable screenshot or video evidence was recorded.");
   });
 
   it("turns expired dispatched claims into unknown without repeating the POST", async () => {
@@ -519,6 +597,7 @@ describe("durable E2E media publication", () => {
     await disabled.publish(h.report.report.id);
     expect(h.fetch).not.toHaveBeenCalled();
     expect(disabled.render(h.report.report.id)).toContain("media_publication_disabled");
+    expect(disabled.render(h.report.report.id)).toContain("Evidence publication is blocked.");
     h.store.put("evidenceAssets", h.artifacts[0]!.id, {
       contentBase64: Buffer.from("corrupted").toString("base64"),
     });

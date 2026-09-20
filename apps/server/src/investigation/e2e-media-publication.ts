@@ -508,12 +508,20 @@ export class InvestigationE2eMediaPublications {
       return "### Evidence publication\n\nBlocked: the E2E evidence manifest is unavailable.";
     const uploads = this.uploads(reportId);
     const status = this.status(reportId);
+    const summary =
+      status.state === "ready"
+        ? "Published. Test results and evidence delivery are tracked independently."
+        : uploads.length === 0 && status.blockers.length === 0
+          ? "No publishable screenshot or video evidence was recorded. No upload is pending. Test results are unchanged."
+          : status.state === "unknown"
+            ? "Evidence upload status is unconfirmed. Test results are unchanged."
+            : status.state === "blocked"
+              ? `Evidence publication is blocked. ${uploads.length === 0 ? "No upload is pending. " : ""}Test results are unchanged; review the recorded publication blockers below.`
+              : "Evidence upload is pending. Test results are unchanged; evidence delivery is not complete.";
     const lines = [
       "### Evidence publication",
       "",
-      status.state === "ready"
-        ? "Published. Test results and evidence delivery are tracked independently."
-        : "Blocked or pending. Test results are unchanged; the evidence delivery is not complete.",
+      summary,
       "",
       `Revision: \`${publication.headSha}\`.`,
     ];

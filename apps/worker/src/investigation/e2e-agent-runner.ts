@@ -7,6 +7,7 @@ import type {
   InvestigationOutcome,
   InvestigationRuntimeState,
 } from "@agentic-review/contracts";
+import { isInvestigationE2eBlockerCode } from "@agentic-review/contracts";
 import { projectRecordedE2eAnalysis } from "@agentic-review/domain";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -14,7 +15,7 @@ import type {
   ProcessHostClient,
   ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
-import type { E2eBuildRecord } from "./e2e-build.js";
+import type { E2eBuildRecord, E2eMsbuildToolchain } from "./e2e-build.js";
 import { describeE2eAssertion, type E2eFeaturePlan } from "./e2e-feature-plan.js";
 import {
   type E2eToolReceipt,
@@ -86,6 +87,8 @@ export interface E2eAgentRunnerOptions {
   readonly ffmpegExecutablePath?: string;
   readonly desktopDriverPath?: string;
   readonly buildTools?: Readonly<Partial<Record<"msbuild" | "dotnet", string>>>;
+  readonly buildToolDigests?: Readonly<Partial<Record<"msbuild" | "dotnet", string>>>;
+  readonly msbuildToolchain?: E2eMsbuildToolchain;
   readonly jsonRunner?: StaticModelJsonRunner;
   readonly createTools?: (options: E2eToolServerOptions) => E2eToolServer;
 }
@@ -161,6 +164,12 @@ export function createE2eAgentRunner(options: E2eAgentRunnerOptions): E2eAgentRu
         gitExecutablePath: options.gitExecutablePath,
         changedPaths: manifest.files.map((file) => file.path),
         ...(options.buildTools === undefined ? {} : { buildTools: options.buildTools }),
+        ...(options.buildToolDigests === undefined
+          ? {}
+          : { buildToolDigests: options.buildToolDigests }),
+        ...(options.msbuildToolchain === undefined
+          ? {}
+          : { msbuildToolchain: options.msbuildToolchain }),
         ...(input.onRuntimeObservation === undefined
           ? {}
           : { onRuntimeObservation: input.onRuntimeObservation }),
@@ -476,6 +485,7 @@ export function projectE2eResult(
       limitations: ["The PR cannot be marked verified while required feature coverage is missing."],
     });
   const identities = [...buildMap.values()].map((build) => build.identity);
+  const blockers = buildMap.size === 0 ? recordedBuildBlockers(receipts, artifactMap) : [];
   return {
     e2e: {
       headSha,
@@ -483,6 +493,7 @@ export function projectE2eResult(
         identities.length > 0
           ? identities.join("; ").slice(0, 16_384)
           : "No verified build was produced.",
+      ...(blockers.length === 0 ? {} : { blockers }),
       features,
       cleanup: {
         confirmed: true,
@@ -497,6 +508,63 @@ export function projectE2eResult(
         ? "completed"
         : "blocked",
   };
+}
+
+/** Only managed build receipts and their retained logs can establish a build blocker. */
+function recordedBuildBlockers(
+  receipts: readonly E2eToolReceipt[],
+  artifacts: ReadonlyMap<string, { id: string; kind: string }>,
+): NonNullable<InvestigationE2eResult["blockers"]> {
+  type Blocker = NonNullable<InvestigationE2eResult["blockers"]>[number];
+  const groups = new Map<Blocker["code"], Blocker>();
+  const object = (value: unknown): Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  for (const receipt of receipts) {
+    if (
+      receipt.operation !== "build" ||
+      !["blocked", "failed"].includes(receipt.status) ||
+      !receipt.artifactRefs.some((ref) => artifacts.get(ref)?.kind === "log")
+    )
+      continue;
+    const observed = object(receipt.observed);
+    const candidate = observed.errorCode;
+    const code = isInvestigationE2eBlockerCode(candidate)
+      ? candidate
+      : "E2E_BUILD_OPERATION_BLOCKED";
+    const blocker: Blocker = groups.get(code) ?? {
+      stage: "build",
+      code,
+      diagnosticCodes: [],
+      evidenceRefs: [],
+    };
+    if (!blocker.evidenceRefs.includes(receipt.id)) blocker.evidenceRefs.push(receipt.id);
+    if (blocker.evidenceRefs.length > 1_024)
+      throw new ModelTurnRunnerError(
+        "MODEL_OUTPUT_LIMIT_EXCEEDED",
+        "The retained build blocker evidence exceeds its bounded result contract.",
+      );
+    const diagnostics = object(observed.buildDiagnostics);
+    // Compiler code tokens are safe structured metadata; paths and diagnostic text stay private.
+    for (const value of [observed.error, diagnostics.stderr, diagnostics.stdout]) {
+      if (typeof value !== "string") continue;
+      for (const match of value
+        .slice(-65_536)
+        .matchAll(
+          /\b(?:fatal\s+)?error\s+((?:NETSDK|MSB|LNK|CS|NU|C|D)[0-9]{4,5})(?=[:\s]|$)/giu,
+        )) {
+        const diagnosticCode = match[1]!.toUpperCase();
+        if (
+          blocker.diagnosticCodes.length < 16 &&
+          !blocker.diagnosticCodes.includes(diagnosticCode)
+        )
+          blocker.diagnosticCodes.push(diagnosticCode);
+      }
+    }
+    groups.set(code, blocker);
+  }
+  return [...groups.values()];
 }
 
 export function createE2ePrompt(input: {

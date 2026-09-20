@@ -1,4 +1,5 @@
 import { type Static, Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { DateTimeSchema, EntityIdSchema, GitObjectIdSchema } from "./common.js";
 import type {
   InvestigationAnalysisV1,
@@ -24,11 +25,63 @@ export const InvestigationE2eOutcomeSchema = Type.Union([
   Type.Literal("not_run"),
 ]);
 
+export const InvestigationE2eBlockerCodeSchema = Type.Union([
+  Type.Literal("E2E_BUILD_REQUEST_INVALID"),
+  Type.Literal("E2E_BUILD_TOOL_UNAVAILABLE"),
+  Type.Literal("E2E_BUILD_SOURCE_INVALID"),
+  Type.Literal("E2E_BUILD_FAILED"),
+  Type.Literal("E2E_BUILD_ARTIFACT_INVALID"),
+  Type.Literal("E2E_BUILD_RECORD_INVALID"),
+  Type.Literal("E2E_BUILD_OPERATION_BLOCKED"),
+]);
+export type InvestigationE2eBlockerCode = Static<typeof InvestigationE2eBlockerCodeSchema>;
+export const InvestigationE2eBlockerSchema = Type.Object(
+  {
+    stage: Type.Literal("build"),
+    code: InvestigationE2eBlockerCodeSchema,
+    diagnosticCodes: Type.Array(
+      Type.String({ pattern: "^(?:C|D|CS|MSB|NU|NETSDK|LNK)[0-9]{4,5}$(?![\\s\\S])" }),
+      { uniqueItems: true, maxItems: 16 },
+    ),
+    evidenceRefs: Type.Array(EntityIdSchema, { uniqueItems: true, minItems: 1, maxItems: 1_024 }),
+  },
+  { additionalProperties: false },
+);
+export type InvestigationE2eBlocker = Static<typeof InvestigationE2eBlockerSchema>;
+const blockersSchema = Type.Array(InvestigationE2eBlockerSchema, { minItems: 1, maxItems: 7 });
+const blockerDescriptions: Record<InvestigationE2eBlockerCode, string> = {
+  E2E_BUILD_REQUEST_INVALID: "Build request validation failed.",
+  E2E_BUILD_TOOL_UNAVAILABLE: "A required build tool was unavailable.",
+  E2E_BUILD_SOURCE_INVALID: "Build source validation failed.",
+  E2E_BUILD_FAILED: "The build failed.",
+  E2E_BUILD_ARTIFACT_INVALID: "Build artifacts could not be verified.",
+  E2E_BUILD_RECORD_INVALID: "The build verification record could not be validated.",
+  E2E_BUILD_OPERATION_BLOCKED: "The build operation was blocked.",
+};
+
+export function isInvestigationE2eBlockerCode(
+  value: unknown,
+): value is InvestigationE2eBlockerCode {
+  return typeof value === "string" && Object.hasOwn(blockerDescriptions, value);
+}
+
+/** Public build explanations contain only controlled categories and compiler diagnostic codes. */
+export function describeInvestigationE2eBlocker(blocker: InvestigationE2eBlocker): string {
+  if (!Value.Check(InvestigationE2eBlockerSchema, blocker))
+    return "E2E build blocker details are unavailable.";
+  const diagnosticCodes =
+    blocker.diagnosticCodes.length === 0
+      ? ""
+      : ` Diagnostic codes: ${[...blocker.diagnosticCodes].sort().join(", ")}.`;
+  return `${blocker.code}: ${blockerDescriptions[blocker.code]}${diagnosticCodes}`;
+}
+
 /** Worker-observed coverage of the exact PR revision, independent of a static report. */
 export const InvestigationE2eResultSchema = Type.Object(
   {
     headSha: GitObjectIdSchema,
     buildIdentity: text,
+    blockers: Type.Optional(blockersSchema),
     features: Type.Array(
       Type.Object(
         {
@@ -160,6 +213,44 @@ export function validateInvestigationE2eBindings(input: {
     errors.push("E2E results must bind the root PR task and its exact head revision.");
   if (!e2e.cleanup.confirmed)
     errors.push("E2E results require confirmed process and desktop cleanup.");
+  if (e2e.blockers !== undefined) {
+    if (input.completed) errors.push("Completed E2E reports cannot contain build blockers.");
+    if (!Value.Check(blockersSchema, e2e.blockers)) {
+      errors.push("E2E build blockers require bounded typed codes and Worker evidence references.");
+    } else {
+      const codes = new Set<string>();
+      const refs = new Set<string>();
+      for (const blocker of e2e.blockers) {
+        if (codes.has(blocker.code)) errors.push("E2E build blocker codes must be unique.");
+        codes.add(blocker.code);
+        for (const ref of blocker.evidenceRefs) {
+          if (refs.has(ref)) errors.push("E2E build blocker evidence references must be unique.");
+          refs.add(ref);
+          const observed = evidence.get(ref);
+          if (
+            observed === undefined ||
+            observed.authority !== "worker" ||
+            observed.subjectRef !== input.subjectRef ||
+            observed.provenance.taskId !== input.taskId ||
+            !observed.artifactRefs.some((artifactRef) => {
+              const artifact = artifacts.get(artifactRef);
+              return (
+                artifact !== undefined &&
+                artifact.taskId === input.taskId &&
+                artifact.subjectRef === input.subjectRef &&
+                artifact.attemptId === observed.provenance.attemptId &&
+                artifact.kind === "log" &&
+                artifact.availability === "available"
+              );
+            })
+          )
+            errors.push(
+              "E2E build blockers require same-task Worker observations with an available log from the same subject and attempt.",
+            );
+        }
+      }
+    }
+  }
   const ids = new Set<string>();
   for (const feature of e2e.features) {
     if (ids.has(feature.id)) errors.push("E2E feature and assertion identities must be unique.");
