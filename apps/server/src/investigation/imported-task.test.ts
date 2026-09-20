@@ -151,6 +151,8 @@ function harness(kind: InvestigationWorkItemRecord["kind"] = "pull_request") {
     actionTransport: { supportedActions: [], readTarget, execute, reconcile },
     prepareTaskInput,
   });
+  const initialIdempotencyRecords = store.list("idempotency");
+  const initialReportDirectoryMarker = store.get("idempotency", "workspace:report-directory:v1");
   const request: InvestigationCreateTaskRequestV1 = {
     workItemId: workItem.id,
     kind: kind === "pull_request" ? "pr-review" : "issue-investigate",
@@ -159,6 +161,8 @@ function harness(kind: InvestigationWorkItemRecord["kind"] = "pull_request") {
   return {
     store,
     service,
+    initialIdempotencyRecords,
+    initialReportDirectoryMarker,
     request,
     source,
     inputSnapshot,
@@ -174,9 +178,33 @@ type Harness = ReturnType<typeof harness>;
 
 function expectNoTaskWrites(fixture: Harness) {
   expect(fixture.store.list("tasks")).toEqual([]);
-  expect(fixture.store.list("idempotency")).toEqual([]);
+  expectIdempotencyRecords(fixture);
   expect(fixture.execute).not.toHaveBeenCalled();
   expect(fixture.reconcile).not.toHaveBeenCalled();
+}
+
+function expectIdempotencyRecords(fixture: Harness, taskRecords: unknown[] = []) {
+  const sorted = (records: unknown[]) =>
+    records.toSorted((left, right) =>
+      investigationContentDigest(left).localeCompare(investigationContentDigest(right)),
+    );
+  expect(sorted(fixture.store.list("idempotency"))).toEqual(
+    sorted([...fixture.initialIdempotencyRecords, ...taskRecords]),
+  );
+  expect(fixture.store.get("idempotency", "workspace:report-directory:v1")).toEqual(
+    fixture.initialReportDirectoryMarker,
+  );
+}
+
+function expectCreatedTaskWrites(fixture: Harness, task: InvestigationTaskV1) {
+  expect(fixture.store.list("tasks")).toEqual([task]);
+  const input = { inputSnapshot: fixture.inputSnapshot, plan: null, execution: null };
+  const receipt = { digest: investigationContentDigest(fixture.request), entityId: task.id };
+  expect(fixture.store.get("idempotency", `input:${task.id}`)).toEqual(input);
+  expect(
+    fixture.store.get("idempotency", `task:${actor.id}:${fixture.request.idempotencyKey}`),
+  ).toEqual(receipt);
+  expectIdempotencyRecords(fixture, [input, receipt]);
 }
 
 function replaceSnapshot(fixture: Harness, inputSnapshot: InvestigationInputSnapshotV1) {
@@ -195,6 +223,55 @@ function deferTarget(fixture: Harness) {
 }
 
 describe("frozen imported task creation", () => {
+  it("preserves initialized metadata when an imported task transaction makes no writes", () => {
+    const fixture = harness();
+    expect(fixture.store.get("idempotency", "workspace:report-directory:v1")).toEqual({
+      complete: true,
+    });
+    fixture.store.transaction(() => undefined);
+    expectNoTaskWrites(fixture);
+  });
+
+  it.each([
+    [
+      "an unexpected task",
+      (fixture: Harness) => {
+        fixture.store.insert("tasks", "synthetic-unexpected-task", {
+          id: "synthetic-unexpected-task",
+        });
+      },
+    ],
+    [
+      "an extra metadata record with the same value",
+      (fixture: Harness) => {
+        fixture.store.insert("idempotency", "synthetic-unexpected-metadata", { complete: true });
+      },
+    ],
+    [
+      "a changed initialization record",
+      (fixture: Harness) => {
+        fixture.store.put("idempotency", "workspace:report-directory:v1", { complete: false });
+      },
+    ],
+    [
+      "a removed initialization record",
+      (fixture: Harness) => {
+        fixture.store.delete("idempotency", "workspace:report-directory:v1");
+      },
+    ],
+    [
+      "an initialization record moved to another key with the same value",
+      (fixture: Harness) => {
+        fixture.store.delete("idempotency", "workspace:report-directory:v1");
+        fixture.store.insert("idempotency", "synthetic-replaced-metadata", { complete: true });
+      },
+    ],
+  ] as const)("detects %s when checking that no task writes occurred", (_description, mutate) => {
+    const fixture = harness();
+    mutate(fixture);
+    expect(() => expectNoTaskWrites(fixture)).toThrow();
+  });
+
   it("commits its creation callback with the task and does not replay it for an existing task", async () => {
     const fixture = harness();
     const onPersisted = vi.fn((task: InvestigationTaskV1) => {
@@ -554,8 +631,7 @@ describe("frozen imported task creation", () => {
     );
     expect(replayed).toEqual(task);
     expect(fixture.store.get("idempotency", `input:${task.id}`)).toEqual(frozen);
-    expect(fixture.store.list("tasks")).toHaveLength(1);
-    expect(fixture.store.list("idempotency")).toHaveLength(2);
+    expectCreatedTaskWrites(fixture, task);
     expect(fixture.readTarget).toHaveBeenCalledTimes(1);
   });
 
@@ -575,8 +651,7 @@ describe("frozen imported task creation", () => {
     resumed.release();
     const [firstTask, secondTask] = await Promise.all([first, second]);
     expect(secondTask).toEqual(firstTask);
-    expect(fixture.store.list("tasks")).toHaveLength(1);
-    expect(fixture.store.list("idempotency")).toHaveLength(2);
+    expectCreatedTaskWrites(fixture, firstTask);
     expect(fixture.store.get("idempotency", `input:${firstTask.id}`)).toEqual({
       inputSnapshot: fixture.inputSnapshot,
       plan: null,
@@ -594,8 +669,7 @@ describe("frozen imported task creation", () => {
         fixture.source,
       ),
     ).rejects.toMatchObject({ statusCode: 409, code: "idempotency_conflict" });
-    expect(fixture.store.list("tasks")).toEqual([task]);
-    expect(fixture.store.list("idempotency")).toHaveLength(2);
+    expectCreatedTaskWrites(fixture, task);
   });
 
   it.each([
