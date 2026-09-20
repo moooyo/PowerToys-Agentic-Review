@@ -88,6 +88,8 @@ export interface InvestigationAutomaticRepliesOptions {
     task: InvestigationTaskV1,
   ) => Promise<string>;
   readonly enableExternalWrites: boolean;
+  /** Legacy report records remain readable and reconcilable; new writes use the shared publisher. */
+  readonly recoveryOnly?: boolean;
   readonly now?: () => Date;
   readonly retryDelayMs?: number;
   readonly leaseDurationMs?: number;
@@ -137,6 +139,7 @@ export class InvestigationAutomaticReplies {
 
   /** Called synchronously inside the transaction that seals the report. No historical backfill. */
   enqueue(report: InvestigationResultV1, task: InvestigationTaskV1): void {
+    if (this.options.recoveryOnly) return;
     if (
       report.outcome !== "completed" ||
       report.report.completeness !== "complete" ||
@@ -713,6 +716,12 @@ export class InvestigationAutomaticReplies {
     );
   }
   #assertWritable(record: AutomaticReplyRecord, intent?: InvestigationActionIntentV1): void {
+    requireCondition(
+      !this.options.recoveryOnly,
+      409,
+      "auto_reply_legacy_retired",
+      "This retained report comment is read-only. New results use the conversation comment.",
+    );
     requireCondition(
       (this.#started || this.#running !== undefined) && this.#owns(record),
       409,

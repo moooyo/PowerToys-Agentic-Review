@@ -148,7 +148,7 @@ export async function createInvestigationRuntime(
         ? {}
         : { defaultTaskBudget: config.defaultTaskBudget }),
       onReportSealed: (report, task) => {
-        if (!progressReplies?.hasTask(task.id)) automaticReplies?.enqueue(report, task);
+        progressReplies?.enqueueResult(report, task);
       },
       onTaskStateChanged: (task, report) => progressReplies?.update(task, report),
       onTaskUsageChanged: (task) => progressReplies?.updateUsage(task),
@@ -224,6 +224,7 @@ export async function createInvestigationRuntime(
           return media.render(report.report.id);
         };
         const publisher = new InvestigationAutomaticReplies({
+          recoveryOnly: true,
           usageSummary: (taskId) => service.usageSummary(taskId),
           prepareReportMedia,
           store,

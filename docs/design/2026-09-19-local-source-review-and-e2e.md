@@ -213,7 +213,9 @@ static report merely to acknowledge an otherwise valid E2E request.
 
 ## Separate E2E publication and media
 
-Give E2E its own Task, publication identity, exact comment ID, and media references. Static and E2E
+Give E2E its own Task and media references, with one persistent publication identity and exact comment
+ID per PR. Repeated E2E Tasks update that comment; repeated static Tasks update the PR's static comment.
+Static and E2E
 comments may link to each other, but their state and content do not overwrite one another. Keep the
 existing durable desired/prepared/confirmed publication lifecycle and append-only delivery history.
 Always edit the exact recorded comment; account-wide last-comment selection is unsafe when both

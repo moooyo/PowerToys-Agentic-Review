@@ -42,6 +42,40 @@ function harness() {
   return { store, fixture, actor, item, evidence, reads };
 }
 
+function publication(
+  h: ReturnType<typeof harness>,
+  id: string,
+  overrides: Partial<InvestigationCommentPublicationSummary> = {},
+): InvestigationCommentPublicationSummary {
+  return {
+    id,
+    version: "version-one",
+    mode: "progress",
+    repositoryId: h.item.repositoryId,
+    repositoryFullName: h.fixture.task.repository.fullName,
+    workItemId: h.item.id,
+    workItemKind: h.item.kind,
+    workItemNumber: h.item.number,
+    workItemTitle: h.item.title,
+    taskId: h.fixture.task.id,
+    producerTaskKind: "pr-review",
+    reportId: null,
+    state: "pending",
+    reasonCode: null,
+    reason: null,
+    requiresAttention: false,
+    nextAttemptAt: null,
+    lastAttemptAt: null,
+    lastConfirmedAt: null,
+    externalId: null,
+    commentUrl: null,
+    availableActions: [],
+    createdAt: h.item.updatedAt,
+    updatedAt: h.item.updatedAt,
+    ...overrides,
+  };
+}
+
 describe("authorized workspace read projections", () => {
   it("lists every immutable report with bounded cursors without exporting whole reports per request", () => {
     const h = harness();
@@ -153,32 +187,7 @@ describe("authorized workspace read projections", () => {
       ["progress-reply:task:one", "progress", "pr-review"],
       ["progress-reply:task:two", "progress", "pr-e2e"],
     ] as const) {
-      const entry: InvestigationCommentPublicationSummary = {
-        id,
-        version: "version-one",
-        mode,
-        repositoryId: h.item.repositoryId,
-        repositoryFullName: h.fixture.task.repository.fullName,
-        workItemId: h.item.id,
-        workItemKind: h.item.kind,
-        workItemNumber: h.item.number,
-        workItemTitle: h.item.title,
-        taskId: h.fixture.task.id,
-        producerTaskKind: kind,
-        reportId: null,
-        state: "pending",
-        reasonCode: null,
-        reason: null,
-        requiresAttention: false,
-        nextAttemptAt: null,
-        lastAttemptAt: null,
-        lastConfirmedAt: null,
-        externalId: null,
-        commentUrl: null,
-        availableActions: [],
-        createdAt: h.item.updatedAt,
-        updatedAt: h.item.updatedAt,
-      };
+      const entry = publication(h, id, { mode, producerTaskKind: kind });
       summaries.set(id, entry);
       h.store.insert("idempotency", id, {
         id,
@@ -196,6 +205,143 @@ describe("authorized workspace read projections", () => {
       h.reads.publications(h.actor, { taskKind: "pr-e2e" }, summary).items.map((entry) => entry.id),
     ).toEqual(["progress-reply:task:two"]);
     expect(h.reads.publications(h.actor, { state: "synced" }, summary).items).toEqual([]);
+  });
+
+  it("includes an older task's shared publication once in its existing scoped keyset pages", () => {
+    const h = harness();
+    const producer = { ...h.fixture.task, id: "task-current-producer" };
+    h.store.insert("tasks", producer.id, producer);
+    const legacy = publication(h, "auto-reply:report:old", { mode: "result" });
+    const shared = publication(h, "progress-reply:task:shared", { taskId: producer.id });
+    const unrelated = publication(h, "progress-reply:task:unrelated", {
+      taskId: "task-unrelated",
+      producerTaskKind: "pr-e2e",
+    });
+    const summaries = new Map([legacy, shared, unrelated].map((entry) => [entry.id, entry]));
+    for (const entry of summaries.values())
+      h.store.insert("idempotency", entry.id, {
+        id: entry.id,
+        repository: h.fixture.task.repository,
+        taskId: entry.taskId,
+        workItemId: entry.workItemId,
+      });
+    for (const taskId of [h.fixture.task.id, producer.id])
+      h.store.insert("idempotency", `progress-reply:task-index:${taskId}`, {
+        recordId: shared.id,
+      });
+    const summary = vi.fn((id: string) => summaries.get(id)!);
+    const query = { taskId: h.fixture.task.id, limit: 1 };
+    const first = h.reads.publications(h.actor, query, summary);
+    const second = h.reads.publications(h.actor, { ...query, cursor: first.nextCursor! }, summary);
+    expect(first.items.map((entry) => entry.id)).toEqual([legacy.id]);
+    expect(second).toEqual({
+      items: [{ ...shared, associatedTaskIds: [h.fixture.task.id] }],
+      nextCursor: null,
+    });
+    expect(
+      h.reads
+        .publications(h.actor, { taskId: producer.id }, summary)
+        .items.map((entry) => entry.id),
+    ).toEqual([shared.id]);
+    expect(
+      h.reads.publications(h.actor, { ...query, mode: "progress" }, summary).items[0]?.id,
+    ).toBe(shared.id);
+    expect(h.reads.publications(h.actor, { ...query, taskKind: "pr-e2e" }, summary).items).toEqual(
+      [],
+    );
+    expect(() =>
+      h.reads.publications(h.actor, { taskId: producer.id, cursor: first.nextCursor! }, summary),
+    ).toThrow(expect.objectContaining({ code: "directory_cursor_invalid" }));
+  });
+
+  it("checks task grants and rejects a shared index that points to another source", () => {
+    const h = harness();
+    const shared = publication(h, "progress-reply:task:shared", {
+      taskId: "task-another-source",
+      workItemId: "item-another-source",
+    });
+    h.store.insert("idempotency", `progress-reply:task-index:${h.fixture.task.id}`, {
+      recordId: shared.id,
+    });
+    const summary = vi.fn(() => shared);
+    expect(() =>
+      h.reads.publications(
+        { ...h.actor, repositoryIds: [] },
+        { taskId: h.fixture.task.id },
+        summary,
+      ),
+    ).toThrow(expect.objectContaining({ code: "repository_forbidden" }));
+    expect(summary).not.toHaveBeenCalled();
+    expect(() => h.reads.publications(h.actor, { taskId: h.fixture.task.id }, summary)).toThrow(
+      expect.objectContaining({ code: "comment_task_binding_invalid" }),
+    );
+  });
+
+  it("follows an older task's retired publication index to the canonical shared comment", () => {
+    const h = harness();
+    const shared = publication(h, "progress-reply:task:canonical", {
+      taskId: "task-current-producer",
+    });
+    const retiredId = "progress-reply:task:retired";
+    h.store.insert("idempotency", retiredId, {
+      id: retiredId,
+      repository: h.fixture.task.repository,
+      workItemId: h.item.id,
+      taskId: "task-retired-producer",
+      retiredTo: shared.id,
+    });
+    h.store.insert("idempotency", shared.id, {
+      id: shared.id,
+      repository: h.fixture.task.repository,
+      workItemId: h.item.id,
+      taskId: shared.taskId,
+    });
+    h.store.insert("idempotency", `progress-reply:task-index:${h.fixture.task.id}`, {
+      recordId: retiredId,
+    });
+    const summary = vi.fn(() => shared);
+    expect(h.reads.publications(h.actor, { taskId: h.fixture.task.id }, summary)).toEqual({
+      items: [{ ...shared, associatedTaskIds: [h.fixture.task.id] }],
+      nextCursor: null,
+    });
+    expect(summary).toHaveBeenCalledExactlyOnceWith(shared.id);
+    summary.mockReturnValue({ ...shared, workItemId: "another-source" });
+    expect(() => h.reads.publications(h.actor, { taskId: h.fixture.task.id }, summary)).toThrow(
+      expect.objectContaining({ code: "comment_task_binding_invalid" }),
+    );
+  });
+
+  it("keeps an older task linked while a new assignment prepares the shared comment", () => {
+    const h = harness();
+    const shared = publication(h, "progress-reply:assignment:preparing", {
+      taskId: null,
+      workItemId: null,
+    });
+    h.store.insert("idempotency", shared.id, {
+      id: shared.id,
+      repository: h.fixture.task.repository,
+      workItemId: null,
+      taskId: null,
+    });
+    h.store.insert("idempotency", `progress-reply:task-index:${h.fixture.task.id}`, {
+      recordId: shared.id,
+    });
+    const summary = vi.fn(() => shared);
+    expect(h.reads.publications(h.actor, { taskId: h.fixture.task.id }, summary)).toEqual({
+      items: [{ ...shared, associatedTaskIds: [h.fixture.task.id] }],
+      nextCursor: null,
+    });
+    for (const foreign of [
+      { ...shared, repositoryId: "another-repository" },
+      { ...shared, workItemKind: "issue" as const },
+      { ...shared, workItemNumber: h.item.number + 1 },
+      { ...shared, workItemId: "another-source" },
+    ]) {
+      summary.mockReturnValue(foreign);
+      expect(() => h.reads.publications(h.actor, { taskId: h.fixture.task.id }, summary)).toThrow(
+        expect.objectContaining({ code: "comment_task_binding_invalid" }),
+      );
+    }
   });
 
   it("searches real granted entities with exact destination kinds and a bounded result count", () => {

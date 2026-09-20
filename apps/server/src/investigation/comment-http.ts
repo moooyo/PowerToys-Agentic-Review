@@ -208,16 +208,28 @@ export function registerInvestigationCommentRoutes(
         ];
         const selected = new Map<string, InvestigationCommentPublicationSummary>();
         for (const summary of summaries) {
-          if (summary.taskId === null) continue;
-          const previous = selected.get(summary.taskId);
-          if (
-            previous === undefined ||
-            summary.mode === "progress" ||
-            summary.updatedAt > previous.updatedAt
-          )
-            selected.set(summary.taskId, summary);
+          const associatedTaskIds =
+            summary.associatedTaskIds ?? (summary.taskId === null ? [] : [summary.taskId]);
+          for (const taskId of associatedTaskIds) {
+            if (!ids.includes(taskId)) continue;
+            const previous = selected.get(taskId);
+            if (
+              previous === undefined ||
+              (summary.mode === "progress" && previous.mode !== "progress") ||
+              (summary.mode === previous.mode && summary.updatedAt > previous.updatedAt)
+            )
+              selected.set(taskId, summary);
+          }
         }
-        items = [...selected.values()];
+        const publications = new Map<string, InvestigationCommentPublicationSummary>();
+        for (const [taskId, summary] of selected) {
+          const previous = publications.get(summary.id);
+          publications.set(summary.id, {
+            ...summary,
+            associatedTaskIds: [...(previous?.associatedTaskIds ?? []), taskId],
+          });
+        }
+        items = [...publications.values()];
       } else {
         items = ids.map((id) => comment(principal, id));
       }

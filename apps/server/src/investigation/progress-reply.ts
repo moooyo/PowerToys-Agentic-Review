@@ -20,6 +20,7 @@ import {
 } from "./auto-reply-template.js";
 import { InvestigationCommentDeliveries } from "./comment-deliveries.js";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
+import { inspectLegacyConversationReplies } from "./legacy-conversation-replies.js";
 import {
   type CommentPublication,
   classifyDelivery,
@@ -97,6 +98,8 @@ export interface InvestigationProgressRepliesOptions {
 }
 interface Reference {
   readonly recordId: string;
+  readonly admission?: TrustedAssignmentAdmission;
+  readonly attachedTaskId?: string;
 }
 const oldTaskId = (taskId: string) => `progress-reply:task:${taskId}`;
 const taskIndex = (taskId: string) => `progress-reply:task-index:${taskId}`;
@@ -107,6 +110,12 @@ const repositoryPrefix = (id: string) =>
 const revisionPrefix = (id: string) => `progress-reply:revision:${investigationContentDigest(id)}:`;
 const pendingPrefix = "progress-reply:pending:";
 const maximumPending = 1_000;
+const conversationIndex = (
+  repositoryId: string,
+  target: InvestigationCommentTarget,
+  e2e: boolean,
+) =>
+  `progress-reply:conversation:${investigationContentDigest([repositoryId, target.kind, target.number, e2e ? "e2e" : "static"])}`;
 
 function actorFor(record: CommentPublication): InvestigationOperatorPrincipal {
   return {
@@ -168,14 +177,22 @@ export class InvestigationProgressReplies {
   }
   /** Only the newly accepted canonical assignment calls this in its intake transaction. */
   enqueueAssignment(admission: TrustedAssignmentAdmission): void {
+    this.#atomic(() => this.#enqueueAssignment(admission));
+  }
+  #enqueueAssignment(admission: TrustedAssignmentAdmission): void {
     const existing = this.#assignment(admission.id);
     if (existing !== undefined) {
+      const original = this.options.store.get<Reference>(
+        "idempotency",
+        assignmentIndex(admission.id),
+      )?.admission;
       requireCondition(
-        equal(existing.repository, admission.repository) &&
-          sameTrigger(existing.trigger, admission.trigger) &&
-          existing.target.kind === admission.target.kind &&
-          existing.target.number === admission.target.number &&
-          existing.target.githubWorkItemId === admission.target.githubWorkItemId,
+        equal(original?.repository ?? existing.repository, admission.repository) &&
+          sameTrigger(original?.trigger ?? existing.trigger, admission.trigger) &&
+          (original?.target ?? existing.target).kind === admission.target.kind &&
+          (original?.target ?? existing.target).number === admission.target.number &&
+          (original?.target ?? existing.target).githubWorkItemId ===
+            admission.target.githubWorkItemId,
         409,
         "progress_reply_assignment_conflict",
         "The assignment already belongs to another comment scope.",
@@ -205,7 +222,7 @@ export class InvestigationProgressReplies {
           : { kind: "issue" },
       nextStep: stoppedCopy("preparing", undefined, admission.mode).nextStep,
     };
-    this.#create(
+    const record = this.#enroll(
       `progress-reply:assignment:${investigationContentDigest(admission.id).slice(0, 48)}`,
       admission.repository,
       admission.target,
@@ -215,11 +232,19 @@ export class InvestigationProgressReplies {
       policy,
       admission.id,
     );
+    this.options.store.put("idempotency", assignmentIndex(admission.id), {
+      recordId: record.id,
+      admission: structuredClone(admission),
+    });
   }
   /** Compatibility enrollment for a genuinely new assignment Task; never called for recovery. */
   enqueue(task: InvestigationTaskV1, trigger: InvestigationProgressTrigger): void {
+    this.#atomic(() => this.#enqueue(task, trigger));
+  }
+  #enqueue(task: InvestigationTaskV1, trigger: InvestigationProgressTrigger): void {
     const existing = this.#task(task.id);
     if (existing !== undefined) {
+      if (existing.taskId !== task.id) return;
       requireCondition(
         sameTask(existing, task) && sameTrigger(existing.trigger, trigger),
         409,
@@ -252,7 +277,7 @@ export class InvestigationProgressReplies {
       "progress_reply_work_item_identity_changed",
       "The assignment does not match the registered conversation.",
     );
-    const record = this.#create(
+    const record = this.#enroll(
       oldTaskId(task.id),
       task.repository,
       item,
@@ -272,12 +297,112 @@ export class InvestigationProgressReplies {
       policy,
       null,
     );
+    if (record.receivedAt > task.createdAt) {
+      this.options.store.put("idempotency", taskIndex(task.id), { recordId: record.id });
+      return;
+    }
     this.#attach(record, task);
+    this.update(task);
+  }
+  /** Result-only settings use the same conversation slot, without publishing earlier phases. */
+  enqueueResult(report: InvestigationResultV1, origin: InvestigationTaskV1): void {
+    this.#atomic(() => {
+      // Report sealing callbacks may still carry the pre-finalization Task snapshot.
+      const task = this.options.store.get<InvestigationTaskV1>("tasks", origin.id);
+      if (
+        task === undefined ||
+        task.kind !== origin.kind ||
+        task.createdAt !== origin.createdAt ||
+        !equal(task.repository, origin.repository) ||
+        task.workItem.id !== origin.workItem.id ||
+        task.state !== report.outcome ||
+        task.latestReportRef?.id !== report.report.id
+      )
+        return;
+      if (this.hasTask(task.id)) {
+        this.update(task, report);
+        return;
+      }
+      if (
+        report.outcome !== "completed" ||
+        report.report.completeness !== "complete" ||
+        task.parentTaskId !== null ||
+        !["pr-review", "pr-e2e", "issue-investigate"].includes(task.kind)
+      )
+        return;
+      const policy = this.#policy(task.repository.id);
+      if (policy === null) return;
+      const target = this.options.store.get<InvestigationWorkItemRecord>(
+        "workItems",
+        task.workItem.id,
+      );
+      requireCondition(
+        target !== undefined &&
+          target.repositoryId === task.repository.id &&
+          target.kind === task.workItem.kind &&
+          target.number === task.workItem.number &&
+          equal(policy.repository, task.repository),
+        409,
+        "progress_reply_work_item_identity_changed",
+        "The report does not match the registered conversation.",
+      );
+      const record = this.#enroll(
+        oldTaskId(task.id),
+        task.repository,
+        target,
+        {
+          eventName: task.workItem.kind === "pull_request" ? "pull_request" : "issues",
+          actorUserId: 0,
+          assigneeUserId: 0,
+          actorLogin: "operator",
+          assigneeLogin: "automation",
+        },
+        task.createdAt,
+        {
+          ...(task.kind === "pr-e2e" ? { mode: "e2e" as const } : {}),
+          status: "completed",
+          receivedAt: task.createdAt,
+          scope: this.#scopeForTask(task),
+        },
+        policy,
+        null,
+        true,
+      );
+      this.options.store.put("idempotency", taskIndex(task.id), { recordId: record.id });
+      if (record.receivedAt > task.createdAt) return;
+      this.#attach(record, task);
+      this.update(task, report);
+    });
   }
   /** Attachment changes references, never the publication identity, marker, or sent body. */
   attachTask(receiptId: string, task: InvestigationTaskV1): void {
     const record = this.#assignment(receiptId);
     if (record === undefined) return;
+    const reference = this.options.store.get<Reference>("idempotency", assignmentIndex(receiptId))!;
+    requireCondition(
+      reference.attachedTaskId === undefined || reference.attachedTaskId === task.id,
+      409,
+      "progress_reply_task_conflict",
+      "The assignment is already attached to another task.",
+    );
+    if (record.receiptId !== receiptId) {
+      requireCondition(
+        equal(record.repository, task.repository) &&
+          record.target.kind === task.workItem.kind &&
+          record.target.number === task.workItem.number &&
+          (record.desired.context.mode === "e2e") === (task.kind === "pr-e2e"),
+        409,
+        "progress_reply_task_conflict",
+        "The task does not match the accepted assignment comment.",
+      );
+      this.options.store.put("idempotency", taskIndex(task.id), { recordId: record.id });
+      this.options.store.put("idempotency", assignmentIndex(receiptId), {
+        ...reference,
+        attachedTaskId: task.id,
+      });
+      this.#deliveries.attachTask(record.id, task.id, task.workItem.id, receiptId);
+      return;
+    }
     if (record.taskId !== null) {
       requireCondition(
         sameTask(record, task),
@@ -288,11 +413,15 @@ export class InvestigationProgressReplies {
       return;
     }
     this.#attach(record, task);
+    this.options.store.put("idempotency", assignmentIndex(receiptId), {
+      ...reference,
+      attachedTaskId: task.id,
+    });
     this.update(task);
   }
   updateAssignment(receiptId: string, state: AssignmentProgressState, reasonCode?: string): void {
     const record = this.#assignment(receiptId);
-    if (record === undefined || record.taskId !== null) return;
+    if (record === undefined || record.receiptId !== receiptId || record.taskId !== null) return;
     const copy = stoppedCopy(
       state,
       state === "failed" ? "source_preparation_failed" : reasonCode,
@@ -311,6 +440,7 @@ export class InvestigationProgressReplies {
   update(task: InvestigationTaskV1, report?: InvestigationResultV1): void {
     const record = this.#task(task.id);
     if (record === undefined || !this.#currentTask(record, task)) return;
+    if (record.resultOnly && task.state !== "completed") return;
     try {
       const source =
         report ??
@@ -349,7 +479,7 @@ export class InvestigationProgressReplies {
         context,
         copy.failure,
         source ?? null,
-        `task:${task.updatedAt}:${task.state}:${attempt?.number ?? 0}:${task.latestReportRef?.digest ?? ""}:${stopReason ?? ""}:${investigationContentDigest(context.usage ?? null)}`,
+        `task:${task.id}:${task.updatedAt}:${task.state}:${attempt?.number ?? 0}:${task.latestReportRef?.digest ?? ""}:${stopReason ?? ""}:${investigationContentDigest(context.usage ?? null)}`,
         task.updatedAt,
       );
     } catch {
@@ -371,7 +501,12 @@ export class InvestigationProgressReplies {
     attempt: InvestigationAttemptV1,
   ): void {
     const record = this.#task(task.id);
-    if (record === undefined || task.state !== "running" || !this.#currentTask(record, task))
+    if (
+      record === undefined ||
+      record.resultOnly ||
+      task.state !== "running" ||
+      !this.#currentTask(record, task)
+    )
       return;
     const savedCheckpoint = this.options.store.get<InvestigationLoopCheckpointV1>(
       "checkpoints",
@@ -434,6 +569,10 @@ export class InvestigationProgressReplies {
           this.options.store.delete("idempotency", notificationId);
           return;
         }
+        if (record.taskId !== task.id) {
+          this.options.store.delete("idempotency", notificationId);
+          return;
+        }
         if (!this.#currentTask(record, task) || record.desired.context.status !== task.state)
           return;
         const usage = this.options.usageSummary!(task.id);
@@ -443,7 +582,7 @@ export class InvestigationProgressReplies {
             { ...record.desired.context, usage },
             record.desired.failure,
             this.#assertRevision(record.desired) ?? null,
-            `usage:${task.updatedAt}:${investigationContentDigest(usage)}`,
+            `usage:${task.id}:${task.updatedAt}:${investigationContentDigest(usage)}`,
             this.#now().toISOString(),
             "usage",
           );
@@ -494,7 +633,9 @@ export class InvestigationProgressReplies {
     requireCondition(task !== undefined, 404, "task_not_found", "The task is unavailable.");
     this.#scope(actor, task.repository.id);
     const record = this.#task(taskId);
-    return record === undefined ? null : this.#summary(actor, record);
+    return record === undefined
+      ? null
+      : { ...this.#summary(actor, record), associatedTaskIds: [taskId] };
   }
   taskSummaries(
     actor: InvestigationOperatorPrincipal,
@@ -506,12 +647,16 @@ export class InvestigationProgressReplies {
       "comment_summary_limit",
       "At most 100 task summaries may be requested.",
     );
-    return {
-      items: [...new Set(taskIds)].flatMap((id) => {
-        const summary = this.taskSummary(actor, id);
-        return summary === null ? [] : [summary];
-      }),
-    };
+    const summaries = new Map<string, InvestigationCommentPublicationSummary>();
+    for (const id of new Set(taskIds)) {
+      const summary = this.taskSummary(actor, id);
+      if (summary === null) continue;
+      summaries.set(summary.id, {
+        ...summary,
+        associatedTaskIds: [...(summaries.get(summary.id)?.associatedTaskIds ?? []), id],
+      });
+    }
+    return { items: [...summaries.values()] };
   }
   list(
     actor: InvestigationOperatorPrincipal,
@@ -615,6 +760,31 @@ export class InvestigationProgressReplies {
       }
       if (page.length < 100) break;
     }
+    // Index retained comments before any publisher can dispatch a second conversation writer.
+    this.#atomic(() => {
+      for (const record of this.#publications()) {
+        const registered = this.options.store.get<InvestigationRepositoryRecord>(
+          "repositories",
+          record.repository.id,
+        );
+        if (registered !== undefined && equal(registered, record.repository)) {
+          try {
+            this.#conversation(
+              record.repository,
+              record.target,
+              record.desired.context.mode === "e2e",
+            );
+          } catch (error) {
+            if (
+              !(error instanceof InvestigationRequestError) ||
+              error.code !== "progress_reply_work_item_identity_changed"
+            )
+              throw error;
+            this.#store({ ...record, conversationConflict: true });
+          }
+        }
+      }
+    });
     this.#started = true;
     let usageCursor: string | undefined;
     while (true) {
@@ -693,14 +863,308 @@ export class InvestigationProgressReplies {
   }
   #task(taskId: string): CommentPublication | undefined {
     const entry = this.options.store.get<Reference>("idempotency", taskIndex(taskId));
-    if (entry !== undefined) return this.#record(entry.recordId);
-    return this.options.store.has("idempotency", oldTaskId(taskId))
-      ? this.#record(oldTaskId(taskId))
-      : undefined;
+    const record =
+      entry !== undefined
+        ? this.#record(entry.recordId)
+        : this.options.store.has("idempotency", oldTaskId(taskId))
+          ? this.#record(oldTaskId(taskId))
+          : undefined;
+    if (record?.retiredTo === undefined) return record;
+    this.options.store.put("idempotency", taskIndex(taskId), { recordId: record.retiredTo });
+    return this.#record(record.retiredTo);
   }
   #assignment(receiptId: string): CommentPublication | undefined {
     const entry = this.options.store.get<Reference>("idempotency", assignmentIndex(receiptId));
-    return entry === undefined ? undefined : this.#record(entry.recordId);
+    if (entry === undefined) return undefined;
+    const record = this.#record(entry.recordId);
+    return record.retiredTo === undefined ? record : this.#record(record.retiredTo);
+  }
+  #retainAssignment(record: CommentPublication): void {
+    if (record.receiptId === null || record.target.githubWorkItemId === undefined) return;
+    const key = assignmentIndex(record.receiptId);
+    const previous = this.options.store.get<Reference>("idempotency", key);
+    if (previous?.admission !== undefined) return;
+    this.options.store.put("idempotency", key, {
+      recordId: record.id,
+      ...(record.taskId === null ? {} : { attachedTaskId: record.taskId }),
+      admission: {
+        id: record.receiptId,
+        repository: record.repository,
+        target: { ...record.target, githubWorkItemId: record.target.githubWorkItemId },
+        trigger: record.trigger,
+        receivedAt: record.receivedAt,
+        expectedAssigneeUserId: record.trigger.assigneeUserId,
+        ...(record.desired.context.mode === "e2e" ? { mode: "e2e" as const } : {}),
+        ...(record.desired.context.scope?.headSha === undefined
+          ? {}
+          : { headSha: record.desired.context.scope.headSha }),
+      },
+    } satisfies Reference);
+  }
+  #publications(): CommentPublication[] {
+    return this.options.store
+      .list<{ id: string; repository?: InvestigationRepositoryRecord }>(
+        "idempotency",
+        (record) =>
+          typeof record?.id === "string" &&
+          (record.id.startsWith("progress-reply:task:") ||
+            record.id.startsWith("progress-reply:assignment:")) &&
+          record.repository !== undefined,
+      )
+      .map((record) => this.#record(record.id));
+  }
+  #conversation(
+    repository: InvestigationRepositoryRecord,
+    target: InvestigationCommentTarget,
+    e2e: boolean,
+  ): CommentPublication | undefined {
+    const key = conversationIndex(repository.id, target, e2e);
+    const reference = this.options.store.get<Reference>("idempotency", key);
+    let record = reference === undefined ? undefined : this.#record(reference.recordId);
+    if (record === undefined) {
+      const candidates = this.#publications().filter(
+        (candidate) =>
+          candidate.retiredTo === undefined &&
+          equal(candidate.repository, repository) &&
+          candidate.target.kind === target.kind &&
+          candidate.target.number === target.number &&
+          (candidate.desired.context.mode === "e2e") === e2e,
+      );
+      const priority = (candidate: CommentPublication) =>
+        candidate.operation?.dispatched || candidate.state === "unconfirmed"
+          ? 0
+          : candidate.confirmed !== null
+            ? 1
+            : 2;
+      candidates.sort(
+        (left, right) =>
+          priority(left) - priority(right) ||
+          right.receivedAt.localeCompare(left.receivedAt) ||
+          left.id.localeCompare(right.id),
+      );
+      record = candidates[0];
+      if (record !== undefined) {
+        this.options.store.put("idempotency", key, { recordId: record.id });
+        if (candidates.filter((candidate) => priority(candidate) === 0).length > 1)
+          record = this.#store({ ...record, conversationConflict: true });
+        for (const duplicate of candidates.slice(1)) {
+          this.#retainAssignment(duplicate);
+          this.#store({ ...duplicate, retiredTo: record.id });
+          if (duplicate.taskId !== null)
+            this.options.store.put("idempotency", taskIndex(duplicate.taskId), {
+              recordId: record.id,
+            });
+        }
+        const latest = candidates.toSorted((left, right) =>
+          right.receivedAt.localeCompare(left.receivedAt),
+        )[0]!;
+        if (latest.receivedAt > record.receivedAt) {
+          this.#retainAssignment(record);
+          const revision: PublicationRevision = {
+            ...latest.desired,
+            taskId: latest.taskId,
+            workItemId: latest.workItemId,
+            receiptId: latest.receiptId,
+            id: `${revisionPrefix(record.id)}${String(record.desired.sequence + 1).padStart(12, "0")}`,
+            sequence: record.desired.sequence + 1,
+            sourceEventId: `conversation-migration:${latest.desired.id}`,
+          };
+          this.options.store.insert("idempotency", revision.id, revision);
+          record = this.#store({
+            ...record,
+            desired: revision,
+            receiptId: latest.receiptId,
+            taskId: latest.taskId,
+            taskKind: latest.taskKind,
+            taskCreatedAt: latest.taskCreatedAt,
+            workItemId: latest.workItemId,
+            target: { ...record.target, id: latest.target.id },
+            trigger: latest.trigger,
+            receivedAt: latest.receivedAt,
+            firstStartedAt: latest.firstStartedAt,
+            resultOnly: latest.resultOnly ?? false,
+            grant: latest.grant,
+            grantHistory: equal(record.grant, latest.grant)
+              ? record.grantHistory
+              : [...record.grantHistory, ...latest.grantHistory],
+            state: record.operation?.dispatched ? "unconfirmed" : "needs_attention",
+            reasonCode: record.operation?.dispatched
+              ? record.reasonCode
+              : "synchronization_required",
+            requiresAttention: true,
+          });
+        }
+      }
+    }
+    if (record !== undefined)
+      requireCondition(
+        equal(record.repository, repository) &&
+          (record.target.githubWorkItemId === undefined ||
+            target.githubWorkItemId === undefined ||
+            record.target.githubWorkItemId === target.githubWorkItemId),
+        409,
+        "progress_reply_work_item_identity_changed",
+        "The conversation comment identity changed.",
+      );
+    return record === undefined ? undefined : this.#refreshLegacy(record);
+  }
+  #refreshLegacy(record: CommentPublication): CommentPublication {
+    if (
+      (record.confirmed !== null && !record.legacyConflict) ||
+      record.operation?.dispatched ||
+      record.retiredTo !== undefined
+    )
+      return record;
+    const legacy = inspectLegacyConversationReplies({
+      store: this.options.store,
+      repository: record.repository,
+      target: record.target,
+      channel: record.desired.context.mode === "e2e" ? "e2e" : "static",
+    });
+    if (legacy.blocked) return this.#store({ ...record, legacyConflict: true });
+    if (record.confirmed !== null)
+      return this.#store({
+        ...record,
+        legacyConflict: false,
+        state: "pending",
+        reasonCode: null,
+        requiresAttention: false,
+        nextAttemptAt: this.#now().valueOf(),
+      });
+    if (legacy.confirmed === null && !record.legacyConflict) return record;
+    const confirmation = legacy.confirmed;
+    if (
+      confirmation !== null &&
+      record.operation?.attemptId !== null &&
+      record.operation?.attemptId !== undefined &&
+      !record.operation.finished
+    )
+      this.#deliveries.finish(record.operation.attemptId, {
+        state: "cancelled",
+        effect: "not_sent",
+        reason: publicationReason("superseded"),
+      });
+    return this.#store({
+      ...record,
+      legacyConflict: false,
+      ...(confirmation === null
+        ? {}
+        : {
+            marker: confirmation.marker,
+            githubIdentity: confirmation.githubIdentity,
+            operation: null,
+            confirmed: {
+              revision: {
+                ...record.desired,
+                id: `${revisionPrefix(record.id)}legacy`,
+                sequence: -1,
+                legacy: true,
+                taskId: confirmation.taskId,
+                workItemId:
+                  this.options.store.get<InvestigationTaskV1>("tasks", confirmation.taskId)
+                    ?.workItem.id ?? null,
+                receiptId: null,
+                reportRef: null,
+                reportDigest: null,
+                sourceEventId: `legacy:${confirmation.recordId}`,
+                stage: "completed",
+                updatedAt: confirmation.confirmedAt,
+              },
+              body: confirmation.body,
+              externalId: confirmation.externalId,
+              attemptId: null,
+              confirmedAt: confirmation.confirmedAt,
+            },
+          }),
+      state: "pending",
+      reasonCode: null,
+      requiresAttention: false,
+      nextAttemptAt: this.#now().valueOf(),
+    });
+  }
+  #enroll(
+    id: string,
+    repository: InvestigationRepositoryRecord,
+    target: InvestigationCommentTarget,
+    trigger: InvestigationProgressTrigger,
+    receivedAt: string,
+    context: ProgressReplyContext,
+    policy: AutomaticReplyPolicy,
+    receiptId: string | null,
+    resultOnly = false,
+  ): CommentPublication {
+    const existing = this.#conversation(repository, target, context.mode === "e2e");
+    if (existing === undefined) {
+      const created = this.#create(
+        id,
+        repository,
+        target,
+        trigger,
+        receivedAt,
+        context,
+        policy,
+        receiptId,
+        resultOnly,
+      );
+      this.options.store.put(
+        "idempotency",
+        conversationIndex(repository.id, target, context.mode === "e2e"),
+        { recordId: created.id },
+      );
+      return created;
+    }
+    if (receivedAt < existing.receivedAt) return existing;
+    this.#retainAssignment(existing);
+    const grant = {
+      authorizationEpoch: policy.authorizationEpoch,
+      authorizedById: policy.authorizedById,
+    };
+    // Keep the confirmed body, frozen in-flight operation, lease and authority while advancing the producer.
+    const next = {
+      ...existing,
+      receiptId,
+      taskId: null,
+      taskKind: null,
+      taskCreatedAt: null,
+      workItemId: null,
+      trigger: structuredClone(trigger),
+      receivedAt,
+      firstStartedAt: null,
+      resultOnly,
+      nextPhaseAt: 0,
+      grant,
+      grantHistory: equal(existing.grant, grant)
+        ? existing.grantHistory
+        : [
+            ...existing.grantHistory,
+            {
+              ...grant,
+              at: this.#now().toISOString(),
+              actorId: policy.authorizedById,
+              source: "enrollment" as const,
+            },
+          ],
+      target: {
+        ...existing.target,
+        ...(target.githubWorkItemId === undefined
+          ? {}
+          : { githubWorkItemId: target.githubWorkItemId }),
+      },
+      operation:
+        existing.operation === null
+          ? null
+          : {
+              ...existing.operation,
+              revision: {
+                taskId: existing.taskId,
+                workItemId: existing.workItemId,
+                receiptId: existing.receiptId,
+                ...existing.operation.revision,
+              },
+            },
+    };
+    this.#accept(next, context, null, null, `accepted:${receiptId ?? id}`, receivedAt);
+    return this.#record(existing.id);
   }
   #policy(repositoryId: string): AutomaticReplyPolicy | null {
     try {
@@ -719,6 +1183,7 @@ export class InvestigationProgressReplies {
     context: ProgressReplyContext,
     policy: AutomaticReplyPolicy,
     receiptId: string | null,
+    resultOnly = false,
   ): CommentPublication {
     const now = this.#now().toISOString();
     const grant = {
@@ -736,6 +1201,9 @@ export class InvestigationProgressReplies {
       reportRef: null,
       reportDigest: null,
       policy: publicationPolicy(policy, target.kind, context.mode),
+      taskId: null,
+      workItemId: null,
+      receiptId,
     };
     const record: CommentPublication = {
       schemaVersion: 2,
@@ -780,7 +1248,44 @@ export class InvestigationProgressReplies {
       historyAvailableSince: now,
       createdAt: now,
       updatedAt: now,
+      resultOnly,
     };
+    const legacy = inspectLegacyConversationReplies({
+      store: this.options.store,
+      repository,
+      target,
+      channel: context.mode === "e2e" ? "e2e" : "static",
+    });
+    const adopted: CommentPublication =
+      legacy.confirmed === null
+        ? record
+        : {
+            ...record,
+            marker: legacy.confirmed.marker,
+            githubIdentity: legacy.confirmed.githubIdentity,
+            confirmed: {
+              revision: {
+                ...revision,
+                id: `${revisionPrefix(id)}legacy`,
+                sequence: -1,
+                legacy: true,
+                taskId: legacy.confirmed.taskId,
+                workItemId:
+                  this.options.store.get<InvestigationTaskV1>("tasks", legacy.confirmed.taskId)
+                    ?.workItem.id ?? null,
+                receiptId: null,
+                reportRef: null,
+                reportDigest: null,
+                sourceEventId: `legacy:${legacy.confirmed.recordId}`,
+                stage: "completed",
+                updatedAt: legacy.confirmed.confirmedAt,
+              },
+              body: legacy.confirmed.body,
+              externalId: legacy.confirmed.externalId,
+              attemptId: null,
+              confirmedAt: legacy.confirmed.confirmedAt,
+            },
+          };
     this.options.store.insert("idempotency", revision.id, revision);
     this.options.store.insert("idempotency", id, record);
     this.options.store.insert(
@@ -790,7 +1295,7 @@ export class InvestigationProgressReplies {
     );
     if (receiptId !== null)
       this.options.store.insert("idempotency", assignmentIndex(receiptId), { recordId: id });
-    const saved = this.#store(record);
+    const saved = this.#store({ ...adopted, ...(legacy.blocked ? { legacyConflict: true } : {}) });
     this.#wake();
     return saved;
   }
@@ -813,7 +1318,7 @@ export class InvestigationProgressReplies {
       "This task already belongs to another comment publication.",
     );
     this.options.store.put("idempotency", taskIndex(task.id), { recordId: record.id });
-    this.#deliveries.attachTask(record.id, task.id, task.workItem.id);
+    this.#deliveries.attachTask(record.id, task.id, task.workItem.id, record.receiptId);
     this.#store({
       ...record,
       taskId: task.id,
@@ -893,6 +1398,9 @@ export class InvestigationProgressReplies {
         policy === null
           ? record.desired.policy
           : publicationPolicy(policy, record.target.kind, context.mode),
+      taskId: record.taskId,
+      workItemId: record.workItemId,
+      receiptId: record.receiptId,
     };
     this.options.store.insert("idempotency", revision.id, revision);
     this.options.store.insert("idempotency", eventKey, { revisionId: revision.id });
@@ -944,6 +1452,25 @@ export class InvestigationProgressReplies {
     this.#wake();
   }
   #store(record: CommentPublication): CommentPublication {
+    if (record.retiredTo !== undefined || record.conversationConflict || record.legacyConflict)
+      record = {
+        ...record,
+        state:
+          record.conversationConflict || record.legacyConflict
+            ? "conflict"
+            : record.operation?.dispatched
+              ? "unconfirmed"
+              : "paused",
+        reasonCode:
+          record.conversationConflict || record.legacyConflict
+            ? "conflict_legacy_publications"
+            : "conversation_comment_replaced",
+        requiresAttention:
+          record.conversationConflict ||
+          record.legacyConflict ||
+          record.operation?.dispatched === true,
+        nextAttemptAt: record.reconcileRequested ? record.nextAttemptAt : null,
+      };
     let next = record;
     if (record.nextAttemptAt !== null) {
       if (
@@ -979,9 +1506,12 @@ export class InvestigationProgressReplies {
   }
   #grantValid(record: CommentPublication, policy = this.#policy(record.repository.id)): boolean {
     if (
+      record.retiredTo !== undefined ||
+      record.conversationConflict ||
+      record.legacyConflict ||
       policy === null ||
       !policy.enabled ||
-      !policy.progressEnabled ||
+      (!record.resultOnly && !policy.progressEnabled) ||
       !equal(policy.repository, record.repository) ||
       policy.authorizationEpoch !== record.grant.authorizationEpoch ||
       policy.authorizedById !== record.grant.authorizedById
@@ -1015,8 +1545,22 @@ export class InvestigationProgressReplies {
         (record.claim?.expiresAt ?? 0) <= this.#now().valueOf() &&
         this.options.transport?.reconcileProgressComment !== undefined
       );
+    if (record.legacyConflict) {
+      const legacy = inspectLegacyConversationReplies({
+        store: this.options.store,
+        repository: record.repository,
+        target: record.target,
+        channel: record.desired.context.mode === "e2e" ? "e2e" : "static",
+      });
+      return (
+        !legacy.blocked &&
+        this.#can(actor, operation, { ...record, legacyConflict: false, state: "pending" })
+      );
+    }
     if (
       !actor.permissions.includes("action:execute") ||
+      record.retiredTo !== undefined ||
+      record.conversationConflict ||
       !this.options.enableExternalWrites ||
       record.operation?.dispatched ||
       ["conflict", "unconfirmed"].includes(record.state) ||
@@ -1183,6 +1727,7 @@ export class InvestigationProgressReplies {
         "This recovery action is not currently available for the comment.",
       );
       if (action === "sync") {
+        if (record.legacyConflict) record = this.#refreshLegacy(record);
         const policy = this.#policy(record.repository.id)!;
         const grant = {
           authorizationEpoch: policy.authorizationEpoch,
@@ -1471,18 +2016,20 @@ export class InvestigationProgressReplies {
         this.#assertRevision(revision);
       }
       const render = (result?: RenderedAutomaticReply) =>
-        `${renderProgressReply({
-          stage: revision.stage,
-          template: revision.policy.templates[revision.stage],
-          trigger: record.trigger,
-          updatedAt: revision.updatedAt,
-          identity: record.githubIdentity ?? identity,
-          context: revision.context,
-          ...(report === undefined ? {} : { report }),
-          ...(result === undefined ? {} : { result }),
-          ...(revision.failure === null ? {} : { failure: revision.failure }),
-          ...(trustedMediaMarkdown === undefined ? {} : { trustedMediaMarkdown }),
-        })}\n\n${record.marker}`;
+        record.resultOnly && result !== undefined
+          ? `${result.body}\n\n${record.marker}`
+          : `${renderProgressReply({
+              stage: revision.stage,
+              template: revision.policy.templates[revision.stage],
+              trigger: record.trigger,
+              updatedAt: revision.updatedAt,
+              identity: record.githubIdentity ?? identity,
+              context: revision.context,
+              ...(report === undefined ? {} : { report }),
+              ...(result === undefined ? {} : { result }),
+              ...(revision.failure === null ? {} : { failure: revision.failure }),
+              ...(trustedMediaMarkdown === undefined ? {} : { trustedMediaMarkdown }),
+            })}\n\n${record.marker}`;
       let body = render(
         revision.stage === "completed" && report !== undefined
           ? renderAutomaticReplyParts(
@@ -1491,7 +2038,12 @@ export class InvestigationProgressReplies {
               record.githubIdentity ?? identity,
               {
                 ...(revision.context.usage === undefined ? {} : { usage: revision.context.usage }),
-                includeUsage: !revision.policy.templates[revision.stage].includes("{{usage}}"),
+                includeUsage:
+                  record.resultOnly ||
+                  !revision.policy.templates[revision.stage].includes("{{usage}}"),
+                ...(record.resultOnly && trustedMediaMarkdown !== undefined
+                  ? { trustedMediaMarkdown }
+                  : {}),
               },
             )
           : undefined,
@@ -1505,7 +2057,11 @@ export class InvestigationProgressReplies {
         body = render(
           renderAutomaticReplySummaryParts(report, record.githubIdentity ?? identity, {
             ...(revision.context.usage === undefined ? {} : { usage: revision.context.usage }),
-            includeUsage: !revision.policy.templates[revision.stage].includes("{{usage}}"),
+            includeUsage:
+              record.resultOnly || !revision.policy.templates[revision.stage].includes("{{usage}}"),
+            ...(record.resultOnly && trustedMediaMarkdown !== undefined
+              ? { trustedMediaMarkdown }
+              : {}),
           }),
         );
         reasonCode = "summary_only";
@@ -1523,7 +2079,9 @@ export class InvestigationProgressReplies {
           body,
           externalId: record.confirmed?.externalId ?? null,
           previousBody: record.confirmed?.body ?? null,
-          ...(record.confirmed === null && record.desired.context.mode !== "e2e"
+          ...(record.confirmed === null &&
+          !record.resultOnly &&
+          record.desired.context.mode !== "e2e"
             ? { expectedAssigneeUserId: record.trigger.assigneeUserId }
             : {}),
         },
@@ -1563,10 +2121,11 @@ export class InvestigationProgressReplies {
       mode: "progress" as const,
       repositoryId: record.repository.id,
       repositoryFullName: record.repository.fullName,
-      workItemId: record.workItemId,
+      workItemId: revision.workItemId === undefined ? record.workItemId : revision.workItemId,
       workItemKind: record.target.kind,
       workItemNumber: record.target.number,
-      taskId: record.taskId,
+      taskId: revision.taskId === undefined ? record.taskId : revision.taskId,
+      sourceReceiptId: revision.receiptId === undefined ? record.receiptId : revision.receiptId,
       reportId: revision.reportRef?.id ?? null,
       operation: record.confirmed === null ? ("create" as const) : ("update" as const),
       body,
@@ -1678,18 +2237,18 @@ export class InvestigationProgressReplies {
           try {
             const current = this.#assertWritable(id, claim);
             requireCondition(
+              current.desired.id === operation.revision.id && current.operation !== null,
+              409,
+              "progress_reply_superseded",
+              "A newer task update superseded this prepared comment.",
+            );
+            requireCondition(
               current.operation !== null &&
                 !current.operation.dispatched &&
                 equal(current.operation, operation),
               409,
               "progress_reply_operation_changed",
               "The frozen operation changed before dispatch.",
-            );
-            requireCondition(
-              current.desired.id === operation.revision.id,
-              409,
-              "progress_reply_superseded",
-              "A newer task update superseded this prepared comment.",
             );
             this.#assertRevision(operation.revision);
             this.#mutate(id, claim, (latest) => {
@@ -1799,11 +2358,13 @@ export class InvestigationProgressReplies {
     const invalidReport = record.reasonCode === "report_binding_changed";
     const deferUsage =
       newer &&
+      record.desired.taskId === operation.revision.taskId &&
       record.desired.sourceEventId.startsWith("usage:") &&
       record.desired.context.status === operation.revision.context.status &&
       record.desired.context.attemptNumber === operation.revision.context.attemptNumber;
     const deferPhase =
       newer &&
+      record.desired.taskId === operation.revision.taskId &&
       record.desired.context.status === "running" &&
       operation.revision.context.status === "running" &&
       record.desired.context.attemptNumber === operation.revision.context.attemptNumber;

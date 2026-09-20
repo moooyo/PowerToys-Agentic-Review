@@ -220,6 +220,22 @@ export class InvestigationWorkspaceReads {
     const identity = pageIdentity("publications", actor, query);
     let afterId = readCursor(query.cursor, identity);
     const items: InvestigationCommentPublicationSummary[] = [];
+    const task =
+      query.taskId === undefined
+        ? undefined
+        : this.store.get<InvestigationTaskV1>("tasks", query.taskId);
+    const indexedId =
+      task === undefined
+        ? undefined
+        : this.store.get<{ recordId: string }>(
+            "idempotency",
+            `progress-reply:task-index:${task.id}`,
+          )?.recordId;
+    const associatedId =
+      indexedId === undefined
+        ? undefined
+        : (this.store.get<{ retiredTo?: string }>("idempotency", indexedId)?.retiredTo ??
+          indexedId);
     // Dynamic publication states and grants are projected by the authoritative existing readers.
     // The scan cap makes selective queries bounded; an empty page may carry a continuation.
     for (let scanned = 0; scanned < 500; scanned += 1) {
@@ -230,8 +246,25 @@ export class InvestigationWorkspaceReads {
         ...(afterId === undefined ? {} : { afterId }),
         limit: 1,
       })[0];
-      if (record === undefined) return { items, nextCursor: null };
-      const entry = summary(record.id);
+      // Merge the task's shared publication into the same keyset order as its historical records.
+      const id =
+        associatedId !== undefined &&
+        (afterId === undefined || associatedId > afterId) &&
+        (record === undefined || associatedId < record.id)
+          ? associatedId
+          : record?.id;
+      if (id === undefined) return { items, nextCursor: null };
+      const entry = summary(id);
+      if (id === associatedId && task !== undefined)
+        requireCondition(
+          entry.repositoryId === task.repository.id &&
+            (entry.workItemId === null || entry.workItemId === task.workItem.id) &&
+            entry.workItemKind === task.workItem.kind &&
+            entry.workItemNumber === task.workItem.number,
+          409,
+          "comment_task_binding_invalid",
+          "The shared comment does not match the task's source.",
+        );
       const matches =
         (query.mode === undefined || entry.mode === query.mode) &&
         (query.state === undefined || entry.state === query.state) &&
@@ -243,8 +276,9 @@ export class InvestigationWorkspaceReads {
             .includes(query.search.toLowerCase()));
       if (matches && items.length === limit)
         return { items, nextCursor: writeCursor(identity, afterId!) };
-      afterId = record.id;
-      if (matches) items.push(entry);
+      afterId = id;
+      if (matches)
+        items.push(task === undefined ? entry : { ...entry, associatedTaskIds: [task.id] });
     }
     return { items, nextCursor: afterId === undefined ? null : writeCursor(identity, afterId) };
   }

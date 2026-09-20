@@ -36,7 +36,7 @@ export type BeginCommentDeliveryInput = Pick<
       Delivery,
       "id" | "startedAt" | "workItemId" | "taskId" | "reportId" | "externalId" | "attemptNumber"
     >
-  >;
+  > & { readonly sourceReceiptId?: string | null };
 
 export interface CommentDeliveryResult {
   readonly state: TerminalState;
@@ -65,6 +65,7 @@ interface OriginalReceipt {
   readonly at: string | null;
 }
 interface StoredDelivery extends Delivery {
+  readonly sourceReceiptId?: string | null;
   readonly inputDigest: string;
   readonly initialTaskId: string | null;
   readonly initialWorkItemId: string | null;
@@ -225,7 +226,12 @@ export class InvestigationCommentDeliveries {
     });
   }
 
-  attachTask(commentId: string, taskId: string, workItemId: string): void {
+  attachTask(
+    commentId: string,
+    taskId: string,
+    workItemId: string,
+    sourceReceiptId?: string | null,
+  ): void {
     this.#atomic(() => {
       let before: { startedAt: string; id: string } | undefined;
       for (;;) {
@@ -235,6 +241,12 @@ export class InvestigationCommentDeliveries {
           ...(before === undefined ? {} : { before }),
         });
         for (const record of records) {
+          // A shared comment keeps each attempt attributed to its originating intake cycle.
+          if (
+            sourceReceiptId !== undefined &&
+            (record.taskId !== null || record.sourceReceiptId !== sourceReceiptId)
+          )
+            continue;
           requireCondition(
             (record.taskId === null || record.taskId === taskId) &&
               (record.workItemId === null || record.workItemId === workItemId),
@@ -407,14 +419,16 @@ export class InvestigationCommentDeliveries {
           latest.workItemKind === draft.workItemKind &&
           latest.workItemNumber === draft.workItemNumber &&
           latest.mode === draft.mode &&
-          (latest.taskId === null || latest.taskId === draft.taskId) &&
-          (latest.workItemId === null || latest.workItemId === draft.workItemId),
+          (latest.workItemId === null ||
+            draft.workItemId === null ||
+            latest.workItemId === draft.workItemId),
         409,
         "comment_delivery_target_conflict",
-        "A comment history cannot change its repository, conversation, or Task.",
+        "A comment history cannot change its repository or conversation.",
       );
     const record: StoredDelivery = {
       ...draft,
+      ...(input.sourceReceiptId === undefined ? {} : { sourceReceiptId: input.sourceReceiptId }),
       inputDigest,
       initialTaskId: draft.taskId,
       initialWorkItemId: draft.workItemId,
@@ -445,6 +459,7 @@ export class InvestigationCommentDeliveries {
       initialExternalId: _external,
       dispatchedAt: _dispatched,
       originalReceipt: _receipt,
+      sourceReceiptId: _sourceReceipt,
       ...view
     } = record;
     return structuredClone({ ...view, state: commentDeliveryState(view) });

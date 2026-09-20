@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { TaskDetail } from "./api";
+import { commentSummariesQueryKey } from "./comment-deliveries";
 import { createSampleInvestigationApi } from "./sample-adapter";
 import { sessionIdentity } from "./session";
 import { TaskDetails, TaskList, taskDetailQueryKey, taskDetailTab } from "./task-workspace";
@@ -133,6 +134,36 @@ describe("task workspace runtime information", () => {
     expect(html).toContain("700 tokens");
     expect(html).toContain("Static");
     expect(html).toContain("Reported usage");
+  });
+
+  it("links older and current tasks to their shared comment without changing its producer", async () => {
+    const api = createSampleInvestigationApi();
+    const detail = await api.task("sample-pr-p0-task");
+    const older = { ...detail.task, id: "task-older" };
+    const unrelated = { ...detail.task, id: "task-unrelated" };
+    const tasks = [older, detail.task, unrelated];
+    const shared = {
+      ...(await api.comment("sample-pr-p0-comment")),
+      taskId: detail.task.id,
+      associatedTaskIds: [older.id, detail.task.id],
+    };
+    const queryClient = client();
+    queryClient.setQueryData(
+      [
+        ...commentSummariesQueryKey({ taskIds: tasks.map((task) => task.id).sort() }),
+        sessionIdentity(session),
+      ],
+      { items: [shared] },
+    );
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <TaskList tasks={tasks} usageByTaskId={{}} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(html.match(/commentId=sample-pr-p0-comment/gu)).toHaveLength(2);
+    expect(shared.taskId).toBe(detail.task.id);
   });
 
   it("separates model call counts, accepted rounds, and saved state versions", async () => {

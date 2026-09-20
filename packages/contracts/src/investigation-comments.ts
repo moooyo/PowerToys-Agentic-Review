@@ -111,6 +111,9 @@ export const InvestigationCommentPublicationSummarySchema = object({
   workItemNumber: PositiveIntegerSchema,
   taskId: nullableId,
   producerTaskKind: Type.Optional(Type.Union([InvestigationTaskKindSchema, Type.Null()])),
+  associatedTaskIds: Type.Optional(
+    Type.Array(EntityIdSchema, { uniqueItems: true, maxItems: 100 }),
+  ),
   workItemTitle: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   reportId: nullableId,
   state: InvestigationCommentPublicationStateSchema,

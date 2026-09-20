@@ -179,7 +179,13 @@ const progressRequest = (
   };
   if (
     typeof frozen.marker !== "string" ||
-    !/^<!-- agentic-review-progress:[A-Za-z0-9][A-Za-z0-9._:-]{0,199} -->$/u.test(frozen.marker)
+    !(
+      /^<!-- agentic-review-progress:[A-Za-z0-9][A-Za-z0-9._:-]{0,199} -->$/u.test(frozen.marker) ||
+      (frozen.externalId !== null &&
+        /^<!-- agentic-review-action:[A-Za-z0-9][A-Za-z0-9._:-]{0,255}:[a-f0-9]{64} -->$/u.test(
+          frozen.marker,
+        ))
+    )
   )
     throw new GitHubActionFailure("invalid_progress_comment_marker");
   for (const body of [
@@ -190,7 +196,7 @@ const progressRequest = (
       typeof body !== "string" ||
       Buffer.byteLength(body, "utf8") > 60_000 ||
       body.split(frozen.marker).length !== 2 ||
-      body.split("<!-- agentic-review-progress:").length !== 2
+      (body.match(/<!-- agentic-review-(?:progress|action):/gu) ?? []).length !== 1
     )
       throw new GitHubActionFailure("invalid_progress_comment_body");
   }
@@ -538,7 +544,7 @@ export class InvestigationGitHubTransport
     if (
       typeof comment.body !== "string" ||
       comment.body.split(request.marker).length !== 2 ||
-      comment.body.split("<!-- agentic-review-progress:").length !== 2
+      (comment.body.match(/<!-- agentic-review-(?:progress|action):/gu) ?? []).length !== 1
     )
       throw new GitHubActionFailure("progress_comment_marker_changed");
     if (

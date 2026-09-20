@@ -40,6 +40,9 @@ export interface PublicationRevision {
   readonly reportDigest: string | null;
   readonly policy: PublicationPolicySnapshot;
   readonly legacy?: boolean;
+  readonly taskId?: string | null;
+  readonly workItemId?: string | null;
+  readonly receiptId?: string | null;
 }
 export interface PublicationOperation {
   readonly revision: PublicationRevision;
@@ -104,6 +107,10 @@ export interface CommentPublication {
   readonly historyAvailableSince: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly resultOnly?: boolean;
+  readonly retiredTo?: string;
+  readonly conversationConflict?: boolean;
+  readonly legacyConflict?: boolean;
 }
 
 export const publicationEqual = (left: unknown, right: unknown): boolean =>
@@ -141,6 +148,8 @@ export function publicationStage(
 /** Never expose worker diagnostics, upstream responses, or exception messages as public copy. */
 export function publicationReason(code: string | null): string | null {
   if (code === null) return null;
+  if (code === "conversation_comment_replaced")
+    return "This historical comment is retained for audit. New updates use the shared conversation comment.";
   if (code.startsWith("conflict_") || code === "comment_missing")
     return "The remote comment was changed, removed, or could not be uniquely verified. A repository operator must review it before repair.";
   if (

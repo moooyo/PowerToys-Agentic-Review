@@ -143,7 +143,7 @@ export function TaskList({
       <Box component="ul" aria-label="Investigation tasks" sx={{ listStyle: "none", p: 0, m: 0 }}>
         {visibleTasks.map((task) => {
           const comment = comments.data?.items
-            .filter((item) => item.taskId === task.id)
+            .filter((item) => item.taskId === task.id || item.associatedTaskIds?.includes(task.id))
             .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
           const url = `/tasks?taskId=${encodeURIComponent(task.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`;
           const tone =

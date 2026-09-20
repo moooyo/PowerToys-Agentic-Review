@@ -9,14 +9,18 @@ confirmed content internally. Task execution remains authoritative for investiga
 publication service owns delivery, recovery, and publication history. The Dashboard presents an
 ordinary comment delivery history from these server records.
 
-One logical investigation cycle has one progress comment. A cycle can begin with an accepted
-assignment before a Task exists; creating or resuming its Task keeps the publication identity.
-A genuinely new investigation has its own comment and can reference the preceding cycle.
+Each repository conversation has one static-analysis comment and one independent E2E comment,
+created only when the corresponding channel is enabled and used. Assignment intake, new Tasks,
+resumes, and new reports update the same channel comment. A newer accepted cycle becomes its
+producer; late events from older Tasks cannot replace that producer's content. A cycle can begin
+before a Task exists, and attaching the Task preserves the publication identity.
 
 Retain the existing SQLite transactions, durable outbox, stable comment marker, publisher checks,
 and fenced dispatcher. This proposal does not require a message broker, a general workflow engine,
-or a Worker rewrite. Existing conclusion-only replies join the Dashboard read model without
-immediately replacing their proven ActionIntent execution path.
+or a Worker rewrite. New conclusion-only replies use the same conversation publisher. Historical
+ActionIntent replies remain available for audit and read-only recovery. Verified historical
+comments can be adopted with their exact publisher, marker, external ID, and previous body;
+ambiguous writes block a new create until resolved. Migration never deletes existing GitHub comments.
 
 ## Starting point before this implementation
 
@@ -104,6 +108,14 @@ remain internal, while actual attempts use the dedicated comment delivery collec
 ### CommentPublication
 
 One aggregate per logical comment:
+
+The durable scope is `(repository ID, conversation kind, conversation number, static | e2e)`.
+Repository and GitHub conversation identities are checked before reuse. Task and assignment
+indexes point to this aggregate; they are not comment identities. Delivery attempts retain the
+Task that produced their frozen body, while task-scoped summaries expose the current producer
+and the queried associated Task IDs. A preparing assignment can attach only its own unbound
+delivery attempts. Historical duplicate comments are retained with their writers retired; multiple
+unresolved historical writes require reconciliation before the shared writer can proceed.
 
 ```text
 id, version
@@ -426,7 +438,8 @@ summary expansion is optional so existing clients and the Task contract need not
 1. **Explicit state and history:** the publication contracts, versioned additive storage
    migration, revisions, attempt receipts, and delivery-history API. Adapt current progress records;
    preserve their exact comment IDs, markers, frozen bodies, unresolved operations, and authority.
-   Expose legacy conclusion replies through a read adapter and their existing ActionIntent writer.
+   Expose legacy conclusion replies through a read adapter and read-only ActionIntent recovery.
+   Adopt verified confirmed replies into the shared conversation publisher without another POST.
 2. **Dashboard and recovery:** Task summaries/details, the Comments workspace, structured transport
    outcomes, bounded retries, and controlled reconciliation/synchronization. Add lease-expiration
    scheduling. These changes address silent stale comments before moving acknowledgement timing.

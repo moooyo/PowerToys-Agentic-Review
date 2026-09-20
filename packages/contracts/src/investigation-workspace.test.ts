@@ -414,6 +414,28 @@ describe("investigation workspace directory pages", () => {
       ).toBe(false);
     }
   });
+
+  it("bounds shared publication task associations independently from the current producer", () => {
+    const associatedTaskIds = Array.from({ length: 100 }, (_, index) => `task-${index}`);
+    expect(
+      Value.Check(InvestigationPublicationDirectoryPageSchema, {
+        items: [{ ...publication, associatedTaskIds }],
+        nextCursor: null,
+      }),
+    ).toBe(true);
+    for (const invalid of [
+      [...associatedTaskIds, "task-overflow"],
+      ["task-duplicate", "task-duplicate"],
+      ["../invalid-task"],
+      null,
+    ])
+      expect(
+        Value.Check(InvestigationPublicationDirectoryPageSchema, {
+          items: [{ ...publication, associatedTaskIds: invalid }],
+          nextCursor: null,
+        }),
+      ).toBe(false);
+  });
 });
 
 describe("investigation work item discussion contracts", () => {

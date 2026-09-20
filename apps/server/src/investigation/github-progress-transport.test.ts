@@ -210,6 +210,61 @@ describe("investigation progress comment transport", () => {
     ]);
   });
 
+  it("updates an adopted automatic result comment using its exact legacy action marker", async () => {
+    const fixture = harness();
+    const legacyMarker = `<!-- agentic-review-action:legacy-intent:${"a".repeat(64)} -->`;
+    const previousBody = `Retained result.\n\n${legacyMarker}`;
+    const body = `Current result.\n\n${legacyMarker}`;
+    fixture.gets.set(`${basePath}/issues/comments/810`, comment(previousBody));
+    const result = await fixture.transport.publishProgressComment(
+      { marker: legacyMarker, body, externalId: "810", previousBody },
+      repository,
+      workItem(),
+      actor,
+    );
+    expect(result).toMatchObject({ state: "succeeded", externalId: "810" });
+    expect(fixture.mutations()).toEqual([
+      { method: "PATCH", path: `${basePath}/issues/comments/810`, body: { body } },
+    ]);
+  });
+
+  it("does not create a new comment using a retained action marker", async () => {
+    const fixture = harness();
+    const legacyMarker = `<!-- agentic-review-action:legacy-intent:${"a".repeat(64)} -->`;
+    const result = await fixture.transport.publishProgressComment(
+      {
+        marker: legacyMarker,
+        body: `Current result.\n\n${legacyMarker}`,
+        externalId: null,
+        previousBody: null,
+      },
+      repository,
+      workItem(),
+      actor,
+    );
+    expect(result).toMatchObject({ state: "failed", effect: "not_sent" });
+    expect(fixture.mutations()).toEqual([]);
+  });
+
+  it("rejects a foreign managed marker in an adopted result comment", async () => {
+    const fixture = harness();
+    const legacyMarker = `<!-- agentic-review-action:legacy-intent:${"a".repeat(64)} -->`;
+    const previousBody = `Retained result.\n\n${legacyMarker}`;
+    const result = await fixture.transport.publishProgressComment(
+      {
+        marker: legacyMarker,
+        body: `Current result.\n\n${legacyMarker}\n\n${marker}`,
+        externalId: "810",
+        previousBody,
+      },
+      repository,
+      workItem(),
+      actor,
+    );
+    expect(result).toMatchObject({ state: "failed", effect: "not_sent" });
+    expect(fixture.mutations()).toEqual([]);
+  });
+
   it("recognizes an already applied update without invoking dispatch", async () => {
     const fixture = harness();
     fixture.gets.set(`${basePath}/issues/comments/810`, comment(runningBody));

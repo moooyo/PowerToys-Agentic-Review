@@ -306,6 +306,7 @@ describe("durable assignment-only Webhook intake", () => {
     const accepted =
       vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
     const test = harness({ onAssignmentAccepted: accepted });
+    const before = test.store.list("idempotency");
     accepted.mockImplementation((admission) => {
       test.store.insert("idempotency", "synthetic-publication-admission", {
         receiptId: admission.id,
@@ -315,7 +316,8 @@ describe("durable assignment-only Webhook intake", () => {
     expect(() => test.intake.accept(test.delivery())).toThrow(
       "Synthetic publication enrollment failed.",
     );
-    expect(test.store.list("idempotency")).toEqual([]);
+    expect(test.store.list("idempotency")).toEqual(before);
+    expect(test.store.has("idempotency", "synthetic-publication-admission")).toBe(false);
     expect(test.tasks()).toEqual([]);
   });
 

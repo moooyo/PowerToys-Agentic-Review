@@ -14,6 +14,7 @@ import { type AutomaticReplyReceipt, InvestigationAutomaticReplies } from "./aut
 import { InvestigationAutomaticReplySettings } from "./auto-reply-settings.js";
 import { defaultAutomaticReplyTemplates, renderAutomaticReply } from "./auto-reply-template.js";
 import { InvestigationCommentDeliveries } from "./comment-deliveries.js";
+import { inspectLegacyConversationReplies } from "./legacy-conversation-replies.js";
 import { InvestigationStore } from "./store.js";
 import type {
   InvestigationActionTransport,
@@ -189,7 +190,10 @@ function harness(
       throw new Error("An automatic reply must never create another Task.");
     },
   });
-  function createPublisher(history = options.history !== false): InvestigationAutomaticReplies {
+  function createPublisher(
+    history = options.history !== false,
+    recoveryOnly = false,
+  ): InvestigationAutomaticReplies {
     const publisher = new InvestigationAutomaticReplies({
       store,
       settings,
@@ -199,6 +203,7 @@ function harness(
         ? {}
         : { resolvePublisherIdentity: readPublisherIdentity }),
       enableExternalWrites: options.externalWrites ?? true,
+      recoveryOnly,
       now,
       retryDelayMs: 60_000,
       maximumAttempts: options.maximumAttempts ?? 3,
@@ -595,6 +600,112 @@ describe("automatic investigation reply publication", () => {
       expect(h.posts).toHaveBeenCalledTimes(changed ? 0 : 1);
     },
   );
+});
+
+describe("retained automatic replies after conversation publication is enabled", () => {
+  it("does not enroll reports or dispatch a retained pending reply in recovery-only mode", async () => {
+    const h = harness();
+    const recovery = h.createPublisher(true, true);
+    h.enqueue(h.fixture, recovery);
+    expect(h.store.countPrefix("idempotency", "auto-reply:report:")).toBe(0);
+    h.enqueue();
+    await h.run(recovery);
+    expect(h.saved()).toMatchObject({ state: "blocked" });
+    expect(h.posts).not.toHaveBeenCalled();
+    expect(h.store.list("actionIntents")).toEqual([]);
+  });
+
+  it("reconciles a retained unknown native write without a second dispatch", async () => {
+    const h = harness();
+    h.control.delivery = { state: "unknown", externalId: null, message: "Receipt lost." };
+    h.enqueue();
+    await h.run();
+    await h.publisher.stop();
+    h.clock.value += 60_000;
+    h.control.reconciliation = {
+      state: "succeeded",
+      externalId: "810",
+      message: "The original receipt was found.",
+    };
+    await h.run(h.createPublisher(true, true));
+    expect(h.saved()).toMatchObject({ state: "sent", externalId: "810" });
+    expect(h.posts).toHaveBeenCalledTimes(1);
+    expect(h.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes the exact confirmed owned comment for adoption without modifying its history", async () => {
+    const h = harness();
+    h.control.delivery = { state: "succeeded", externalId: "810", message: "Receipt saved." };
+    h.enqueue();
+    await h.run();
+    const before = h.saved();
+    const result = inspectLegacyConversationReplies({
+      store: h.store,
+      repository: h.task.repository,
+      target: h.task.workItem,
+      channel: "static",
+    });
+    const intent = h.store.list<InvestigationActionIntentV1>("actionIntents")[0]!;
+    expect(result).toMatchObject({
+      blocked: false,
+      confirmed: {
+        recordId: before.id,
+        taskId: h.task.id,
+        reportId: h.result.report.id,
+        marker: `<!-- agentic-review-action:${intent.id}:${intent.payloadDigest} -->`,
+        externalId: "810",
+        githubIdentity: h.control.publisherIdentity,
+      },
+    });
+    expect(result.confirmed?.body).toBe(
+      h.deliveries.list(h.actor, { commentId: before.id }).items[0]!.body,
+    );
+    expect(h.saved()).toEqual(before);
+    expect(
+      inspectLegacyConversationReplies({
+        store: h.store,
+        repository: h.task.repository,
+        target: h.task.workItem,
+        channel: "e2e",
+      }),
+    ).toEqual({ confirmed: null, blocked: false });
+  });
+
+  it("blocks a new conversation create until every uncertain legacy write is resolved", async () => {
+    const h = harness();
+    h.control.delivery = { state: "unknown", externalId: null, message: "Receipt lost." };
+    h.enqueue();
+    await h.run();
+    expect(
+      inspectLegacyConversationReplies({
+        store: h.store,
+        repository: h.task.repository,
+        target: h.task.workItem,
+        channel: "static",
+      }),
+    ).toEqual({ confirmed: null, blocked: true });
+    expect(h.posts).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks adoption when a succeeded native receipt does not match its retained payload", async () => {
+    const h = harness();
+    h.control.delivery = { state: "succeeded", externalId: "810", message: "Receipt saved." };
+    h.enqueue();
+    await h.run();
+    const saved = h.saved();
+    h.store.put("idempotency", saved.id, {
+      ...saved,
+      request: { ...saved.request!, expectedRevisionKey: "f".repeat(64) },
+    });
+    expect(
+      inspectLegacyConversationReplies({
+        store: h.store,
+        repository: h.task.repository,
+        target: h.task.workItem,
+        channel: "static",
+      }),
+    ).toEqual({ confirmed: null, blocked: true });
+  });
 });
 
 describe("automatic reply durable recovery", () => {
