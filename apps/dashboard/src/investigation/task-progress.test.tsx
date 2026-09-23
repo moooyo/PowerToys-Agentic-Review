@@ -184,5 +184,30 @@ describe("task progress and resource waiting", () => {
     );
     expect(html).toContain("Current stage elapsed");
     expect(html).toContain("10s");
+    const compact = renderToStaticMarkup(
+      <TaskProgressPanel
+        task={task}
+        progress={progress}
+        compact
+        now={Date.parse("2026-09-19T01:00:11Z")}
+        resourceLeases={[
+          {
+            attemptId: "attempt",
+            taskId: "task",
+            workerId: "desktop",
+            fence: 1,
+            pool: "e2e",
+            state: "needs_cleanup",
+            acquiredAt: "2026-09-19T00:59:00Z",
+            updatedAt: task.updatedAt,
+            releasedAt: null,
+            reason: "completed",
+          },
+        ]}
+      />,
+    );
+    expect(compact).toContain("Awaiting worker cleanup");
+    expect(compact).toContain("Execution has stopped");
+    expect(compact).not.toContain("Task complete");
   });
 });

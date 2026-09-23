@@ -1,12 +1,57 @@
 import type {
+  InvestigationAttemptV1,
   InvestigationModelInvocationReceipt,
   InvestigationOutputEvent,
   InvestigationOutputPage,
 } from "@agentic-review/contracts";
 
+/** Never select an attempt belonging to another task, regardless of response order. */
+export function orderedTaskAttempts(
+  taskId: string,
+  attempts: readonly InvestigationAttemptV1[],
+): InvestigationAttemptV1[] {
+  return attempts
+    .filter((attempt) => attempt.taskId === taskId)
+    .sort((left, right) => right.number - left.number || right.id.localeCompare(left.id));
+}
+
+export function selectedTaskAttempt(
+  taskId: string,
+  attempts: readonly InvestigationAttemptV1[],
+  requestedId?: string | null,
+): InvestigationAttemptV1 | undefined {
+  const ordered = orderedTaskAttempts(taskId, attempts);
+  return ordered.find((attempt) => attempt.id === requestedId) ?? ordered[0];
+}
+
 export interface OutputItem extends InvestigationOutputEvent {
   firstSequence: number;
   updates: number;
+}
+
+export interface TaskOutputView {
+  search: string;
+  type: "all" | InvestigationOutputEvent["kind"];
+}
+
+/** Only visible-output controls belong in a copied view; unknown event kinds fall back to all. */
+export function normalizeTaskOutputView(view?: {
+  search?: unknown;
+  type?: unknown;
+}): TaskOutputView {
+  const type = view?.type;
+  return {
+    search:
+      typeof view?.search === "string"
+        ? view.search
+            .split("")
+            .filter((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127)
+            .join("")
+            .slice(0, 160)
+        : "",
+    type:
+      type === "assistant" || type === "tool" || type === "system" || type === "gap" ? type : "all",
+  };
 }
 
 export interface TaskOutputState {

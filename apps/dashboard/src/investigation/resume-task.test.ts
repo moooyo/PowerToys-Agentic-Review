@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resumeBudget } from "./resume-task";
+import { resumeBudget, resumeBudgetErrors } from "./resume-task";
 import { createSampleInvestigationApi } from "./sample-adapter";
 
 describe("resume budget preparation", () => {
@@ -39,5 +39,28 @@ describe("resume budget preparation", () => {
         maxRounds: budget.maxRounds + 1,
       }),
     ).rejects.toThrow("different budget");
+  });
+
+  it("identifies the exact exhausted field and requires a limit beyond consumed usage", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-partial-task");
+    const previous = detail.task.budget;
+    const inputs = {
+      maxRounds: String(previous.maxRounds),
+      maxDurationMs: String(previous.maxDurationMs / 1000),
+      maxTokens: String(previous.maxTokens),
+      maxReportBytes: String(previous.maxReportBytes / (1024 * 1024)),
+    };
+    const consumed = { rounds: 0, durationMs: 0, tokens: previous.maxTokens + 500, reportBytes: 0 };
+    expect(resumeBudgetErrors(inputs, previous, consumed)).toEqual({
+      maxTokens: expect.stringContaining("recorded usage"),
+    });
+    expect(() => resumeBudget(inputs, previous, consumed)).toThrow("exhausted");
+    const valid = { ...inputs, maxTokens: String(consumed.tokens + 1) };
+    expect(resumeBudgetErrors(valid, previous, consumed)).toEqual({});
+    expect(resumeBudget(valid, previous, consumed).maxTokens).toBe(consumed.tokens + 1);
+    expect(resumeBudgetErrors({ ...valid, maxRounds: "" }, previous).maxRounds).toBeDefined();
+    expect(
+      resumeBudgetErrors({ ...valid, maxTokens: "9007199254740992" }, previous).maxTokens,
+    ).toBeDefined();
   });
 });

@@ -48,12 +48,33 @@
 .production-task-open {
   align-self: center;
 }
+.production-task-frozen-inputs {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.35fr) minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 0;
+}
+.production-task-frozen-inputs dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.production-task-detail > .MuiAlert-root .MuiAlert-action {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
 @media (pointer: coarse) {
   .production-task-row .production-task-inline-action {
     min-height: 48px;
   }
 }
 @media (max-width: 599px) {
+  .production-task-frozen-inputs {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  .production-task-frozen-inputs dd {
+    margin-bottom: 8px;
+  }
   .production-task-row {
     grid-template-columns: 24px minmax(0, 1fr) 40px;
     gap: 6px 10px;

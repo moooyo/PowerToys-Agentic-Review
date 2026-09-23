@@ -3,41 +3,36 @@ import type {
   InvestigationActionKind,
   InvestigationReportHeaderV1,
 } from "@agentic-review/contracts";
-import ArrowBackRounded from "@mui/icons-material/ArrowBackRounded";
-import CheckRounded from "@mui/icons-material/CheckRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import {
   Alert,
   Box,
   Button,
-  ButtonBase,
-  Checkbox,
   Chip,
   CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
-  FormControlLabel,
   Stack,
   Tab,
   Tabs,
-  TextField,
   Typography,
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { ActionPanel } from "./action-panel";
+import { ActionPanel, type ActionPanelRequest } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
 import {
   createFeedbackSelection,
   type FeedbackSelectionEvent,
   feedbackSelectionReducer,
-  isFindingSelected,
 } from "./feedback-selection";
+import { GithubSourceLink } from "./github-source-link";
 import { useGuardedAction, useUnsavedChanges } from "./navigation-guard";
+import { OutcomeSummary } from "./outcome-summary";
 import { ReportDetails, ReportEvidence } from "./report-detail-panels";
 import { ReportDirectory, reportKindLabel } from "./report-directory";
 import {
@@ -49,35 +44,77 @@ import {
   reportDraftReducer,
   retainReportDraft,
 } from "./report-draft-store";
-import { FindingCard, Section } from "./report-sections";
-import {
-  assertActionContext,
-  assertFindingsPage,
-  assertReportBindings,
-  selectionContext,
-} from "./report-state";
+import { findingViewParameters } from "./report-findings";
+import { ReportFindingsReader } from "./report-findings-reader";
+import { assertActionContext, assertReportBindings, selectionContext } from "./report-state";
+import { ReviewQueueBar } from "./review-navigation";
 import { sessionIdentity, useInvestigationSession } from "./session";
-import { EmptyState, PageHeading, Surface } from "./workspace-ui";
+import { PageHeading } from "./workspace-ui";
 import "./report-workspace.css";
 
-export function StandaloneActions({ workItem }: { workItem: WorkItem }) {
+export function StandaloneActions({
+  workItem,
+  reportId,
+  request,
+  onBusyChange,
+  guardScope,
+}: {
+  workItem: WorkItem;
+  reportId?: string;
+  request?: ActionPanelRequest;
+  onBusyChange?: (busy: boolean) => void;
+  guardScope?: string;
+}) {
   const { session } = useInvestigationSession();
   const query = useQuery({
-    queryKey: ["investigation-action-context", sessionIdentity(session), workItem.id],
-    queryFn: () => investigationApi.actionContext(workItem.id),
+    queryKey: ["investigation-action-context", sessionIdentity(session), workItem.id, reportId],
+    queryFn: async () => {
+      const context = await investigationApi.actionContext(workItem.id, reportId);
+      if (
+        context.workItemId !== workItem.id ||
+        context.repositoryId !== workItem.repositoryId ||
+        context.target.kind !== workItem.kind ||
+        (reportId && context.reportRef?.id !== reportId)
+      )
+        throw new Error("The action context does not match this source and saved report.");
+      return context;
+    },
   });
   if (query.isPending) return <CircularProgress size={24} aria-label="Loading available actions" />;
-  if (query.isError) return <Alert severity="error">{query.error.message}</Alert>;
+  if (query.isError)
+    return (
+      <Alert
+        severity="error"
+        action={<Button onClick={() => void query.refetch()}>Retry actions</Button>}
+      >
+        {query.error.message}
+      </Alert>
+    );
   return (
     <ActionsWithState
-      key={`${query.data.reportRef?.id ?? workItem.id}:${query.data.reportRef?.version ?? 0}`}
+      key={`${query.data.reportRef?.id ?? workItem.id}:${query.data.reportRef?.version ?? 0}:${query.data.reportRef?.digest ?? ""}`}
       workItem={workItem}
       context={query.data}
+      request={request}
+      onBusyChange={onBusyChange}
+      guardScope={guardScope}
     />
   );
 }
 
-function ActionsWithState({ workItem, context }: { workItem: WorkItem; context: ActionContextV1 }) {
+function ActionsWithState({
+  workItem,
+  context,
+  request,
+  onBusyChange,
+  guardScope,
+}: {
+  workItem: WorkItem;
+  context: ActionContextV1;
+  request?: ActionPanelRequest;
+  onBusyChange?: (busy: boolean) => void;
+  guardScope?: string;
+}) {
   const { session } = useInvestigationSession();
   const [selection, dispatch] = useReducer(
     feedbackSelectionReducer<InvestigationActionKind>,
@@ -85,9 +122,16 @@ function ActionsWithState({ workItem, context }: { workItem: WorkItem; context: 
     createFeedbackSelection<InvestigationActionKind>,
   );
   const result = useQuery({
-    queryKey: ["investigation-report-export", sessionIdentity(session), context.reportRef?.id],
+    queryKey: [
+      "investigation-report-export",
+      sessionIdentity(session),
+      context.reportRef?.id,
+      context.reportRef?.version,
+      context.reportRef?.digest,
+    ],
     queryFn: async () => {
-      const value = await investigationApi.exportReport(context.reportRef!.id);
+      if (!context.reportRef) throw new Error("No saved report is bound to this action context.");
+      const value = await investigationApi.exportReport(context.reportRef.id);
       if (
         value.report.id !== context.reportRef?.id ||
         value.report.version !== context.reportRef.version ||
@@ -111,12 +155,32 @@ function ActionsWithState({ workItem, context }: { workItem: WorkItem; context: 
         selection={selection}
         dispatch={dispatch}
         editedBodies={{}}
+        request={request}
+        onBusyChange={onBusyChange}
+        guardScope={guardScope}
       />
     </Stack>
   );
 }
 
 export type ReportTab = "findings" | "evidence" | "details";
+const reportActionLabels: Record<InvestigationActionKind, string> = {
+  comment: "Prepare a conversation comment",
+  approve: "Review approval",
+  "suggestion-comment": "Prepare review comments and suggestions",
+  "request-changes": "Prepare request changes",
+  close: "Review closure",
+  merge: "Review merge",
+  "trigger-ci": "Prepare workflow dispatch",
+  "close-as-duplicate": "Review duplicate closure",
+  "start-task": "Review saved follow-up",
+  "reviews.verify": "Prepare verification",
+  "view-validation": "View validation",
+  "view-changes": "View saved changes",
+  "create-pr": "Prepare pull request",
+  "view-evidence": "View evidence",
+  resume: "Review resume options",
+};
 export function reportTab(value: string | null): ReportTab {
   if (["evidence", "validation", "changes"].includes(value ?? "")) return "evidence";
   if (["details", "coverage", "plans", "diagnostics", "usage"].includes(value ?? ""))
@@ -143,21 +207,31 @@ export function ReportWorkspace({ reportId }: { reportId: string }) {
         <Typography sx={{ mt: 1 }}>Loading structured report…</Typography>
       </Box>
     );
-  if (header.isError)
+  if (!header.data)
     return (
       <Alert
         severity="error"
         action={<Button onClick={() => void header.refetch()}>Retry report</Button>}
       >
-        {header.error.message}
+        {header.error?.message ?? "The report could not be loaded."}
       </Alert>
     );
   return (
-    <BoundReportWorkspace
-      key={`${identity}:${header.data.report.id}:${header.data.report.version}:${header.data.report.logicalContentDigest}`}
-      value={header.data}
-      identity={identity}
-    />
+    <Stack spacing={2}>
+      {header.isError && (
+        <Alert
+          severity="warning"
+          action={<Button onClick={() => void header.refetch()}>Retry report</Button>}
+        >
+          Report refresh failed. The last successfully loaded saved report remains visible.
+        </Alert>
+      )}
+      <BoundReportWorkspace
+        key={`${identity}:${header.data.report.id}:${header.data.report.version}:${header.data.report.logicalContentDigest}`}
+        value={header.data}
+        identity={identity}
+      />
+    </Stack>
   );
 }
 
@@ -175,9 +249,9 @@ function BoundReportWorkspace({
   const [params, setParams] = useSearchParams();
   const tab = reportTab(params.get("section") ?? params.get("tab"));
   const reportId = value.report.id;
-  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
-  const [pageIndex, setPageIndex] = useState(0);
   const [actionOpen, setActionOpen] = useState(false);
+  const [actionRequest, setActionRequest] = useState<ActionPanelRequest>();
+  const requestSequence = useRef(0);
   const [actionBusy, setActionBusy] = useState(false);
   const [exportError, setExportError] = useState<string>();
   const [exporting, setExporting] = useState(false);
@@ -239,20 +313,6 @@ function BoundReportWorkspace({
       return result;
     },
   });
-  const page = useQuery({
-    queryKey: [
-      "investigation-findings",
-      identity,
-      reportId,
-      value.report.version,
-      cursors[pageIndex],
-    ],
-    queryFn: async () => {
-      const result = await investigationApi.findings(reportId, cursors[pageIndex], 25);
-      assertFindingsPage(value, result);
-      return result;
-    },
-  });
   const workItem = useQuery({
     queryKey: ["investigation-work-item", identity, value.context.workItem.id],
     queryFn: async () => {
@@ -284,44 +344,47 @@ function BoundReportWorkspace({
     selection.reportVersion === value.report.version;
   const canEdit = selectionReady && session.user?.permissions.includes("action:prepare") === true;
   const result = full.data;
-  const findingId = params.get("findingId");
-  const finding = findingId
-    ? (result?.findings.find((item) => item.id === findingId) ??
-      page.data?.items.find((item) => item.id === findingId))
-    : page.data?.items[0];
-  const detailRef = useRef<HTMLDivElement>(null);
-  const focusDetail = useRef(false);
-  useEffect(() => {
-    if (focusDetail.current && finding) {
-      focusDetail.current = false;
-      detailRef.current?.focus();
-    }
-  }, [finding]);
+  const canOpenActions = Boolean(
+    context.data && workItem.data && selectionReady && !context.isError && !workItem.isError,
+  );
+  const openActions = (request?: Omit<ActionPanelRequest, "id">) => {
+    setActionRequest(
+      request ? { ...request, id: `${reportId}:${++requestSequence.current}` } : undefined,
+    );
+    setActionOpen(true);
+  };
   const setSection = (next: ReportTab) => {
     const search = new URLSearchParams(params);
     search.set("section", next);
     search.delete("tab");
     setParams(search);
   };
-  const selectFinding = (id: string) => {
-    const search = new URLSearchParams(params);
-    search.set("findingId", id);
-    search.set("section", "findings");
-    focusDetail.current = true;
-    setParams(search);
-  };
-  const changePage = (next: number) => {
-    const search = new URLSearchParams(params);
-    search.delete("findingId");
-    focusDetail.current = true;
-    setParams(search);
-    setPageIndex(next);
-  };
+  const recommendation = context.data?.recommendation;
+  const suggested = context.data?.nextActions.find(
+    (entry) =>
+      entry.id === context.data?.recommendedActionId && entry.action === recommendation?.action,
+  );
+  const fixed = context.data?.fixedActions.find((entry) => entry.action === recommendation?.action);
+  const recommendedReady = suggested ? suggested.canPrepare : (fixed?.allowed ?? false);
+  const recommendedLabel =
+    suggested?.label ??
+    (recommendation?.action ? reportActionLabels[recommendation.action] : "Review evidence");
+  const recommendationNeedsDetails = Boolean(suggested?.planRef || suggested?.draftRef);
+  const recommendationDisabled =
+    !canOpenActions || !recommendedReady || (recommendationNeedsDetails && !result);
+  const navigationRecommendation = ["view-evidence", "view-validation", "view-changes"].includes(
+    recommendation?.action ?? "",
+  );
+  const recommendationTarget = `/reports?${new URLSearchParams({
+    reportId: suggested?.validationReportRef?.id ?? reportId,
+    repositoryId: value.context.repository.id,
+    section: "evidence",
+  })}`;
   const backParams = new URLSearchParams(params);
   backParams.delete("reportId");
   backParams.delete("section");
   backParams.delete("tab");
-  backParams.delete("findingId");
+  for (const name of findingViewParameters) backParams.delete(name);
   const download = async () => {
     if (exportBusy.current) return;
     exportBusy.current = true;
@@ -357,81 +420,161 @@ function BoundReportWorkspace({
   };
   return (
     <Stack spacing={3} className="report-workspace">
-      <Button
-        component={Link}
-        to={`/reports${backParams.size ? `?${backParams}` : ""}`}
-        startIcon={<ArrowBackRounded />}
-        sx={{ alignSelf: "flex-start" }}
-      >
-        Reports
-      </Button>
+      <ReviewQueueBar
+        record={{
+          kind: "report",
+          id: reportId,
+          workItemId: value.context.workItem.id,
+          repositoryId: value.context.repository.id,
+          href: `/reports?reportId=${encodeURIComponent(reportId)}&repositoryId=${encodeURIComponent(value.context.repository.id)}`,
+          label: value.context.workItem.title,
+        }}
+        fallbackTo={`/reports${backParams.size ? `?${backParams}` : ""}`}
+        fallbackLabel="Reports"
+      />
       <PageHeading
         eyebrow={`${reportKindLabel(value.context.task.kind)} · ${value.context.repository.fullName} · ${value.context.workItem.kind === "pull_request" ? "Pull request" : "Issue"} #${value.context.workItem.number}`}
         title={value.context.workItem.title}
         subtitle={`Saved report · Version ${value.report.version}`}
         action={
-          <Button
-            variant="contained"
-            disabled={!context.data || !workItem.data || !selectionReady}
-            onClick={() => setActionOpen(true)}
-          >
-            Prepare action
-          </Button>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+            <GithubSourceLink
+              repositoryFullName={value.context.repository.fullName}
+              kind={value.context.workItem.kind}
+              number={value.context.workItem.number}
+            />
+            <Button variant="outlined" disabled={!canOpenActions} onClick={() => openActions()}>
+              Other actions
+            </Button>
+          </Stack>
         }
       />
-      <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", alignItems: "center" }}>
-        <Chip
-          size="small"
-          label={`Execution: ${value.outcome}`}
-          color={
-            value.outcome === "failed"
-              ? "error"
-              : value.outcome === "completed"
-                ? "success"
-                : "warning"
-          }
-        />
-        <Chip
-          size="small"
-          label={`Report: ${value.report.completeness}`}
-          color={value.report.completeness === "partial" ? "warning" : "default"}
-        />
-        <Chip
-          size="small"
-          label={value.report.delivery === "final" ? "Final delivery" : "Checkpoint only"}
-          variant="outlined"
-        />
-        <Button
-          component={Link}
-          to={`/tasks?taskId=${encodeURIComponent(value.context.task.id)}&repositoryId=${encodeURIComponent(value.context.repository.id)}`}
-        >
-          Open task
-        </Button>
-        <Button
-          startIcon={<RefreshRounded />}
-          disabled={context.isFetching || workItem.isFetching}
-          onClick={() => {
-            void context.refetch();
-            void workItem.refetch();
-          }}
-        >
-          Refresh actions
-        </Button>
-      </Stack>
-      <Surface className="report-conclusion" sx={{ p: { xs: 2, sm: 3 }, bgcolor: "action.hover" }}>
-        <Typography variant="overline" color="text.secondary">
-          Saved conclusion
+      <OutcomeSummary
+        header={value}
+        nextActions={
+          context.data
+            ? undefined
+            : result?.nextActions.filter((entry) => entry.recommended).slice(0, 1)
+        }
+        actions={
+          <Stack spacing={1}>
+            {recommendation ? (
+              <>
+                <Typography variant="subtitle1">{recommendedLabel}</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {recommendation.reason}
+                </Typography>
+                {recommendation.action &&
+                  (navigationRecommendation ? (
+                    <Button
+                      component={Link}
+                      to={recommendationTarget}
+                      variant="contained"
+                      disabled={recommendationDisabled}
+                    >
+                      {recommendedLabel}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="contained"
+                      disabled={recommendationDisabled}
+                      onClick={() => {
+                        if (recommendation.action)
+                          openActions({
+                            action: recommendation.action,
+                            nextActionId: suggested?.id,
+                          });
+                      }}
+                    >
+                      {recommendedLabel}
+                    </Button>
+                  ))}
+                {(suggested?.guards ?? fixed?.guards ?? [])
+                  .filter((guard) => !guard.satisfied)
+                  .map((guard) => (
+                    <Typography key={guard.code} variant="caption" color="text.secondary">
+                      {guard.message}
+                    </Typography>
+                  ))}
+                {suggested?.canPrepare && !suggested.readyToExecute && (
+                  <Typography variant="caption" color="text.secondary">
+                    Preparation is available. Execution still requires the listed prerequisites.
+                  </Typography>
+                )}
+                {recommendationNeedsDetails && !result && (
+                  <Typography variant="caption" color="text.secondary">
+                    Load the complete saved plan and feedback before preparing this action.
+                  </Typography>
+                )}
+                <Typography variant="caption" color="text.secondary">
+                  A saved recommendation is not an executed action. Writes require an exact preview
+                  and separate confirmation.
+                </Typography>
+              </>
+            ) : (
+              <Typography color="text.secondary" role="status">
+                {context.isPending
+                  ? "Checking current action availability…"
+                  : "Current action availability is unavailable. The saved assessment remains readable."}
+              </Typography>
+            )}
+            <Button onClick={() => setSection("evidence")}>Review saved evidence</Button>
+          </Stack>
+        }
+      />
+      <Box component="details" className="report-context">
+        <Typography component="summary">
+          Report context · {value.report.completeness} · {value.report.delivery}
         </Typography>
-        <Typography component="h2" variant="h6" sx={{ mt: 0.5, mb: 1 }}>
-          {value.report.summary}
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          {value.assessment.summary}
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          {value.validation.summary}
-        </Typography>
-      </Surface>
+        <Stack spacing={2} sx={{ mt: 2 }}>
+          <Typography>{value.report.summary}</Typography>
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{ flexWrap: "wrap", alignItems: "center" }}
+          >
+            <Chip
+              label={`Execution: ${value.outcome}`}
+              color={
+                value.outcome === "failed"
+                  ? "error"
+                  : value.outcome === "completed"
+                    ? "success"
+                    : "warning"
+              }
+            />
+            <Chip
+              label={`Report: ${value.report.completeness}`}
+              color={value.report.completeness === "partial" ? "warning" : "default"}
+            />
+            <Chip
+              label={value.report.delivery === "final" ? "Final delivery" : "Checkpoint only"}
+              variant="outlined"
+            />
+            <Button
+              component={Link}
+              to={`/tasks?taskId=${encodeURIComponent(value.context.task.id)}&repositoryId=${encodeURIComponent(value.context.repository.id)}`}
+            >
+              Open task
+            </Button>
+            <Button
+              startIcon={<RefreshRounded />}
+              disabled={context.isFetching || workItem.isFetching}
+              onClick={() => {
+                void context.refetch();
+                void workItem.refetch();
+              }}
+            >
+              Refresh actions
+            </Button>
+          </Stack>
+          <Typography variant="body2" color="text.secondary">
+            Report {reportId} · Version {value.report.version} · Saved assessment and evidence
+            remain bound to their original source.
+          </Typography>
+        </Stack>
+      </Box>
       {value.report.completeness === "partial" && (
         <Alert severity="warning">
           This checkpoint is incomplete. Retained findings and evidence do not cover the entire
@@ -441,7 +584,7 @@ function BoundReportWorkspace({
       {context.data?.pendingSubmission && (
         <Alert
           severity="warning"
-          action={<Button onClick={() => setActionOpen(true)}>Inspect submission</Button>}
+          action={<Button onClick={() => openActions()}>Inspect submission</Button>}
         >
           A saved submission needs review. Its server identity remains available when you leave this
           report or discard private edits.
@@ -502,226 +645,18 @@ function BoundReportWorkspace({
       </Box>
       <Box role="tabpanel" id={`report-panel-${tab}`} aria-labelledby={`report-tab-${tab}`}>
         {tab === "findings" && (
-          <Stack spacing={3}>
-            <Stack
-              direction="row"
-              spacing={1}
-              useFlexGap
-              sx={{ flexWrap: "wrap", alignItems: "center" }}
-            >
-              <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
-                {selection.selectedFindings.length} findings selected across all pages ·{" "}
-                {selection.selectedDraftIds.length} independent drafts
-              </Typography>
-              <Typography variant="caption" color="text.secondary" aria-live="polite">
-                {dirty ? "Unsaved private edits" : "Private feedback saved for this session"}
-              </Typography>
-              <Button disabled={!dirty || !canEdit} onClick={() => updateDraft({ type: "save" })}>
-                Save private draft
-              </Button>
-              <Button disabled={!dirty} onClick={() => updateDraft({ type: "discard" })}>
-                Discard edits
-              </Button>
-            </Stack>
-            {page.isPending && <CircularProgress size={24} aria-label="Loading findings" />}
-            {page.isError && (
-              <Alert
-                severity="error"
-                action={<Button onClick={() => void page.refetch()}>Retry page</Button>}
-              >
-                {page.error.message}
-              </Alert>
-            )}
-            {page.data?.total === 0 && (
-              <EmptyState
-                title="No review findings"
-                description="Review the saved coverage and supporting evidence before choosing the next action."
-                action={<Button onClick={() => setSection("evidence")}>Review evidence</Button>}
-              />
-            )}
-            {page.data && page.data.total > 0 && (
-              <Box className="report-findings-layout">
-                <Box
-                  component="nav"
-                  aria-label="Report findings"
-                  className="report-finding-nav"
-                  sx={{ borderColor: "divider" }}
-                >
-                  <Typography variant="caption" color="text.secondary" sx={{ px: 1, mb: 1 }}>
-                    Showing {page.data.offset + 1}–{page.data.offset + page.data.items.length} of{" "}
-                    {page.data.total} findings
-                  </Typography>
-                  {page.data.items.map((item) => (
-                    <ButtonBase
-                      key={`${item.id}:${item.version}`}
-                      className="report-finding-nav-item"
-                      aria-current={finding?.id === item.id ? "true" : undefined}
-                      aria-controls="selected-report-finding"
-                      onClick={() => selectFinding(item.id)}
-                      sx={{
-                        bgcolor: finding?.id === item.id ? "action.selected" : "transparent",
-                        "&:hover": { bgcolor: "action.hover" },
-                        borderRadius: 2,
-                      }}
-                    >
-                      <Stack
-                        direction="row"
-                        spacing={1}
-                        useFlexGap
-                        sx={{ width: "100%", flexWrap: "wrap", alignItems: "center" }}
-                      >
-                        <Chip
-                          size="small"
-                          label={item.priority}
-                          color={
-                            item.priority === "P0"
-                              ? "error"
-                              : item.priority === "P1"
-                                ? "warning"
-                                : "default"
-                          }
-                        />
-                        <Typography variant="caption" color="text.secondary">
-                          {item.confirmation.status}
-                        </Typography>
-                        {isFindingSelected(selection, item.id) && (
-                          <CheckRounded
-                            fontSize="small"
-                            aria-label="Included in feedback"
-                            sx={{ ml: "auto" }}
-                          />
-                        )}
-                      </Stack>
-                      <Typography variant="subtitle2" sx={{ overflowWrap: "anywhere" }}>
-                        {item.title}
-                      </Typography>
-                      <Typography
-                        variant="caption"
-                        color="text.secondary"
-                        sx={{ overflowWrap: "anywhere" }}
-                      >
-                        {item.locations[0]?.kind === "source"
-                          ? `${item.locations[0].path}:${item.locations[0].startLine}`
-                          : item.subjectRef}
-                      </Typography>
-                    </ButtonBase>
-                  ))}
-                  <Stack direction="row" spacing={1} sx={{ justifyContent: "space-between" }}>
-                    <Button disabled={pageIndex === 0} onClick={() => changePage(pageIndex - 1)}>
-                      Previous
-                    </Button>
-                    <Button
-                      disabled={!page.data.nextCursor}
-                      onClick={() => {
-                        const cursor = page.data?.nextCursor;
-                        if (cursor) {
-                          setCursors((current) => [...current.slice(0, pageIndex + 1), cursor]);
-                          changePage(pageIndex + 1);
-                        }
-                      }}
-                    >
-                      Next
-                    </Button>
-                  </Stack>
-                </Box>
-                <Box
-                  id="selected-report-finding"
-                  ref={detailRef}
-                  tabIndex={-1}
-                  className="report-finding-detail"
-                  sx={{ borderColor: "divider" }}
-                >
-                  {finding && !page.data.items.some((item) => item.id === finding.id) && (
-                    <Alert severity="info" sx={{ mb: 2 }}>
-                      This linked finding is outside the current list page. It belongs to the
-                      complete saved report, and selection remains shared across pages.
-                    </Alert>
-                  )}
-                  {finding ? (
-                    <FindingCard
-                      key={`${finding.id}:${finding.version}`}
-                      detail
-                      finding={finding}
-                      evidence={result?.verificationEvidence ?? []}
-                      selected={isFindingSelected(selection, finding.id)}
-                      selectionEnabled={canEdit}
-                      draftBody={
-                        editedBodies[finding.feedbackDraft.id] ?? finding.feedbackDraft.body
-                      }
-                      suggestionValid={
-                        context.data?.suggestionSelectionDefaults.some(
-                          (option) =>
-                            option.findingId === finding.id &&
-                            option.draftId === finding.feedbackDraft.id &&
-                            option.valid,
-                        ) ?? false
-                      }
-                      onSelect={(selected) =>
-                        dispatch({
-                          type: "set-finding",
-                          finding: {
-                            findingId: finding.id,
-                            draftId: finding.feedbackDraft.id,
-                            suggestionId: finding.feedbackDraft.suggestion
-                              ? finding.feedbackDraft.id
-                              : null,
-                          },
-                          selected,
-                        })
-                      }
-                      onDraftChange={(body) =>
-                        updateDraft({ type: "edit", draftId: finding.feedbackDraft.id, body })
-                      }
-                    />
-                  ) : full.isPending ? (
-                    <CircularProgress size={24} aria-label="Loading linked finding" />
-                  ) : (
-                    <EmptyState
-                      title="Finding unavailable"
-                      description="The linked finding does not belong to this saved report. Choose a finding from the list."
-                    />
-                  )}
-                </Box>
-              </Box>
-            )}
-            {result && result.feedbackDrafts.length > 0 && (
-              <Section title="Independent feedback drafts">
-                <Stack spacing={2}>
-                  {result.feedbackDrafts.map((item) => (
-                    <Box key={item.id}>
-                      <FormControlLabel
-                        control={
-                          <Checkbox
-                            disabled={!canEdit}
-                            checked={selection.selectedDraftIds.includes(item.id)}
-                            onChange={(event) =>
-                              dispatch({
-                                type: "set-draft",
-                                draftId: item.id,
-                                selected: event.target.checked,
-                              })
-                            }
-                          />
-                        }
-                        label="Include this independent feedback"
-                      />
-                      <TextField
-                        multiline
-                        fullWidth
-                        minRows={3}
-                        label="Feedback draft"
-                        disabled={!canEdit}
-                        value={editedBodies[item.id] ?? item.body}
-                        onChange={(event) =>
-                          updateDraft({ type: "edit", draftId: item.id, body: event.target.value })
-                        }
-                      />
-                    </Box>
-                  ))}
-                </Stack>
-              </Section>
-            )}
-          </Stack>
+          <ReportFindingsReader
+            header={value}
+            result={result}
+            context={context.data}
+            loading={full.isPending}
+            draft={draft}
+            onDraft={updateDraft}
+            dispatch={dispatch}
+            canEdit={canEdit}
+            canPublish={canEdit && canOpenActions}
+            onPublish={() => openActions({ importReportSelection: true })}
+          />
         )}
         {tab !== "findings" && full.isPending && (
           <CircularProgress size={24} aria-label="Loading complete report details" />
@@ -754,7 +689,7 @@ function BoundReportWorkspace({
               editedBodies={editedBodies}
               onBusyChange={setActionBusy}
               guardScope={actionGuardScope}
-              onSaveDraft={() => updateDraft({ type: "save" })}
+              request={actionRequest}
             />
           )}
         </DialogContent>

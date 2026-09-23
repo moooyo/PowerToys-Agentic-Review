@@ -18,6 +18,7 @@ import {
   inspectActionIntent,
   retainActionIntent,
   saveActionDraft,
+  switchActionDraft,
 } from "./action-draft-store";
 
 const reportRef = { id: "report-1", version: 2, digest: "a".repeat(64) };
@@ -51,6 +52,73 @@ function intent(input = request()): InvestigationActionIntentV1 {
 }
 
 describe("private action drafts", () => {
+  it("keeps selection, summary and execution fields independent for each action", () => {
+    let record = switchActionDraft(createActionDraft(), "request-changes");
+    record = {
+      ...record,
+      fields: { ...record.fields, body: "Request changes summary" },
+      publication: { ...record.publication, selectedFindingIds: ["finding-1"] },
+    };
+    record = saveActionDraft(record);
+    record = switchActionDraft(record, "approve");
+    expect(record.fields.body).toBe("");
+    expect(record.publication.selectedFindingIds).toEqual([]);
+    record = saveActionDraft(record);
+    record = switchActionDraft(record, "trigger-ci");
+    record = {
+      ...record,
+      fields: { ...record.fields, workflowId: "checks.yml", workflowRef: "reviewed-head" },
+    };
+    record = switchActionDraft(record, "request-changes");
+    expect(record.fields.body).toBe("Request changes summary");
+    expect(record.fields.workflowId).toBe("");
+    expect(record.publication.selectedFindingIds).toEqual(["finding-1"]);
+    expect(actionDraftIsDirty(record)).toBe(true);
+    record = discardActionDraft(record);
+    record = switchActionDraft(record, "trigger-ci");
+    expect(record.fields.workflowId).toBe("");
+    expect(record.publication.selectedFindingIds).toEqual([]);
+    expect(actionDraftIsDirty(record)).toBe(false);
+  });
+
+  it("does not partition unresolved submission identities when the form action changes", () => {
+    const pending = beginActionPreparation(
+      switchActionDraft(createActionDraft(), "comment"),
+      request(),
+    );
+    const otherForm = switchActionDraft(pending, "approve");
+    expect(otherForm.prepareRequest).toBe(pending.prepareRequest);
+    expect(beginActionPreparation(otherForm, request("another-key")).prepareRequest).toBe(
+      pending.prepareRequest,
+    );
+    const prepared = acceptPreparedAction(otherForm, intent());
+    const unknown = retainActionIntent(prepared, { ...intent(), version: 2, state: "unknown" });
+    const thirdForm = switchActionDraft(unknown, "merge");
+    expect(() => beginActionPreparation(thirdForm, request("third-key"))).toThrow(
+      "Check the saved submission",
+    );
+    expect(discardActionDraft(thirdForm).intent?.id).toBe("intent-1");
+  });
+
+  it("retains an independent receipt snapshot while preparing another action", () => {
+    const prepared = acceptPreparedAction(
+      beginActionPreparation(createActionDraft(), request()),
+      intent(),
+    );
+    const receipt = {
+      ...intent(),
+      version: 2,
+      state: "succeeded" as const,
+      result: { message: "Recorded", externalId: "review-42", taskId: null },
+    };
+    const complete = retainActionIntent(prepared, receipt);
+    if (receipt.payload.kind === "feedback") receipt.payload.body = "Caller mutation";
+    const next = beginActionPreparation(complete, request("next-key"));
+    expect(next.intent).toBeNull();
+    expect(next.receipts).toHaveLength(1);
+    expect(next.receipts[0]?.payload).toMatchObject({ body: "Exact original body" });
+    expect(next.receipts[0]?.result?.externalId).toBe("review-42");
+  });
   it("separates accounts, grants, repositories, work items, and exact report versions", () => {
     const key = actionDraftKey("actor-1:execute", "repository-1", "work-1", reportRef);
     const different = [

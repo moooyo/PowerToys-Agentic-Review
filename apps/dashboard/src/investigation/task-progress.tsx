@@ -141,20 +141,28 @@ export function TaskProgressPanel({
                 : active
                   ? "Last reported activity"
                   : task.state === "completed"
-                    ? "Result"
+                    ? "Execution"
                     : "Saved progress"}
             </Typography>
             <Typography variant="h6" sx={{ mt: 0.5 }}>
-              {progress?.stage
-                ? stage
-                : task.state === "queued"
-                  ? "Waiting for resources"
-                  : task.state === "completed"
-                    ? "Task complete"
-                    : task.state === "blocked"
-                      ? "Task blocked"
-                      : "Stage not reported"}
+              {cleanupPending && !["queued", "running"].includes(task.state)
+                ? "Awaiting worker cleanup"
+                : progress?.stage
+                  ? stage
+                  : task.state === "queued"
+                    ? "Waiting for resources"
+                    : task.state === "completed"
+                      ? "Task complete"
+                      : task.state === "blocked"
+                        ? "Task blocked"
+                        : "Stage not reported"}
             </Typography>
+            {cleanupPending && !["queued", "running"].includes(task.state) && (
+              <Typography variant="body2" color="text.secondary">
+                Execution has stopped. Resource ownership ends only after the worker cleanup receipt
+                is accepted.
+              </Typography>
+            )}
           </Box>
           {progress?.stageStartedAt && (
             <Typography variant="caption" color="text.secondary">

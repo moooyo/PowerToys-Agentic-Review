@@ -71,6 +71,20 @@ const templateLabels: Record<AutoReplyTemplateKey, string> = {
   completed: "Completed progress template",
 };
 const templateKeys = ["pullRequest", "issue", ...autoReplyProgressStages] as const;
+function autoReplySettingsHaveChanges(
+  form: AutoReplySettingsFormValues,
+  saved: RepositoryAutoReplySettings,
+): boolean {
+  return (
+    form.enabled !== saved.enabled ||
+    form.progressEnabled !== saved.progressEnabled ||
+    form.pullRequestTemplate !== saved.pullRequestTemplate ||
+    form.issueTemplate !== saved.issueTemplate ||
+    autoReplyProgressStages.some(
+      (stage) => form.progressTemplates[stage] !== saved.progressTemplates[stage],
+    )
+  );
+}
 const previewTokens: Record<string, string> = {
   identity: "[AI identity statement, recorded model, and verified GitHub publishing user]",
   conclusion: "[Investigation conclusion]",
@@ -174,17 +188,24 @@ export function AutoReplySettingsConflictNotice() {
   );
 }
 
+type AutoReplyTemplateView = {
+  selectedTemplate?: AutoReplyTemplateKey;
+  onTemplateChange?: (template: AutoReplyTemplateKey) => void;
+};
+
 export function AutoReplySettingsForm({
   repository,
   settings,
   canManage,
   canAuthorize,
+  selectedTemplate,
+  onTemplateChange,
 }: {
   repository: Repository;
   settings: RepositoryAutoReplySettings;
   canManage: boolean;
   canAuthorize: boolean;
-}) {
+} & AutoReplyTemplateView) {
   const queryClient = useQueryClient();
   const guardedAction = useGuardedAction();
   const [saved, setSaved] = useState(settings);
@@ -193,8 +214,13 @@ export function AutoReplySettingsForm({
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
-  const [template, setTemplate] = useState<AutoReplyTemplateKey>("pullRequest");
-  const [editingTemplates, setEditingTemplates] = useState(false);
+  const [localTemplate, setLocalTemplate] = useState<AutoReplyTemplateKey>("pullRequest");
+  const template = onTemplateChange ? (selectedTemplate ?? "pullRequest") : localTemplate;
+  const setTemplate = (value: AutoReplyTemplateKey) => {
+    setLocalTemplate(value);
+    onTemplateChange?.(value);
+  };
+  const [editingTemplates, setEditingTemplates] = useState(Boolean(selectedTemplate));
   const [preview, setPreview] = useState(false);
   const [authorization, setAuthorization] = useState<AutoReplyAuthorization | null>(null);
   const [fieldErrors, setFieldErrors] = useState<ReturnType<typeof autoReplySettingsFieldErrors>>(
@@ -203,8 +229,16 @@ export function AutoReplySettingsForm({
   const templateRef = useRef<HTMLInputElement>(null);
   const [pendingFocus, setPendingFocus] = useState<AutoReplyTemplateKey | null>(null);
   const alive = useRef(true);
-  const dirty = JSON.stringify(form) !== JSON.stringify(autoReplySettingsFormValues(saved));
-  useUnsavedChanges(dirty, { busy, description: "Automatic replies have unsaved changes." });
+  const dirty = autoReplySettingsHaveChanges(form, saved);
+  useEffect(() => {
+    if (selectedTemplate) setEditingTemplates(true);
+  }, [selectedTemplate]);
+  useUnsavedChanges(dirty, {
+    busy,
+    description: "Automatic replies have unsaved changes.",
+    allowPresentationNavigation: true,
+    presentationParameters: ["replyTemplate"],
+  });
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -248,7 +282,14 @@ export function AutoReplySettingsForm({
     queryClient.setQueryData(autoReplySettingsQueryKey(repository.id), value);
   };
   const save = async (reauthorize = false, submittedForm = form, submittedSettings = saved) => {
-    if (!canManage || busy || conflict || (submittedForm.enabled && !canAuthorize)) return;
+    if (
+      !canManage ||
+      busy ||
+      conflict ||
+      (submittedForm.enabled && !canAuthorize) ||
+      (!reauthorize && !autoReplySettingsHaveChanges(submittedForm, submittedSettings))
+    )
+      return;
     setAuthorization(null);
     setBusy(true);
     setError(undefined);
@@ -289,7 +330,8 @@ export function AutoReplySettingsForm({
   };
   const requestSave = (event?: FormEvent, renew = false) => {
     event?.preventDefault();
-    if (!canManage || busy || conflict || (form.enabled && !canAuthorize)) return;
+    if (!canManage || busy || conflict || (form.enabled && !canAuthorize) || (!dirty && !renew))
+      return;
     const errors = autoReplySettingsFieldErrors(form);
     setFieldErrors(errors);
     const invalid = templateKeys.find((key) => errors[key]);
@@ -617,7 +659,7 @@ export function AutoReplySettingsForm({
             <Button
               type="submit"
               variant="contained"
-              disabled={busy || conflict || (form.enabled && !canAuthorize)}
+              disabled={busy || conflict || !dirty || (form.enabled && !canAuthorize)}
             >
               {busy
                 ? "Working…"
@@ -870,22 +912,27 @@ function ReplyDeliveryList({
   );
 }
 
-export function RepositoryAutoReplySettingsPanel({ repository }: { repository: Repository }) {
+export function RepositoryAutoReplySettingsPanel({
+  repository,
+  ...view
+}: { repository: Repository } & AutoReplyTemplateView) {
   const { session } = useInvestigationSession();
   const permissions = autoReplySettingsPermissions(repository.id, session.user);
   if (!permissions.canRead) return null;
-  return <ScopedAutoReplySettingsPanel repository={repository} {...permissions} />;
+  return <ScopedAutoReplySettingsPanel repository={repository} {...permissions} {...view} />;
 }
 
 function ScopedAutoReplySettingsPanel({
   repository,
   canManage,
   canAuthorize,
+  selectedTemplate,
+  onTemplateChange,
 }: {
   repository: Repository;
   canManage: boolean;
   canAuthorize: boolean;
-}) {
+} & AutoReplyTemplateView) {
   const settings = useQuery({
     queryKey: autoReplySettingsQueryKey(repository.id),
     queryFn: () => investigationApi.repositoryAutoReplySettings(repository.id),
@@ -910,6 +957,8 @@ function ScopedAutoReplySettingsPanel({
           settings={settings.data}
           canManage={canManage}
           canAuthorize={canAuthorize}
+          selectedTemplate={selectedTemplate}
+          onTemplateChange={onTemplateChange}
         />
       )}
       <Divider />

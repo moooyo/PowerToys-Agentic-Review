@@ -10,6 +10,7 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   CircularProgress,
   Dialog,
   DialogActions,
@@ -85,6 +86,17 @@ export function commentPublicationFilters(
   };
 }
 
+export function commentPublicationFilterUrl(
+  filters: ReturnType<typeof commentPublicationFilters>,
+  remove?: Exclude<keyof ReturnType<typeof commentPublicationFilters>, "repositoryId">,
+): string {
+  const parameters = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (key !== remove && value !== undefined) parameters.set(key, String(value));
+  }
+  return `/comments${parameters.size ? `?${parameters.toString()}` : ""}`;
+}
+
 export function CommentDetails({ commentId }: { commentId: string }) {
   const scope = useInvestigationRepositoryScope();
   const query = useQuery({
@@ -111,10 +123,10 @@ export function CommentDetails({ commentId }: { commentId: string }) {
     refetchIntervalInBackground: false,
   });
   if (query.isPending) return <CircularProgress size={28} aria-label="Loading comment" />;
-  if (query.isError)
+  if (!query.data)
     return (
       <Alert severity="error">
-        {query.error.message}
+        {query.error?.message ?? "The publication could not be loaded."}
         <Button onClick={() => void query.refetch()}>Retry</Button>
       </Alert>
     );
@@ -148,6 +160,13 @@ export function CommentDetails({ commentId }: { commentId: string }) {
         <CommentStatus comment={comment} />
       </PageHeading>
       <CommentContextLinks comment={comment} />
+      {query.isError && (
+        <Alert severity="error">
+          {query.error.message} The last loaded publication and retained history remain visible.
+          Refresh before scheduling a new operation.
+          <Button onClick={() => void query.refetch()}>Refresh publication</Button>
+        </Alert>
+      )}
       <Box className="comments-detail-grid">
         <Stack spacing={3} sx={{ minWidth: 0 }}>
           <Surface sx={{ p: { xs: 2, sm: 3 } }}>
@@ -216,7 +235,7 @@ export function CommentDetails({ commentId }: { commentId: string }) {
             <Typography variant="h6" sx={{ mb: 2 }}>
               Delivery options
             </Typography>
-            <CommentPublicationControls comment={comment} />
+            <CommentPublicationControls comment={comment} stale={query.isError} />
           </Surface>
         </Stack>
         <Stack spacing={2} sx={{ minWidth: 0 }}>
@@ -256,6 +275,19 @@ function PublicationDirectory({
     refetchOnWindowFocus: true,
   });
   const activeFilters = Object.keys(filters).filter((key) => key !== "repositoryId").length;
+  const filterLabels = {
+    search: filters.search ? `Search: ${filters.search}` : undefined,
+    state: filters.state ? `State: ${publicationLabels[filters.state]}` : undefined,
+    mode: filters.mode
+      ? `Type: ${filters.mode === "progress" ? "Progress updates" : "Review results"}`
+      : undefined,
+    taskKind: filters.taskKind ? "Producer: E2E tasks" : undefined,
+    taskId: filters.taskId ? `Task ID: ${filters.taskId}` : undefined,
+    workItemNumber: filters.workItemNumber ? `Source: #${filters.workItemNumber}` : undefined,
+    workItemId: filters.workItemId ? `Source ID: ${filters.workItemId}` : undefined,
+  };
+  const removeFilter = (key: keyof typeof filterLabels) =>
+    navigate(commentPublicationFilterUrl(filters, key));
   const clear = () =>
     navigate(
       `/comments${filters.repositoryId ? `?repositoryId=${encodeURIComponent(filters.repositoryId)}` : ""}`,
@@ -360,14 +392,49 @@ function PublicationDirectory({
         </Button>
         <Button
           startIcon={<FilterListRounded />}
-          className="comments-mobile-filter"
+          className="comments-more-filters"
           variant={activeFilters ? "contained" : "outlined"}
           onClick={() => setFiltersOpen(true)}
         >
-          Filters{activeFilters ? ` (${activeFilters})` : ""}
+          More filters{activeFilters ? ` (${activeFilters})` : ""}
         </Button>
         {activeFilters > 0 && <Button onClick={clear}>Clear</Button>}
       </Box>
+      {activeFilters > 0 && (
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ flexWrap: "wrap" }}
+          role="group"
+          aria-label="Active comment filters"
+        >
+          {Object.entries(filterLabels).map(
+            ([key, label]) =>
+              label && (
+                <Chip
+                  key={key}
+                  label={label}
+                  variant="outlined"
+                  onClick={() => removeFilter(key as keyof typeof filterLabels)}
+                  onDelete={() => removeFilter(key as keyof typeof filterLabels)}
+                  aria-label={`Remove ${label}`}
+                  sx={{
+                    maxWidth: "100%",
+                    height: "auto",
+                    minHeight: 44,
+                    "@media (pointer: coarse)": { minHeight: 48 },
+                    "& .MuiChip-label": {
+                      whiteSpace: "normal",
+                      overflowWrap: "anywhere",
+                      py: 0.75,
+                    },
+                  }}
+                />
+              ),
+          )}
+        </Stack>
+      )}
       {(filters.taskId || filters.workItemNumber || filters.workItemId) && (
         <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
           Showing{" "}
@@ -481,8 +548,9 @@ function PublicationDirectory({
               />
               <TextField
                 name="taskId"
-                label="Task ID"
+                label="Exact Task ID"
                 defaultValue={filters.taskId ?? ""}
+                helperText="Filter by the recorded Task ID, independently of the source number."
                 fullWidth
               />
             </Stack>

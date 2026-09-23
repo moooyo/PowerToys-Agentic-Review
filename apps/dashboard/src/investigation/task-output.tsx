@@ -34,9 +34,12 @@ import {
   exportLoadedOutput,
   latestAttemptInvocation,
   mergeTaskOutput,
+  normalizeTaskOutputView,
   type OutputItem,
+  orderedTaskAttempts,
   outputMatches,
   type TaskOutputState,
+  type TaskOutputView,
 } from "./task-output-state";
 import { InvestigationHttpError } from "./transport";
 import "./task-output.css";
@@ -143,6 +146,9 @@ interface TaskOutputProps {
   attempts: InvestigationAttemptV1[];
   attemptId?: string;
   onAttemptChange: (attemptId: string) => void;
+  onHistory?: () => void;
+  view?: TaskOutputView;
+  onViewChange?: (view: TaskOutputView) => void;
   summary?: InvestigationUsageSummary;
   invocations?: InvestigationModelInvocationReceipt[];
 }
@@ -173,6 +179,9 @@ function TaskOutputReader({
   attempts,
   attemptId,
   onAttemptChange,
+  onHistory,
+  view,
+  onViewChange,
   summary,
   invocations,
   identity,
@@ -198,10 +207,18 @@ function TaskOutputReader({
     (value: boolean) => queryClient.setQueryData(accessKey, value),
     [queryClient, accessKey],
   );
+  const [localView, setLocalView] = useState<TaskOutputView>({ search: "", type: "all" });
+  const currentView = normalizeTaskOutputView(view ?? localView);
+  const search = currentView.search;
+  const filter = currentView.type;
   const [searchOpen, setSearchOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("all");
-  const [following, setFollowing] = useState(true);
+  const searchVisible = searchOpen || !!search || filter !== "all";
+  const updateView = (next: Partial<TaskOutputView>) => {
+    const updated = normalizeTaskOutputView({ ...currentView, ...next });
+    if (view === undefined) setLocalView(updated);
+    onViewChange?.(updated);
+  };
+  const [following, setFollowing] = useState(!search && filter === "all");
   const [seenCount, setSeenCount] = useState(0);
   const [exportError, setExportError] = useState<string>();
   const viewport = useRef<HTMLDivElement>(null);
@@ -209,7 +226,10 @@ function TaskOutputReader({
   const searchTrigger = useRef<HTMLButtonElement>(null);
   const terminalQuietPolls = useRef(0);
   const wasActive = useRef<boolean | undefined>(undefined);
-  const selectedAttempt = attempts.find((attempt) => attempt.id === attemptId);
+  const orderedAttempts = orderedTaskAttempts(task.id, attempts);
+  const selectedAttempt = orderedAttempts.find((attempt) => attempt.id === attemptId);
+  const latestAttempt = orderedAttempts[0];
+  const historical = Boolean(selectedAttempt && latestAttempt?.id !== selectedAttempt.id);
   const active =
     selectedAttempt !== undefined &&
     ["queued", "leased", "running"].includes(selectedAttempt.state);
@@ -284,6 +304,9 @@ function TaskOutputReader({
   useEffect(() => {
     if (searchOpen) searchInput.current?.focus();
   }, [searchOpen]);
+  useEffect(() => {
+    if (search || filter !== "all") setFollowing(false);
+  }, [search, filter]);
   const disconnected = query.isError && !inaccessible;
   const lastReceived = output.items.reduce(
     (latest, item) => Math.max(latest, Date.parse(item.receivedAt)),
@@ -314,8 +337,7 @@ function TaskOutputReader({
   };
   const closeSearch = () => {
     setSearchOpen(false);
-    setSearch("");
-    setFilter("all");
+    updateView({ search: "", type: "all" });
     searchTrigger.current?.focus();
   };
   const download = () => {
@@ -356,7 +378,9 @@ function TaskOutputReader({
           spacing={1.5}
           sx={{ alignItems: "center", flexWrap: "wrap" }}
         >
-          <Typography variant="h6">Agent output</Typography>
+          <Typography component="h2" variant="h6">
+            Agent output
+          </Typography>
           {call && (
             <Typography variant="caption" color="text.secondary">
               {call.engine === "copilot" ? "Copilot CLI" : "Codex CLI"}
@@ -370,7 +394,7 @@ function TaskOutputReader({
           />
         </Stack>
         <Box className="task-output-actions">
-          {attempts.length > 0 && (
+          {orderedAttempts.length > 0 && (
             <TextField
               select
               size="small"
@@ -379,21 +403,21 @@ function TaskOutputReader({
               onChange={(event) => onAttemptChange(event.target.value)}
               sx={{ minWidth: 136, maxWidth: 220 }}
             >
-              {[...attempts]
-                .sort((left, right) => right.number - left.number)
-                .map((attempt) => (
-                  <MenuItem key={attempt.id} value={attempt.id}>
-                    Attempt {attempt.number} · {attempt.state}
-                  </MenuItem>
-                ))}
+              {orderedAttempts.map((attempt) => (
+                <MenuItem key={attempt.id} value={attempt.id}>
+                  Attempt {attempt.number}
+                  {attempt.id === latestAttempt?.id ? " · latest" : " · historical"} ·{" "}
+                  {attempt.state}
+                </MenuItem>
+              ))}
             </TextField>
           )}
           <Tooltip title="Find or filter output">
             <IconButton
               ref={searchTrigger}
               aria-label="Find or filter output"
-              aria-expanded={searchOpen}
-              onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
+              aria-expanded={searchVisible}
+              onClick={() => (searchVisible ? closeSearch() : setSearchOpen(true))}
             >
               <SearchRounded />
             </IconButton>
@@ -420,13 +444,28 @@ function TaskOutputReader({
           </Tooltip>
         </Box>
       </Box>
+      {selectedAttempt && (
+        <Box className="task-output-attempt-context" sx={{ bgcolor: "action.hover" }}>
+          <Typography variant="body2" color="text.secondary">
+            {historical ? "Historical" : "Latest"} attempt {selectedAttempt.number} ·{" "}
+            {selectedAttempt.state}.
+            {historical
+              ? " This output does not describe the latest attempt."
+              : " Output and task outcome are separate records."}
+          </Typography>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+            {historical && <Button onClick={() => onAttemptChange("")}>Latest attempt</Button>}
+            {onHistory && <Button onClick={onHistory}>Attempt history</Button>}
+          </Stack>
+        </Box>
+      )}
       <AgentRuntimeMetadata
         taskId={task.id}
         attemptId={attemptId}
         summary={summary}
         invocations={invocations}
       />
-      {searchOpen && (
+      {searchVisible && (
         <Box
           className="task-output-search"
           sx={{ borderBottom: 1, borderColor: "divider" }}
@@ -444,10 +483,11 @@ function TaskOutputReader({
             label="Find in loaded output"
             value={search}
             onChange={(event) => {
-              setSearch(event.target.value);
+              updateView({ search: event.target.value });
               if (event.target.value) setFollowing(false);
             }}
             sx={{ flex: "1 1 180px" }}
+            slotProps={{ htmlInput: { maxLength: 160 } }}
           />
           <TextField
             select
@@ -455,7 +495,7 @@ function TaskOutputReader({
             label="Event type"
             value={filter}
             onChange={(event) => {
-              setFilter(event.target.value);
+              updateView(normalizeTaskOutputView({ search, type: event.target.value }));
               setFollowing(false);
             }}
             sx={{ minWidth: 140 }}
@@ -560,8 +600,7 @@ function TaskOutputReader({
               <Button
                 sx={{ mt: 1 }}
                 onClick={() => {
-                  setSearch("");
-                  setFilter("all");
+                  updateView({ search: "", type: "all" });
                 }}
               >
                 Clear filters

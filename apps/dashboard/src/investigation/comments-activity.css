@@ -15,6 +15,7 @@
 }
 .comments-filter-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: center;
   min-width: 0;
@@ -29,8 +30,9 @@
   gap: 12px;
   min-width: 0;
 }
-.comments-filter-bar .comments-mobile-filter {
-  display: none;
+.comments-filter-bar .comments-more-filters {
+  display: inline-flex;
+  min-height: 44px;
 }
 .comments-record {
   display: grid;
@@ -129,10 +131,6 @@
   }
   .comments-desktop-filters {
     display: none;
-  }
-  .comments-filter-bar .comments-mobile-filter {
-    display: inline-flex;
-    min-height: 44px;
   }
   .comments-desktop-apply {
     display: none !important;

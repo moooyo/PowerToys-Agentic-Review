@@ -50,9 +50,13 @@ const operator: InvestigationSessionUser = {
   allowRepositoryExecution: true,
 };
 
-vi.mock("./session", () => ({
-  useInvestigationSession: () => ({ session: { authenticated: true, user: operator } }),
-}));
+vi.mock("./session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./session")>();
+  return {
+    ...actual,
+    useInvestigationSession: () => ({ session: { authenticated: true, user: operator } }),
+  };
+});
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -488,6 +492,7 @@ describe("webhook event management", () => {
       </QueryClientProvider>,
     );
     expect(html).toContain("Recovery request unconfirmed");
+    expect(html).toContain("Refresh event status");
     expect(html).toContain("Resend saved request");
     expect(html).not.toContain(">Retry event handling</button>");
     const list = renderToStaticMarkup(
@@ -790,6 +795,30 @@ describe("webhook event management", () => {
     expect(html).toContain("taskId=existing-task");
     expect(html).toMatch(/datetime="2026-09-19T02:00:00\.000Z"/i);
     expect(html).not.toContain("Retry event handling");
+    queryClient.clear();
+  });
+
+  it("keeps the recorded GitHub source visible after a read failure and blocks a new recovery", async () => {
+    const queryClient = client();
+    queryClient.setQueryData(webhookDeliveryQueryKey("delivery-1"), delivery());
+    queryClient.setQueryData(["investigation-repositories"], { items: [] });
+    await queryClient.prefetchQuery({
+      queryKey: webhookDeliveryQueryKey("delivery-1"),
+      queryFn: () => Promise.reject(new Error("Event refresh unavailable")),
+    });
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={[webhookDetailsUrl("delivery-1", "repo-1")]}>
+        <QueryClientProvider client={queryClient}>
+          <WebhookDeliveryDetails deliveryId="delivery-1" />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(html).toContain("Event refresh unavailable");
+    expect(html).toContain("last loaded event and linked work remain visible");
+    expect(html).toContain('href="https://github.com/owner/repository/pull/7"');
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('rel="noopener noreferrer"');
+    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Retry event handling<\/button>/u);
     queryClient.clear();
   });
 });

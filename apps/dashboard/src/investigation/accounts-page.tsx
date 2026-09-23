@@ -25,10 +25,12 @@ import {
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   type AccountDirectoryFilter,
   AccountFormError,
   type AccountFormValues,
+  accountDirectoryFilters,
   accountFormIsDirty,
   accountFormValues,
   accountPasswordResetProblems,
@@ -371,11 +373,12 @@ function AccountEditor({
   const [error, setError] = useState<string>();
   const [fieldError, setFieldError] = useState<AccountFormError>();
   const review = useAccountReview(account, reloadAccount);
-  const dirty = accountFormIsDirty(form, account);
+  const baseline = review.reviewed && review.latest ? review.latest : account;
+  const dirty = accountFormIsDirty(form, baseline);
   useUnsavedChanges(dirty, {
     busy: busy || review.loading,
     description: "Your unsaved account changes will be discarded.",
-    onDiscard: () => setForm(accountFormValues(account)),
+    onDiscard: () => setForm(accountFormValues(baseline)),
   });
   const close = () => guardedAction(onClose);
   const setField = <K extends keyof AccountFormValues>(field: K, value: AccountFormValues[K]) => {
@@ -384,7 +387,7 @@ function AccountEditor({
   };
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (pending.current || !review.ready || review.loading) return;
+    if (pending.current || !review.ready || review.loading || (account && !dirty)) return;
     pending.current = true;
     setBusy(true);
     setError(undefined);
@@ -598,7 +601,7 @@ function AccountEditor({
           type="submit"
           form={formId}
           variant="contained"
-          disabled={busy || review.loading || !review.ready}
+          disabled={busy || review.loading || !review.ready || Boolean(account && !dirty)}
         >
           {busy ? "Saving…" : account ? "Save changes" : "Create account"}
         </Button>
@@ -803,8 +806,14 @@ function AdminAccountsPage() {
   const [editor, setEditor] = useState<{ account?: Account }>();
   const [passwordAccount, setPasswordAccount] = useState<Account>();
   const [notice, setNotice] = useState<string>();
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<AccountDirectoryFilter>("all");
+  const [parameters, setParameters] = useSearchParams();
+  const { search, filter } = accountDirectoryFilters(parameters.toString());
+  const setView = (nextSearch: string, nextFilter: AccountDirectoryFilter, replace = false) => {
+    const next = new URLSearchParams();
+    if (nextSearch) next.set("q", nextSearch.slice(0, 200));
+    if (nextFilter !== "all") next.set("status", nextFilter);
+    setParameters(next, { replace });
+  };
   const guardedAction = useGuardedAction();
   const visibleAccounts = filterAccounts(accounts.data?.items ?? [], search, filter);
   const reloadAccount = async (id: string) => {
@@ -819,8 +828,7 @@ function AdminAccountsPage() {
   const onSaved = async (account: Account, created: boolean) => {
     setEditor(undefined);
     if (created) {
-      setSearch("");
-      setFilter("all");
+      setView("", "all", true);
     }
     setNotice(`${account.username} was ${created ? "created" : "updated"}.`);
     if (account.id === session.user?.id) await refresh();
@@ -864,11 +872,12 @@ function AdminAccountsPage() {
         <TextField
           label="Search accounts"
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => setView(event.target.value, filter, true)}
           placeholder="Name, username, or repository ID"
           size="small"
           sx={{ width: { xs: "100%", sm: 340 }, maxWidth: "100%" }}
           slotProps={{
+            htmlInput: { maxLength: 200 },
             input: {
               startAdornment: (
                 <InputAdornment position="start">
@@ -896,7 +905,7 @@ function AdminAccountsPage() {
               aria-pressed={filter === value}
               color={filter === value ? "primary" : "default"}
               variant={filter === value ? "filled" : "outlined"}
-              onClick={() => setFilter(value)}
+              onClick={() => setView(search, value)}
               sx={{ minHeight: 44, "@media (pointer: coarse)": { minHeight: 48 } }}
             />
           ))}
@@ -1089,8 +1098,7 @@ function AdminAccountsPage() {
               action={
                 <Button
                   onClick={() => {
-                    setSearch("");
-                    setFilter("all");
+                    setView("", "all");
                   }}
                 >
                   Clear filters

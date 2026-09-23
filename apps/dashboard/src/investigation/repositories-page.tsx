@@ -19,10 +19,10 @@ import {
   Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { investigationApi, type Repository } from "./api";
 import { autoReplySettingsQueryKey, RepositoryAutoReplySettingsPanel } from "./auto-reply-settings";
+import type { AutoReplyTemplateKey } from "./auto-reply-settings-form";
 import { ImportWorkItemButton } from "./import-work-item";
 import { useGuardedAction } from "./navigation-guard";
 import { SchedulerPanel } from "./scheduler-panel";
@@ -55,6 +55,14 @@ function RepositoryTabScrollButton(props: TabScrollButtonProps) {
 
 export function repositorySettingsTab(value: string | null): SettingsTab {
   return repositorySettingsTabs.find((tab) => tab === value) ?? "overview";
+}
+
+export function repositoryReplyTemplate(value: string | null): AutoReplyTemplateKey | undefined {
+  return ["pullRequest", "issue", "received", "started", "failed", "completed"].includes(
+    value ?? "",
+  )
+    ? (value as AutoReplyTemplateKey)
+    : undefined;
 }
 
 function useRepositorySettings(repository: Repository) {
@@ -232,7 +240,13 @@ function RepositoryOverview({
 export default function RepositoriesPage() {
   const { session } = useInvestigationSession();
   const [params, setParams] = useSearchParams();
-  const [search, setSearch] = useState("");
+  const search = (params.get("q") ?? "").slice(0, 200);
+  const setSearch = (value: string) => {
+    const next = new URLSearchParams(params);
+    if (value) next.set("q", value.slice(0, 200));
+    else next.delete("q");
+    setParams(next, { replace: true });
+  };
   const guardedAction = useGuardedAction();
   const repositoryIds = session.user?.repositoryIds ?? [];
   const query = useQuery({
@@ -244,9 +258,17 @@ export default function RepositoriesPage() {
   const repositories = (query.data?.items ?? []).filter((item) => repositoryIds.includes(item.id));
   const selected = repositories.find((item) => item.id === selectedId);
   const tab = repositorySettingsTab(params.get("tab"));
+  const replyTemplate = repositoryReplyTemplate(params.get("replyTemplate"));
   const open = (repositoryId?: string, nextTab: SettingsTab = "overview") =>
     guardedAction(() => {
-      setParams(repositoryId ? { repositoryId, tab: nextTab } : {});
+      const next = new URLSearchParams();
+      if (search) next.set("q", search);
+      if (repositoryId) {
+        next.set("repositoryId", repositoryId);
+        next.set("tab", nextTab);
+        if (repositoryId === selectedId && replyTemplate) next.set("replyTemplate", replyTemplate);
+      }
+      setParams(next);
     });
   const filtered = repositories.filter((item) =>
     (item.fullName + " " + item.id + " " + item.githubRepositoryId)
@@ -318,7 +340,18 @@ export default function RepositoriesPage() {
           )}
           {tab === "replies" && (
             <Surface sx={{ p: { xs: 2, sm: 3.5 } }}>
-              <RepositoryAutoReplySettingsPanel repository={selected} />
+              <RepositoryAutoReplySettingsPanel
+                repository={selected}
+                selectedTemplate={replyTemplate}
+                onTemplateChange={(value) => {
+                  const next = new URLSearchParams();
+                  next.set("repositoryId", selected.id);
+                  next.set("tab", "replies");
+                  next.set("replyTemplate", value);
+                  if (search) next.set("q", search);
+                  setParams(next, { replace: true });
+                }}
+              />
             </Surface>
           )}
           {tab === "scheduling" && <SchedulerPanel />}
@@ -362,6 +395,7 @@ export default function RepositoriesPage() {
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 slotProps={{
+                  htmlInput: { maxLength: 200 },
                   input: {
                     startAdornment: (
                       <InputAdornment position="start">

@@ -3,12 +3,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { createSampleInvestigationApi } from "./sample-adapter";
+import { sourceReportKey } from "./source-result";
 import { WorkItemsPage } from "./work-items-page";
 
 vi.mock("./session", () => ({
   sessionIdentity: () => "source-list-test",
   useInvestigationSession: () => ({
-    session: { authenticated: true, user: { id: "reader", permissions: [], repositoryIds: [] } },
+    session: {
+      authenticated: true,
+      user: { id: "reader", permissions: [], repositoryIds: ["repo-powertoys-fork"] },
+    },
   }),
 }));
 
@@ -19,7 +23,9 @@ async function fixture() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, retryOnMount: false, gcTime: Infinity } },
   });
-  queryClient.setQueryData(["investigation-repositories"], { items: [task.repository] });
+  queryClient.setQueryData(["investigation-repositories", "source-list-test"], {
+    items: [task.repository],
+  });
   queryClient.setQueryData(["investigation-work-items", undefined, "pull_request"], {
     items: [source],
   });
@@ -37,6 +43,19 @@ function render(queryClient: QueryClient, entry = "/pull-requests") {
 }
 
 describe("source list presentation", () => {
+  it("presents the saved conclusion and validation independently of completed execution", async () => {
+    const { queryClient, source, task } = await fixture();
+    const header = await createSampleInvestigationApi().report("sample-pr-p1-report");
+    queryClient.setQueryData(["investigation-tasks", "source-list"], { items: [task] });
+    queryClient.setQueryData(sourceReportKey("source-list-test", source.id, task), header);
+    const html = render(queryClient);
+    expect(html).toContain("Changes needed");
+    expect(html).toContain("E2E required");
+    expect(html).toContain("Completed");
+    expect(html).toContain(task.repository.fullName);
+    expect(html).not.toContain("Loading conclusion");
+  });
+
   it("shows a compact source with a distinct investigation state and no single-page controls", async () => {
     const { queryClient, source, task } = await fixture();
     queryClient.setQueryData(["investigation-tasks", "source-list"], {

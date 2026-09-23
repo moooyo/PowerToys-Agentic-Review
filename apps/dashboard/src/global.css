@@ -1,12 +1,12 @@
 :root {
-  --app-canvas: var(--mui-palette-background-default, #f5f8fc);
+  --app-canvas: var(--mui-palette-background-default, #faf9fd);
   --app-surface: var(--mui-palette-background-paper, #fff);
-  --app-text: var(--mui-palette-text-primary, #172b3a);
-  --app-muted: var(--mui-palette-text-secondary, #465c70);
-  --app-line: var(--mui-palette-divider, #cfd9e4);
-  --app-accent: var(--mui-palette-primary-main, #1565c0);
-  --app-accent-soft: var(--app-primary-container, #e3f2fd);
-  --app-hover: var(--mui-palette-action-hover, rgb(23 43 58 / 8%));
+  --app-text: var(--mui-palette-text-primary, #1b1d24);
+  --app-muted: var(--mui-palette-text-secondary, #505966);
+  --app-line: var(--mui-palette-divider, #d4dae5);
+  --app-accent: var(--mui-palette-primary-main, #345ead);
+  --app-accent-soft: var(--app-primary-container, #dce6ff);
+  --app-hover: var(--mui-palette-action-hover, rgb(52 94 173 / 8%));
   --app-body-font: "Roboto", "Segoe UI", sans-serif;
   --app-display-font: var(--app-body-font);
   --app-heading-font: var(--app-body-font);
@@ -31,6 +31,13 @@ body {
 }
 a {
   color: inherit;
+  text-underline-offset: 3px;
+}
+button,
+select,
+summary,
+a {
+  touch-action: manipulation;
 }
 button,
 input,
@@ -63,6 +70,11 @@ code,
 pre {
   font-family: var(--app-code-font);
 }
+summary {
+  min-height: 40px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
 pre {
   font-size: 0.875rem;
   line-height: 1.5;
@@ -78,10 +90,16 @@ pre {
   *::before,
   *::after {
     /* biome-ignore lint/complexity/noImportantStyles: Reduced motion must override component animations. */
-    animation-duration: 0.01ms !important;
+    animation: none !important;
     /* biome-ignore lint/complexity/noImportantStyles: Reduced motion must override component transitions. */
-    transition-duration: 0.01ms !important;
+    transition: none !important;
     /* biome-ignore lint/complexity/noImportantStyles: Reduced motion must override smooth scrolling. */
     scroll-behavior: auto !important;
+  }
+}
+@media (forced-colors: active) {
+  :focus-visible,
+  .MuiButtonBase-root.Mui-focusVisible {
+    outline: 3px solid Highlight;
   }
 }

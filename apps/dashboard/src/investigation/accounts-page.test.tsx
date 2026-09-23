@@ -1,8 +1,10 @@
 import type { InvestigationSession } from "@agentic-review/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  accountDirectoryFilters,
   accountFormIsDirty,
   accountFormValues,
   accountPasswordResetProblems,
@@ -49,11 +51,13 @@ function client() {
   });
 }
 
-function renderPage(queryClient: QueryClient) {
+function renderPage(queryClient: QueryClient, url = "/accounts") {
   return renderToStaticMarkup(
-    <QueryClientProvider client={queryClient}>
-      <AccountsPage />
-    </QueryClientProvider>,
+    <MemoryRouter initialEntries={[url]}>
+      <QueryClientProvider client={queryClient}>
+        <AccountsPage />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 
@@ -154,6 +158,21 @@ describe("account administration access", () => {
 });
 
 describe("typed account forms", () => {
+  it("restores only bounded public account filters from the URL", () => {
+    expect(accountDirectoryFilters("?q=reviewer&status=disabled&password=private")).toEqual({
+      search: "reviewer",
+      filter: "disabled",
+    });
+    expect(accountDirectoryFilters("?status=unknown")).toEqual({ search: "", filter: "all" });
+    expect(accountDirectoryFilters(`?q=${"a".repeat(240)}`).search).toHaveLength(200);
+    const queryClient = client();
+    queryClient.setQueryData(["investigation-accounts"], { items: [account] });
+    const html = renderPage(queryClient, "/accounts?q=workspace&status=disabled");
+    expect(html).toContain('value="workspace"');
+    expect(html).toContain("0 of 1 accounts");
+    expect(html).not.toContain('aria-label="Open account workspace.admin"');
+    queryClient.clear();
+  });
   it("filters the directory by identity, exact stored repository text, and enabled state", () => {
     const disabled = {
       ...account,
@@ -207,6 +226,31 @@ describe("typed account forms", () => {
     expect(input.repositoryIds).toEqual([]);
     expect(input.actionCapabilities).toEqual([]);
     expect(input.allowRepositoryExecution).toBe(false);
+  });
+
+  it("compares the saved account with the net normalized values and preserves actual access changes", () => {
+    const saved: Account = {
+      ...account,
+      repositoryIds: ["repo-a", "repo-b"],
+      permissions: ["task:create", "action:prepare"],
+      actionCapabilities: ["comment", "approve"],
+    };
+    const form = {
+      ...accountFormValues(saved),
+      displayName: `  ${saved.displayName}  `,
+      repositoryIdsText: " repo-b, repo-a\nrepo-b ",
+      permissions: ["action:prepare", "task:create"] as Account["permissions"],
+      actionCapabilities: ["approve", "comment"] as Account["actionCapabilities"],
+    };
+    expect(accountFormIsDirty(form, saved)).toBe(false);
+    expect(accountFormIsDirty({ ...form, repositoryIdsText: "repo-a" }, saved)).toBe(true);
+    expect(accountFormIsDirty({ ...form, enabled: false }, saved)).toBe(true);
+    const changedElsewhere = {
+      ...saved,
+      version: saved.version + 1,
+      actionCapabilities: ["comment"] as Account["actionCapabilities"],
+    };
+    expect(accountFormIsDirty(form, changedElsewhere)).toBe(true);
   });
 
   it("validates username and password boundaries using the shared contracts", () => {

@@ -5,6 +5,7 @@ import type {
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
+  actionExecutionAccess,
   actionIntentMatchesContext,
   assertActionPreparationBindings,
   ExactActionPreview,
@@ -43,6 +44,66 @@ function readablePreview(payload: InvestigationActionPayload): string {
 }
 
 describe("exact saved action preview", () => {
+  it("requires task creation and repository execution for follow-up confirm and reconcile", () => {
+    for (const action of ["start-task", "reviews.verify"] as const) {
+      const user = {
+        permissions: ["action:execute", "task:create"],
+        actionCapabilities: [action],
+        allowRepositoryExecution: true,
+      };
+      expect(actionExecutionAccess(user, action).allowed).toBe(true);
+      const noCreate = actionExecutionAccess({ ...user, permissions: ["action:execute"] }, action);
+      expect(noCreate.allowed).toBe(false);
+      expect(noCreate.reason).toContain("Create investigations");
+      const noExecution = actionExecutionAccess(
+        { ...user, allowRepositoryExecution: false },
+        action,
+      );
+      expect(noExecution.allowed).toBe(false);
+      expect(noExecution.reason).toContain("repository execution");
+      expect(actionExecutionAccess({ ...user, actionCapabilities: [] }, action).allowed).toBe(
+        false,
+      );
+    }
+    expect(
+      actionExecutionAccess(
+        {
+          permissions: ["action:execute"],
+          actionCapabilities: ["comment"],
+          allowRepositoryExecution: false,
+        },
+        "comment",
+      ).allowed,
+    ).toBe(true);
+  });
+  it("shows text drafts once in the summary and suggestion text once inline", () => {
+    const html = readablePreview({
+      kind: "feedback",
+      body: "Intro only once",
+      findingIds: ["finding-text", "finding-code"],
+      drafts: [
+        { id: "text-draft", body: "Plain finding only once", suggestion: null },
+        {
+          id: "code-draft",
+          body: "Inline finding only once",
+          suggestion: {
+            subjectRef: "source",
+            path: "src/file.ts",
+            startLine: 1,
+            endLine: 1,
+            headSha: "a".repeat(40),
+            originalContentDigest: "b".repeat(64),
+            replacement: "replacement();",
+          },
+        },
+      ],
+    });
+    for (const text of ["Intro only once", "Plain finding only once", "Inline finding only once"])
+      expect(html.split(text)).toHaveLength(2);
+    expect(html).toContain("text-draft");
+    expect(html).toContain("Inline comment 1");
+    expect(html).toContain("replacement();");
+  });
   it("renders the server feedback and complete suggestion binding without executing markup", () => {
     const html = readablePreview({
       kind: "feedback",

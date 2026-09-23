@@ -1,9 +1,10 @@
 import {
+  type InvestigationReportHeaderV1,
+  type InvestigationResourceLease,
   type InvestigationTaskV1,
   type InvestigationUsageSummary,
   projectInvestigationCheckpointPresentation,
 } from "@agentic-review/contracts";
-import ArrowBackRounded from "@mui/icons-material/ArrowBackRounded";
 import CheckRounded from "@mui/icons-material/CheckRounded";
 import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
@@ -37,7 +38,7 @@ import {
   Typography,
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useId, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { investigationApi } from "./api";
 import {
@@ -47,15 +48,23 @@ import {
   commentSummariesQueryKey,
   TaskComments,
 } from "./comment-deliveries";
+import { GithubSourceLink } from "./github-source-link";
 import { useUnsavedChanges } from "./navigation-guard";
+import { OutcomeSummary } from "./outcome-summary";
 import { Section, SubjectPanel, TextList } from "./report-sections";
 import { useInvestigationRepositoryScope } from "./repository-scope";
 import { ResumeTaskButton } from "./resume-task";
+import { ReviewQueueBar, type ReviewRecord, useReviewListNavigation } from "./review-navigation";
 import { schedulerQueryKey } from "./scheduler-panel";
 import { sessionIdentity, useInvestigationSession } from "./session";
 import { TaskEvidencePanel } from "./task-evidence";
 import { outputAccessDenied, TaskOutputPanel } from "./task-output";
-import { latestAttemptInvocation } from "./task-output-state";
+import {
+  latestAttemptInvocation,
+  normalizeTaskOutputView,
+  orderedTaskAttempts,
+  selectedTaskAttempt,
+} from "./task-output-state";
 import { TaskProgressPanel } from "./task-progress";
 import { TokenUsagePanel, UsageSummaryLabel } from "./usage-panel";
 import { EmptyState, PageHeading, Surface } from "./workspace-ui";
@@ -82,17 +91,77 @@ const taskKindLabels: Record<InvestigationTaskV1["kind"], string> = {
   "feature-implement": "Feature implementation",
 };
 
+export function taskCleanupPending(
+  task: Pick<InvestigationTaskV1, "id" | "state">,
+  leases: readonly InvestigationResourceLease[] = [],
+): boolean {
+  return leases.some(
+    (lease) =>
+      lease.taskId === task.id &&
+      lease.state !== "released" &&
+      (lease.state === "needs_cleanup" || !["queued", "running"].includes(task.state)),
+  );
+}
+
+export function taskIsActive(
+  task: Pick<InvestigationTaskV1, "id" | "state">,
+  leases: readonly InvestigationResourceLease[] = [],
+): boolean {
+  return ["queued", "running"].includes(task.state) || taskCleanupPending(task, leases);
+}
+
+export function taskReportMatches(
+  task: InvestigationTaskV1,
+  header: InvestigationReportHeaderV1 | null | undefined,
+): header is InvestigationReportHeaderV1 {
+  const ref = task.latestReportRef;
+  return (
+    !!header &&
+    !!ref &&
+    header.context.task.id === task.id &&
+    header.context.task.kind === task.kind &&
+    header.context.repository.id === task.repository.id &&
+    header.context.repository.fullName === task.repository.fullName &&
+    header.context.workItem.id === task.workItem.id &&
+    header.context.workItem.kind === task.workItem.kind &&
+    header.context.workItem.number === task.workItem.number &&
+    header.report.id === ref.id &&
+    header.report.version === ref.version &&
+    header.report.logicalContentDigest === ref.digest
+  );
+}
+
+const taskReviewRecord = (task: InvestigationTaskV1): ReviewRecord => ({
+  kind: "task",
+  id: task.id,
+  workItemId: task.workItem.id,
+  repositoryId: task.repository.id,
+  href: `/tasks?taskId=${encodeURIComponent(task.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`,
+  label: task.workItem.title,
+});
+
 export function TaskList({
   tasks,
   usageByTaskId,
+  resourceLeases,
+  page,
+  onPageChange,
 }: {
   tasks: InvestigationTaskV1[];
   usageByTaskId?: Record<string, InvestigationUsageSummary>;
+  resourceLeases?: readonly InvestigationResourceLease[];
+  page?: number;
+  onPageChange?: (page: number) => void;
 }) {
   const { session } = useInvestigationSession();
-  const [page, setPage] = useState(1);
+  const records = useMemo(() => tasks.map(taskReviewRecord), [tasks]);
+  const listNavigation = useReviewListNavigation({ label: "Tasks", records, complete: true });
+  const [localPage, setLocalPage] = useState(1);
   const pageSize = 10;
-  const currentPage = Math.min(page, Math.max(1, Math.ceil(tasks.length / pageSize)));
+  const currentPage = Math.min(
+    Math.max(1, page ?? localPage),
+    Math.max(1, Math.ceil(tasks.length / pageSize)),
+  );
   const visibleTasks = tasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const usageWorkItemId =
     visibleTasks.length > 0 &&
@@ -142,12 +211,15 @@ export function TaskList({
       </Typography>
       <Box component="ul" aria-label="Investigation tasks" sx={{ listStyle: "none", p: 0, m: 0 }}>
         {visibleTasks.map((task) => {
+          const cleanupPending = taskCleanupPending(task, resourceLeases);
           const comment = comments.data?.items
             .filter((item) => item.taskId === task.id || item.associatedTaskIds?.includes(task.id))
             .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-          const url = `/tasks?taskId=${encodeURIComponent(task.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`;
-          const tone =
-            task.state === "failed"
+          const record = taskReviewRecord(task);
+          const { id: _rowLinkId, ...secondaryLinkProps } = listNavigation.getLinkProps(record);
+          const tone = cleanupPending
+            ? "warning"
+            : task.state === "failed"
               ? "error"
               : task.state === "completed"
                 ? "success"
@@ -156,16 +228,17 @@ export function TaskList({
                   : task.state === "running"
                     ? "primary"
                     : "default";
-          const icon =
-            task.state === "completed" ? (
-              <CheckRounded />
-            ) : task.state === "running" ? (
-              <PlayArrowRounded />
-            ) : ["failed", "blocked", "interrupted"].includes(task.state) ? (
-              <WarningAmberRounded />
-            ) : (
-              <ScheduleRounded />
-            );
+          const icon = cleanupPending ? (
+            <ScheduleRounded />
+          ) : task.state === "completed" ? (
+            <CheckRounded />
+          ) : task.state === "running" ? (
+            <PlayArrowRounded />
+          ) : ["failed", "blocked", "interrupted"].includes(task.state) ? (
+            <WarningAmberRounded />
+          ) : (
+            <ScheduleRounded />
+          );
           return (
             <Box
               component="li"
@@ -183,7 +256,7 @@ export function TaskList({
               <Box className="production-task-row-main" sx={{ minWidth: 0 }}>
                 <Typography
                   component={Link}
-                  to={url}
+                  {...listNavigation.getLinkProps(record)}
                   className="production-task-title"
                   sx={{ color: "text.primary", fontWeight: 500 }}
                 >
@@ -218,7 +291,7 @@ export function TaskList({
                       className="production-task-inline-action"
                       size="small"
                       component={Link}
-                      to={url}
+                      {...secondaryLinkProps}
                     >
                       View progress
                     </Button>
@@ -245,11 +318,13 @@ export function TaskList({
                 <Chip
                   size="small"
                   label={
-                    task.state === "running"
-                      ? "In progress"
-                      : task.state === "completed"
-                        ? "Complete"
-                        : task.state
+                    cleanupPending
+                      ? `${task.state} · awaiting cleanup`
+                      : task.state === "running"
+                        ? "In progress"
+                        : task.state === "completed"
+                          ? "Execution completed"
+                          : task.state
                   }
                   color={tone}
                   sx={{ height: 24, fontSize: 12, borderRadius: "6px" }}
@@ -273,7 +348,7 @@ export function TaskList({
               <IconButton
                 className="production-task-open"
                 component={Link}
-                to={url}
+                {...secondaryLinkProps}
                 aria-label={`Open task: ${task.workItem.title}`}
               >
                 <ChevronRightRounded />
@@ -302,7 +377,7 @@ export function TaskList({
             size="small"
             count={Math.ceil(tasks.length / pageSize)}
             page={currentPage}
-            onChange={(_, next) => setPage(next)}
+            onChange={(_, next) => (onPageChange ? onPageChange(next) : setLocalPage(next))}
             aria-label="Task pages"
           />
         )}
@@ -345,6 +420,7 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
   const query = useQuery({
     queryKey: taskDetailQueryKey(identity, taskId),
     queryFn: ({ signal }) => investigationApi.task(taskId, signal),
+    enabled: session.authenticated,
     refetchInterval: (current) =>
       !outputAccessDenied(current.state.error) &&
       current.state.data &&
@@ -366,42 +442,89 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
     refetchInterval: query.data?.task.state === "queued" ? 5_000 : false,
     refetchIntervalInBackground: false,
   });
+  if (!session.authenticated) return <Alert severity="warning">Sign in to read this task.</Alert>;
   if (query.isPending) return <CircularProgress size={28} aria-label="Loading task" />;
-  if (query.isError)
+  if (query.isError && (!query.data || outputAccessDenied(query.error)))
     return (
       <Alert severity="error">
         {query.error.message}
         <Button onClick={() => void query.refetch()}>Retry</Button>
       </Alert>
     );
-  const { task, attempts, checkpoint, children, latestReport, usage, invocations, resourceLeases } =
-    query.data;
-  const currentAttempt = [...attempts].sort((left, right) => right.number - left.number)[0];
+  if (!query.data) return <Alert severity="warning">No task snapshot is available.</Alert>;
+  const { task, usage, resourceLeases } = query.data;
+  if (
+    task.id !== taskId ||
+    !session.user.repositoryIds.includes(task.repository.id) ||
+    (parameters.get("repositoryId") && parameters.get("repositoryId") !== task.repository.id)
+  )
+    return (
+      <Alert severity="warning">This task is unavailable in the current repository scope.</Alert>
+    );
+  const attempts = orderedTaskAttempts(task.id, query.data.attempts);
+  const checkpoint = query.data.checkpoint?.taskId === task.id ? query.data.checkpoint : null;
+  const checkpointMismatch = !!query.data.checkpoint && !checkpoint;
+  const invocations = query.data.invocations?.filter(
+    (call) => call.taskId === task.id && attempts.some((attempt) => attempt.id === call.attemptId),
+  );
+  const currentAttempt = attempts[0];
+  const latestReport = taskReportMatches(task, query.data.latestReport)
+    ? query.data.latestReport
+    : null;
+  const children = query.data.children.filter(
+    (child) =>
+      child.parentTaskId === task.id &&
+      child.repository.id === task.repository.id &&
+      child.workItem.id === task.workItem.id &&
+      child.workItem.kind === task.workItem.kind &&
+      child.workItem.number === task.workItem.number,
+  );
   const requestedAttempt = parameters.get("attemptId");
-  const attemptId = attempts.some((attempt) => attempt.id === requestedAttempt)
-    ? requestedAttempt!
-    : currentAttempt?.id;
-  const selectedAttempt = attempts.find((attempt) => attempt.id === attemptId);
+  const selectedAttempt = selectedTaskAttempt(task.id, attempts, requestedAttempt);
+  const attemptId = selectedAttempt?.id;
   const call = latestAttemptInvocation(invocations, attemptId);
   const active = ["queued", "running"].includes(task.state);
   const recoverable = ["blocked", "failed", "cancelled", "interrupted"].includes(task.state);
-  const cleanup = !active && resourceLeases?.some((lease) => lease.state !== "released");
+  const cleanup = taskCleanupPending(task, resourceLeases);
+  const fresh = !query.isError;
   const canCancel = session.user?.permissions.includes("task:cancel") === true;
   const canResume =
     session.user?.permissions.includes("task:create") === true &&
-    (task.executionPolicy.mode !== "execute" || session.user.allowRepositoryExecution);
+    (task.executionPolicy.mode !== "execute" || session.user.allowRepositoryExecution) &&
+    !checkpointMismatch;
   const stopReason = currentAttempt?.terminationReason ?? checkpoint?.stopReason;
-  const updateRoute = (next: { tab?: string; attemptId?: string }) => {
+  const outputView = normalizeTaskOutputView({
+    search: parameters.get("outputSearch"),
+    type: parameters.get("outputType"),
+  });
+  const updateRoute = (
+    next: { tab?: string; attemptId?: string; outputSearch?: string; outputType?: string },
+    replace = false,
+  ) => {
     const search = new URLSearchParams(location.search);
     search.set("taskId", task.id);
     if (next.tab) search.set("tab", next.tab);
-    if (next.attemptId) search.set("attemptId", next.attemptId);
-    navigate(`${location.pathname}?${search.toString()}`);
+    if (next.attemptId !== undefined) {
+      if (next.attemptId) search.set("attemptId", next.attemptId);
+      else search.delete("attemptId");
+    }
+    if (next.outputSearch !== undefined || next.outputType !== undefined) {
+      const view = normalizeTaskOutputView({
+        search: next.outputSearch ?? outputView.search,
+        type: next.outputType ?? outputView.type,
+      });
+      if (view.search) search.set("outputSearch", view.search);
+      else search.delete("outputSearch");
+      if (view.type !== "all") search.set("outputType", view.type);
+      else search.delete("outputType");
+    }
+    search.set("repositoryId", task.repository.id);
+    navigate(`${location.pathname}?${search.toString()}`, { replace, state: location.state });
   };
   const taskUrl = (id: string) =>
     `/tasks?taskId=${encodeURIComponent(id)}&repositoryId=${encodeURIComponent(task.repository.id)}`;
   const cancelTask = async () => {
-    if (!canCancel || busy) return;
+    if (!canCancel || busy || !fresh) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -416,6 +539,12 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
     }
   };
   const runFields = [
+    [
+      "Selected output",
+      selectedAttempt
+        ? `Attempt ${selectedAttempt.number} · ${selectedAttempt.id === currentAttempt?.id ? "latest" : "historical"}`
+        : "No attempt recorded",
+    ],
     ["Agent", call ? (call.engine === "copilot" ? "Copilot CLI" : "Codex CLI") : "Not started"],
     ["Requested model", call ? (call.model ?? "CLI default") : "Not started"],
     ["Reasoning effort", "Not recorded"],
@@ -428,7 +557,7 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
         ? new Date(selectedAttempt.startedAt).toLocaleString()
         : "Not started",
     ],
-    ["Recorded model calls", String(usage?.invocationCount ?? "Not recorded")],
+    ["Task model calls", String(usage?.invocationCount ?? "Not recorded")],
     ["Execution mode", task.executionPolicy.mode],
     [
       "Execution authorization",
@@ -444,16 +573,24 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
       sx={{ "& > .workspace-page-heading > .MuiBox-root:last-child": { mt: 1 } }}
     >
       <Stack direction="row" sx={{ justifyContent: "space-between", alignItems: "center" }}>
-        <Button
-          component={Link}
-          to="/tasks"
-          startIcon={<ArrowBackRounded />}
-          sx={{ minHeight: 32, py: 0.5 }}
-        >
-          All tasks
-        </Button>
+        <ReviewQueueBar
+          record={{
+            kind: "task",
+            id: task.id,
+            workItemId: task.workItem.id,
+            repositoryId: task.repository.id,
+            href: taskUrl(task.id),
+            label: task.workItem.title,
+          }}
+          fallbackTo={`/tasks?repositoryId=${encodeURIComponent(task.repository.id)}`}
+          fallbackLabel="All tasks"
+        />
         {active && (
-          <Button color="error" disabled={!canCancel || busy} onClick={() => setCancelOpen(true)}>
+          <Button
+            color="error"
+            disabled={!canCancel || busy || !fresh}
+            onClick={() => setCancelOpen(true)}
+          >
             Cancel task
           </Button>
         )}
@@ -467,21 +604,24 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
               <ResumeTaskButton
                 task={task}
                 checkpoint={checkpoint}
-                disabled={busy || !canResume || !!cleanup}
+                disabled={busy || !canResume || !!cleanup || !fresh}
+                disabledReason={
+                  !fresh
+                    ? "Refresh the retained task snapshot before resuming."
+                    : checkpointMismatch
+                      ? "The returned checkpoint does not belong to this task. Reload its saved state before recovery."
+                      : cleanup
+                        ? "Wait for the worker cleanup receipt before starting another attempt."
+                        : !canResume
+                          ? "Recovery requires Create tasks access and an execution grant for execution tasks."
+                          : undefined
+                }
                 onResumed={async () => {
                   await query.refetch();
                   await queryClient.invalidateQueries({ queryKey: ["investigation-tasks"] });
+                  updateRoute({ tab: "progress", attemptId: "" });
                 }}
               />
-            )}
-            {latestReport && (
-              <Button
-                variant={task.state === "completed" ? "contained" : "outlined"}
-                component={Link}
-                to={`/reports?reportId=${encodeURIComponent(latestReport.report.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`}
-              >
-                Open report
-              </Button>
             )}
           </Stack>
         }
@@ -506,26 +646,76 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
             {task.id}
           </Typography>
+          <GithubSourceLink
+            repositoryFullName={task.repository.fullName}
+            kind={task.workItem.kind}
+            number={task.workItem.number}
+          />
         </Stack>
       </PageHeading>
-      <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
+      {query.isError && (
+        <Alert
+          severity="warning"
+          action={
+            <Button disabled={query.isFetching} onClick={() => void query.refetch()}>
+              Retry refresh
+            </Button>
+          }
+        >
+          Refresh failed. Showing the last successful task snapshot; cancellation and recovery
+          require a successful refresh.
+        </Alert>
+      )}
+      {latestReport ? (
+        <OutcomeSummary
+          header={latestReport}
+          compact
+          actions={
+            <Button
+              component={Link}
+              to={`/reports?reportId=${encodeURIComponent(latestReport.report.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`}
+            >
+              Review saved report v{latestReport.report.version}
+            </Button>
+          }
+        />
+      ) : (
+        <Alert severity="info">
+          {query.data.latestReport
+            ? "The returned report does not match this task's saved report reference. Its conclusion is not shown."
+            : task.latestReportRef
+              ? "The saved report header is unavailable in this snapshot. Refresh to load its conclusion; execution status is shown separately."
+              : "No saved report is available for this task yet. Execution progress does not establish a review or verification result."}
+        </Alert>
+      )}
+      <Stack
+        direction="row"
+        spacing={1.5}
+        useFlexGap
+        sx={{ alignItems: "center", flexWrap: "wrap" }}
+      >
+        <Typography variant="body2">Current execution</Typography>
         <Chip
           size="small"
           label={
-            task.state === "running"
-              ? "In progress"
-              : task.state === "completed"
-                ? "Complete"
-                : task.state
+            cleanup
+              ? `${task.state} · awaiting cleanup`
+              : task.state === "running"
+                ? "In progress"
+                : task.state === "completed"
+                  ? "Completed"
+                  : task.state
           }
           color={
-            task.state === "failed"
-              ? "error"
-              : task.state === "completed"
-                ? "success"
-                : task.state === "blocked"
-                  ? "warning"
-                  : "default"
+            cleanup
+              ? "warning"
+              : task.state === "failed"
+                ? "error"
+                : task.state === "completed"
+                  ? "success"
+                  : task.state === "blocked"
+                    ? "warning"
+                    : "default"
           }
         />
         <Typography variant="body2" color="text.secondary">
@@ -539,6 +729,12 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
         </Typography>
       </Stack>
       {error && <Alert severity="error">{error}</Alert>}
+      {checkpointMismatch && (
+        <Alert severity="warning">
+          The returned checkpoint does not belong to this task. It is hidden and recovery is
+          unavailable until the saved state is reloaded.
+        </Alert>
+      )}
       {recoverable && stopReason && (
         <Alert severity={task.state === "failed" ? "error" : "warning"}>
           {task.state === "blocked" ? "Task blocked" : "Why this task stopped"}: {stopReason}
@@ -563,12 +759,23 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
         <Alert
           severity="info"
           action={
-            <Button component={Link} to={taskUrl(task.parentTaskId)}>
-              Open parent task
-            </Button>
+            <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+              <Button component={Link} to={taskUrl(task.parentTaskId)}>
+                Open parent task
+              </Button>
+              {task.parentReportRef && (
+                <Button
+                  component={Link}
+                  to={`/reports?reportId=${encodeURIComponent(task.parentReportRef.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`}
+                >
+                  Parent report v{task.parentReportRef.version}
+                </Button>
+              )}
+            </Stack>
           }
         >
-          This task continues work from a linked investigation.
+          This task continues work from a linked investigation. Its execution and report are tracked
+          separately from the parent's saved result.
         </Alert>
       )}
       <Box
@@ -653,13 +860,18 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
             attempts={attempts}
             attemptId={attemptId}
             onAttemptChange={(id) => updateRoute({ attemptId: id })}
+            onHistory={() => updateRoute({ tab: "details" })}
+            view={outputView}
+            onViewChange={(view) =>
+              updateRoute({ outputSearch: view.search, outputType: view.type }, true)
+            }
             summary={usage}
             invocations={invocations}
           />
-          {!latestReport && !active && (
-            <Alert severity="info">
-              No sealed report is available. Saved progress and recorded evidence remain available
-              for review.
+          {requestedAttempt && requestedAttempt !== attemptId && (
+            <Alert severity="warning">
+              The requested attempt is not available for this task. Showing the latest retained
+              attempt.
             </Alert>
           )}
           {children.length > 0 && (
@@ -725,6 +937,18 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
                     <Typography variant="subtitle2">
                       Attempt {attempt.number} · {attempt.state}
                     </Typography>
+                    <Button
+                      onClick={() =>
+                        updateRoute({
+                          tab: "progress",
+                          attemptId: attempt.id === currentAttempt?.id ? "" : attempt.id,
+                        })
+                      }
+                    >
+                      {attempt.id === currentAttempt?.id
+                        ? "View latest output"
+                        : `View attempt ${attempt.number} output`}
+                    </Button>
                     <Typography variant="body2" color="text.secondary">
                       {attempt.workerId ?? "Waiting for worker"} ·{" "}
                       {attempt.startedAt ?? "Not started"}
@@ -737,23 +961,25 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
                     )}
                   </Box>
                 ))}
-              {resourceLeases?.map((lease) => (
-                <Alert
-                  key={lease.attemptId}
-                  severity={lease.state === "needs_cleanup" ? "warning" : "info"}
-                >
-                  {lease.pool === "e2e" ? "E2E desktop" : "Static capacity"}:{" "}
-                  {lease.state === "released"
-                    ? "Ownership released by a cleanup receipt."
-                    : lease.state === "needs_cleanup"
-                      ? "Needs cleanup confirmation."
-                      : "Reserved by this attempt."}
-                  <Typography variant="caption" component="div">
-                    Attempt {lease.attemptId} · {new Date(lease.updatedAt).toLocaleString()}
-                    {lease.reason ? ` · ${lease.reason}` : ""}
-                  </Typography>
-                </Alert>
-              ))}
+              {resourceLeases
+                ?.filter((lease) => lease.taskId === task.id)
+                .map((lease) => (
+                  <Alert
+                    key={lease.attemptId}
+                    severity={lease.state === "needs_cleanup" ? "warning" : "info"}
+                  >
+                    {lease.pool === "e2e" ? "E2E desktop" : "Static capacity"}:{" "}
+                    {lease.state === "released"
+                      ? "Ownership released by a cleanup receipt."
+                      : lease.state === "needs_cleanup"
+                        ? "Needs cleanup confirmation."
+                        : "Reserved by this attempt."}
+                    <Typography variant="caption" component="div">
+                      Attempt {lease.attemptId} · {new Date(lease.updatedAt).toLocaleString()}
+                      {lease.reason ? ` · ${lease.reason}` : ""}
+                    </Typography>
+                  </Alert>
+                ))}
             </Stack>
           </Section>
           <Accordion
@@ -887,7 +1113,7 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           <Button
             variant="contained"
             color="error"
-            disabled={busy || !canCancel}
+            disabled={busy || !canCancel || !fresh}
             onClick={() => void cancelTask()}
           >
             {busy ? "Cancelling…" : "Cancel task"}
@@ -900,10 +1126,29 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
 export default function TasksPage() {
   const { session } = useInvestigationSession();
   const location = useLocation();
-  const taskId = new URLSearchParams(location.search).get("taskId");
+  const navigate = useNavigate();
+  const parameters = new URLSearchParams(location.search);
+  const taskId = parameters.get("taskId");
   const scope = useInvestigationRepositoryScope();
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("all");
+  const search = (parameters.get("q") ?? "").slice(0, 160);
+  const requestedFilter = parameters.get("status") ?? "all";
+  const filter = ["all", "active", "attention"].includes(requestedFilter) ? requestedFilter : "all";
+  const requestedPage = parameters.get("page") ?? "1";
+  const page = /^[1-9]\d{0,4}$/.test(requestedPage) ? Number(requestedPage) : 1;
+  const updateList = (next: { search?: string; filter?: string; page?: number }) => {
+    const query = new URLSearchParams(location.search);
+    if (next.search !== undefined) {
+      if (next.search) query.set("q", next.search.slice(0, 160));
+      else query.delete("q");
+    }
+    if (next.filter !== undefined) {
+      if (next.filter !== "all") query.set("status", next.filter);
+      else query.delete("status");
+    }
+    if ((next.page ?? 1) > 1) query.set("page", String(next.page));
+    else query.delete("page");
+    navigate({ pathname: location.pathname, search: query.toString() }, { replace: true });
+  };
   const query = useQuery({
     queryKey: ["investigation-tasks", sessionIdentity(session)],
     queryFn: ({ signal }) => investigationApi.tasks(undefined, signal),
@@ -918,9 +1163,23 @@ export default function TasksPage() {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
+  const resources = useQuery({
+    queryKey: [...schedulerQueryKey, sessionIdentity(session)],
+    queryFn: investigationApi.scheduler,
+    enabled: !taskId && session.authenticated && !!query.data?.items.length,
+    refetchInterval: (current) =>
+      !outputAccessDenied(current.state.error) &&
+      (current.state.data?.leases.some((lease) => lease.state !== "released") ||
+        query.data?.items.some((task) => ["queued", "running"].includes(task.state)))
+        ? 5_000
+        : false,
+    refetchIntervalInBackground: false,
+    retry: false,
+  });
   if (taskId) return <TaskDetails key={taskId} taskId={taskId} />;
+  const leases = outputAccessDenied(resources.error) ? [] : (resources.data?.leases ?? []);
   const priority = (task: InvestigationTaskV1) =>
-    ["running", "queued"].includes(task.state)
+    taskIsActive(task, leases)
       ? 0
       : ["failed", "interrupted", "blocked"].includes(task.state)
         ? 1
@@ -928,10 +1187,11 @@ export default function TasksPage() {
   const tasks = (query.data?.items ?? [])
     .filter(
       (task) =>
+        session.user?.repositoryIds.includes(task.repository.id) &&
         (!scope.repositoryId || task.repository.id === scope.repositoryId) &&
         (filter === "all" ||
           (filter === "active"
-            ? ["running", "queued"].includes(task.state)
+            ? taskIsActive(task, leases)
             : ["failed", "interrupted", "blocked"].includes(task.state))) &&
         `${task.workItem.title} ${task.id} ${task.workItem.number}`
           .toLocaleLowerCase()
@@ -950,7 +1210,11 @@ export default function TasksPage() {
           <Button
             variant="contained"
             component={Link}
-            to="/pull-requests"
+            to={
+              scope.repositoryId
+                ? `/pull-requests?${new URLSearchParams({ repositoryId: scope.repositoryId })}`
+                : "/pull-requests"
+            }
             disabled={!session.user?.permissions.includes("task:create")}
           >
             Choose a source
@@ -971,7 +1235,7 @@ export default function TasksPage() {
           type="search"
           placeholder="Search tasks"
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => updateList({ search: event.target.value })}
           slotProps={{
             htmlInput: { "aria-label": "Search tasks by title or source number" },
             input: {
@@ -1009,7 +1273,7 @@ export default function TasksPage() {
             },
           }}
           onChange={(_, value: string | null) => {
-            if (value) setFilter(value);
+            if (value) updateList({ filter: value });
           }}
         >
           <ToggleButton value="all">All tasks</ToggleButton>
@@ -1028,11 +1292,41 @@ export default function TasksPage() {
       {query.isError && (
         <Alert severity="error">
           {query.error.message}
+          {query.data && !outputAccessDenied(query.error)
+            ? " Showing the last successful task list."
+            : ""}
           <Button onClick={() => void query.refetch()}>Retry</Button>
         </Alert>
       )}
-      {query.isPending ? (
+      {resources.isError && query.data && (
+        <Alert
+          severity="warning"
+          action={<Button onClick={() => void resources.refetch()}>Retry cleanup status</Button>}
+        >
+          Resource ownership could not be refreshed. Cancellation does not establish cleanup
+          completion.
+        </Alert>
+      )}
+      {filter === "active" && (
+        <Typography variant="body2" color="text.secondary">
+          Queued and running tasks, plus stopped tasks whose workers still hold resources.
+        </Typography>
+      )}
+      {query.isPending ||
+      (filter === "active" &&
+        !query.isError &&
+        resources.isPending &&
+        !!query.data?.items.length) ? (
         <CircularProgress size={28} aria-label="Loading tasks" />
+      ) : query.isError &&
+        (!query.data || outputAccessDenied(query.error)) ? null : !tasks.length &&
+        filter === "active" &&
+        resources.isError ? (
+        <EmptyState
+          title="Active resource state unavailable"
+          description="Retry cleanup status or view all tasks to inspect retained execution records."
+          action={<Button onClick={() => updateList({ filter: "all" })}>View all tasks</Button>}
+        />
       ) : !tasks.length && (search || filter !== "all") ? (
         <EmptyState
           title="No matching tasks"
@@ -1040,8 +1334,7 @@ export default function TasksPage() {
           action={
             <Button
               onClick={() => {
-                setSearch("");
-                setFilter("all");
+                updateList({ search: "", filter: "all" });
               }}
             >
               Clear filters
@@ -1053,6 +1346,9 @@ export default function TasksPage() {
           key={JSON.stringify([search, filter, scope.repositoryId])}
           tasks={tasks}
           usageByTaskId={query.data?.usageByTaskId}
+          resourceLeases={leases}
+          page={page}
+          onPageChange={(page) => updateList({ page })}
         />
       )}
     </Stack>

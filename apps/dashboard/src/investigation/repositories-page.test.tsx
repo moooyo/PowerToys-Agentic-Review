@@ -4,7 +4,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Repository, RepositoryWebhookSettings } from "./api";
-import RepositoriesPage, { repositorySettingsTab } from "./repositories-page";
+import RepositoriesPage, {
+  repositoryReplyTemplate,
+  repositorySettingsTab,
+} from "./repositories-page";
 import { webhookSettingsQueryKey } from "./webhook-settings";
 
 const context = vi.hoisted(() => ({ session: null as InvestigationSession | null }));
@@ -70,6 +73,18 @@ beforeEach(() => {
 });
 
 describe("repository directory and detail navigation", () => {
+  it("restores directory search and only accepts known reply-template view keys", () => {
+    const queryClient = client();
+    const html = render(queryClient, "/repositories?q=missing");
+    expect(html).toContain('value="missing"');
+    expect(html).toContain("No matching repositories");
+    expect(html).not.toContain(hidden.fullName);
+    expect(repositoryReplyTemplate("issue")).toBe("issue");
+    expect(repositoryReplyTemplate("completed")).toBe("completed");
+    expect(repositoryReplyTemplate("{{conclusion}}")).toBeUndefined();
+    expect(repositoryReplyTemplate(null)).toBeUndefined();
+    queryClient.clear();
+  });
   it("lists only exact repository grants and leaves settings editors out of the directory", () => {
     const queryClient = client();
     const html = render(queryClient);

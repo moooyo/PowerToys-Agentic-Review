@@ -10,7 +10,16 @@ import type { TaskDetail } from "./api";
 import { commentSummariesQueryKey } from "./comment-deliveries";
 import { createSampleInvestigationApi } from "./sample-adapter";
 import { sessionIdentity } from "./session";
-import { TaskDetails, TaskList, taskDetailQueryKey, taskDetailTab } from "./task-workspace";
+import { TaskOutputPanel } from "./task-output";
+import {
+  TaskDetails,
+  TaskList,
+  taskCleanupPending,
+  taskDetailQueryKey,
+  taskDetailTab,
+  taskIsActive,
+  taskReportMatches,
+} from "./task-workspace";
 
 const session = vi.hoisted(() => ({
   authenticated: true as const,
@@ -57,6 +66,136 @@ function client() {
 }
 
 describe("task workspace runtime information", () => {
+  it("restores copied output filters while keeping the explicitly selected attempt", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-partial-task");
+    const attempt = detail.attempts[0];
+    if (!attempt) throw new Error("An attempt fixture is required.");
+    const queryClient = client();
+    queryClient.setQueryData(taskDetailQueryKey(sessionIdentity(session), detail.task.id), detail);
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter
+          initialEntries={[
+            `/tasks?taskId=${detail.task.id}&attemptId=${attempt.id}&outputSearch=retained-needle&outputType=system`,
+          ]}
+        >
+          <TaskDetails taskId={detail.task.id} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(html).toContain('value="retained-needle"');
+    expect(html).toContain('value="system"');
+    expect(html).toContain(`value="${attempt.id}"`);
+    expect(html).toContain("Find in loaded output");
+  });
+
+  it("keeps the output panel independently usable without a router or controlled view", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-partial-task");
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client()}>
+        <TaskOutputPanel
+          task={detail.task}
+          attempts={detail.attempts}
+          attemptId={detail.attempts[0]?.id}
+          onAttemptChange={() => undefined}
+        />
+      </QueryClientProvider>,
+    );
+    expect(html).toContain("Agent output");
+    expect(html).not.toContain("Find in loaded output");
+  });
+  it("keeps cancelled work in Active until its own resources are released", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-p1-task");
+    const task = { ...detail.task, state: "cancelled" as const };
+    const lease = {
+      taskId: task.id,
+      attemptId: "owned-attempt",
+      workerId: "worker-one",
+      fence: 1,
+      pool: "e2e" as const,
+      state: "needs_cleanup" as const,
+      acquiredAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      releasedAt: null,
+      reason: "cancelled",
+    };
+    expect(taskIsActive(task, [lease])).toBe(true);
+    expect(taskCleanupPending(task, [lease])).toBe(true);
+    expect(taskIsActive(task, [{ ...lease, state: "released" }])).toBe(false);
+    expect(taskIsActive(task, [{ ...lease, taskId: "another-task" }])).toBe(false);
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client()}>
+        <MemoryRouter>
+          <TaskList tasks={[task]} usageByTaskId={{}} resourceLeases={[lease]} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(html).toContain("cancelled · awaiting cleanup");
+  });
+
+  it("binds the saved report to its task and keeps its result immutable across resumed execution", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-p1-task");
+    if (!detail.latestReport) throw new Error("A saved report fixture is required.");
+    const header = structuredClone(detail.latestReport);
+    expect(taskReportMatches(detail.task, header)).toBe(true);
+    expect(taskReportMatches({ ...detail.task, state: "running" }, header)).toBe(true);
+    expect(
+      taskReportMatches(detail.task, {
+        ...header,
+        context: { ...header.context, task: { ...header.context.task, id: "other-task" } },
+      }),
+    ).toBe(false);
+    expect(
+      taskReportMatches(detail.task, {
+        ...header,
+        context: {
+          ...header.context,
+          workItem: { ...header.context.workItem, number: header.context.workItem.number + 1 },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      taskReportMatches(detail.task, {
+        ...header,
+        report: { ...header.report, logicalContentDigest: "f".repeat(64) },
+      }),
+    ).toBe(false);
+    const queryClient = client();
+    queryClient.setQueryData(taskDetailQueryKey(sessionIdentity(session), detail.task.id), {
+      ...detail,
+      task: { ...detail.task, state: "running" },
+    });
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <TaskDetails taskId={detail.task.id} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(html).toContain("Current execution");
+    expect(html).toContain("Review saved report");
+    expect(html).toContain(
+      `https://github.com/${detail.task.repository.fullName}/pull/${detail.task.workItem.number}`,
+    );
+    expect(detail.latestReport).toEqual(header);
+  });
+
+  it("rejects a cached task that does not match the requested repository scope", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-p1-task");
+    const queryClient = client();
+    queryClient.setQueryData(taskDetailQueryKey(sessionIdentity(session), detail.task.id), detail);
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter
+          initialEntries={[`/tasks?taskId=${detail.task.id}&repositoryId=another-repository`]}
+        >
+          <TaskDetails taskId={detail.task.id} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(html).toContain("unavailable in the current repository scope");
+    expect(html).not.toContain(detail.task.workItem.title);
+  });
   it.each(["started", "observed"])(
     "shows cancelled E2E %s activity without claiming an adopted analysis",
     async (stage) => {

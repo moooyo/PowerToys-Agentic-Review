@@ -55,22 +55,44 @@ export function accountFormValues(account?: Account): AccountFormValues {
 
 export function accountFormIsDirty(form: AccountFormValues, account?: Account): boolean {
   const saved = accountFormValues(account);
+  const sameValues = (left: readonly string[], right: readonly string[]) => {
+    const leftValues = new Set(left);
+    const rightValues = new Set(right);
+    return (
+      leftValues.size === rightValues.size &&
+      [...leftValues].every((value) => rightValues.has(value))
+    );
+  };
   return (
-    form.username !== saved.username ||
-    form.displayName !== saved.displayName ||
+    normalizeInvestigationUsername(form.username) !==
+      normalizeInvestigationUsername(saved.username) ||
+    form.displayName.trim() !== saved.displayName.trim() ||
     form.password !== "" ||
     form.enabled !== saved.enabled ||
     form.isAdmin !== saved.isAdmin ||
-    form.repositoryIdsText !== saved.repositoryIdsText ||
+    !sameValues(
+      form.repositoryIdsText.split(/[\s,]+/u).filter(Boolean),
+      saved.repositoryIdsText.split(/[\s,]+/u).filter(Boolean),
+    ) ||
     form.allowRepositoryExecution !== saved.allowRepositoryExecution ||
-    form.permissions.length !== saved.permissions.length ||
-    form.permissions.some((permission) => !saved.permissions.includes(permission)) ||
-    form.actionCapabilities.length !== saved.actionCapabilities.length ||
-    form.actionCapabilities.some((action) => !saved.actionCapabilities.includes(action))
+    !sameValues(form.permissions, saved.permissions) ||
+    !sameValues(form.actionCapabilities, saved.actionCapabilities)
   );
 }
 
 export type AccountDirectoryFilter = "all" | "enabled" | "disabled";
+
+export function accountDirectoryFilters(search: string): {
+  search: string;
+  filter: AccountDirectoryFilter;
+} {
+  const parameters = new URLSearchParams(search);
+  const status = parameters.get("status");
+  return {
+    search: (parameters.get("q") ?? "").slice(0, 200),
+    filter: status === "enabled" || status === "disabled" ? status : "all",
+  };
+}
 
 export function filterAccounts(
   accounts: Account[],

@@ -28,6 +28,7 @@ import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-quer
 import { type FormEvent, type ReactNode, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { investigationApi } from "./api";
+import { GithubSourceLink as GitHubSourceLink } from "./github-source-link";
 import { useGuardedAction, useUnsavedChanges } from "./navigation-guard";
 import { useInvestigationRepositoryScope } from "./repository-scope";
 import { useInvestigationSession } from "./session";
@@ -586,9 +587,11 @@ export function WebhookAttemptHistory({ delivery }: { delivery: InvestigationWeb
 export function WebhookRetryControls({
   delivery,
   user,
+  snapshotStale = false,
 }: {
   delivery: InvestigationWebhookDelivery;
   user?: InvestigationSessionUser | null;
+  snapshotStale?: boolean;
 }) {
   const queryClient = useQueryClient();
   const request = useWebhookRecoveryRequest(delivery.deliveryId);
@@ -602,7 +605,8 @@ export function WebhookRetryControls({
   const grantProblem = webhookRecoveryGrantProblem(delivery, user);
   const retryOffered = webhookCanStartRecovery(delivery);
   const canReplay = delivery.canonicalDeliveryId === delivery.deliveryId && !grantProblem;
-  const canReview = retryOffered && !grantProblem && !unknown && !stale && !busy && !refreshing;
+  const canReview =
+    retryOffered && !grantProblem && !unknown && !stale && !snapshotStale && !busy && !refreshing;
   useUnsavedChanges(previewVersion !== null, {
     description: "A webhook recovery preview is open. Leave without scheduling it?",
     onDiscard: () => setPreviewVersion(null),
@@ -659,7 +663,7 @@ export function WebhookRetryControls({
             : stale
               ? "Load latest status"
               : unknown
-                ? "Check recovery request"
+                ? "Refresh event status"
                 : "Refresh status"}
         </Button>
         {unknown && request ? (
@@ -877,16 +881,17 @@ function WebhookLinkedContext({ delivery }: { delivery: InvestigationWebhookDeli
     webhookReportMatches(delivery, task, query.data.latestReport)
       ? query.data.latestReport
       : undefined;
-  const sourceUrl = `https://github.com/${delivery.repositoryFullName.split("/").map(encodeURIComponent).join("/")}/${delivery.kind === "pull_request" ? "pull" : "issues"}/${delivery.number}`;
   return (
     <Stack spacing={1}>
       <Typography variant="body2" color="text.secondary">
         Source and associated work
       </Typography>
       <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", alignItems: "center" }}>
-        <Button component="a" href={sourceUrl} target="_blank" rel="noopener noreferrer">
-          Open GitHub {delivery.kind === "pull_request" ? "PR" : "Issue"} #{delivery.number}
-        </Button>
+        <GitHubSourceLink
+          repositoryFullName={delivery.repositoryFullName}
+          kind={delivery.kind}
+          number={delivery.number}
+        />
         {task && (
           <Button
             component={Link}
@@ -979,10 +984,10 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
     refetchOnWindowFocus: true,
   });
   if (query.isPending) return <CircularProgress size={28} aria-label="Loading webhook event" />;
-  if (query.isError)
+  if (!query.data)
     return (
       <Alert severity="error">
-        {query.error.message}
+        {query.error?.message ?? "The webhook event could not be loaded."}
         <Button onClick={() => void query.refetch()}>Refresh event</Button>
       </Alert>
     );
@@ -1035,6 +1040,13 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
         </Stack>
       </PageHeading>
       <WebhookLinkedContext delivery={delivery} />
+      {query.isError && (
+        <Alert severity="error">
+          {query.error.message} The last loaded event and linked work remain visible. Refresh before
+          starting a new recovery request.
+          <Button onClick={() => void query.refetch()}>Refresh event</Button>
+        </Alert>
+      )}
       <WebhookIntakeNotice repositoryId={delivery.repositoryId} user={session.user} />
       {duplicate && (
         <Alert
@@ -1086,6 +1098,7 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
               key={delivery.deliveryId}
               delivery={delivery}
               user={session.user}
+              snapshotStale={query.isError}
             />
           </EventSection>
           <WebhookAttemptHistory delivery={delivery} />

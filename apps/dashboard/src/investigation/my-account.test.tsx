@@ -56,7 +56,7 @@ describe("personal account access", () => {
     const html = renderToStaticMarkup(<MyAccountPage />);
     expect(html).toContain("repo:outside-directory");
     expect(html).toContain("Create investigations");
-    expect(html).toContain(">Comment<");
+    expect(html).toContain(">Conversation comment<");
     expect(html).toContain(">Allowed<");
     expect(html).toContain("Standard account");
     expect(html).not.toContain(">Administrator<");

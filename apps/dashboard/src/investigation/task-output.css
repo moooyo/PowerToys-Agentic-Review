@@ -15,6 +15,16 @@
   align-items: center;
   gap: 4px;
   margin-left: auto;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.task-output-attempt-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 12px 24px;
 }
 .task-output-search {
   display: flex;
@@ -119,6 +129,9 @@
   .task-output-search {
     padding: 12px;
     gap: 8px;
+  }
+  .task-output-attempt-context {
+    padding: 12px;
   }
   .task-output-search > .MuiTextField-root:first-child {
     flex-basis: calc(100% - 48px);

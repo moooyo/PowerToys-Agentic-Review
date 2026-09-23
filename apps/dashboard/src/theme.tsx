@@ -19,39 +19,41 @@ function materialTheme(mode: PaletteMode) {
         onPrimary: "#002E6D",
         primaryContainer: "#24467E",
         onPrimaryContainer: "#DBE5FF",
-        secondary: "#B8BFCE",
+        secondary: "#BAC2D0",
         secondaryContainer: "#303A50",
         onSecondaryContainer: "#DBE5FF",
         surface: "#181C24",
         canvas: "#10141B",
+        surfaceLow: "#181C24",
         container: "#20252F",
         containerHigh: "#2B313D",
         onSurface: "#E3E5ED",
-        onSurfaceVariant: "#B8BFCE",
-        outline: "#7D8594",
-        outlineVariant: "#38404E",
+        onSurfaceVariant: "#BAC2D0",
+        outline: "#8994A5",
+        outlineVariant: "#414A58",
       }
     : {
         primary: "#345EAD",
         onPrimary: "#FFFFFF",
-        primaryContainer: "#DEE8FF",
+        primaryContainer: "#DCE6FF",
         onPrimaryContainer: "#173D79",
-        secondary: "#565E6B",
-        secondaryContainer: "#DEE8FF",
-        onSecondaryContainer: "#173D79",
+        secondary: "#505966",
+        secondaryContainer: "#DFE6F4",
+        onSecondaryContainer: "#25344E",
         surface: "#FFFFFF",
-        canvas: "#F8F9FC",
-        container: "#F0F3F9",
-        containerHigh: "#E7EBF3",
-        onSurface: "#1B1D22",
-        onSurfaceVariant: "#565E6B",
-        outline: "#7B8494",
-        outlineVariant: "#E0E3EB",
+        canvas: "#FAF9FD",
+        surfaceLow: "#F3F4FA",
+        container: "#EDF0F7",
+        containerHigh: "#E7EBF4",
+        onSurface: "#1B1D24",
+        onSurfaceVariant: "#505966",
+        outline: "#737D8C",
+        outlineVariant: "#D4DAE5",
       };
   const semanticColors = {
     error: dark ? "#F2B8B5" : "#B3261E",
-    success: dark ? "#91D4B4" : "#286A53",
-    warning: dark ? "#EDC274" : "#8A5700",
+    success: dark ? "#91D4B4" : "#25634E",
+    warning: dark ? "#F1C779" : "#775000",
     info: dark ? "#A8C7FA" : "#365E9D",
   };
   const semanticContainers = dark
@@ -84,12 +86,12 @@ function materialTheme(mode: PaletteMode) {
       warning: { main: semanticColors.warning },
       info: { main: semanticColors.info },
       action: {
-        hover: alpha(colors.onSurface, 0.08),
+        hover: alpha(colors.primary, 0.08),
         selected: alpha(colors.primary, 0.12),
         focus: alpha(colors.primary, 0.12),
       },
     },
-    // Numeric sx radii multiply this unit; component surface radii are explicit below.
+    // Keep the sx radius unit at 4px; M3 surface and dialog roles are explicit below.
     shape: { borderRadius: 4 },
     typography: {
       fontFamily: '"Roboto", "Segoe UI", sans-serif',
@@ -97,9 +99,14 @@ function materialTheme(mode: PaletteMode) {
       fontWeightRegular: 400,
       fontWeightMedium: 500,
       fontWeightBold: 700,
-      h1: { fontSize: "2rem", lineHeight: 1.25, fontWeight: 400, letterSpacing: "-.5px" },
-      h2: { fontSize: "1.375rem", lineHeight: 1.36, fontWeight: 500, letterSpacing: "-.2px" },
-      h3: { fontSize: "1.125rem", lineHeight: 1.44, fontWeight: 500, letterSpacing: 0 },
+      h1: {
+        fontSize: "1.75rem",
+        lineHeight: "2.25rem",
+        fontWeight: 400,
+        letterSpacing: "-.35px",
+      },
+      h2: { fontSize: "1.375rem", lineHeight: "1.75rem", fontWeight: 400, letterSpacing: 0 },
+      h3: { fontSize: "1rem", lineHeight: 1.5, fontWeight: 500, letterSpacing: 0 },
       h4: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
       h5: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
       h6: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
@@ -136,12 +143,16 @@ function materialTheme(mode: PaletteMode) {
             "--app-on-primary-container": colors.onPrimaryContainer,
             "--app-secondary-container": colors.secondaryContainer,
             "--app-on-secondary-container": colors.onSecondaryContainer,
+            "--app-surface-low": colors.surfaceLow,
             "--app-surface-container": colors.container,
             "--app-surface-container-high": colors.containerHigh,
             "--app-outline": colors.outline,
+            "--app-pressed": alpha(colors.primary, 0.12),
+            "--app-shape-surface": "16px",
+            "--app-shape-dialog": "28px",
           },
           body: { margin: 0 },
-          ":focus-visible": { outline: "3px solid " + colors.primary, outlineOffset: 3 },
+          ":focus-visible": { outline: `3px solid ${colors.primary}`, outlineOffset: 3 },
         },
       },
       MuiAppBar: {
@@ -154,19 +165,74 @@ function materialTheme(mode: PaletteMode) {
           },
         },
       },
+      MuiButtonBase: {
+        styleOverrides: {
+          root: {
+            touchAction: "manipulation",
+            "&.Mui-focusVisible": {
+              outline: `3px solid ${colors.primary}`,
+              outlineOffset: 3,
+            },
+          },
+        },
+      },
       MuiButton: {
         defaultProps: { size: "medium", disableElevation: true },
         styleOverrides: {
-          root: { borderRadius: 100, minHeight: 44, padding: "10px 24px", fontWeight: 500 },
-          sizeSmall: { minHeight: 44, padding: "10px 16px" },
-          text: { paddingInline: 16 },
-          outlined: { borderColor: colors.outline },
+          root: {
+            borderRadius: 100,
+            minHeight: 40,
+            maxWidth: "100%",
+            padding: "9px 24px",
+            fontWeight: 500,
+            whiteSpace: "normal",
+            overflowWrap: "anywhere",
+            transition: "background-color 160ms ease, box-shadow 160ms ease",
+          },
+          sizeSmall: { minHeight: 40, padding: "9px 12px" },
+          text: {
+            paddingInline: 12,
+            "&:hover": { backgroundColor: "color-mix(in srgb, currentColor 8%, transparent)" },
+            "&:active": { backgroundColor: "color-mix(in srgb, currentColor 12%, transparent)" },
+          },
+          outlined: {
+            borderColor: colors.outline,
+            "&:hover": { backgroundColor: "color-mix(in srgb, currentColor 8%, transparent)" },
+            "&:active": { backgroundColor: "color-mix(in srgb, currentColor 12%, transparent)" },
+          },
+          contained: ({ ownerState }) => {
+            const color = ownerState.color ?? "primary";
+            if (color === "inherit") return { boxShadow: "none" };
+            const background = `var(--mui-palette-${color}-main)`;
+            const foreground = `var(--mui-palette-${color}-contrastText)`;
+            return {
+              boxShadow: "none",
+              "&:hover": {
+                backgroundColor: `color-mix(in srgb, ${background} 92%, ${foreground})`,
+                boxShadow: "0 1px 3px rgb(0 0 0 / 16%)",
+              },
+              "&:active": {
+                backgroundColor: `color-mix(in srgb, ${background} 88%, ${foreground})`,
+                boxShadow: "none",
+              },
+            };
+          },
           startIcon: { marginRight: 8 },
         },
       },
       MuiIconButton: {
         defaultProps: { size: "medium" },
-        styleOverrides: { root: { width: 44, height: 44, borderRadius: "50%", flexShrink: 0 } },
+        styleOverrides: {
+          root: {
+            width: 40,
+            height: 40,
+            borderRadius: "50%",
+            flexShrink: 0,
+            transition: "background-color 160ms ease",
+            "&:hover": { backgroundColor: alpha(colors.primary, 0.08) },
+            "&:active": { backgroundColor: alpha(colors.primary, 0.12) },
+          },
+        },
       },
       MuiAvatar: {
         styleOverrides: {
@@ -197,7 +263,7 @@ function materialTheme(mode: PaletteMode) {
       MuiInputBase: { styleOverrides: { root: { fontSize: "1rem", lineHeight: 1.5 } } },
       MuiOutlinedInput: {
         styleOverrides: {
-          root: { borderRadius: 10 },
+          root: { borderRadius: 4 },
           notchedOutline: { borderColor: colors.outline },
         },
       },
@@ -210,34 +276,64 @@ function materialTheme(mode: PaletteMode) {
         defaultProps: { size: "medium" },
         styleOverrides: {
           root: ({ ownerState }) => ({
-            borderRadius: 8,
-            height: 32,
-            fontSize: ".875rem",
-            lineHeight: 1.4286,
+            borderRadius: ownerState.clickable || ownerState.onClick ? 8 : 4,
+            height: "auto",
+            minHeight: ownerState.clickable || ownerState.onClick ? 36 : 24,
+            fontSize: ownerState.clickable || ownerState.onClick ? ".875rem" : ".75rem",
+            lineHeight: ownerState.clickable || ownerState.onClick ? 1.4286 : 1.3333,
             fontWeight: 500,
+            maxWidth: "100%",
             ...(ownerState.variant !== "outlined" && ownerState.color && chipTones[ownerState.color]
               ? {
                   ...chipTones[ownerState.color],
                   "&.MuiChip-clickable:hover": {
                     ...chipTones[ownerState.color],
-                    boxShadow: `inset 0 0 0 999px ${alpha(colors.onSurface, 0.04)}`,
+                    boxShadow: `inset 0 0 0 999px ${alpha(colors.primary, 0.08)}`,
                   },
                   "&.Mui-focusVisible": {
                     ...chipTones[ownerState.color],
-                    boxShadow: `inset 0 0 0 999px ${alpha(colors.onSurface, 0.08)}`,
+                    boxShadow: `inset 0 0 0 999px ${alpha(colors.primary, 0.12)}`,
+                  },
+                  "&.MuiChip-clickable:active": {
+                    ...chipTones[ownerState.color],
+                    boxShadow: `inset 0 0 0 999px ${alpha(colors.primary, 0.12)}`,
                   },
                 }
               : {}),
           }),
-          sizeSmall: { height: 32, fontSize: ".875rem" },
           outlined: { borderColor: colors.outline },
-          label: { paddingInline: 12 },
+          label: {
+            padding: "4px 8px",
+            whiteSpace: "normal",
+            overflowWrap: "anywhere",
+          },
+        },
+      },
+      MuiToggleButton: {
+        styleOverrides: {
+          root: {
+            borderRadius: 8,
+            minHeight: 40,
+            padding: "9px 12px",
+            fontSize: ".875rem",
+            lineHeight: 1.4286,
+            textTransform: "none",
+            "&.Mui-selected": {
+              color: colors.onSecondaryContainer,
+              backgroundColor: colors.secondaryContainer,
+              "&:hover": {
+                backgroundColor: colors.secondaryContainer,
+                boxShadow: `inset 0 0 0 999px ${alpha(colors.primary, 0.08)}`,
+              },
+            },
+            "&:active": { backgroundColor: alpha(colors.primary, 0.12) },
+          },
         },
       },
       MuiTableCell: {
         styleOverrides: {
           root: {
-            padding: "16px",
+            padding: "14px 12px",
             fontSize: ".875rem",
             lineHeight: 1.4286,
             verticalAlign: "top",
@@ -248,7 +344,7 @@ function materialTheme(mode: PaletteMode) {
             color: colors.onSurfaceVariant,
             fontWeight: 500,
             fontSize: ".875rem",
-            backgroundColor: colors.canvas,
+            backgroundColor: colors.surfaceLow,
             whiteSpace: "nowrap",
           },
         },
@@ -268,6 +364,9 @@ function materialTheme(mode: PaletteMode) {
             fontSize: ".875rem",
             fontWeight: 500,
             letterSpacing: ".1px",
+            borderRadius: "8px 8px 0 0",
+            "&:hover": { backgroundColor: alpha(colors.primary, 0.08) },
+            "&:active": { backgroundColor: alpha(colors.primary, 0.12) },
           },
         },
       },
@@ -280,7 +379,19 @@ function materialTheme(mode: PaletteMode) {
       MuiListItemButton: { styleOverrides: { root: { minHeight: 48 } } },
       MuiDialog: {
         defaultProps: { fullWidth: true, container: overlayContainer },
-        styleOverrides: { paper: { borderRadius: 28, backgroundColor: colors.surface } },
+        styleOverrides: {
+          paper: {
+            borderRadius: 28,
+            backgroundColor: colors.containerHigh,
+            backgroundImage: "none",
+            minWidth: 0,
+            "@media (max-width: 599px)": {
+              margin: 12,
+              maxWidth: "calc(100% - 24px)",
+              maxHeight: "calc(100% - 24px)",
+            },
+          },
+        },
       },
       MuiDialogTitle: {
         styleOverrides: {
@@ -289,11 +400,31 @@ function materialTheme(mode: PaletteMode) {
             lineHeight: 1.3333,
             fontWeight: 400,
             padding: "24px 24px 16px",
+            overflowWrap: "anywhere",
+            "@media (max-width: 599px)": { paddingInline: 20 },
           },
         },
       },
-      MuiDialogContent: { styleOverrides: { root: { padding: "8px 24px 24px" } } },
-      MuiDialogActions: { styleOverrides: { root: { padding: "8px 24px 24px", gap: 8 } } },
+      MuiDialogContent: {
+        styleOverrides: {
+          root: {
+            padding: "8px 24px 24px",
+            minWidth: 0,
+            overflowWrap: "anywhere",
+            "@media (max-width: 599px)": { paddingInline: 20 },
+          },
+        },
+      },
+      MuiDialogActions: {
+        styleOverrides: {
+          root: {
+            padding: "8px 24px 24px",
+            gap: 8,
+            flexWrap: "wrap",
+            "@media (max-width: 599px)": { paddingInline: 20 },
+          },
+        },
+      },
       MuiDrawer: { defaultProps: { ModalProps: { container: overlayContainer } } },
       MuiModal: { defaultProps: { container: overlayContainer } },
       MuiPopover: { defaultProps: { container: overlayContainer } },
@@ -310,6 +441,14 @@ function materialTheme(mode: PaletteMode) {
             lineHeight: 1.4286,
           },
           message: { paddingBlock: 4 },
+          standard: ({ ownerState }) => {
+            const severity = ownerState.color ?? ownerState.severity ?? "success";
+            return {
+              color: semanticColors[severity],
+              backgroundColor: semanticContainers[severity],
+            };
+          },
+          icon: { color: "inherit", opacity: 1 },
         },
       },
       MuiAlertTitle: { styleOverrides: { root: { fontSize: "1rem", fontWeight: 500 } } },

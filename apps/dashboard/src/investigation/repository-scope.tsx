@@ -2,12 +2,15 @@ import { Autocomplete, Box, TextField } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "react-router-dom";
 import { investigationApi } from "./api";
+import { sessionIdentity, useInvestigationSession } from "./session";
+import { changeRepositorySearch } from "./workspace-view";
 
 export function useInvestigationRepositoryScope() {
   const location = useLocation();
+  const { session } = useInvestigationSession();
   const repositoryId = new URLSearchParams(location.search).get("repositoryId") || undefined;
   const query = useQuery({
-    queryKey: ["investigation-repositories"],
+    queryKey: ["investigation-repositories", sessionIdentity(session)],
     queryFn: investigationApi.repositories,
     retry: false,
   });
@@ -50,15 +53,10 @@ export function InvestigationRepositorySelector({ fullWidth = false }: { fullWid
         isOptionEqualToValue={(left, right) => left.id === right.id}
         value={options.find((item) => item.id === (scope.repositoryId ?? "")) ?? options[0]}
         onChange={(_event, option) => {
-          const parameters = new URLSearchParams(location.search);
-          if (option.id) parameters.set("repositoryId", option.id);
-          else parameters.delete("repositoryId");
-          parameters.delete("workItemId");
-          parameters.delete("taskId");
-          parameters.delete("reportId");
-          parameters.delete("commentId");
-          parameters.delete("deliveryId");
-          navigate({ pathname: location.pathname, search: parameters.toString() });
+          navigate({
+            pathname: location.pathname,
+            search: changeRepositorySearch(location.search, option.id),
+          });
         }}
         renderInput={(parameters) => (
           <TextField

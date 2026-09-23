@@ -1,9 +1,11 @@
 import type {
   InvestigationActionIntentV1,
+  InvestigationActionKind,
   InvestigationCreateActionIntentRequest,
   InvestigationReportRef,
 } from "@agentic-review/contracts";
 import type { QueryClient } from "@tanstack/react-query";
+import { createPublicationComposer, type PublicationComposerDraft } from "./publication-composer";
 
 export interface ActionDraftFields {
   nextActionId: string | undefined;
@@ -22,14 +24,26 @@ export interface ActionDraftFields {
 }
 
 export interface ActionDraftRecord {
+  activeAction: InvestigationActionKind | null;
   fields: ActionDraftFields;
   savedFields: ActionDraftFields;
+  publication: PublicationComposerDraft;
+  savedPublication: PublicationComposerDraft;
+  actionDrafts: Partial<Record<InvestigationActionKind, ActionFormDraft>>;
+  receipts: InvestigationActionIntentV1[];
   prepareRequest: InvestigationCreateActionIntentRequest | null;
   preparationRejected: boolean;
   preparationResolved: boolean;
   contextRefreshRequired: boolean;
   intent: InvestigationActionIntentV1 | null;
   confirmationUncertain: boolean;
+}
+
+export interface ActionFormDraft {
+  fields: ActionDraftFields;
+  savedFields: ActionDraftFields;
+  publication: PublicationComposerDraft;
+  savedPublication: PublicationComposerDraft;
 }
 
 export function actionDraftKey(
@@ -46,6 +60,7 @@ export function actionDraftKey(
     reportRef?.id ?? null,
     reportRef?.version ?? null,
     reportRef?.digest ?? null,
+    "publication-v2",
   ] as const;
 }
 
@@ -66,8 +81,13 @@ export function createActionDraft(): ActionDraftRecord {
     sourceCommit: "",
   };
   return {
+    activeAction: null,
     fields,
     savedFields: { ...fields },
+    publication: createPublicationComposer(),
+    savedPublication: createPublicationComposer(),
+    actionDrafts: {},
+    receipts: [],
     prepareRequest: null,
     preparationRejected: false,
     preparationResolved: false,
@@ -78,18 +98,88 @@ export function createActionDraft(): ActionDraftRecord {
 }
 
 export function actionDraftIsDirty(record: ActionDraftRecord): boolean {
-  return (Object.keys(record.fields) as (keyof ActionDraftFields)[]).some(
-    (key) => record.fields[key] !== record.savedFields[key],
+  return (
+    actionFormIsDirty(record) ||
+    Object.entries(record.actionDrafts).some(
+      ([action, draft]) =>
+        action !== record.activeAction && draft !== undefined && actionFormIsDirty(draft),
+    )
   );
 }
 
+export function actionFormIsDirty(record: ActionFormDraft): boolean {
+  return (
+    (Object.keys(record.fields) as (keyof ActionDraftFields)[]).some(
+      (key) => record.fields[key] !== record.savedFields[key],
+    ) || JSON.stringify(record.publication) !== JSON.stringify(record.savedPublication)
+  );
+}
+
+/** Switching forms never creates a second preparation/submission lifecycle. */
+export function switchActionDraft(
+  record: ActionDraftRecord,
+  action: InvestigationActionKind,
+): ActionDraftRecord {
+  if (record.activeAction === action) return record;
+  const actionDrafts = { ...record.actionDrafts };
+  if (record.activeAction)
+    actionDrafts[record.activeAction] = structuredClone({
+      fields: record.fields,
+      savedFields: record.savedFields,
+      publication: record.publication,
+      savedPublication: record.savedPublication,
+    });
+  const fresh = createActionDraft();
+  const next = actionDrafts[action] ?? {
+    fields: fresh.fields,
+    savedFields: fresh.savedFields,
+    publication: fresh.publication,
+    savedPublication: fresh.savedPublication,
+  };
+  return { ...record, ...structuredClone(next), activeAction: action, actionDrafts };
+}
+
 export function saveActionDraft(record: ActionDraftRecord): ActionDraftRecord {
-  return { ...record, savedFields: { ...record.fields } };
+  return {
+    ...record,
+    savedFields: { ...record.fields },
+    savedPublication: structuredClone(record.publication),
+  };
 }
 
 export function discardActionDraft(record: ActionDraftRecord): ActionDraftRecord {
   // Draft editing and an already submitted request have separate lifecycles.
-  return { ...record, fields: { ...record.savedFields } };
+  return {
+    ...record,
+    fields: { ...record.savedFields },
+    publication: structuredClone(record.savedPublication),
+    actionDrafts: Object.fromEntries(
+      Object.entries(record.actionDrafts).map(([action, draft]) => [
+        action,
+        draft
+          ? {
+              ...draft,
+              fields: { ...draft.savedFields },
+              publication: structuredClone(draft.savedPublication),
+            }
+          : draft,
+      ]),
+    ),
+  };
+}
+
+function withReceipt(
+  record: ActionDraftRecord,
+  intent: InvestigationActionIntentV1,
+): ActionDraftRecord {
+  if (!["succeeded", "failed", "cancelled"].includes(intent.state)) return record;
+  return {
+    ...record,
+    receipts: [
+      ...record.receipts.filter((receipt) => receipt.id !== intent.id),
+      structuredClone(intent),
+    ],
+  };
 }
 
 export function hasUnresolvedActionSubmission(record: ActionDraftRecord): boolean {
@@ -177,7 +267,10 @@ export function retainActionIntent(
       intent.version < record.intent.version)
   )
     throw new Error("The returned status does not match the saved submission.");
-  return { ...record, intent: structuredClone(intent), confirmationUncertain: false };
+  return withReceipt(
+    { ...record, intent: structuredClone(intent), confirmationUncertain: false },
+    intent,
+  );
 }
 
 export function inspectActionIntent(
@@ -187,7 +280,10 @@ export function inspectActionIntent(
   if (record.intent?.id === intent.id) return retainActionIntent(record, intent);
   if (hasUnresolvedActionSubmission(record))
     throw new Error("Resolve the saved request before inspecting a different submission.");
-  return { ...record, intent: structuredClone(intent), confirmationUncertain: false };
+  return withReceipt(
+    { ...record, intent: structuredClone(intent), confirmationUncertain: false },
+    intent,
+  );
 }
 
 export function beginActionConfirmation(

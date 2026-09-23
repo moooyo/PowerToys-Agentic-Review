@@ -35,6 +35,7 @@ import {
   type RetainedCommentCommand,
   scheduleCommentCommand,
 } from "./comment-publication-state";
+import { GithubSourceLink as GitHubSourceLink } from "./github-source-link";
 import { useUnsavedChanges } from "./navigation-guard";
 import { Section } from "./report-sections";
 import { useInvestigationSession } from "./session";
@@ -168,6 +169,11 @@ export function CommentContextLinks({
   const source = commentSourceUrl(comment);
   return (
     <Stack direction="row" spacing={1} useFlexGap className="comments-actions">
+      <GitHubSourceLink
+        repositoryFullName={comment.repositoryFullName}
+        kind={comment.workItemKind}
+        number={comment.workItemNumber}
+      />
       {source && (
         <Button component={Link} to={source}>
           Open {comment.workItemKind === "pull_request" ? "pull request" : "issue"} #
@@ -514,8 +520,10 @@ export function CommentDeliveryHistoryPanel({
 
 export function CommentPublicationControls({
   comment,
+  stale = false,
 }: {
   comment: InvestigationCommentPublicationSummary;
+  stale?: boolean;
 }) {
   const queryClient = useQueryClient();
   const { session } = useInvestigationSession();
@@ -541,7 +549,7 @@ export function CommentPublicationControls({
   });
   const busy = refreshing || request?.state === "submitting";
   const canSchedule = (action: CommentAction) =>
-    canScheduleCommentAction(comment, session.user, action, request);
+    !stale && canScheduleCommentAction(comment, session.user, action, request);
   const refresh = async () => {
     if (busy) return;
     setRefreshing(true);
@@ -565,6 +573,12 @@ export function CommentPublicationControls({
           state: "refreshed",
           message:
             "Latest status loaded. Review the current destination and operation before making a new request.",
+        } satisfies RetainedCommentCommand);
+      } else if (current?.state === "unknown") {
+        queryClient.setQueryData(requestKey, {
+          ...current,
+          message:
+            "The latest publication status is loaded. Reading it cannot confirm this saved request. Its original operation, version, and request identity remain available for retrying.",
         } satisfies RetainedCommentCommand);
       }
       await Promise.all([
@@ -659,7 +673,7 @@ export function CommentPublicationControls({
               sx={{ mt: 1 }}
             >
               <Button disabled={busy} onClick={() => void refresh()}>
-                Check request status
+                Refresh publication status
               </Button>
               <Button
                 disabled={busy || !hasCommentActionGrant(comment, session.user, request.action)}

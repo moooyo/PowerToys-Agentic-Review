@@ -30,8 +30,9 @@ export function PageHeading({
           {subtitle && (
             <Typography
               component="div"
+              variant="body2"
               color="text.secondary"
-              sx={{ mt: 1, maxWidth: "80ch", overflowWrap: "anywhere" }}
+              sx={{ mt: 1, maxWidth: "72ch", overflowWrap: "anywhere" }}
             >
               {subtitle}
             </Typography>
@@ -49,7 +50,7 @@ export function Surface({ sx, children, ...props }: BoxProps) {
     <Box
       {...props}
       sx={[
-        { minWidth: 0, bgcolor: "background.paper", borderRadius: "20px" },
+        { minWidth: 0, bgcolor: "background.paper", borderRadius: "16px" },
         ...(Array.isArray(sx) ? sx : sx ? [sx] : []),
       ]}
     >
@@ -74,16 +75,22 @@ export function EmptyState({
       role="status"
       className="workspace-empty-state"
       spacing={1.5}
-      sx={{ py: 6, px: 2, textAlign: "center", alignItems: "center" }}
+      sx={{
+        py: { xs: 5, sm: 7 },
+        px: { xs: 2, sm: 3 },
+        textAlign: "center",
+        alignItems: "center",
+        minWidth: 0,
+      }}
     >
       <Box aria-hidden="true" sx={{ color: "text.secondary", display: "flex", mb: 0.5 }}>
         {icon ?? <InboxOutlined sx={{ fontSize: 32 }} />}
       </Box>
-      <Typography component="h2" variant="h6">
+      <Typography component="h2" variant="h6" sx={{ overflowWrap: "anywhere" }}>
         {title}
       </Typography>
       {description && (
-        <Typography color="text.secondary" sx={{ maxWidth: "58ch" }}>
+        <Typography color="text.secondary" sx={{ maxWidth: "58ch", overflowWrap: "anywhere" }}>
           {description}
         </Typography>
       )}

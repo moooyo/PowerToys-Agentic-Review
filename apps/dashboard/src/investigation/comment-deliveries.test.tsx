@@ -13,26 +13,41 @@ import {
   CommentPublicationControls,
   commentDeliveriesQueryKey,
   commentPollingInterval,
+  commentQueryKey,
   publicationKindLabel,
   publicationsQueryKey,
   safeCommentUrl,
   TaskComments,
 } from "./comment-deliveries";
-import { commentHistoryFilters, commentPublicationFilters } from "./comments-page";
+import CommentsPage, {
+  CommentDetails,
+  commentHistoryFilters,
+  commentPublicationFilters,
+  commentPublicationFilterUrl,
+} from "./comments-page";
 
-vi.mock("./session", () => ({
-  useInvestigationSession: () => ({
-    session: {
-      user: {
-        id: "reader",
-        isAdmin: false,
-        repositoryIds: ["repo-1"],
-        permissions: [],
-        actionCapabilities: [],
+vi.mock("./session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./session")>();
+  return {
+    ...actual,
+    useInvestigationSession: () => ({
+      session: {
+        authenticated: true,
+        user: {
+          id: "reader",
+          username: "reader",
+          displayName: "Reader",
+          email: null,
+          isAdmin: false,
+          repositoryIds: ["repo-1"],
+          permissions: [],
+          actionCapabilities: [],
+          allowRepositoryExecution: false,
+        },
       },
-    },
-  }),
-}));
+    }),
+  };
+});
 
 const timestamp = "2026-09-19T02:00:00.000Z";
 function summary(
@@ -324,7 +339,78 @@ describe("comment delivery history", () => {
         />
       </MemoryRouter>,
     );
-    expect(preparation).not.toContain("href=");
+    expect(preparation).toContain('href="https://github.com/owner/repository/pull/7"');
+    expect(preparation).toContain('target="_blank"');
+    expect(preparation).toContain('rel="noopener noreferrer"');
+    expect(preparation).not.toContain("workItemId=");
+    expect(preparation).not.toContain("taskId=");
+    expect(preparation).not.toContain("reportId=");
+  });
+
+  it("removes only the selected publication filter while retaining exact scope and other filters", () => {
+    const filters = commentPublicationFilters(
+      "?repositoryId=repo-1&workItemId=item-1&taskId=task-1&state=needs_attention&search=focus",
+    );
+    const withoutTask = commentPublicationFilters(
+      commentPublicationFilterUrl(filters, "taskId").split("?")[1] ?? "",
+    );
+    expect(withoutTask).toEqual({
+      repositoryId: "repo-1",
+      workItemId: "item-1",
+      state: "needs_attention",
+      search: "focus",
+    });
+  });
+
+  it("always offers additional publication filters and exposes individually removable exact filters", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    const html = renderToStaticMarkup(
+      <MemoryRouter
+        initialEntries={["/comments?repositoryId=repo-1&taskId=task-1&workItemNumber=7"]}
+      >
+        <QueryClientProvider client={queryClient}>
+          <CommentsPage />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(html).toContain("comments-more-filters");
+    expect(html).not.toContain("comments-mobile-filter");
+    expect(html).toContain("More filters");
+    expect(html).toContain('aria-label="Remove Task ID: task-1"');
+    expect(html).toContain('aria-label="Remove Source: #7"');
+    queryClient.clear();
+  });
+
+  it("retains the last publication body and GitHub source when a later status read fails", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryOnMount: false, gcTime: Infinity } },
+    });
+    queryClient.setQueryData(commentQueryKey("comment-1"), summary());
+    queryClient.setQueryData(
+      commentDeliveriesQueryKey({ commentId: "comment-1", cursor: undefined, limit: 25 }),
+      {
+        items: [delivery({ body: "Retained body from the recorded delivery." })],
+        nextCursor: null,
+      },
+    );
+    await queryClient.prefetchQuery({
+      queryKey: commentQueryKey("comment-1"),
+      queryFn: () => Promise.reject(new Error("Refresh unavailable")),
+    });
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/comments?repositoryId=repo-1&commentId=comment-1"]}>
+        <QueryClientProvider client={queryClient}>
+          <CommentDetails commentId="comment-1" />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(html).toContain("Refresh unavailable");
+    expect(html).toContain("last loaded publication");
+    expect(html).toContain("Retained body from the recorded delivery.");
+    expect(html).toContain('href="https://github.com/owner/repository/pull/7"');
+    queryClient.clear();
   });
 
   it("shows every returned publication for a task without collapsing result into progress", () => {

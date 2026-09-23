@@ -24,9 +24,11 @@ import {
   Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useId, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { investigationApi, type Repository } from "./api";
+import { investigationApi } from "./api";
+import { reportOutcome } from "./outcome-summary";
+import { type ReviewRecord, useReviewListNavigation } from "./review-navigation";
 import { sessionIdentity, useInvestigationSession } from "./session";
 import { EmptyState, PageHeading, Surface } from "./workspace-ui";
 
@@ -45,21 +47,51 @@ export function reportKindLabel(kind: InvestigationTaskKind): string {
   return taskKinds.find((item) => item.value === kind)?.label ?? kind;
 }
 
+function directoryRecord(
+  header: InvestigationReportHeaderV1,
+  params: URLSearchParams,
+): ReviewRecord {
+  const target = new URLSearchParams(params);
+  target.set("reportId", header.report.id);
+  return {
+    kind: "report",
+    id: header.report.id,
+    workItemId: header.context.workItem.id,
+    repositoryId: header.context.repository.id,
+    href: `/reports?${target}`,
+    label: header.context.workItem.title,
+  };
+}
+
 interface ReportFilterValues {
-  repositoryId: string;
   kind: string;
   completeness: string;
   delivery: string;
 }
 
+/** Report-local filters never replace the workspace repository scope. */
+export function applyReportDirectoryFilters(params: URLSearchParams, values: ReportFilterValues) {
+  const next = new URLSearchParams(params);
+  for (const key of ["kind", "completeness", "delivery"] as const) {
+    if (values[key]) next.set(key, values[key]);
+    else next.delete(key);
+  }
+  next.delete("cursor");
+  return next;
+}
+
+export function clearReportDirectoryFilters(params: URLSearchParams) {
+  const next = applyReportDirectoryFilters(params, { kind: "", completeness: "", delivery: "" });
+  next.delete("search");
+  return next;
+}
+
 function ReportFilterFields({
   values,
-  repositories,
   onChange,
   compact = false,
 }: {
   values: ReportFilterValues;
-  repositories: Repository[];
   onChange: (name: keyof ReportFilterValues, value: string) => void;
   compact?: boolean;
 }) {
@@ -67,23 +99,6 @@ function ReportFilterFields({
   const menuItemSx = compact ? { minHeight: 48 } : undefined;
   return (
     <>
-      <TextField
-        select
-        fullWidth
-        className={className}
-        label="Repository"
-        value={values.repositoryId}
-        onChange={(event) => onChange("repositoryId", event.target.value)}
-      >
-        <MenuItem value="" sx={menuItemSx}>
-          All accessible repositories
-        </MenuItem>
-        {repositories.map((item) => (
-          <MenuItem key={item.id} value={item.id} sx={menuItemSx}>
-            {item.fullName}
-          </MenuItem>
-        ))}
-      </TextField>
       <TextField
         select
         fullWidth
@@ -144,15 +159,19 @@ function ReportFilterFields({
 export function ReportDirectoryRow({
   header,
   to,
+  linkProps,
 }: {
   header: InvestigationReportHeaderV1;
   to: string;
+  linkProps?: ReturnType<ReturnType<typeof useReviewListNavigation>["getLinkProps"]>;
 }) {
   const { report, context } = header;
+  const outcome = reportOutcome(header);
   return (
     <ButtonBase
       component={Link}
       to={to}
+      {...linkProps}
       className="report-directory-row"
       sx={{
         width: "100%",
@@ -187,7 +206,7 @@ export function ReportDirectoryRow({
           {context.workItem.title}
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
-          {report.summary}
+          {outcome.label} · {outcome.description}
         </Typography>
       </Box>
       <Stack className="report-directory-status" spacing={1} sx={{ alignItems: "flex-start" }}>
@@ -201,6 +220,9 @@ export function ReportDirectoryRow({
         </Typography>
         <Typography variant="caption" color="text.secondary">
           Execution: {header.outcome}
+        </Typography>
+        <Typography variant="caption" color="text.secondary">
+          {outcome.validation.label}
         </Typography>
       </Stack>
       <ArrowForwardRounded className="report-directory-arrow" fontSize="small" />
@@ -233,7 +255,6 @@ export function ReportDirectory() {
         : undefined;
   const cursor = params.get("cursor") || undefined;
   const appliedFilters: ReportFilterValues = {
-    repositoryId: repositoryId ?? "",
     kind: kind ?? "",
     completeness: completeness ?? "",
     delivery: delivery ?? "",
@@ -253,10 +274,11 @@ export function ReportDirectory() {
     queryKey: ["investigation-report-directory", identity, query],
     queryFn: ({ signal }) => investigationApi.reports(query, signal),
   });
-  const repositories = useQuery({
-    queryKey: ["investigation-repositories", identity],
-    queryFn: () => investigationApi.repositories(),
-  });
+  const records = useMemo<ReviewRecord[]>(
+    () => (reports.data?.items ?? []).map((header) => directoryRecord(header, params)),
+    [reports.data, params],
+  );
+  const { getLinkProps } = useReviewListNavigation({ label: "Reports", records, complete: false });
   const filter = (name: string, value: string) => {
     const next = new URLSearchParams(params);
     if (value) next.set(name, value);
@@ -272,15 +294,14 @@ export function ReportDirectory() {
     setParams(next);
   };
   const applyCompactFilters = (values: ReportFilterValues) => {
-    const next = new URLSearchParams(params);
-    for (const [name, value] of Object.entries(values)) {
-      if (value) next.set(name, value);
-      else next.delete(name);
-    }
-    next.delete("cursor");
     setPrevious([]);
-    setParams(next, { replace: true });
+    setParams(applyReportDirectoryFilters(params, values), { replace: true });
     setCompactFilters(undefined);
+  };
+  const clearLocalFilters = () => {
+    setPrevious([]);
+    setCompactFilters(undefined);
+    setParams(clearReportDirectoryFilters(params), { replace: true });
   };
   return (
     <Stack spacing={3} className="report-workspace report-directory">
@@ -309,11 +330,7 @@ export function ReportDirectory() {
           onChange={(event) => filter("search", event.target.value)}
           slotProps={{ htmlInput: { maxLength: 200 } }}
         />
-        <ReportFilterFields
-          values={appliedFilters}
-          repositories={repositories.data?.items ?? []}
-          onChange={filter}
-        />
+        <ReportFilterFields values={appliedFilters} onChange={filter} />
         <Button
           className="report-directory-mobile-filter"
           startIcon={<FilterListRounded />}
@@ -327,22 +344,12 @@ export function ReportDirectory() {
         >
           Filters{activeFilterCount ? ` (${activeFilterCount})` : ""}
         </Button>
-        {activeFilterCount > 0 && (
-          <Button
-            className="report-directory-clear-filters"
-            onClick={() =>
-              applyCompactFilters({ repositoryId: "", kind: "", completeness: "", delivery: "" })
-            }
-          >
+        {(activeFilterCount > 0 || Boolean(search)) && (
+          <Button className="report-directory-clear-filters" onClick={clearLocalFilters}>
             Clear filters
           </Button>
         )}
       </Box>
-      {repositories.isError && (
-        <Alert severity="warning">
-          Repository filters could not be loaded. {repositories.error.message}
-        </Alert>
-      )}
       {reports.isPending && (
         <Box role="status">
           <CircularProgress size={24} />
@@ -361,13 +368,13 @@ export function ReportDirectory() {
         (reports.data.items.length ? (
           <Surface sx={{ overflow: "hidden" }}>
             {reports.data.items.map((header) => {
-              const target = new URLSearchParams(params);
-              target.set("reportId", header.report.id);
+              const record = directoryRecord(header, params);
               return (
                 <ReportDirectoryRow
                   key={`${header.report.id}:${header.report.version}`}
                   header={header}
-                  to={`/reports?${target}`}
+                  to={record.href}
+                  linkProps={getLinkProps(record)}
                 />
               );
             })}
@@ -378,16 +385,7 @@ export function ReportDirectory() {
             description="Saved reports from repositories available to your account appear here."
             action={
               search || kind || delivery || completeness ? (
-                <Button
-                  onClick={() => {
-                    const next = new URLSearchParams();
-                    if (repositoryId) next.set("repositoryId", repositoryId);
-                    setPrevious([]);
-                    setParams(next);
-                  }}
-                >
-                  Clear filters
-                </Button>
+                <Button onClick={clearLocalFilters}>Clear filters</Button>
               ) : undefined
             }
           />
@@ -415,7 +413,7 @@ export function ReportDirectory() {
             disabled={!reports.data.nextCursor || reports.isFetching}
             onClick={() => {
               setPrevious((value) => [...value, cursor]);
-              navigatePage(reports.data!.nextCursor ?? undefined);
+              navigatePage(reports.data?.nextCursor ?? undefined);
             }}
           >
             Next
@@ -448,7 +446,6 @@ export function ReportDirectory() {
               <ReportFilterFields
                 compact
                 values={compactValues}
-                repositories={repositories.data?.items ?? []}
                 onChange={(name, value) =>
                   setCompactFilters((current) => ({
                     ...appliedFilters,
@@ -457,9 +454,6 @@ export function ReportDirectory() {
                   }))
                 }
               />
-              {repositories.isError && (
-                <Alert severity="warning">Repository filters could not be loaded.</Alert>
-              )}
               <Stack
                 direction="row"
                 useFlexGap
@@ -470,7 +464,6 @@ export function ReportDirectory() {
                   sx={{ minHeight: 48 }}
                   onClick={() =>
                     setCompactFilters({
-                      repositoryId: "",
                       kind: "",
                       completeness: "",
                       delivery: "",

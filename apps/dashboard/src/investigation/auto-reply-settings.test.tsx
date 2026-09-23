@@ -214,6 +214,14 @@ describe("repository automatic reply configuration", () => {
         </QueryClientProvider>,
       );
     expect(renderForm(true, true)).toContain("Save automatic reply settings");
+    expect(renderForm(true, true)).toMatch(
+      /<button\b[^>]*disabled=""[^>]*>Save automatic reply settings<\/button>/u,
+    );
+    const renewal = renderForm(true, true).match(
+      /<button\b[^>]*>Save and renew publishing authorization<\/button>/u,
+    )?.[0];
+    expect(renewal).toBeDefined();
+    expect(renewal).not.toContain('disabled=""');
     expect(renderForm(true, true)).toContain("Save and renew publishing authorization");
     expect(renderForm(true, true)).not.toContain("publisher is not configured yet");
     const reader = renderForm(false, false);
@@ -223,6 +231,28 @@ describe("repository automatic reply configuration", () => {
     const manager = renderForm(true, false);
     expect(manager).toContain("turn off existing automatic replies");
     expect(manager).toContain("action preparation, action execution, and comment");
+  });
+
+  it("opens the requested template view without introducing a configuration change", () => {
+    const queryClient = client();
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <AutoReplySettingsForm
+          repository={repository}
+          settings={settings}
+          canManage
+          canAuthorize
+          selectedTemplate="issue"
+          onTemplateChange={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+    expect(html).toContain("Issue reply template");
+    expect(html).toContain("<textarea");
+    expect(html).toContain("{{next_steps}}");
+    expect(html).not.toContain("Unsaved changes");
+    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Save automatic reply settings<\/button>/u);
+    queryClient.clear();
   });
 
   it("shows loading and failed settings reads without loading historical snapshot lists", async () => {

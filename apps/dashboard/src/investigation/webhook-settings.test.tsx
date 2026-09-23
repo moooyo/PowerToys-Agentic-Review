@@ -15,6 +15,7 @@ import {
   parseGitHubUserIds,
   submitWebhookSettings,
   webhookSettingsFieldErrors,
+  webhookSettingsFormIsDirty,
   webhookSettingsFormValues,
   webhookSettingsInput,
 } from "./webhook-settings-form";
@@ -96,6 +97,7 @@ describe("repository assignment webhook settings", () => {
     expect(html).toContain("/api/github/webhook");
     expect(html).toContain("receiver is not configured yet");
     expect(html).toContain("Save webhook settings");
+    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Save webhook settings<\/button>/u);
     expect(html).not.toContain("review_requested");
   });
 
@@ -257,7 +259,7 @@ describe("webhook settings input and conflict recovery", () => {
     update.mockResolvedValue({ ...latest, version: 5 });
     await submitWebhookSettings(
       repository.id,
-      webhookSettingsFormValues(latest),
+      { ...webhookSettingsFormValues(latest), reviewerUserIdText: "1009" },
       latest,
       false,
       update,
@@ -265,11 +267,32 @@ describe("webhook settings input and conflict recovery", () => {
     expect(update).toHaveBeenLastCalledWith(repository.id, {
       version: 4,
       enabled: true,
-      reviewerUserId: 1005,
+      reviewerUserId: 1009,
       allowedActorUserIds: [2001, 2002],
     });
     const notice = renderToStaticMarkup(<WebhookSettingsConflictNotice />);
     expect(notice).toContain("Your draft is still in this form");
     expect(notice).toContain("replace the draft with the latest version");
+  });
+
+  it("does not write unchanged intake rules when numeric IDs are reordered or reformatted", async () => {
+    const form = {
+      ...webhookSettingsFormValues(settings),
+      reviewerUserIdText: " 01001 ",
+      allowedActorUserIdsText: "2002, 2001\n2002",
+    };
+    const update = vi.fn();
+    expect(webhookSettingsFormIsDirty(form, settings)).toBe(false);
+    await expect(submitWebhookSettings(repository.id, form, settings, false, update)).resolves.toBe(
+      settings,
+    );
+    expect(update).not.toHaveBeenCalled();
+    expect(webhookSettingsFormIsDirty({ ...form, enabled: false }, settings)).toBe(true);
+    expect(
+      webhookSettingsFormIsDirty({ ...form, reviewerUserIdText: "not-a-user-id" }, settings),
+    ).toBe(true);
+    expect(webhookSettingsFormIsDirty({ ...form, allowedActorUserIdsText: "2001" }, settings)).toBe(
+      true,
+    );
   });
 });

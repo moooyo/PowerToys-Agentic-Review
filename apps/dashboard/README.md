@@ -20,18 +20,43 @@ retired pages or provides a compatibility API or migration path.
 | `/pull-requests` | Lists registered pull requests; `workItemId` opens the item, its tasks, and available actions. |
 | `/issues` | Lists registered issues and opens their investigations, including Bug and Feature assessments. |
 | `/tasks` | Lists tasks; `taskId` opens attempts, the saved checkpoint, the latest report, and linked tasks. |
-| `/comments` | Lists scoped comment delivery history; `commentId` opens one comment and its available recovery actions. |
+| `/comments` | Lists scoped publications with search and exact source/Task filters; `commentId` opens its retained body, delivery attempts, and available recovery actions. |
 | `/webhooks` | Lists scoped assignment/E2E intake events; `deliveryId` opens its attempts, linked Task, and available intake retry. |
 | `/workers` | Administrator-only investigation Worker controls, effective task types, contact, and cleanup state. |
-| `/reports` | Opens the immutable report identified by `reportId`; reached from an item or task. |
-| `/repositories` | Lists repositories shared with the account and offers scoped PR/Issue import when permitted. |
+| `/reports` | Searches the server-paginated report directory; `reportId` opens an immutable report, also reachable from its source or Task. |
+| `/repositories` | Lists accessible repositories and opens Overview, Event intake, Replies, and workspace-wide Scheduling settings. |
 | `/account` | Lets the signed-in user change their own password. |
 | `/accounts` | Lets administrators list, create, update, disable, and reset workspace accounts. |
 
-`/` and `/work-items` redirect to `/pull-requests`. The `repositoryId` query
-parameter preserves repository selection. A report link can also specify
-`section=validation`, `section=evidence`, or `section=changes` to open the evidence
-section. Retired and unknown routes show an unavailable page.
+`/` and `/work-items` redirect to `/pull-requests`. PRs, Issues, Tasks, Reports,
+Comments, and Webhooks share the selected `repositoryId` when navigating between
+those destinations. Changing repository clears record-specific IDs, pagination
+position, and detail-view parameters. Workers and Accounts remain workspace-wide pages;
+repository access still comes from the authenticated account's grants.
+
+**Copy view link** copies only the page's allowed public view parameters: scope,
+record IDs, filters, pagination, sections, selected finding or attempt, and
+operational view choices. It excludes private feedback, publication payloads,
+passwords, and account/settings drafts. A report link can specify
+`section=validation`, `section=evidence`, or `section=changes` to open its evidence
+section. Account search/status, repository search, and the selected reply template
+can be restored without putting form content in the URL. Retired and unknown
+routes show an unavailable page.
+
+Opening a PR, Issue, Task, or Report from a result list captures a session-local
+review queue. Previous/Next follows that snapshot, and returning to the origin
+restores its list location and opener focus. Related Source, Task, and Report
+links retain the origin using their real repository/work-item associations,
+not interchangeable IDs. **A Reports queue contains only the currently fetched
+directory page**, not all server-side matches. Queues do not reorder or execute
+Tasks, are not included in copied view URLs, and are invalidated when their
+identity or repository scope is no longer applicable. Direct links have a normal
+directory fallback.
+
+Source, Task, Report, Comment, and Webhook details offer a GitHub source link when
+their recorded repository, source kind, and number are valid. It opens the current
+GitHub page; saved evidence remains bound to the report's original snapshot or
+revision.
 
 PR and Issue details can create a full investigation task. A static Issue
 investigation uses its imported snapshot; source-based Issue investigation
@@ -88,12 +113,30 @@ delivery, or request GitHub redelivery. Use the separate Task and Comments views
 for their respective outcomes and recovery actions. See
 [webhook recovery](../server/README.md#inspect-and-retry-webhook-intake).
 
+Comments and Webhooks keep status refresh, reconciliation, replay, and new
+requests distinct. A GET refresh retains the last readable snapshot and does not
+confirm an unknown command: these endpoints have no separate acknowledgement
+lookup by idempotency key. An unconfirmed request keeps its original operation,
+version, and key for **Retry same request** or **Resend saved request**; it blocks
+a new operation. Comment **Check delivery** is a separate versioned reconciliation
+command that records an observation without sending a GitHub comment. Publication
+sync can create or update a comment. Accepted requests and completed delivery are
+separate states; server availability and the required grants still apply. A later
+read failure preserves the source and retained history but disables starting a new
+operation until refresh succeeds.
+
 ## Structured reports
 
 The interface distinguishes execution outcome, report completeness, review
 conclusion, and actual validation. A completed investigation does not certify
 that the code is correct or that required E2E checks passed. A checkpoint or
 partial report retains findings, evidence, limitations, and remaining work.
+The shared outcome presentation uses the saved assessment before evidence and
+current next-step controls. `changes-requested` is displayed as **Changes needed**;
+it does not mean a GitHub review was submitted. Checkpoints and partial results
+show **No final conclusion** with their saved assessment. Task execution and
+cleanup remain separate from that assessment, and saved recommendations do not
+grant permission to execute an action.
 
 Reports provide:
 
@@ -106,13 +149,24 @@ Reports provide:
 - Exact original PR, Issue snapshot, source commit, local patch, and remote branch subjects.
 - Actual validation checks, evidence provenance, artifact availability, and diagnostics.
 
-Findings use cursor pagination with 25 items per page. The displayed total comes
-from the complete server collection, not the visible page. Header, page, and
-export responses are checked against report identity, version, digest, and
-collection totals. The complete JSON export also supplies evidence and saved
-plans and can be downloaded from the report. Registered available artifacts use
-the authenticated content endpoint; missing sample artifacts have no fake
-download destination.
+The report reader loads the **complete JSON export**, checks its report identity,
+version, digest, and collection totals against the header, and filters that full
+collection locally. Text search, priority, and assessment filters cover all
+findings; pagination then displays 25 matching findings per page. The complete
+count, matching count, selection, and current finding are distinct. A finding
+deep link locates its actual ID, including when it is outside the current filter.
+The server's cursor-based findings endpoint still exists, but it is not the
+reader's current filtering boundary. The export also supplies evidence and saved
+plans and remains downloadable. Registered available artifacts use the
+authenticated content endpoint; missing sample artifacts have no fake download
+destination.
+
+**Review selected** includes the complete report selection, including findings
+hidden by a filter or another page. Removing an item from that selection retains
+its private feedback text. **Save draft & next** saves only the current finding's
+text and moves within the filtered collection; **Save all report drafts** is a
+separate operation. Private drafts and selection stay in session memory and do
+not modify the immutable report or publish anything.
 
 The investigation workflow must cover the declared scope and recheck candidates
 before final delivery. Pagination is presentation only; it is not a top-k limit
@@ -132,14 +186,26 @@ that prohibition. Merge uses its own permissions and target conditions. Actual
 account permissions, source identity, target state, installed handlers, and
 unresolved submissions still apply to every operation.
 
-Valid suggestions are selected by default using the server's complete selection
-context. Selection survives pagination and preserves explicit deselection.
-Preparing feedback includes only selected findings and independent drafts,
-including any edits. Mixed text and code suggestions can be combined. Clearing
-selection restores the recommendation's default operation only when the user
-has not explicitly selected an operation. A code suggestion does not implicitly
-choose Request changes. A P0 outside the loaded page cannot be bypassed by
-clearing or changing the selection.
+Report review selection and action publication selection are separate. The
+report can initially select valid suggestions marked `selectedByDefault` by the
+server's complete selection context; it preserves explicit changes across pages.
+An action is chosen explicitly and keeps its own findings, text, delivery modes,
+and saved draft. A fresh action starts empty unless the user imports report
+selection or explicitly chooses a saved proposal carrying a draft reference.
+**Publish selected findings** and **Use report selection** are explicit imports,
+not continuous synchronization. Switching actions preserves each action's edits;
+later report changes require an explicit choice to import them, keep the action's
+selection/text, or replace publishing text. A P0 outside the visible page cannot
+be bypassed by clearing either selection.
+
+Feedback publication follows **Select findings -> Compose -> Server preview**,
+then a separate confirmation. Compose edits each included finding's publishing
+text and, for eligible review actions, its exact source-bound code suggestion.
+Conversation comments are text-only. Request changes requires at least one
+finding; Approve can have no findings or summary. This selection rule does not
+replace the server's P0, source, permission, or execution guards. Close, Merge,
+Trigger CI, and follow-up operations use their own fields rather than a generic
+feedback body. Field-specific errors identify and focus the field to correct.
 
 Follow-up operations come from persisted, validated `nextActions` and exact saved
 plans. `canPrepare` allows reviewing and completing a preparation form;
@@ -150,10 +216,22 @@ entering a SHA does not assert that other prerequisites have been satisfied.
 Preparation saves an `ActionIntent` and opens its exact payload, target, expected
 SHA/revision, and guards. Execution requires a separate confirmation bound to the
 intent version and payload digest. The server performs fresh checks before
-dispatch. An `executing` or `unknown` submission can be reconciled without
-resubmitting the operation. Read-only next actions navigate to the existing
-report or evidence. Creating a PR requires an existing verified remote branch;
-the dashboard does not implicitly commit or push changes.
+dispatch. An `executing` or `unknown` submission retains its original intent and
+blocks a new submission. Its owner can refresh the saved intent without executing
+it; reconciliation requires Execute actions and the operation's capability. Losing
+those grants does not turn reconciliation into a read-only operation or permit a
+replacement submission. Read-only next actions navigate to the existing report
+or evidence.
+
+Closing a preview or discarding local drafts does not cancel, undo, or roll back a
+prepared or submitted server operation. Terminal receipts remain available for
+their bound actor and source; repeating a successful action with the same payload
+requires an explicit **Confirm another**. Unknown outcomes must be checked through the
+saved identity, not by resending individual findings, and a review-level receipt
+does not independently verify every inline comment. A returned linked Task can
+be opened without claiming it has started or completed. Creating a PR requires an
+existing verified remote branch; the dashboard does not implicitly commit or push
+changes.
 
 ## Production API and session boundary
 
@@ -182,6 +260,7 @@ sample data or fabricated success.
 | `GET /api/tasks` and `GET /api/tasks/:id` | Read tasks, attempts, checkpoints, and linked work. |
 | `POST /api/tasks` | Create an investigation with server-frozen inputs. |
 | `POST /api/tasks/:id/resume` and `POST /api/tasks/:id/cancel` | Resume with an idempotency key and optional increased budget, or cancel execution. |
+| `GET /api/reports` | Search and filter the scoped report directory using server pagination. |
 | `GET /api/reports/:id` | Read a report header. |
 | `GET /api/reports/:id/findings` | Read a cursor-based findings page. |
 | `GET /api/reports/:id/export` | Read the complete structured result. |
@@ -206,6 +285,12 @@ action capabilities.
 Account forms retain an explicit version for updates and resets. A conflict
 requires refreshing and reviewing the current account before trying again;
 the dashboard does not silently overwrite a concurrent administrator's changes.
+Account and repository settings compare current values with their saved baseline.
+Restoring the original values clears dirty state, and ordinary no-op saves do not
+submit an update. Exact-ID/grant sets are compared without treating ordering or
+separator changes as new access. Renewing automatic-publishing authorization is
+an independent action and remains available when configuration values are
+unchanged. Shared static concurrency applies across all repositories.
 
 Password fields use the appropriate `username`, `current-password`, and
 `new-password` autocomplete attributes. They are held only in form memory and
@@ -261,7 +346,7 @@ synthetic investigations:
 | Sample | Behavior to inspect |
 | --- | --- |
 | PR #2101 | A P1 with required, unrun E2E checks; mixed suggestion and text feedback; manual Approve remains available. |
-| PR #2102 | 26 findings with the P0 on page two; Approve is blocked before that page loads while Merge retains its independent guards. |
+| PR #2102 | 26 findings with the P0 on page two; Approve is blocked before that page is viewed while Merge retains its independent guards. |
 | PR #2103 | An interrupted, partial investigation with a preserved checkpoint and resume controls. |
 | Bug Issue #3101 | `needs_verification`, separate reproduction status, and a saved follow-up plan requiring a chosen source SHA. |
 | Feature Issue #3102 | `ready` with an implementation plan and acceptance criteria; readiness does not imply maintainer acceptance. |

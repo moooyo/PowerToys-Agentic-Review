@@ -41,6 +41,7 @@ export function createReportDraft(
 export type ReportDraftEvent =
   | { type: "selection"; event: FeedbackSelectionEvent<InvestigationActionKind> }
   | { type: "edit"; draftId: string; body: string }
+  | { type: "save-finding"; draftId: string }
   | { type: "save" }
   | { type: "discard" };
 
@@ -73,6 +74,13 @@ export function reportDraftReducer(
           editedBodies: { ...record.current.editedBodies, [event.draftId]: event.body },
         },
       };
+    case "save-finding": {
+      const editedBodies = { ...record.saved.editedBodies };
+      const body = record.current.editedBodies[event.draftId];
+      if (body !== undefined) editedBodies[event.draftId] = body;
+      else delete editedBodies[event.draftId];
+      return { ...record, saved: { ...record.saved, editedBodies } };
+    }
     case "save":
       return { current: record.current, saved: record.current };
     case "discard":

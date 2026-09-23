@@ -9,6 +9,7 @@ import {
   Alert,
   Box,
   Button,
+  ButtonBase,
   Chip,
   CircularProgress,
   Dialog,
@@ -29,6 +30,8 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { investigationApi, type WorkItem } from "./api";
 import { ImportWorkItemButton } from "./import-work-item";
 import { useInvestigationRepositoryScope } from "./repository-scope";
+import { type ReviewRecord, useReviewListNavigation } from "./review-navigation";
+import { SourceResultLabel } from "./source-result";
 import { WorkItemDetails } from "./work-item-details";
 import {
   currentWorkItemTask,
@@ -37,6 +40,7 @@ import {
   investigationFilters,
   investigationLabels,
   investigationStateLabel,
+  relatedWorkItemTasks,
   workItemInvestigationState,
   workItemUrl,
 } from "./work-item-state";
@@ -118,6 +122,15 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(Math.floor(page), pageCount);
   const visible = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const queueRecords: ReviewRecord[] = filtered.map((item) => ({
+    kind: "work-item",
+    id: item.id,
+    workItemId: item.id,
+    repositoryId: item.repositoryId,
+    href: workItemUrl(item),
+    label: item.title,
+  }));
+  const queue = useReviewListNavigation({ label: plural, records: queueRecords, complete: true });
   const refreshing = query.isFetching || tasks.isFetching;
   if (selected) return <WorkItemDetails key={selected} id={selected} />;
   return (
@@ -268,12 +281,21 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
             {visible.map((item) => {
               const current = currentWorkItemTask(item, tasks.data?.items ?? []);
               const reviewState = workItemInvestigationState(current);
+              const savedTask = current?.latestReportRef
+                ? current
+                : relatedWorkItemTasks(item, tasks.data?.items ?? []).find((task) =>
+                    Boolean(task.latestReportRef),
+                  );
+              const record = queueRecords.find((record) => record.id === item.id)!;
               return (
-                <Box
-                  component="article"
+                <ButtonBase
+                  component={Link}
+                  {...queue.getLinkProps(record)}
                   key={item.id}
                   sx={{
                     display: "grid",
+                    width: "100%",
+                    textAlign: "left",
                     gridTemplateColumns: {
                       xs: "28px minmax(0, 1fr) 40px",
                       md: "40px minmax(0, 1fr) 172px 40px",
@@ -310,8 +332,7 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
                   </Box>
                   <Box sx={{ minWidth: 0, gridColumn: 2, gridRow: 1 }}>
                     <Typography
-                      component={Link}
-                      to={workItemUrl(item)}
+                      component="span"
                       sx={{
                         display: "block",
                         fontSize: 16,
@@ -352,6 +373,7 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
                       gap: { xs: 1.5, md: 0 },
                     }}
                   >
+                    <SourceResultLabel item={item} task={savedTask} />
                     <Chip
                       size="small"
                       label={
@@ -373,15 +395,10 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
                       {item.state} · Snapshot
                     </Typography>
                   </Stack>
-                  <IconButton
-                    component={Link}
-                    to={workItemUrl(item)}
-                    aria-label={`Open ${singular} ${item.number}: ${item.title}`}
-                    sx={{ gridColumn: { xs: 3, md: 4 }, gridRow: 1 }}
-                  >
+                  <Box aria-hidden="true" sx={{ gridColumn: { xs: 3, md: 4 }, gridRow: 1 }}>
                     <ChevronRightRounded />
-                  </IconButton>
-                </Box>
+                  </Box>
+                </ButtonBase>
               );
             })}
             <Stack

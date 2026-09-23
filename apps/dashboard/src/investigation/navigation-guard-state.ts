@@ -5,6 +5,7 @@ export interface NavigationProtection {
   busy?: boolean;
   scope?: string;
   allowPresentationNavigation?: boolean;
+  presentationParameters?: readonly string[];
 }
 
 export function activeGuardEntries<T extends NavigationProtection>(
@@ -25,8 +26,22 @@ export function blocksNavigation(
   const presentationOnly =
     workspaceRecordKey(current.pathname, current.search) ===
     workspaceRecordKey(next.pathname, next.search);
+  const keyIgnoring = (location: typeof current, keys: readonly string[]) => {
+    const query = new URLSearchParams(location.search);
+    for (const key of keys) query.delete(key);
+    query.sort();
+    return `${location.pathname}?${query}`;
+  };
   return activeGuardEntries(entries).some(
     (entry) =>
-      entry.busy || (entry.dirty && !(presentationOnly && entry.allowPresentationNavigation)),
+      entry.busy ||
+      (entry.dirty &&
+        !(
+          entry.allowPresentationNavigation &&
+          (entry.presentationParameters
+            ? keyIgnoring(current, entry.presentationParameters) ===
+              keyIgnoring(next, entry.presentationParameters)
+            : presentationOnly)
+        )),
   );
 }

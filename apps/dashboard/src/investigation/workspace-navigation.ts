@@ -1,3 +1,5 @@
+import { presentationParameters } from "./workspace-view";
+
 const detailParameters: Readonly<Record<string, string>> = {
   "/pull-requests": "workItemId",
   "/issues": "workItemId",
@@ -11,7 +13,7 @@ const scopedLists = new Set(["/pull-requests", "/issues", "/tasks", "/comments",
 
 export function workspaceRecordKey(pathname: string, search: string): string {
   const parameters = new URLSearchParams(search);
-  for (const key of ["tab", "section", "findingId", "attemptId"]) parameters.delete(key);
+  for (const key of presentationParameters) parameters.delete(key);
   if (pathname === "/workers") parameters.delete("workerId");
   parameters.sort();
   return `${pathname}?${parameters.toString()}`;

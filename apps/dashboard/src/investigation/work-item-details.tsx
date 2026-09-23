@@ -1,9 +1,8 @@
 import type {
+  InvestigationReportHeaderV1,
   InvestigationTaskV1,
   InvestigationWorkItemDiscussion,
 } from "@agentic-review/contracts";
-import ArrowBackRounded from "@mui/icons-material/ArrowBackRounded";
-import ArrowForwardRounded from "@mui/icons-material/ArrowForwardRounded";
 import ChatBubbleOutlineRounded from "@mui/icons-material/ChatBubbleOutlineRounded";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import HistoryRounded from "@mui/icons-material/HistoryRounded";
@@ -29,22 +28,37 @@ import {
   Typography,
 } from "@mui/material";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { type ReactNode, useId, useState } from "react";
+import { type ReactNode, useId, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { type ActionPanelRequest, actionLabels, isActionAllowed } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
 import { CommentStatus, commentDetailsUrl, commentPollingInterval } from "./comment-deliveries";
+import { GithubSourceLink } from "./github-source-link";
+import { useGuardedAction } from "./navigation-guard";
+import { OutcomeSummary } from "./outcome-summary";
+import { assertActionContext } from "./report-state";
 import { StandaloneActions } from "./report-workspace";
 import { useInvestigationRepositoryScope } from "./repository-scope";
-import { useInvestigationSession } from "./session";
+import { ReviewQueueBar } from "./review-navigation";
+import { sessionIdentity, useInvestigationSession } from "./session";
+import {
+  activeSourceReportTask,
+  readableSourceData,
+  readableSourceReport,
+  sourceAccessDenied,
+  sourceActionContextMatches,
+  sourceActionKey,
+  useSourceReport,
+} from "./source-result";
 import { StartInvestigationButton } from "./start-investigation";
 import {
   assertSourceSnapshot,
   currentWorkItemTask,
   investigationStateLabel,
   relatedWorkItemTasks,
-  taskReportMatches,
   taskUrl,
   taskUsesCurrentSource,
+  workItemUrl,
 } from "./work-item-state";
 import { EmptyState, PageHeading, Surface } from "./workspace-ui";
 
@@ -340,65 +354,197 @@ function WorkspaceUpdates({ item, tasks }: { item: WorkItem; tasks: Investigatio
   );
 }
 
+function SourceDecision({
+  source,
+  header,
+  activeTask,
+  fresh,
+  openActions,
+  refreshSource,
+}: {
+  source: WorkItem;
+  header: InvestigationReportHeaderV1;
+  activeTask?: InvestigationTaskV1;
+  fresh: boolean;
+  openActions: (request?: Omit<ActionPanelRequest, "id">) => void;
+  refreshSource: () => void;
+}) {
+  const { session } = useInvestigationSession();
+  const context = useQuery({
+    queryKey: sourceActionKey(sessionIdentity(session), source, header),
+    queryFn: async () => {
+      const result = await investigationApi.actionContext(source.id, header.report.id);
+      assertActionContext(header, result);
+      if (!sourceActionContextMatches(source, header, result, session.user?.id))
+        throw new Error("Action availability changed. Refresh the source before preparing.");
+      return result;
+    },
+  });
+  const currentContext =
+    context.data &&
+    !sourceAccessDenied(context.error) &&
+    sourceActionContextMatches(source, header, context.data, session.user?.id)
+      ? context.data
+      : undefined;
+  const reportUrl = `/reports?${new URLSearchParams({ reportId: header.report.id, repositoryId: source.repositoryId })}`;
+  const action = currentContext?.recommendation.action;
+  const saved = currentContext?.nextActions.find(
+    (value) => value.id === currentContext?.recommendedActionId,
+  );
+  const allowed = Boolean(
+    fresh &&
+      !context.isError &&
+      currentContext &&
+      action &&
+      isActionAllowed(currentContext, action, saved?.id),
+  );
+  return (
+    <OutcomeSummary
+      header={header}
+      actions={
+        <Stack spacing={1.5}>
+          {activeTask ? (
+            <>
+              <Typography variant="body2">
+                A linked task is {activeTask.state}. Its execution and validation remain separate
+                from this saved report.
+              </Typography>
+              <Button component={Link} to={taskUrl(activeTask)} variant="contained">
+                Open linked task
+              </Button>
+            </>
+          ) : (
+            <>
+              {currentContext && (
+                <Typography variant="body2">{currentContext.recommendation.reason}</Typography>
+              )}
+              {(action || currentContext?.pendingSubmission) && (
+                <Button
+                  variant="contained"
+                  disabled={currentContext?.pendingSubmission ? context.isError : !allowed}
+                  onClick={() =>
+                    openActions(
+                      currentContext?.pendingSubmission || !action
+                        ? undefined
+                        : { action, nextActionId: saved?.id },
+                    )
+                  }
+                >
+                  {currentContext?.pendingSubmission
+                    ? "Inspect pending submission"
+                    : (saved?.label ?? (action ? actionLabels[action] : "Choose an action"))}
+                </Button>
+              )}
+            </>
+          )}
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+            <Button component={Link} to={reportUrl}>
+              Read saved report
+            </Button>
+            <Button disabled={!fresh} onClick={() => openActions()}>
+              Other actions
+            </Button>
+          </Stack>
+          {context.isError && (
+            <Alert
+              severity="warning"
+              action={
+                <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+                  <Button onClick={refreshSource}>Refresh source</Button>
+                  <Button onClick={() => void context.refetch()}>Retry actions</Button>
+                </Stack>
+              }
+            >
+              {context.error.message}
+            </Alert>
+          )}
+          {context.data && !currentContext && !context.isError && (
+            <Alert
+              severity="warning"
+              action={<Button onClick={() => void context.refetch()}>Refresh actions</Button>}
+            >
+              The cached action context does not match this source revision or account. Reload
+              current action availability.
+            </Alert>
+          )}
+          {!fresh && (
+            <Typography variant="caption" color="text.secondary">
+              Saved data remains readable. Refresh the source and task status before preparing an
+              action.
+            </Typography>
+          )}
+          {context.isPending && (
+            <Typography variant="body2" role="status">
+              Loading current next actions…
+            </Typography>
+          )}
+        </Stack>
+      }
+    />
+  );
+}
+
 export function WorkItemDetails({ id }: { id: string }) {
   const sourceActionsId = useId();
   const scope = useInvestigationRepositoryScope();
   const { session } = useInvestigationSession();
+  const identity = sessionIdentity(session);
   const location = useLocation();
   const navigate = useNavigate();
   const [sourceOpen, setSourceOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionRequest, setActionRequest] = useState<ActionPanelRequest>();
+  const actionSerial = useRef(0);
+  const guardScope = `source-actions:${id}`;
+  const guardActions = useGuardedAction(guardScope);
   const requestedTab = new URLSearchParams(location.search).get("tab");
   const tab =
     requestedTab === "investigations" || requestedTab === "discussion" ? requestedTab : "overview";
   const item = useQuery({
-    queryKey: ["investigation-work-item", id],
-    queryFn: () => investigationApi.workItem(id),
+    queryKey: ["investigation-work-item", identity, id, scope.repositoryId],
+    queryFn: async () => {
+      const result = await investigationApi.workItem(id);
+      if (result.id !== id || (scope.repositoryId && result.repositoryId !== scope.repositoryId))
+        throw new Error("The returned source does not match this address and repository.");
+      return result;
+    },
   });
+  const itemData = readableSourceData(item.data, item.error);
   const tasks = useQuery({
-    queryKey: ["investigation-tasks", id],
+    queryKey: ["investigation-tasks", identity, id],
     queryFn: () => investigationApi.tasks(id),
     refetchInterval: (current) =>
+      !sourceAccessDenied(current.state.error) &&
       current.state.data?.items.some((task) => task.state === "queued" || task.state === "running")
         ? 5_000
         : false,
     refetchIntervalInBackground: false,
   });
   const snapshot = useQuery({
-    queryKey: ["investigation-work-item-snapshot", id, item.data?.subject.revisionKey],
+    queryKey: ["investigation-work-item-snapshot", identity, id, itemData?.subject.revisionKey],
     queryFn: async ({ signal }) => {
+      if (!itemData) throw new Error("Load this source before reading its snapshot.");
       const value = await investigationApi.workItemSnapshot(
         id,
-        { revisionKey: item.data!.subject.revisionKey },
+        { revisionKey: itemData.subject.revisionKey },
         signal,
       );
-      assertSourceSnapshot(item.data!, value);
+      assertSourceSnapshot(itemData, value);
       return value;
     },
-    enabled: !!item.data,
+    enabled: !!itemData,
   });
-  const related = item.data ? relatedWorkItemTasks(item.data, tasks.data?.items ?? []) : [];
-  const current = item.data ? currentWorkItemTask(item.data, related) : undefined;
+  const taskData = readableSourceData(tasks.data, tasks.error);
+  const snapshotData = readableSourceData(snapshot.data, snapshot.error);
+  const related = itemData ? relatedWorkItemTasks(itemData, taskData?.items ?? []) : [];
+  const current = itemData ? currentWorkItemTask(itemData, related) : undefined;
   const latestSavedTask = current?.latestReportRef
     ? current
     : related.find((task) => !!task.latestReportRef);
-  const currentReport = useQuery({
-    queryKey: [
-      "investigation-source-report",
-      id,
-      current?.id,
-      current?.latestReportRef?.id,
-      current?.latestReportRef?.digest,
-    ],
-    queryFn: async () => {
-      const value = await investigationApi.report(current!.latestReportRef!.id);
-      if (!taskReportMatches(item.data!, current!, value))
-        throw new Error("The saved report does not match the current investigation.");
-      return value;
-    },
-    enabled: !!current?.latestReportRef && !!item.data,
-  });
+  const currentReport = useSourceReport(itemData, latestSavedTask);
   if (item.isPending) return <CircularProgress size={28} aria-label="Loading source" />;
-  if (item.isError)
+  if (item.isError && (!item.data || sourceAccessDenied(item.error)))
     return (
       <Stack spacing={3}>
         <PageHeading
@@ -413,7 +559,22 @@ export function WorkItemDetails({ id }: { id: string }) {
         </Button>
       </Stack>
     );
-  const source = item.data;
+  const source = itemData;
+  if (!source)
+    return <EmptyState title="Source unavailable" description="Refresh to load this source." />;
+  const fresh = !item.isError && !tasks.isError;
+  const header = readableSourceReport(
+    source,
+    latestSavedTask,
+    currentReport.data,
+    currentReport.error,
+  );
+  const openActions = (request: Omit<ActionPanelRequest, "id"> = {}) => {
+    setActionRequest({ id: `source-${++actionSerial.current}`, ...request });
+    setActionsOpen(true);
+  };
+  const activeLinkedTask = activeSourceReportTask(source, header, related);
+
   const repository = scope.query.data?.items.find((entry) => entry.id === source.repositoryId);
   const canCreate =
     !!session.user?.permissions.includes("task:create") &&
@@ -430,27 +591,109 @@ export function WorkItemDetails({ id }: { id: string }) {
   };
   return (
     <Stack spacing={3}>
-      <Box sx={{ ml: -1.5, mb: -1 }}>
-        <Button
-          component={Link}
-          to={source.kind === "pull_request" ? "/pull-requests" : "/issues"}
-          startIcon={<ArrowBackRounded />}
-        >
-          All {source.kind === "pull_request" ? "pull requests" : "issues"}
-        </Button>
-      </Box>
+      <ReviewQueueBar
+        record={{
+          kind: "work-item",
+          id: source.id,
+          workItemId: source.id,
+          repositoryId: source.repositoryId,
+          href: workItemUrl(source),
+          label: source.title,
+        }}
+        fallbackTo={`${source.kind === "pull_request" ? "/pull-requests" : "/issues"}?repositoryId=${encodeURIComponent(source.repositoryId)}`}
+        fallbackLabel={source.kind === "pull_request" ? "Pull requests" : "Issues"}
+      />
       <PageHeading
         eyebrow={`${source.kind === "pull_request" ? "Pull request" : "Issue"} #${source.number}`}
         title={source.title}
         subtitle={`${repository?.fullName ?? source.repositoryId} · Updated ${new Date(source.updatedAt).toLocaleString()}`}
-        action={<StartInvestigationButton workItem={source} />}
+        action={
+          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+            {repository && (
+              <GithubSourceLink
+                repositoryFullName={repository.fullName}
+                kind={source.kind}
+                number={source.number}
+              />
+            )}
+            <StartInvestigationButton
+              workItem={source}
+              variant={header ? "outlined" : "contained"}
+              disabled={!fresh}
+            />
+          </Stack>
+        }
       >
         <Chip
-          label={source.state[0]!.toUpperCase() + source.state.slice(1)}
+          label={source.state.charAt(0).toUpperCase() + source.state.slice(1)}
           color={source.state === "open" ? "success" : "default"}
           size="small"
         />
       </PageHeading>
+      {item.isError && (
+        <Alert
+          severity="warning"
+          action={
+            <Button
+              onClick={() => {
+                void item.refetch();
+                void tasks.refetch();
+              }}
+            >
+              Retry refresh
+            </Button>
+          }
+        >
+          Refresh failed. Showing the last saved source snapshot.
+        </Alert>
+      )}
+      {header ? (
+        <>
+          {latestSavedTask && !taskUsesCurrentSource(source, latestSavedTask) && (
+            <Alert severity="warning">
+              This report describes an earlier saved source. Its findings have not been verified
+              against the current revision.
+            </Alert>
+          )}
+          <SourceDecision
+            source={source}
+            header={header}
+            activeTask={activeLinkedTask}
+            fresh={fresh && !currentReport.isError}
+            openActions={openActions}
+            refreshSource={() => {
+              void item.refetch();
+              void tasks.refetch();
+            }}
+          />
+        </>
+      ) : sourceAccessDenied(tasks.error) ? (
+        <Alert
+          severity="warning"
+          action={<Button onClick={() => void tasks.refetch()}>Check investigation access</Button>}
+        >
+          Investigation access is unavailable. Cached tasks and their saved conclusions are hidden
+          until access is confirmed.
+        </Alert>
+      ) : currentReport.isError ? (
+        <Alert
+          severity="warning"
+          action={<Button onClick={() => void currentReport.refetch()}>Retry report</Button>}
+        >
+          {currentReport.error.message}
+        </Alert>
+      ) : (
+        <Surface sx={{ p: { xs: 2, sm: 3 }, bgcolor: "var(--app-surface-container)" }}>
+          <Typography component="h2" variant="h6">
+            {latestSavedTask?.latestReportRef
+              ? "Loading saved conclusion…"
+              : "No saved conclusion yet"}
+          </Typography>
+          <Typography color="text.secondary" sx={{ mt: 1 }}>
+            Task progress is separate from a saved assessment and accepted validation.
+          </Typography>
+        </Surface>
+      )}
       {!canCreate && (
         <Alert severity="info">
           Read-only access. Creating an investigation requires the Create tasks permission and
@@ -525,14 +768,16 @@ export function WorkItemDetails({ id }: { id: string }) {
               to={`/reports?${new URLSearchParams({ reportId: latestSavedTask.latestReportRef.id, repositoryId: source.repositoryId })}`}
             >
               {latestSavedTask.id === current?.id
-                ? currentReport.data?.report.delivery === "checkpoint"
+                ? header?.report.delivery === "checkpoint"
                   ? "Checkpoint available"
                   : "View saved report"
                 : "From an earlier or linked investigation"}
             </Button>
           ) : (
             <Typography variant="body2" sx={{ mt: 0.25, lineHeight: "20px" }}>
-              Not available yet
+              {sourceAccessDenied(tasks.error)
+                ? "Unavailable with current access"
+                : "Not available yet"}
             </Typography>
           )}
         </Box>
@@ -621,26 +866,6 @@ export function WorkItemDetails({ id }: { id: string }) {
                         {currentReport.error.message}
                       </Alert>
                     )}
-                    {currentReport.data && (
-                      <Box sx={{ bgcolor: "action.hover", borderRadius: 4, p: 3, mt: 2.5 }}>
-                        <Typography variant="caption" color="text.secondary">
-                          {currentReport.data.report.delivery === "checkpoint"
-                            ? "Saved checkpoint"
-                            : "Report summary"}
-                          {currentReport.data.report.completeness === "partial" ? " · Partial" : ""}
-                        </Typography>
-                        <Typography sx={{ my: 1.25, lineHeight: 1.6 }}>
-                          {currentReport.data.report.summary}
-                        </Typography>
-                        <Button
-                          component={Link}
-                          endIcon={<ArrowForwardRounded />}
-                          to={`/reports?${new URLSearchParams({ reportId: currentReport.data.id, repositoryId: source.repositoryId })}`}
-                        >
-                          Review saved report
-                        </Button>
-                      </Box>
-                    )}
                   </>
                 ) : (
                   <Stack direction="row" spacing={2} sx={{ py: 2 }}>
@@ -678,7 +903,9 @@ export function WorkItemDetails({ id }: { id: string }) {
                   <Typography variant="subtitle2">Available source actions</Typography>
                 </AccordionSummary>
                 <AccordionDetails>
-                  <StandaloneActions workItem={source} />
+                  <Button onClick={() => openActions()} disabled={!fresh}>
+                    Choose an action
+                  </Button>
                 </AccordionDetails>
               </Accordion>
             </Stack>
@@ -808,13 +1035,42 @@ export function WorkItemDetails({ id }: { id: string }) {
                   {snapshot.error.message}
                 </Alert>
               ) : (
-                <FrozenDiscussion item={source} snapshot={snapshot.data} />
+                <FrozenDiscussion item={source} snapshot={snapshotData} />
               )}
             </DetailSection>
             <WorkspaceUpdates item={source} tasks={related} />
           </Stack>
         )}
       </Box>
+      <Dialog
+        open={actionsOpen}
+        onClose={() => {
+          if (!actionBusy) guardActions(() => setActionsOpen(false));
+        }}
+        fullWidth
+        maxWidth="md"
+        aria-labelledby={`${sourceActionsId}-dialog-title`}
+      >
+        <DialogTitle id={`${sourceActionsId}-dialog-title`}>
+          Actions for {source.kind === "pull_request" ? "PR" : "Issue"} #{source.number}
+        </DialogTitle>
+        <DialogContent>
+          {actionsOpen && (
+            <StandaloneActions
+              workItem={source}
+              reportId={header?.report.id}
+              request={actionRequest}
+              onBusyChange={setActionBusy}
+              guardScope={guardScope}
+            />
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={actionBusy} onClick={() => guardActions(() => setActionsOpen(false))}>
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog
         open={sourceOpen}
         onClose={() => setSourceOpen(false)}
@@ -826,16 +1082,18 @@ export function WorkItemDetails({ id }: { id: string }) {
         <DialogContent>
           <Stack spacing={3}>
             <Typography variant="body2" color="text.secondary">
-              A saved reference for investigations and reports.
+              {sourceAccessDenied(snapshot.error)
+                ? "Saved snapshot access is unavailable. Only the registered source description is shown."
+                : "A saved reference for investigations and reports."}
             </Typography>
             <Typography variant="h6">
-              {snapshot.data?.inputSnapshot?.title ?? source.title}
+              {snapshotData?.inputSnapshot?.title ?? source.title}
             </Typography>
             <Typography sx={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-              {snapshot.data?.inputSnapshot?.body ?? source.body}
+              {snapshotData?.inputSnapshot?.body ?? source.body}
             </Typography>
             {snapshot.isError && <Alert severity="error">{snapshot.error.message}</Alert>}
-            {snapshot.data?.availability === "unavailable" && (
+            {snapshotData?.availability === "unavailable" && (
               <Alert severity="info">
                 This legacy record has no retained input snapshot. The registered description is
                 shown.
@@ -848,13 +1106,13 @@ export function WorkItemDetails({ id }: { id: string }) {
               <Typography component="p" sx={{ fontFamily: "monospace", fontSize: 12 }}>
                 {source.subject.revisionKey}
               </Typography>
-              {snapshot.data?.snapshotRef && (
+              {snapshotData?.snapshotRef && (
                 <>
                   <Typography variant="caption" color="text.secondary">
                     Snapshot digest
                   </Typography>
                   <Typography component="p" sx={{ fontFamily: "monospace", fontSize: 12 }}>
-                    {snapshot.data.snapshotRef.digest}
+                    {snapshotData.snapshotRef.digest}
                   </Typography>
                 </>
               )}

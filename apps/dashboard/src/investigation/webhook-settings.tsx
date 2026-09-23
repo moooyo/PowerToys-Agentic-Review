@@ -24,6 +24,7 @@ import {
   submitWebhookSettings,
   type WebhookSettingsFormValues,
   webhookSettingsFieldErrors,
+  webhookSettingsFormIsDirty,
   webhookSettingsFormValues,
 } from "./webhook-settings-form";
 
@@ -63,7 +64,7 @@ export function WebhookSettingsForm({
   const reviewerRef = useRef<HTMLInputElement>(null);
   const actorsRef = useRef<HTMLInputElement>(null);
   const alive = useRef(true);
-  const dirty = JSON.stringify(form) !== JSON.stringify(webhookSettingsFormValues(saved));
+  const dirty = webhookSettingsFormIsDirty(form, saved);
   useUnsavedChanges(dirty, { busy, description: "Event intake has unsaved changes." });
   useEffect(() => {
     alive.current = true;
@@ -96,7 +97,7 @@ export function WebhookSettingsForm({
   };
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!canManage || busy || conflict) return;
+    if (!canManage || busy || conflict || !dirty) return;
     const errors = webhookSettingsFieldErrors(form);
     setFieldErrors(errors);
     if (Object.keys(errors).length) {
@@ -341,7 +342,7 @@ export function WebhookSettingsForm({
           sx={{ flexWrap: "wrap", bgcolor: dirty ? "background.paper" : undefined }}
         >
           {canManage && (
-            <Button type="submit" variant="contained" disabled={busy || conflict}>
+            <Button type="submit" variant="contained" disabled={busy || conflict || !dirty}>
               {busy ? "Working…" : "Save webhook settings"}
             </Button>
           )}

@@ -29,7 +29,7 @@ import { type ReactNode, useId, useState } from "react";
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 3 }}>
-      <Typography variant="h6" sx={{ mb: 1.5 }}>
+      <Typography component="h2" variant="h6" sx={{ mb: 1.5 }}>
         {title}
       </Typography>
       {children}
@@ -66,7 +66,7 @@ export function TextList({ items }: { items: readonly string[] }) {
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <Box>
-      <Typography variant="overline" color="text.secondary">
+      <Typography component="h3" variant="overline" color="text.secondary">
         {label}
       </Typography>
       <Box sx={{ overflowWrap: "anywhere" }}>{children}</Box>
@@ -468,7 +468,9 @@ export function FindingCard({
               }
               size="small"
             />
-            <Typography variant="h6">{finding.title}</Typography>
+            <Typography component="h2" variant="h6">
+              {finding.title}
+            </Typography>
           </Stack>
           <Typography variant="caption" color="text.secondary">
             {finding.confirmation.status} · Finding version {finding.version} · {finding.subjectRef}
@@ -559,7 +561,9 @@ export function FindingCard({
                 <Typography variant="subtitle2">Code replacement suggestion</Typography>
                 <Chip
                   size="small"
-                  label={suggestionValid ? "Validated by server" : "Not available for submission"}
+                  label={
+                    suggestionValid ? "Source anchor validated" : "Not available for submission"
+                  }
                   color={suggestionValid ? "success" : "default"}
                 />
               </Stack>
@@ -580,7 +584,8 @@ export function FindingCard({
                 {finding.feedbackDraft.suggestion.replacement}
               </Box>
               <Typography variant="caption" color="text.secondary">
-                A code suggestion is a comment; it does not choose Request changes.
+                A suggested change does not choose a review verdict or establish runtime
+                correctness. Choose its delivery and the review action in the publishing workflow.
               </Typography>
             </Box>
           )}

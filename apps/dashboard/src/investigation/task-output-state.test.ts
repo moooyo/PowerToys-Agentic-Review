@@ -1,4 +1,5 @@
 import type {
+  InvestigationAttemptV1,
   InvestigationModelInvocationReceipt,
   InvestigationOutputEvent,
   InvestigationOutputPage,
@@ -11,8 +12,54 @@ import {
   latestAttemptInvocation,
   maximumLoadedOutputItems,
   mergeTaskOutput,
+  normalizeTaskOutputView,
+  orderedTaskAttempts,
   outputMatches,
+  selectedTaskAttempt,
 } from "./task-output-state";
+
+describe("copied output view", () => {
+  it("restores only bounded search text and supported visible-output event types", () => {
+    expect(normalizeTaskOutputView()).toEqual({ search: "", type: "all" });
+    expect(normalizeTaskOutputView({ search: "tool\u0000 result", type: "tool" })).toEqual({
+      search: "tool result",
+      type: "tool",
+    });
+    expect(normalizeTaskOutputView({ search: "x".repeat(170), type: "private" })).toEqual({
+      search: "x".repeat(160),
+      type: "all",
+    });
+    for (const type of ["assistant", "tool", "system", "gap"])
+      expect(normalizeTaskOutputView({ search: "needle", type }).type).toBe(type);
+  });
+});
+
+describe("task attempt navigation", () => {
+  const attempt = (id: string, number: number, taskId = "task-one"): InvestigationAttemptV1 => ({
+    schemaVersion: "InvestigationAttemptV1",
+    id,
+    taskId,
+    number,
+    workerId: null,
+    leaseVersion: 0,
+    state: "queued",
+    startedAt: null,
+    finishedAt: null,
+    terminationReason: null,
+  });
+  it("defaults to the latest owned attempt and preserves an explicit historical choice", () => {
+    const records = [attempt("old", 1), attempt("foreign", 99, "task-two"), attempt("latest", 3)];
+    expect(orderedTaskAttempts("task-one", records).map((value) => value.id)).toEqual([
+      "latest",
+      "old",
+    ]);
+    expect(selectedTaskAttempt("task-one", records)?.id).toBe("latest");
+    expect(selectedTaskAttempt("task-one", records, "old")?.id).toBe("old");
+    expect(selectedTaskAttempt("task-one", records, "foreign")?.id).toBe("latest");
+    expect(selectedTaskAttempt("task-one", [], "old")).toBeUndefined();
+    expect(records.map((value) => value.id)).toEqual(["old", "foreign", "latest"]);
+  });
+});
 
 function event(
   sequence: number,

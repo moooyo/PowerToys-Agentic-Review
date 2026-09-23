@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { activeGuardEntries, blocksNavigation } from "./navigation-guard-state";
+import {
+  activeGuardEntries,
+  blocksNavigation,
+  type NavigationProtection,
+} from "./navigation-guard-state";
 
 describe("navigation protection boundaries", () => {
   const report = { pathname: "/reports", search: "?reportId=report-one&section=findings" };
@@ -64,5 +68,111 @@ describe("navigation protection boundaries", () => {
       "pending-request",
     ]);
     expect(entries[0]?.dirty).toBe(true);
+  });
+
+  describe("a retained reply-template editor", () => {
+    const replies = {
+      pathname: "/repositories",
+      search: "?repositoryId=repo-one&tab=replies&replyTemplate=pullRequest&q=PowerToys",
+    };
+    const protection: NavigationProtection = {
+      dirty: true,
+      allowPresentationNavigation: true,
+      presentationParameters: ["replyTemplate"],
+    };
+
+    it("allows only the selected template to change, including default selection and reordered parameters", () => {
+      const next = {
+        ...replies,
+        search: "?q=PowerToys&replyTemplate=issue&tab=replies&repositoryId=repo-one",
+      };
+      expect(blocksNavigation([protection], replies, next)).toBe(false);
+      const defaultTemplate = {
+        ...replies,
+        search: "?repositoryId=repo-one&tab=replies&q=PowerToys",
+      };
+      expect(blocksNavigation([protection], replies, defaultTemplate)).toBe(false);
+      expect(blocksNavigation([protection], defaultTemplate, next)).toBe(false);
+      expect(protection.dirty).toBe(true);
+      expect(protection.presentationParameters).toEqual(["replyTemplate"]);
+    });
+
+    it.each([
+      [
+        "repository",
+        "/repositories",
+        "?repositoryId=repo-two&tab=replies&replyTemplate=issue&q=PowerToys",
+      ],
+      [
+        "settings tab",
+        "/repositories",
+        "?repositoryId=repo-one&tab=intake&replyTemplate=issue&q=PowerToys",
+      ],
+      [
+        "record binding",
+        "/repositories",
+        "?repositoryId=repo-one&tab=replies&replyTemplate=issue&q=PowerToys&workItemId=another-source",
+      ],
+      [
+        "another presentation parameter",
+        "/repositories",
+        "?repositoryId=repo-one&tab=replies&replyTemplate=issue&q=PowerToys&findingId=another-finding",
+      ],
+      [
+        "directory filter",
+        "/repositories",
+        "?repositoryId=repo-one&tab=replies&replyTemplate=issue&q=another-query",
+      ],
+      ["page", "/reports", "?repositoryId=repo-one&reportId=report-one&replyTemplate=issue"],
+    ])(
+      "still protects a changed %s while a template selection also changes",
+      (_label, pathname, search) => {
+        expect(blocksNavigation([protection], replies, { pathname, search })).toBe(true);
+      },
+    );
+
+    it("requires the presentation-navigation opt-in even when a parameter list is supplied", () => {
+      expect(
+        blocksNavigation([{ ...protection, allowPresentationNavigation: false }], replies, {
+          ...replies,
+          search: replies.search.replace("pullRequest", "issue"),
+        }),
+      ).toBe(true);
+      expect(
+        blocksNavigation([{ ...protection, presentationParameters: [] }], replies, {
+          ...replies,
+          search: replies.search.replace("pullRequest", "issue"),
+        }),
+      ).toBe(true);
+    });
+
+    it.each([false, true])("blocks a template switch while submitting (dirty=%s)", (dirty) => {
+      expect(
+        blocksNavigation([{ ...protection, dirty, busy: true }], replies, {
+          ...replies,
+          search: replies.search.replace("pullRequest", "issue"),
+        }),
+      ).toBe(true);
+      expect(blocksNavigation([{ ...protection, dirty, busy: true }], replies, replies)).toBe(
+        false,
+      );
+    });
+
+    it("does not let one editor's exception bypass another active draft or busy operation", () => {
+      const next = { ...replies, search: replies.search.replace("pullRequest", "issue") };
+      expect(
+        blocksNavigation([protection, { dirty: true, scope: "another-form" }], replies, next),
+      ).toBe(true);
+      expect(
+        blocksNavigation(
+          [protection, { dirty: false, busy: true, scope: "operation" }],
+          replies,
+          next,
+        ),
+      ).toBe(true);
+      expect(blocksNavigation([protection, { dirty: false, busy: false }], replies, next)).toBe(
+        false,
+      );
+    });
   });
 });

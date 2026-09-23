@@ -4,7 +4,7 @@
 }
 .report-workspace .report-directory-filters {
   display: grid;
-  grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(150px, 1fr));
+  grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(150px, 1fr));
   gap: 16px;
 }
 .report-workspace .report-directory-mobile-filter,
@@ -98,6 +98,39 @@
   max-width: 100%;
   overflow-wrap: anywhere;
 }
+.report-workspace .report-context {
+  padding: 16px 20px;
+  border: 1px solid var(--app-line);
+  border-radius: 16px;
+}
+.report-workspace .report-context > summary,
+.report-workspace .report-independent-drafts > summary {
+  cursor: pointer;
+  min-height: 48px;
+  padding-block: 12px;
+  font-weight: 500;
+}
+.report-workspace .report-finding-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) minmax(130px, 1fr) minmax(200px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+.report-workspace .report-findings-tools-toggle,
+.report-workspace .report-mobile-finding-picker {
+  display: none;
+}
+.report-workspace .report-selected-review-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-block: 16px;
+  border-bottom: 1px solid var(--app-line);
+}
+.report-workspace .report-finding-nav-item {
+  overflow-wrap: anywhere;
+}
 @media (max-width: 1200px) {
   .report-workspace .report-directory-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -111,6 +144,23 @@
   }
 }
 @media (max-width: 900px) {
+  .report-workspace .report-finding-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .report-workspace .report-finding-filters > :first-child {
+    grid-column: 1 / -1;
+  }
+  .report-workspace .report-findings-tools-toggle,
+  .report-workspace .report-mobile-finding-picker {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .report-workspace .report-findings-tools[data-open="false"],
+  .report-workspace .report-finding-nav[data-open="false"] {
+    display: none;
+  }
   .report-workspace .report-findings-layout,
   .report-workspace .report-details-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -130,6 +180,13 @@
   }
 }
 @media (max-width: 600px) {
+  .report-workspace .report-finding-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .report-workspace .report-selected-review-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
   .report-workspace .report-directory-filters {
     grid-template-columns: minmax(0, 1fr);
   }

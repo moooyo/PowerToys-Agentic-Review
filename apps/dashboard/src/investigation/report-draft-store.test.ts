@@ -20,6 +20,51 @@ import { selectionContext } from "./report-state";
 import { createSampleInvestigationApi } from "./sample-adapter";
 
 describe("private report feedback", () => {
+  it("saves only the current finding text while other edits and selections remain unsaved", () => {
+    let record = createReportDraft({
+      reportId: "report",
+      reportVersion: 1,
+      recommendedAction: null,
+      suggestionOptions: [],
+    });
+    record = reportDraftReducer(record, {
+      type: "edit",
+      draftId: "current",
+      body: "Current feedback",
+    });
+    record = reportDraftReducer(record, { type: "edit", draftId: "other", body: "Other feedback" });
+    record = reportDraftReducer(record, {
+      type: "selection",
+      event: { type: "set-action", action: "request-changes" },
+    });
+    record = reportDraftReducer(record, { type: "save-finding", draftId: "current" });
+    expect(record.saved.editedBodies).toEqual({ current: "Current feedback" });
+    expect(record.saved.selection.action).toBeNull();
+    expect(record.current.selection.action).toBe("request-changes");
+    expect(isReportDraftDirty(record)).toBe(true);
+    const discarded = reportDraftReducer(record, { type: "discard" });
+    expect(discarded.current.editedBodies).toEqual({ current: "Current feedback" });
+    expect(discarded.current.selection.action).toBeNull();
+    expect(isReportDraftDirty(discarded)).toBe(false);
+  });
+
+  it("uses the current text baseline without keeping a removed edit or saving another field", () => {
+    const initial = createReportDraft({
+      reportId: "report",
+      reportVersion: 1,
+      recommendedAction: null,
+      suggestionOptions: [],
+    });
+    const record: PrivateReportDraft = {
+      current: { ...initial.current, editedBodies: { other: "Unsaved" } },
+      saved: { ...initial.saved, editedBodies: { current: "Previous edit", other: "Saved" } },
+    };
+    const next = reportDraftReducer(record, { type: "save-finding", draftId: "current" });
+    expect(next.saved.editedBodies).toEqual({ other: "Saved" });
+    expect(next.current.editedBodies).toEqual({ other: "Unsaved" });
+    expect(record.saved.editedBodies.current).toBe("Previous edit");
+  });
+
   it("closes an unchanged action form without requiring a discard of report feedback", async () => {
     const api = createSampleInvestigationApi();
     const header = await api.report("sample-pr-p1-report");
@@ -128,11 +173,11 @@ describe("private report feedback", () => {
     const client = new QueryClient();
     const key = reportDraftKey("account-a", header);
     retainReportDraft(client, key, record);
-    const restored = client.getQueryData<PrivateReportDraft>(key)!;
-    expect(restored.current.editedBodies.draft).toBe("Private comment");
-    expect(restored.current.selection.action).toBe("approve");
-    expect(restored.current.selection.explicitAction).toBe(true);
-    expect(isReportDraftDirty(restored)).toBe(false);
+    const restored = client.getQueryData<PrivateReportDraft>(key);
+    expect(restored?.current.editedBodies.draft).toBe("Private comment");
+    expect(restored?.current.selection.action).toBe("approve");
+    expect(restored?.current.selection.explicitAction).toBe(true);
+    expect(restored && isReportDraftDirty(restored)).toBe(false);
     client.clear();
   });
 

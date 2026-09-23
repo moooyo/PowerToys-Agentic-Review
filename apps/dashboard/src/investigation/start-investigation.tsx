@@ -115,7 +115,15 @@ export function InvestigationAccessOptions({
   );
 }
 
-export function StartInvestigationButton({ workItem }: { workItem: WorkItem }) {
+export function StartInvestigationButton({
+  workItem,
+  variant = "contained",
+  disabled = false,
+}: {
+  workItem: WorkItem;
+  variant?: "contained" | "outlined" | "text";
+  disabled?: boolean;
+}) {
   const budgetId = useId();
   const { session } = useInvestigationSession();
   const identity = sessionIdentity(session);
@@ -316,9 +324,9 @@ export function StartInvestigationButton({ workItem }: { workItem: WorkItem }) {
   return (
     <>
       <Button
-        variant="contained"
+        variant={variant}
         startIcon={<PlayArrowRounded />}
-        disabled={!canCreate}
+        disabled={!canCreate || disabled}
         onClick={openDialog}
       >
         {receipt

@@ -8,6 +8,7 @@ import {
   ForumRounded,
   GridViewRounded,
   LightModeOutlined,
+  LinkRounded,
   LogoutRounded,
   MenuRounded,
   PersonOutlineRounded,
@@ -22,6 +23,7 @@ import {
   Box,
   Button,
   Dialog,
+  DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
@@ -34,6 +36,7 @@ import {
   ListItemText,
   Menu,
   MenuItem,
+  Snackbar,
   Stack,
   TextField,
   Tooltip,
@@ -69,7 +72,8 @@ import MyAccountPage from "./investigation/my-account";
 import { NavigationGuardProvider, useGuardedAction } from "./investigation/navigation-guard";
 import ReportPage from "./investigation/report-workspace";
 import RepositoriesPage from "./investigation/repositories-page";
-import { useInvestigationRepositoryScope } from "./investigation/repository-scope";
+import { InvestigationRepositorySelector } from "./investigation/repository-scope";
+import { ReviewNavigationProvider } from "./investigation/review-navigation";
 import {
   InvestigationSessionProvider,
   sessionIdentity,
@@ -78,13 +82,13 @@ import {
 import TasksPage from "./investigation/task-workspace";
 import WebhookDeliveriesPage from "./investigation/webhook-deliveries-page";
 import WorkersPage from "./investigation/workers-page";
-import {
-  hasAppliedRepositoryFilter,
-  isWorkspaceDetail,
-  withoutRepositoryFilter,
-  workspaceRecordKey,
-} from "./investigation/workspace-navigation";
+import { isWorkspaceDetail, workspaceRecordKey } from "./investigation/workspace-navigation";
 import { EmptyState } from "./investigation/workspace-ui";
+import {
+  publicWorkspaceHref,
+  repositoryScopedPaths,
+  scopedWorkspaceHref,
+} from "./investigation/workspace-view";
 import IssuesPage from "./pages/Issues";
 import PullRequestsPage from "./pages/PullRequests";
 import { MaterialTheme, useColorMode } from "./theme";
@@ -160,11 +164,12 @@ function WorkspaceSearch({ open, close }: { open: boolean; close: () => void }) 
     let destination: string;
     if (item.kind === "repository")
       destination = `/repositories?repositoryId=${encodeURIComponent(item.id)}`;
-    else if (item.kind === "task") destination = `/tasks?taskId=${encodeURIComponent(item.id)}`;
+    else if (item.kind === "task")
+      destination = `/tasks?${new URLSearchParams({ taskId: item.id, repositoryId: item.repositoryId })}`;
     else if (item.kind === "report")
-      destination = `/reports?reportId=${encodeURIComponent(item.id)}`;
+      destination = `/reports?${new URLSearchParams({ reportId: item.id, repositoryId: item.repositoryId })}`;
     else if (item.workItemKind)
-      destination = `${item.workItemKind === "issue" ? "/issues" : "/pull-requests"}?workItemId=${encodeURIComponent(item.id)}`;
+      destination = `${item.workItemKind === "issue" ? "/issues" : "/pull-requests"}?${new URLSearchParams({ workItemId: item.id, repositoryId: item.repositoryId })}`;
     else {
       setError("This source has no recorded type. Refresh the search before opening it.");
       return;
@@ -278,39 +283,6 @@ function WorkspaceSearch({ open, close }: { open: boolean; close: () => void }) 
   );
 }
 
-function AppliedRepositoryFilter() {
-  const scope = useInvestigationRepositoryScope();
-  const location = useLocation();
-  const navigate = useNavigate();
-  const name =
-    scope.repository?.fullName ??
-    (scope.query.isPending ? "Loading repository…" : "Repository unavailable");
-  return (
-    <Box sx={{ mb: 2.5, minWidth: 0 }}>
-      <Tooltip title="View all accessible repositories">
-        <Button
-          size="small"
-          variant="outlined"
-          startIcon={<FolderOutlined />}
-          endIcon={<CloseRounded />}
-          aria-label={`Clear repository filter: ${name}`}
-          onClick={() =>
-            navigate({
-              pathname: location.pathname,
-              search: withoutRepositoryFilter(location.search),
-            })
-          }
-          sx={{ maxWidth: "100%", borderRadius: 2, textAlign: "left" }}
-        >
-          <Box component="span" sx={{ minWidth: 0, overflowWrap: "anywhere" }}>
-            Repository: {name}
-          </Box>
-        </Button>
-      </Tooltip>
-    </Box>
-  );
-}
-
 function ApplicationShell() {
   const location = useLocation();
   const navigationType = useNavigationType();
@@ -322,6 +294,27 @@ function ApplicationShell() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [error, setError] = useState<string>();
+  const [lastRepository, setLastRepository] = useState<string>();
+  const [copied, setCopied] = useState(false);
+  const [copyFallback, setCopyFallback] = useState<string>();
+  const routeRepository = new URLSearchParams(location.search).get("repositoryId") || undefined;
+  const businessPage = repositoryScopedPaths.has(location.pathname);
+  const repository = businessPage ? routeRepository : lastRepository;
+  const permittedRepository =
+    repository && session.user?.repositoryIds.includes(repository) ? repository : undefined;
+  useEffect(() => {
+    if (businessPage) setLastRepository(routeRepository);
+  }, [businessPage, routeRepository]);
+  const destinationFor = (path: string) => scopedWorkspaceHref(path, permittedRepository);
+  const copyView = async () => {
+    const url = window.location.origin + publicWorkspaceHref(location.pathname, location.search);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+    } catch {
+      setCopyFallback(url);
+    }
+  };
   const main = useRef<HTMLElement | null>(null);
   const scrollPositions = useRef(new Map<string, number>());
   // Capture before a shorter destination can clamp scrollTop during the route commit.
@@ -382,7 +375,7 @@ function ApplicationShell() {
         return destination ? (
           <Link
             key={group.id}
-            to={destination}
+            to={destinationFor(destination)}
             className={`workspace-nav-link ${activeGroup?.id === group.id ? "selected" : ""}`}
             aria-current={activeGroup?.id === group.id ? "page" : undefined}
           >
@@ -408,7 +401,7 @@ function ApplicationShell() {
         <Tooltip title="Agentic Review">
           <IconButton
             component={Link}
-            to={home}
+            to={destinationFor(home)}
             aria-label="Workspace home"
             className="workspace-brand-mark"
           >
@@ -435,10 +428,24 @@ function ApplicationShell() {
           >
             <MenuRounded />
           </IconButton>
-          <Link to={home} className="workspace-brand">
+          <Link to={destinationFor(home)} className="workspace-brand">
             Agentic Review
           </Link>
           <Box sx={{ flex: 1 }} />
+          {businessPage && (
+            <Box className="workspace-repository-picker">
+              <InvestigationRepositorySelector fullWidth />
+            </Box>
+          )}
+          <Tooltip title="Copy view link">
+            <IconButton
+              className="workspace-copy-view"
+              aria-label="Copy view link"
+              onClick={() => void copyView()}
+            >
+              <LinkRounded />
+            </IconButton>
+          </Tooltip>
           <Tooltip title="Search workspace (Ctrl+K)">
             <IconButton aria-label="Search workspace (Ctrl+K)" onClick={() => setSearchOpen(true)}>
               <SearchRounded />
@@ -478,7 +485,7 @@ function ApplicationShell() {
                 <Button
                   key={path}
                   component={Link}
-                  to={path}
+                  to={destinationFor(path)}
                   className={location.pathname === path ? "selected" : ""}
                   aria-current={location.pathname === path ? "page" : undefined}
                 >
@@ -488,9 +495,6 @@ function ApplicationShell() {
             </nav>
           )}
           <Box className="workspace-page-content">
-            {hasAppliedRepositoryFilter(location.pathname, location.search) && (
-              <AppliedRepositoryFilter />
-            )}
             <Suspense
               fallback={
                 <Typography color="text.secondary" role="status">
@@ -560,7 +564,7 @@ function ApplicationShell() {
                 <ListItemButton
                   key={path}
                   component={Link}
-                  to={path}
+                  to={destinationFor(path)}
                   onClick={() => setMobileOpen(false)}
                   selected={location.pathname === path}
                   sx={{ borderRadius: 2 }}
@@ -636,6 +640,38 @@ function ApplicationShell() {
         </MenuItem>
       </Menu>
       <WorkspaceSearch open={searchOpen} close={() => setSearchOpen(false)} />
+      <Snackbar
+        open={copied}
+        autoHideDuration={3500}
+        onClose={() => setCopied(false)}
+        message="View link copied. Private drafts and payloads are excluded."
+      />
+      <Dialog
+        open={Boolean(copyFallback)}
+        onClose={() => setCopyFallback(undefined)}
+        fullWidth
+        maxWidth="sm"
+        aria-labelledby="copy-view-title"
+      >
+        <DialogTitle id="copy-view-title">Copy current view</DialogTitle>
+        <DialogContent>
+          <Typography sx={{ mb: 2 }}>
+            Clipboard access is unavailable. Copy this link to restore the current view with your
+            own access.
+          </Typography>
+          <TextField
+            autoFocus
+            fullWidth
+            label="View link"
+            value={copyFallback ?? ""}
+            slotProps={{ input: { readOnly: true } }}
+            onFocus={(event) => event.target.select()}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCopyFallback(undefined)}>Done</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
@@ -654,7 +690,9 @@ export default function App() {
           path: "*",
           element: (
             <NavigationGuardProvider>
-              <ApplicationShell />
+              <ReviewNavigationProvider>
+                <ApplicationShell />
+              </ReviewNavigationProvider>
             </NavigationGuardProvider>
           ),
         },

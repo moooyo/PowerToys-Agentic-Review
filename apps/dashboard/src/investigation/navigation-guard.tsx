@@ -28,6 +28,7 @@ interface GuardOptions {
   description?: string;
   onDiscard?: () => void;
   allowPresentationNavigation?: boolean;
+  presentationParameters?: readonly string[];
 }
 interface GuardEntry extends GuardOptions {
   dirty: boolean;
@@ -45,6 +46,7 @@ export function useUnsavedChanges(dirty: boolean, options: GuardOptions = {}) {
   const latest = useRef(options);
   latest.current = options;
   const register = context?.register;
+  const presentationKey = options.presentationParameters?.join("\0");
   useEffect(
     () =>
       register?.(id, {
@@ -53,6 +55,7 @@ export function useUnsavedChanges(dirty: boolean, options: GuardOptions = {}) {
         busy: options.busy,
         description: options.description,
         allowPresentationNavigation: options.allowPresentationNavigation,
+        presentationParameters: presentationKey?.split("\0"),
         onDiscard: () => latest.current.onDiscard?.(),
       }),
     [
@@ -63,6 +66,7 @@ export function useUnsavedChanges(dirty: boolean, options: GuardOptions = {}) {
       options.busy,
       options.description,
       options.allowPresentationNavigation,
+      presentationKey,
     ],
   );
 }

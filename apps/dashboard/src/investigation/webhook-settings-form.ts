@@ -43,6 +43,28 @@ export function parseGitHubUserIds(value: string): number[] {
   return ids;
 }
 
+export function webhookSettingsFormIsDirty(
+  form: WebhookSettingsFormValues,
+  saved: RepositoryWebhookSettings,
+): boolean {
+  try {
+    const reviewer = form.reviewerUserIdText.trim();
+    const reviewerUserId = reviewer ? parseGitHubUserId(reviewer) : null;
+    const actorIds = parseGitHubUserIds(form.allowedActorUserIdsText);
+    const savedActorIds = new Set(saved.allowedActorUserIds);
+    return (
+      form.enabled !== saved.enabled ||
+      form.e2eEnabled !== saved.e2eEnabled ||
+      reviewerUserId !== saved.reviewerUserId ||
+      actorIds.length !== savedActorIds.size ||
+      actorIds.some((id) => !savedActorIds.has(id))
+    );
+  } catch {
+    // Invalid text remains a draft that must be corrected or explicitly discarded.
+    return true;
+  }
+}
+
 export function webhookSettingsFieldErrors(
   form: WebhookSettingsFormValues,
 ): Partial<Record<"reviewerUserIdText" | "allowedActorUserIdsText", string>> {
@@ -104,5 +126,6 @@ export async function submitWebhookSettings(
   if (conflict) {
     throw new Error("Reload the latest saved settings before trying again.");
   }
+  if (!webhookSettingsFormIsDirty(form, saved)) return saved;
   return update(repositoryId, webhookSettingsInput(form, saved.version));
 }

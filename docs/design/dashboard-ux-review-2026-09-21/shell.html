@@ -1,0 +1,32 @@
+<div id="ar-prototype" aria-label="Agentic Review dashboard prototype">
+  <div class="ar-lab" aria-label="Prototype controls">
+    <span class="ar-lab-title">DESIGN REVIEW <span class="ar-muted">/ 01</span></span>
+    <span class="ar-muted">交互原型 · 合成数据</span>
+    <span class="ar-spacer"></span>
+    <label>角色 <select id="ar-role"><option value="admin">管理员 + 仓库权限</option><option value="preparer">可准备 / 不可执行</option><option value="reader">只读成员</option></select></label>
+    <label>状态 <select id="ar-scenario"><option value="normal">正常</option><option value="loading">加载中</option><option value="empty">真实空状态</option><option value="error">加载失败</option><option value="conflict">版本冲突</option><option value="unknown">提交结果未知</option><option value="noaccess">无访问权限</option><option value="stale">来源已更新</option></select></label>
+    <button class="ar-btn small" type="button" data-action="journeys">流程地图</button>
+  </div>
+  <div class="ar-app">
+    <div id="ar-toast" class="ar-toast" role="status" hidden></div>
+    <div class="ar-shell">
+      <aside class="ar-rail" aria-label="Main navigation">
+        <div class="ar-mark" aria-label="Agentic Review">AR</div>
+        <nav id="ar-nav" class="ar-nav"></nav>
+        <div class="ar-rail-foot"><button type="button" class="ar-btn ghost" data-action="theme" aria-label="Switch theme">◐</button></div>
+      </aside>
+      <div>
+        <header class="ar-header">
+          <span class="ar-brand">Agentic Review</span>
+          <span class="ar-spacer"></span>
+          <label class="ar-scope"><select id="ar-repo" aria-label="Repository scope"><option value="all">All accessible repositories</option><option value="fork">example/dashboard-ui-fixture</option></select></label>
+          <button type="button" class="ar-btn small" data-action="search" aria-label="Search workspace">Search <span class="ar-small">⌘ K</span></button>
+          <button type="button" class="ar-btn small" data-action="account-menu" aria-label="Open account menu">SF</button>
+        </header>
+        <main class="ar-main" id="ar-main" aria-label="Workspace"></main>
+        <footer class="ar-footer"><span id="ar-context">SYNTHETIC WORKSPACE · No external actions</span><span>Design proposal · 21 Sep 2026</span></footer>
+      </div>
+    </div>
+    <dialog id="ar-dialog" aria-labelledby="ar-dialog-title"><div class="ar-dialog-head"><h2 id="ar-dialog-title"></h2><button type="button" class="ar-btn ghost" data-action="dialog-close" aria-label="Close dialog">×</button></div><div class="ar-dialog-body" id="ar-dialog-body"></div><div class="ar-dialog-foot" id="ar-dialog-foot"></div></dialog>
+  </div>
+</div>
