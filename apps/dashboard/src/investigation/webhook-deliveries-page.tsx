@@ -5,7 +5,6 @@ import type {
   InvestigationWebhookDelivery,
   InvestigationWebhookDeliveryQuery,
 } from "@agentic-review/contracts";
-import ArrowForwardRounded from "@mui/icons-material/ArrowForwardRounded";
 import FilterListRounded from "@mui/icons-material/FilterListRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import WebhookRounded from "@mui/icons-material/WebhookRounded";
@@ -100,6 +99,14 @@ export function webhookDeliveryFilters(search: string): WebhookFilters {
 
 export function webhookDetailsUrl(deliveryId: string, repositoryId: string): string {
   return `/webhooks?repositoryId=${encodeURIComponent(repositoryId)}&deliveryId=${encodeURIComponent(deliveryId)}`;
+}
+
+export function webhookFilterUrl(filters: WebhookFilters, remove: "number" | "mode"): string {
+  const parameters = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (key !== remove && value !== undefined) parameters.set(key, String(value));
+  }
+  return `/webhooks${parameters.size ? `?${parameters.toString()}` : ""}`;
 }
 
 export function webhookPollingInterval(
@@ -337,7 +344,12 @@ function TaskLink({
 
 function WebhookStatus({ delivery }: { delivery: InvestigationWebhookDelivery }) {
   return (
-    <Chip size="small" label={stateLabels[delivery.state]} color={stateColors[delivery.state]} />
+    <Chip
+      size="small"
+      label={stateLabels[delivery.state]}
+      color={stateColors[delivery.state]}
+      sx={{ height: 28, flexShrink: 0, "& .MuiChip-label": { whiteSpace: "nowrap" } }}
+    />
   );
 }
 
@@ -389,96 +401,70 @@ export function WebhookDeliveryHistory({
   showRecoveryRequests?: boolean;
 }) {
   if (items.length === 0)
-    return (
-      <EmptyState
-        title="No events match"
-        description="No webhook events match these filters."
-        icon={<WebhookRounded />}
-        action={emptyAction}
-      />
-    );
+    return <EmptyState title="No events match" icon={<WebhookRounded />} action={emptyAction} />;
   return (
-    <Box className="webhook-record-list">
-      {items.map((delivery) => (
-        <Box
-          key={delivery.deliveryId}
-          className="webhook-record"
-          sx={{ borderColor: "divider", "&:hover": { bgcolor: "action.hover" } }}
-        >
-          <Box
-            className="webhook-record-symbol"
-            sx={{
-              color: delivery.state === "failed" ? "error.main" : "primary.main",
-              bgcolor: "action.hover",
-            }}
-          >
-            <WebhookRounded fontSize="small" />
-          </Box>
-          <Box className="webhook-record-main">
-            <Typography variant="caption" color="text.secondary">
-              {delivery.repositoryFullName} ·{" "}
-              {delivery.mode === "e2e" ? "E2E verification" : "Static review"}
-            </Typography>
-            <Typography
-              component={Link}
-              className="webhook-record-link"
-              to={webhookDetailsUrl(delivery.deliveryId, delivery.repositoryId)}
-              sx={{ color: "text.primary" }}
-            >
-              {delivery.kind === "pull_request" ? "Pull request" : "Issue"} #{delivery.number} ·{" "}
-              {delivery.eventName}
-            </Typography>
-            {delivery.reason && (
-              <Typography
-                variant="body2"
-                color="text.secondary"
-                className="webhook-record-description"
-              >
-                {webhookReasonDescription(delivery.reason)}
-              </Typography>
-            )}
-            <Stack
-              direction="row"
-              useFlexGap
-              spacing={1}
-              sx={{ flexWrap: "wrap", alignItems: "center" }}
-            >
-              {delivery.taskId ? (
-                <TaskLink taskId={delivery.taskId} repositoryId={delivery.repositoryId} />
-              ) : (
-                <Typography variant="caption" color="text.secondary">
-                  No task linked
+    <Box className="webhook-table-wrap">
+      <table className="webhook-table">
+        <thead>
+          <tr>
+            {["Event", "Handling", "Task", "Received"].map((label) => (
+              <th key={label} scope="col">
+                {label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((delivery) => (
+            <tr key={delivery.deliveryId}>
+              <td data-label="Event">
+                <Button
+                  component={Link}
+                  className="webhook-table-link"
+                  to={webhookDetailsUrl(delivery.deliveryId, delivery.repositoryId)}
+                >
+                  {delivery.kind === "pull_request" ? "PR" : "Issue"} #{delivery.number}
+                </Button>
+                <Typography variant="caption" color="text.secondary" component="div">
+                  {delivery.eventName} · {delivery.mode === "e2e" ? "E2E" : "Static"}
                 </Typography>
-              )}
-              {delivery.canonicalDeliveryId !== delivery.deliveryId && (
-                <Typography variant="caption" color="text.secondary">
-                  Duplicate receipt
+                <Typography variant="caption" color="text.secondary" component="div">
+                  {delivery.repositoryFullName}
                 </Typography>
-              )}
-              <Typography variant="caption" color="text.secondary">
-                {delivery.totalAttempts} recorded attempts
-              </Typography>
-            </Stack>
-          </Box>
-          <Box className="webhook-record-state">
-            <WebhookStatus delivery={delivery} />
-            {showRecoveryRequests && <WebhookRecoveryFlag deliveryId={delivery.deliveryId} />}
-            <Typography variant="caption" color="text.secondary">
-              <RecordedTime value={delivery.receivedAt} />
-            </Typography>
-            {delivery.nextAttemptAt && (
-              <Typography variant="caption" color="text.secondary">
-                Next attempt <RecordedTime value={delivery.nextAttemptAt} />
-              </Typography>
-            )}
-          </Box>
-          <ArrowForwardRounded
-            aria-hidden
-            className="webhook-record-arrow"
-            sx={{ color: "text.secondary", fontSize: 18 }}
-          />
-        </Box>
-      ))}
+                {delivery.canonicalDeliveryId !== delivery.deliveryId && (
+                  <Typography variant="caption" component="div">
+                    Duplicate receipt
+                  </Typography>
+                )}
+              </td>
+              <td data-label="Handling">
+                <WebhookStatus delivery={delivery} />
+                {delivery.reason && (
+                  <Typography variant="body2" color="text.secondary">
+                    {webhookReasonDescription(delivery.reason)}
+                  </Typography>
+                )}
+                {showRecoveryRequests && <WebhookRecoveryFlag deliveryId={delivery.deliveryId} />}
+                {delivery.nextAttemptAt && (
+                  <Typography variant="caption" component="div">
+                    Next attempt <RecordedTime value={delivery.nextAttemptAt} />
+                  </Typography>
+                )}
+              </td>
+              <td data-label="Task">
+                {delivery.taskId ? (
+                  <TaskLink taskId={delivery.taskId} repositoryId={delivery.repositoryId} />
+                ) : (
+                  <span>—</span>
+                )}
+              </td>
+              <td data-label="Received">
+                <RecordedTime value={delivery.receivedAt} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </Box>
   );
 }
@@ -672,7 +658,7 @@ export function WebhookRetryControls({
             disabled={busy || refreshing || !canReplay}
             onClick={() => submit(request)}
           >
-            Resend saved request
+            Retry saved request
           </Button>
         ) : (
           retryOffered && (
@@ -681,7 +667,7 @@ export function WebhookRetryControls({
               disabled={!canReview}
               onClick={() => setPreviewVersion(delivery.version)}
             >
-              Retry event handling
+              Retry event
             </Button>
           )
         )}
@@ -704,28 +690,20 @@ export function WebhookRetryControls({
                     : "Recovery request confirmed"}
           </Typography>
           {request.message}
-          {busy && " You can return to this event to see the retained request."}
         </Alert>
       )}
       {unknown && (
         <Typography variant="body2" color="text.secondary">
-          No second recovery operation can be started while this request is unconfirmed. Resending
-          uses its original version and request identity, even if the displayed event has changed.
+          The last request is unconfirmed. Retry the saved request before starting another.
         </Typography>
       )}
-      <Typography variant="body2" color="text.secondary">
-        {nextStep}
-      </Typography>
-      {retryOffered && (
+      {!retryOffered && !unknown && (
         <Typography variant="body2" color="text.secondary">
-          Retry resumes event handling. It does not rerun an existing task or retry a GitHub comment
-          delivery.
+          {nextStep}
         </Typography>
       )}
       {(retryOffered || unknown) && grantProblem && (
-        <Alert severity="warning">
-          {grantProblem} Reading the event history remains available.
-        </Alert>
+        <Alert severity="warning">{grantProblem}</Alert>
       )}
       {delivery.nextAttemptAt && (
         <Typography variant="body2" color="text.secondary">
@@ -775,7 +753,7 @@ export function WebhookRetryControls({
         fullWidth
         aria-labelledby="webhook-recovery-title"
       >
-        <DialogTitle id="webhook-recovery-title">Retry event handling?</DialogTitle>
+        <DialogTitle id="webhook-recovery-title">Retry event?</DialogTitle>
         <DialogContent>
           <Box
             sx={{ bgcolor: "action.hover", p: 2, borderRadius: 2, mb: 2, overflowWrap: "anywhere" }}
@@ -790,19 +768,10 @@ export function WebhookRetryControls({
               {delivery.mode === "e2e" ? "E2E verification" : "Static review"}
             </Typography>
           </Box>
-          <Box component="ol" className="webhook-recovery-steps">
-            <li>Recheck this receipt and your current repository permissions.</li>
-            <li>
-              {delivery.taskId
-                ? "Find and restore the existing task association without restarting its execution."
-                : "Look for an existing committed task before continuing source preparation or creating work."}
-            </li>
-            <li>Continue configured progress publication only when repository policy allows it.</li>
-          </Box>
           <Alert severity="warning">
-            Recovery preserves earlier handling attempts. It does not restart a failed task or
-            resend a failed comment. If no committed task exists, intake may create work and
-            configured comments.
+            {delivery.taskId
+              ? "Keeps the existing task. Configured replies may be posted."
+              : "May create an investigation and post configured replies."}
           </Alert>
           {previewVersion !== null && previewVersion !== delivery.version && (
             <Alert severity="error" sx={{ mt: 2 }}>
@@ -818,7 +787,7 @@ export function WebhookRetryControls({
             disabled={!canReview || previewVersion !== delivery.version}
             onClick={() => submit()}
           >
-            Schedule recovery
+            Retry event
           </Button>
         </DialogActions>
       </Dialog>
@@ -1019,7 +988,7 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
           component={Link}
           to={`/webhooks?repositoryId=${encodeURIComponent(delivery.repositoryId)}`}
         >
-          All webhook events
+          Back to webhook events
         </Button>
       </Box>
       <PageHeading
@@ -1039,11 +1008,9 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
           </Typography>
         </Stack>
       </PageHeading>
-      <WebhookLinkedContext delivery={delivery} />
       {query.isError && (
         <Alert severity="error">
-          {query.error.message} The last loaded event and linked work remain visible. Refresh before
-          starting a new recovery request.
+          {query.error.message} Refresh before retrying.
           <Button onClick={() => void query.refetch()}>Refresh event</Button>
         </Alert>
       )}
@@ -1066,10 +1033,7 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
       )}
       <Box className="webhook-detail-grid">
         <Stack spacing={3} sx={{ minWidth: 0 }}>
-          <EventSection title="Handling outcome">
-            <Typography variant="h6" component="h3" sx={{ mb: 1 }}>
-              {outcomeTitle}
-            </Typography>
+          <EventSection title={outcomeTitle}>
             {delivery.reason && (
               <Typography
                 variant="body2"
@@ -1101,68 +1065,73 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
               snapshotStale={query.isError}
             />
           </EventSection>
-          <WebhookAttemptHistory delivery={delivery} />
+          <EventSection title="Related work">
+            <WebhookLinkedContext delivery={delivery} />
+          </EventSection>
+          <details className="webhook-disclosure webhook-history">
+            <summary>Event history</summary>
+            <WebhookAttemptHistory delivery={delivery} />
+          </details>
         </Stack>
         <Stack spacing={2} sx={{ minWidth: 0 }}>
-          <EventSection title="Event details">
-            <Box component="dl" className="webhook-metadata">
-              <div>
-                <dt>Received</dt>
-                <dd>
-                  <RecordedTime value={delivery.receivedAt} />
-                </dd>
-              </div>
-              <div>
-                <dt>Task mode</dt>
-                <dd>{delivery.mode === "e2e" ? "E2E verification" : "Static review"}</dd>
-              </div>
-              <div>
-                <dt>Receipt identity</dt>
-                <dd>{duplicate ? "Duplicate event" : "Canonical event"}</dd>
-              </div>
-              <div>
-                <dt>Source snapshot</dt>
-                <dd>{delivery.snapshotRef ? "Recorded" : "Not recorded"}</dd>
-              </div>
-            </Box>
-            <Box component="details" className="webhook-disclosure">
-              <Box component="summary" sx={{ color: "primary.main" }}>
-                Identity and provenance
-              </Box>
+          <details className="webhook-disclosure webhook-history">
+            <summary>Event details</summary>
+            <EventSection title="Event details">
               <Box component="dl" className="webhook-metadata">
                 <div>
-                  <dt>Event</dt>
-                  <dd>{delivery.eventName}</dd>
+                  <dt>Received</dt>
+                  <dd>
+                    <RecordedTime value={delivery.receivedAt} />
+                  </dd>
                 </div>
                 <div>
-                  <dt>Delivery</dt>
-                  <dd>{delivery.deliveryId}</dd>
+                  <dt>Task mode</dt>
+                  <dd>{delivery.mode === "e2e" ? "E2E verification" : "Static review"}</dd>
                 </div>
                 <div>
-                  <dt>Actor GitHub ID</dt>
-                  <dd>{delivery.actorUserId}</dd>
+                  <dt>Receipt identity</dt>
+                  <dd>{duplicate ? "Duplicate event" : "Canonical event"}</dd>
                 </div>
                 <div>
-                  <dt>Assigned reviewer GitHub ID</dt>
-                  <dd>{delivery.assigneeUserId}</dd>
+                  <dt>Source snapshot</dt>
+                  <dd>{delivery.snapshotRef ? "Recorded" : "Not recorded"}</dd>
                 </div>
-                <div>
-                  <dt>Source snapshot ID</dt>
-                  <dd>{delivery.snapshotRef?.id ?? "Not recorded"}</dd>
-                </div>
-                {delivery.snapshotRef && (
-                  <div>
-                    <dt>Snapshot digest</dt>
-                    <dd>{delivery.snapshotRef.digest}</dd>
-                  </div>
-                )}
               </Box>
-            </Box>
-          </EventSection>
-          <Typography variant="body2" color="text.secondary">
-            Processed means event handling finished. Task execution and GitHub comment delivery have
-            separate outcomes.
-          </Typography>
+              <Box component="details" className="webhook-disclosure">
+                <Box component="summary" sx={{ color: "primary.main" }}>
+                  Identity and provenance
+                </Box>
+                <Box component="dl" className="webhook-metadata">
+                  <div>
+                    <dt>Event</dt>
+                    <dd>{delivery.eventName}</dd>
+                  </div>
+                  <div>
+                    <dt>Delivery</dt>
+                    <dd>{delivery.deliveryId}</dd>
+                  </div>
+                  <div>
+                    <dt>Actor GitHub ID</dt>
+                    <dd>{delivery.actorUserId}</dd>
+                  </div>
+                  <div>
+                    <dt>Assigned reviewer GitHub ID</dt>
+                    <dd>{delivery.assigneeUserId}</dd>
+                  </div>
+                  <div>
+                    <dt>Source snapshot ID</dt>
+                    <dd>{delivery.snapshotRef?.id ?? "Not recorded"}</dd>
+                  </div>
+                  {delivery.snapshotRef && (
+                    <div>
+                      <dt>Snapshot digest</dt>
+                      <dd>{delivery.snapshotRef.digest}</dd>
+                    </div>
+                  )}
+                </Box>
+              </Box>
+            </EventSection>
+          </details>
         </Stack>
       </Box>
     </Stack>
@@ -1280,21 +1249,29 @@ export function WebhookDeliveryHistoryPanel({
   );
 }
 
-function WebhookFilterFields({ filters }: { filters: WebhookFilters }) {
+function WebhookFilterFields({
+  filters,
+  primaryOnly = false,
+}: {
+  filters: WebhookFilters;
+  primaryOnly?: boolean;
+}) {
   return (
     <>
-      <TextField
-        name="number"
-        label="PR or Issue number"
-        size="small"
-        defaultValue={filters.number ?? ""}
-        type="number"
-        slotProps={{ htmlInput: { min: 1, step: 1 } }}
-      />
+      {!primaryOnly && (
+        <TextField
+          name="number"
+          label="PR or Issue number"
+          size="small"
+          defaultValue={filters.number ?? ""}
+          type="number"
+          slotProps={{ htmlInput: { min: 1, step: 1 } }}
+        />
+      )}
       <TextField
         name="kind"
         select
-        label="Target type"
+        label="Work item"
         size="small"
         defaultValue={filters.kind ?? ""}
       >
@@ -1305,7 +1282,7 @@ function WebhookFilterFields({ filters }: { filters: WebhookFilters }) {
       <TextField
         name="state"
         select
-        label="Event status"
+        label="Handling state"
         size="small"
         defaultValue={filters.state ?? ""}
       >
@@ -1316,17 +1293,19 @@ function WebhookFilterFields({ filters }: { filters: WebhookFilters }) {
           </MenuItem>
         ))}
       </TextField>
-      <TextField
-        name="mode"
-        select
-        label="Task mode"
-        size="small"
-        defaultValue={filters.mode ?? ""}
-      >
-        <MenuItem value="">All modes</MenuItem>
-        <MenuItem value="static">Static</MenuItem>
-        <MenuItem value="e2e">E2E</MenuItem>
-      </TextField>
+      {!primaryOnly && (
+        <TextField
+          name="mode"
+          select
+          label="Task mode"
+          size="small"
+          defaultValue={filters.mode ?? ""}
+        >
+          <MenuItem value="">All modes</MenuItem>
+          <MenuItem value="static">Static</MenuItem>
+          <MenuItem value="e2e">E2E</MenuItem>
+        </TextField>
+      )}
     </>
   );
 }
@@ -1342,6 +1321,9 @@ export default function WebhookDeliveriesPage() {
   const activeCount = [filters.kind, filters.number, filters.state, filters.mode].filter(
     (value) => value !== undefined,
   ).length;
+  const extraCount = [filters.number, filters.mode].filter((value) => value !== undefined).length;
+  const removeExtraFilter = (key: "number" | "mode") =>
+    guardedAction(() => navigate(webhookFilterUrl(filters, key)));
   const applyFilters = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -1359,23 +1341,27 @@ export default function WebhookDeliveriesPage() {
   if (deliveryId) return <WebhookDeliveryDetails key={deliveryId} deliveryId={deliveryId} />;
   return (
     <Stack spacing={2.5} className="webhook-page">
-      <PageHeading
-        title="Webhook events"
-        subtitle="Trace received events from intake to a linked task."
-      />
+      <PageHeading title="Webhook events" />
       <Box
         component="form"
         key={location.search}
         onSubmit={applyFilters}
         className="webhook-filter-form"
       >
-        <WebhookFilterFields filters={filters} />
+        <WebhookFilterFields filters={filters} primaryOnly />
+        {filters.number && <input type="hidden" name="number" value={filters.number} />}
+        {filters.mode && <input type="hidden" name="mode" value={filters.mode} />}
         <Button type="submit" variant="outlined">
-          Apply filters
+          Apply
         </Button>
-        <Button component={Link} to={clearUrl}>
-          Clear
+        <Button startIcon={<FilterListRounded />} onClick={() => setFilterDialog(true)}>
+          More filters{extraCount > 0 ? ` (${extraCount})` : ""}
         </Button>
+        {activeCount > 0 && (
+          <Button component={Link} to={clearUrl}>
+            Clear
+          </Button>
+        )}
       </Box>
       <Stack
         direction="row"
@@ -1396,15 +1382,35 @@ export default function WebhookDeliveriesPage() {
           </Button>
         )}
       </Stack>
+      {extraCount > 0 && (
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ flexWrap: "wrap" }}
+          aria-label="Active additional event filters"
+        >
+          {filters.number && (
+            <Chip
+              label={`Work item: #${filters.number}`}
+              onDelete={() => removeExtraFilter("number")}
+              aria-label={`Remove work item number ${filters.number} filter`}
+            />
+          )}
+          {filters.mode && (
+            <Chip
+              label={`Mode: ${filters.mode === "e2e" ? "E2E" : "Static"}`}
+              onDelete={() => removeExtraFilter("mode")}
+              aria-label={`Remove ${filters.mode === "e2e" ? "E2E" : "Static"} mode filter`}
+            />
+          )}
+        </Stack>
+      )}
       <WebhookDeliveryHistoryPanel
         key={JSON.stringify(filters)}
         filters={filters}
         clearUrl={clearUrl}
       />
-      <Typography variant="body2" color="text.secondary">
-        Received history remains available when assignment intake is paused. Task execution and
-        comment publication have separate outcomes.
-      </Typography>
       <Dialog
         open={filterDialog}
         onClose={() => setFilterDialog(false)}
@@ -1421,9 +1427,11 @@ export default function WebhookDeliveriesPage() {
           </DialogContent>
           <DialogActions sx={{ flexWrap: "wrap", gap: 1, px: 3, pb: 2 }}>
             <Button onClick={() => setFilterDialog(false)}>Cancel</Button>
-            <Button component={Link} to={clearUrl} onClick={() => setFilterDialog(false)}>
-              Clear filters
-            </Button>
+            {activeCount > 0 && (
+              <Button component={Link} to={clearUrl} onClick={() => setFilterDialog(false)}>
+                Clear filters
+              </Button>
+            )}
             <Button type="submit" variant="contained">
               Apply filters
             </Button>

@@ -36,9 +36,9 @@ describe("complete report reader", () => {
     );
     expect(html).toContain(p0.title);
     expect(html).toContain(`aria-label="Finding ${p0.ordinal + 1}:`);
-    expect(html).toContain("Search all findings");
-    expect(html).toContain("Review selected");
-    expect(html).toContain("Private feedback saved for this session");
+    expect(html).toContain("Search findings");
+    expect(html).toContain("Include in feedback");
+    expect(html).not.toContain("Private feedback saved for this session");
   });
 
   it("does not silently replace an unavailable deep-linked finding", async () => {
@@ -66,7 +66,8 @@ describe("complete report reader", () => {
       </MemoryRouter>,
     );
     expect(html).toContain("Finding unavailable");
-    expect(html).toContain("This link does not identify a finding in the complete saved report");
+    expect(html).toContain("This link does not identify a finding in this report");
+    expect(html).toContain("Open first finding");
     expect(html).not.toContain("Save draft &amp; next");
   });
 
@@ -91,7 +92,86 @@ describe("complete report reader", () => {
         />
       </MemoryRouter>,
     );
-    expect(html).toContain("Loading the complete saved collection");
+    expect(html).toContain("Loading findings");
     expect(html).not.toContain("No review findings");
+  });
+
+  it("shows a single finding without redundant navigation and ignores obsolete filters", async () => {
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-bug-report");
+    const result = await api.exportReport(header.report.id);
+    const finding = result.findings[0];
+    if (!finding) throw new Error("The fixture requires a finding.");
+    const html = renderToStaticMarkup(
+      <MemoryRouter
+        initialEntries={[
+          `/reports?reportId=${header.report.id}&findingSearch=unmatched&findingPriority=P0`,
+        ]}
+      >
+        <ReportFindingsReader
+          header={header}
+          result={{ ...result, findings: [finding] }}
+          loading={false}
+          draft={createReportDraft({
+            reportId: header.report.id,
+            reportVersion: header.report.version,
+            recommendedAction: null,
+            suggestionOptions: [],
+          })}
+          onDraft={() => {}}
+          dispatch={() => {}}
+          canEdit
+          canPublish
+          onPublish={() => {}}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain(finding.title);
+    expect(html).toContain("report-findings-single");
+    expect(html).not.toContain('id="report-finding-directory"');
+    expect(html).not.toContain('id="report-findings-tools"');
+    expect(html).not.toContain("Previous page");
+    expect(html).not.toContain("No matching findings");
+  });
+
+  it("keeps save and publish available outside filters for a selected edited single finding", async () => {
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-bug-report");
+    const result = await api.exportReport(header.report.id);
+    const context = await api.actionContext(header.context.workItem.id, header.report.id);
+    const finding = result.findings[0];
+    if (!finding) throw new Error("The fixture requires a finding.");
+    const draft = createReportDraft(selectionContext(context));
+    draft.current = {
+      ...draft.current,
+      editedBodies: { [finding.feedbackDraft.id]: "Updated feedback" },
+      selection: {
+        ...draft.current.selection,
+        selectedFindings: [
+          { findingId: finding.id, draftId: finding.feedbackDraft.id, suggestionId: null },
+        ],
+      },
+    };
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <ReportFindingsReader
+          header={header}
+          result={{ ...result, findings: [finding] }}
+          context={context}
+          loading={false}
+          draft={draft}
+          onDraft={() => {}}
+          dispatch={() => {}}
+          canEdit
+          canPublish
+          onPublish={() => {}}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("Unsaved feedback");
+    expect(html).toContain("Save draft");
+    expect(html).toContain("Publish selected");
+    expect(html).toContain("Updated feedback");
+    expect(html).not.toContain('id="report-findings-tools"');
   });
 });

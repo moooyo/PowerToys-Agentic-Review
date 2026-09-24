@@ -4,7 +4,6 @@ import type {
   InvestigationTaskKind,
 } from "@agentic-review/contracts";
 import ArrowForwardRounded from "@mui/icons-material/ArrowForwardRounded";
-import DescriptionRounded from "@mui/icons-material/DescriptionRounded";
 import FilterListRounded from "@mui/icons-material/FilterListRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import {
@@ -103,7 +102,7 @@ function ReportFilterFields({
         select
         fullWidth
         className={className}
-        label="Investigation type"
+        label="Type"
         value={values.kind}
         onChange={(event) => onChange("kind", event.target.value)}
       >
@@ -120,18 +119,18 @@ function ReportFilterFields({
         select
         fullWidth
         className={className}
-        label="Completeness"
+        label="Status"
         value={values.completeness}
         onChange={(event) => onChange("completeness", event.target.value)}
       >
         <MenuItem value="" sx={menuItemSx}>
-          Any completeness
+          All reports
         </MenuItem>
         <MenuItem value="complete" sx={menuItemSx}>
-          Complete report
+          Complete
         </MenuItem>
         <MenuItem value="partial" sx={menuItemSx}>
-          Partial report
+          Partial
         </MenuItem>
       </TextField>
       <TextField
@@ -146,7 +145,7 @@ function ReportFilterFields({
           All deliveries
         </MenuItem>
         <MenuItem value="final" sx={menuItemSx}>
-          Final delivery
+          Final
         </MenuItem>
         <MenuItem value="checkpoint" sx={menuItemSx}>
           Checkpoint
@@ -176,56 +175,62 @@ export function ReportDirectoryRow({
       sx={{
         width: "100%",
         textAlign: "left",
-        p: { xs: 2, md: 3 },
+        p: 2,
         borderBottom: 1,
         borderColor: "divider",
         "&:hover": { bgcolor: "action.hover" },
       }}
     >
-      <Box
-        className="report-directory-icon"
-        sx={{
-          bgcolor: "action.selected",
-          color: "primary.main",
-          width: 48,
-          height: 48,
-          display: "grid",
-          placeItems: "center",
-          borderRadius: 3,
-        }}
-      >
-        <DescriptionRounded />
-      </Box>
       <Box sx={{ minWidth: 0, flex: 1 }}>
-        <Typography variant="body2" color="text.secondary">
-          {context.repository.fullName} ·{" "}
-          {context.workItem.kind === "pull_request" ? "Pull request" : "Issue"} #
-          {context.workItem.number} · {reportKindLabel(context.task.kind)}
-        </Typography>
-        <Typography component="h2" variant="h6" sx={{ my: 0.75, overflowWrap: "anywhere" }}>
+        <Typography
+          component="h2"
+          variant="subtitle1"
+          sx={{ fontWeight: 600, overflowWrap: "anywhere" }}
+        >
           {context.workItem.title}
         </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
-          {outcome.label} · {outcome.description}
+        <Typography variant="caption" color="text.secondary" component="div" sx={{ mt: 0.5 }}>
+          {context.repository.fullName} ·{" "}
+          {context.workItem.kind === "pull_request" ? "PR" : "Issue"} #{context.workItem.number} ·{" "}
+          {reportKindLabel(context.task.kind)}
         </Typography>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ flexWrap: "wrap", alignItems: "center", mt: 0.75 }}
+        >
+          <Chip
+            size="small"
+            label={report.completeness === "partial" ? "Partial" : "Complete"}
+            color={report.completeness === "partial" ? "warning" : "default"}
+          />
+          {report.delivery === "checkpoint" && (
+            <Chip size="small" label="Checkpoint" variant="outlined" />
+          )}
+          <Typography variant="body2">
+            {outcome.label} · {report.collections.findings} finding
+            {report.collections.findings === 1 ? "" : "s"}
+          </Typography>
+          {outcome.validation.label !== "Validation" && (
+            <Typography variant="caption" color="text.secondary">
+              {outcome.validation.label}
+            </Typography>
+          )}
+        </Stack>
       </Box>
-      <Stack className="report-directory-status" spacing={1} sx={{ alignItems: "flex-start" }}>
-        <Chip
-          size="small"
-          label={report.delivery === "checkpoint" ? "Checkpoint" : "Final delivery"}
-          color={report.delivery === "checkpoint" ? "warning" : "default"}
-        />
-        <Typography variant="caption" color="text.secondary">
-          {report.completeness} report · {report.collections.findings} findings
-        </Typography>
-        <Typography variant="caption" color="text.secondary">
-          Execution: {header.outcome}
-        </Typography>
-        <Typography variant="caption" color="text.secondary">
-          {outcome.validation.label}
-        </Typography>
-      </Stack>
-      <ArrowForwardRounded className="report-directory-arrow" fontSize="small" />
+      <Box
+        component="span"
+        className="report-directory-action"
+        sx={{ color: "primary.main", borderColor: "divider" }}
+      >
+        {report.collections.findings
+          ? "Review findings"
+          : report.delivery === "checkpoint"
+            ? "Review checkpoint"
+            : "Read report"}
+        <ArrowForwardRounded fontSize="small" />
+      </Box>
     </ButtonBase>
   );
 }
@@ -304,17 +309,16 @@ export function ReportDirectory() {
     setParams(clearReportDirectoryFilters(params), { replace: true });
   };
   return (
-    <Stack spacing={3} className="report-workspace report-directory">
+    <Stack spacing={2} className="report-workspace report-directory">
       <PageHeading
         title="Reports"
-        subtitle="Conclusions, evidence, and your next decision."
         action={
           <Button
             startIcon={<RefreshRounded />}
             disabled={reports.isFetching}
             onClick={() => void reports.refetch()}
           >
-            Refresh reports
+            Refresh
           </Button>
         }
       />
@@ -325,6 +329,7 @@ export function ReportDirectory() {
       >
         <TextField
           label="Search reports"
+          placeholder="Title or number"
           type="search"
           value={search}
           onChange={(event) => filter("search", event.target.value)}
@@ -367,6 +372,16 @@ export function ReportDirectory() {
       {reports.data &&
         (reports.data.items.length ? (
           <Surface sx={{ overflow: "hidden" }}>
+            <Box
+              className="report-directory-list-heading"
+              sx={{ bgcolor: "action.hover", borderBottom: 1, borderColor: "divider" }}
+            >
+              <Typography variant="caption">
+                {reports.data.items.length} report{reports.data.items.length === 1 ? "" : "s"}
+                {reports.data.nextCursor || cursor ? " on this page" : ""}
+              </Typography>
+              <Typography variant="caption">Next action</Typography>
+            </Box>
             {reports.data.items.map((header) => {
               const record = directoryRecord(header, params);
               return (
@@ -382,7 +397,6 @@ export function ReportDirectory() {
         ) : (
           <EmptyState
             title="No matching reports"
-            description="Saved reports from repositories available to your account appear here."
             action={
               search || kind || delivery || completeness ? (
                 <Button onClick={clearLocalFilters}>Clear filters</Button>
@@ -390,7 +404,7 @@ export function ReportDirectory() {
             }
           />
         ))}
-      {reports.data && (
+      {reports.data && (cursor || reports.data.nextCursor) && (
         <Stack
           direction="row"
           spacing={1}
@@ -398,7 +412,8 @@ export function ReportDirectory() {
           sx={{ alignItems: "center", flexWrap: "wrap" }}
         >
           <Typography variant="body2" color="text.secondary" sx={{ flex: 1 }}>
-            {reports.data.items.length} reports on this page
+            {reports.data.items.length} report{reports.data.items.length === 1 ? "" : "s"} on this
+            page
           </Typography>
           <Button
             disabled={!cursor || reports.isFetching}
@@ -439,10 +454,6 @@ export function ReportDirectory() {
             }}
           >
             <Stack spacing={2.5} sx={{ pt: 1 }}>
-              <Typography variant="body2" color="text.secondary">
-                Choose Show reports to apply these filters. Closing this dialog keeps your unapplied
-                choices.
-              </Typography>
               <ReportFilterFields
                 compact
                 values={compactValues}
@@ -490,7 +501,7 @@ export function ReportDirectory() {
             Cancel
           </Button>
           <Button type="submit" form={filterFormId} variant="contained" sx={{ minHeight: 48 }}>
-            Show reports
+            Apply filters
           </Button>
         </DialogActions>
       </Dialog>

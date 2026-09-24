@@ -1,5 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { DateTimeSchema, EntityIdSchema, Sha256Schema } from "./common.js";
+import { GitHubWorkItemKindSchema } from "./github.js";
 import {
   InvestigationBudgetSchema,
   InvestigationReportHeaderV1Schema,
@@ -74,6 +75,7 @@ export const InvestigationPublicationDirectoryQuerySchema = Type.Object(
   {
     ...paging,
     ...scope,
+    workItemKind: Type.Optional(GitHubWorkItemKindSchema),
     mode: Type.Optional(InvestigationCommentDeliveryModeSchema),
     state: Type.Optional(InvestigationCommentPublicationStateSchema),
     taskKind: Type.Optional(InvestigationTaskKindSchema),

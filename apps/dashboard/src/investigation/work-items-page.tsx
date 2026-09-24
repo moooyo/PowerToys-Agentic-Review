@@ -1,15 +1,13 @@
+import type { InvestigationReportHeaderV1, InvestigationTaskV1 } from "@agentic-review/contracts";
 import ArrowBackRounded from "@mui/icons-material/ArrowBackRounded";
 import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
 import FilterListRounded from "@mui/icons-material/FilterListRounded";
-import MergeRounded from "@mui/icons-material/MergeRounded";
-import RadioButtonCheckedRounded from "@mui/icons-material/RadioButtonCheckedRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import {
   Alert,
   Box,
   Button,
-  ButtonBase,
   Chip,
   CircularProgress,
   Dialog,
@@ -24,14 +22,33 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useId, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { type ActionPanelRequest, isActionAllowed } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
 import { ImportWorkItemButton } from "./import-work-item";
+import { useGuardedAction } from "./navigation-guard";
+import { StandaloneActions } from "./report-workspace";
 import { useInvestigationRepositoryScope } from "./repository-scope";
-import { type ReviewRecord, useReviewListNavigation } from "./review-navigation";
-import { SourceResultLabel } from "./source-result";
+import {
+  type ReviewLinkProps,
+  type ReviewRecord,
+  useReviewListNavigation,
+} from "./review-navigation";
+import { useInvestigationSession } from "./session";
+import {
+  activeSourceReportTask,
+  readableSourceData,
+  readableSourceReport,
+  SourceResultLabel,
+  sourceActionLabel,
+  sourceActionReason,
+  sourceTaskReviewRecord,
+  useSourceActionContext,
+  useSourceReport,
+} from "./source-result";
+import { StartInvestigationButton } from "./start-investigation";
 import { WorkItemDetails } from "./work-item-details";
 import {
   currentWorkItemTask,
@@ -41,10 +58,12 @@ import {
   investigationLabels,
   investigationStateLabel,
   relatedWorkItemTasks,
+  taskUrl,
   workItemInvestigationState,
   workItemUrl,
 } from "./work-item-state";
 import { EmptyState, PageHeading, Surface } from "./workspace-ui";
+import "./work-items-page.css";
 
 const validStates = ["all", "open", "closed", "merged"];
 const statusColor = {
@@ -57,7 +76,175 @@ const statusColor = {
   completed: "success",
 } as const;
 
+function SourceNextAction({
+  item,
+  current,
+  savedTask,
+  tasks,
+  fresh,
+  onAction,
+  onCreate,
+  relatedLink,
+}: {
+  item: WorkItem;
+  current?: InvestigationTaskV1;
+  savedTask?: InvestigationTaskV1;
+  tasks: InvestigationTaskV1[];
+  fresh: boolean;
+  onCreate: (item: WorkItem) => void;
+  relatedLink: (target: ReviewRecord) => ReviewLinkProps;
+  onAction: (
+    item: WorkItem,
+    header: InvestigationReportHeaderV1 | undefined,
+    request: Omit<ActionPanelRequest, "id">,
+  ) => void;
+}) {
+  const { session } = useInvestigationSession();
+  const report = useSourceReport(item, savedTask);
+  const header = readableSourceReport(item, savedTask, report.data, report.error);
+  const { query, context } = useSourceActionContext(item, header);
+  const pending = context?.pendingSubmission;
+  const linked = activeSourceReportTask(item, header, tasks);
+  const active =
+    linked ?? (current && ["queued", "running"].includes(current.state) ? current : undefined);
+  const action = context?.recommendation.action;
+  const savedAction = context?.nextActions.find((next) => next.id === context?.recommendedActionId);
+  const allowed = Boolean(
+    fresh &&
+      !report.isError &&
+      !query.isError &&
+      context &&
+      action &&
+      isActionAllowed(context, action, savedAction?.id),
+  );
+  const openAction = () =>
+    onAction(item, header, pending || !action ? {} : { action, nextActionId: savedAction?.id });
+  const taskLink = (task: InvestigationTaskV1, href = taskUrl(task)) =>
+    relatedLink({
+      kind: "task",
+      id: task.id,
+      workItemId: task.workItem.id,
+      repositoryId: task.repository.id,
+      href,
+    });
+  const actionId = relatedLink({
+    kind: "work-item",
+    id: item.id,
+    workItemId: item.id,
+    repositoryId: item.repositoryId,
+    href: workItemUrl(item),
+  }).id;
+  const canCreate = Boolean(
+    session.user?.permissions.includes("task:create") &&
+      session.user.repositoryIds.includes(item.repositoryId),
+  );
+  return (
+    <>
+      <Box className="source-next-action">
+        {pending ? (
+          <Button
+            id={actionId}
+            variant="outlined"
+            size="small"
+            disabled={query.isError}
+            onClick={openAction}
+          >
+            Check submission
+          </Button>
+        ) : active ? (
+          <Button
+            component={Link}
+            {...taskLink(active)}
+            variant="outlined"
+            size="small"
+            endIcon={<ChevronRightRounded />}
+          >
+            View progress
+          </Button>
+        ) : header && context && action ? (
+          <Stack spacing={0.75} sx={{ alignItems: { xs: "flex-start", sm: "flex-end" } }}>
+            <Button
+              variant="outlined"
+              size="small"
+              id={actionId}
+              disabled={!allowed}
+              onClick={openAction}
+              endIcon={<ChevronRightRounded />}
+            >
+              {sourceActionLabel(action, savedAction?.taskKind)}
+            </Button>
+            {!allowed && (
+              <Typography variant="caption" color="text.secondary">
+                {!fresh || report.isError || query.isError
+                  ? "Refresh to check action availability."
+                  : sourceActionReason(context, action)}
+              </Typography>
+            )}
+          </Stack>
+        ) : current && ["blocked", "failed", "interrupted", "cancelled"].includes(current.state) ? (
+          <Button
+            component={Link}
+            {...taskLink(
+              current,
+              current.state === "blocked" ? `${taskUrl(current)}&tab=details` : taskUrl(current),
+            )}
+            variant="outlined"
+            size="small"
+            endIcon={<ChevronRightRounded />}
+          >
+            {current.state === "blocked" ? "View prerequisites" : "View task"}
+          </Button>
+        ) : !current && !savedTask ? (
+          <Stack spacing={0.75}>
+            <Button
+              id={actionId}
+              variant="outlined"
+              size="small"
+              disabled={!fresh || !canCreate}
+              onClick={() => onCreate(item)}
+            >
+              {item.kind === "pull_request" ? "Start review" : "Investigate issue"}
+            </Button>
+            {!canCreate && (
+              <Typography variant="caption" color="text.secondary">
+                Create tasks permission required.
+              </Typography>
+            )}
+          </Stack>
+        ) : (
+          <Button
+            component={Link}
+            {...relatedLink(
+              header
+                ? {
+                    kind: "report",
+                    id: header.report.id,
+                    workItemId: item.id,
+                    repositoryId: item.repositoryId,
+                    href: `/reports?${new URLSearchParams({ reportId: header.report.id, repositoryId: item.repositoryId })}`,
+                  }
+                : {
+                    kind: "work-item",
+                    id: item.id,
+                    workItemId: item.id,
+                    repositoryId: item.repositoryId,
+                    href: workItemUrl(item),
+                  },
+            )}
+            variant="outlined"
+            size="small"
+            endIcon={<ChevronRightRounded />}
+          >
+            {header ? "Review report" : "View source"}
+          </Button>
+        )}
+      </Box>
+    </>
+  );
+}
+
 export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
+  const queryClient = useQueryClient();
   const scope = useInvestigationRepositoryScope();
   const location = useLocation();
   const navigate = useNavigate();
@@ -74,13 +261,39 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
   )
     ? (parameters.get("investigation") as InvestigationFilter)
     : "all";
-  const pageSize = [8, 16, 32].includes(Number(parameters.get("rows")))
+  const pageSize = [10, 20, 50].includes(Number(parameters.get("rows")))
     ? Number(parameters.get("rows"))
-    : 8;
+    : 10;
   const page = Math.max(1, Number(parameters.get("page")) || 1);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filterDraft, setFilterDraft] = useState({ state, investigation });
   const [refreshed, setRefreshed] = useState(false);
+  const [refreshingResults, setRefreshingResults] = useState(false);
+  const [actionTarget, setActionTarget] = useState<{
+    item: WorkItem;
+    reportId?: string;
+    request: ActionPanelRequest;
+  }>();
+  const [actionBusy, setActionBusy] = useState(false);
+  const [createTarget, setCreateTarget] = useState<{
+    item: WorkItem;
+    onCompleted: (task: InvestigationTaskV1) => boolean;
+  }>();
+  const actionSerial = useRef(0);
+  const actionTitleId = useId();
+  const guardScope = `source-list-actions:${actionTarget?.item.id ?? "none"}`;
+  const guardedAction = useGuardedAction(guardScope);
+  const openAction = (
+    item: WorkItem,
+    header: InvestigationReportHeaderV1 | undefined,
+    request: Omit<ActionPanelRequest, "id">,
+  ) => {
+    setActionTarget({
+      item,
+      reportId: header?.report.id,
+      request: { id: `source-list-${++actionSerial.current}`, ...request },
+    });
+  };
   const query = useQuery({
     queryKey: ["investigation-work-items", scope.repositoryId, kind],
     queryFn: () => investigationApi.workItems(scope.repositoryId, kind),
@@ -106,15 +319,36 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
     navigate({ pathname: location.pathname, search: next.toString() }, { replace });
   };
   const refresh = async () => {
-    const results = await Promise.all([query.refetch(), tasks.refetch()]);
-    setRefreshed(results.every((result) => !result.isError));
+    setRefreshingResults(true);
+    setRefreshed(false);
+    try {
+      const results = await Promise.all([query.refetch(), tasks.refetch()]);
+      const visibleIds = new Set(visible.map((item) => item.id));
+      await queryClient.refetchQueries(
+        {
+          predicate: (entry) =>
+            entry.isActive() &&
+            ((entry.queryKey[0] === "investigation-source-report" &&
+              visibleIds.has(String(entry.queryKey[2]))) ||
+              (entry.queryKey[0] === "investigation-source-actions" &&
+                visibleIds.has(String(entry.queryKey[3])))),
+        },
+        { throwOnError: true },
+      );
+      setRefreshed(results.every((result) => !result.isError));
+    } catch {
+      setRefreshed(false);
+    } finally {
+      setRefreshingResults(false);
+    }
   };
   const sourceOptions = validStates.filter(
     (value) => kind === "pull_request" || value !== "merged",
   );
   const activeFilters = !!search || state !== "all" || investigation !== "all";
   const activeFilterCount = Number(state !== "all") + Number(investigation !== "all");
-  const filtered = filterWorkItems(query.data?.items ?? [], tasks.data?.items ?? [], {
+  const taskItems = readableSourceData(tasks.data, tasks.error)?.items ?? [];
+  const filtered = filterWorkItems(query.data?.items ?? [], taskItems, {
     search,
     state,
     investigation: tasks.isSuccess ? investigation : "all",
@@ -131,17 +365,12 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
     label: item.title,
   }));
   const queue = useReviewListNavigation({ label: plural, records: queueRecords, complete: true });
-  const refreshing = query.isFetching || tasks.isFetching;
+  const refreshing = query.isFetching || tasks.isFetching || refreshingResults;
   if (selected) return <WorkItemDetails key={selected} id={selected} />;
   return (
     <Stack spacing={3}>
       <PageHeading
         title={plural}
-        subtitle={
-          kind === "pull_request"
-            ? "From a source change to a confident review."
-            : "Understand the reported behavior and decide what comes next."
-        }
         action={<ImportWorkItemButton repository={scope.repository} initialKind={kind} />}
       />
       <Stack spacing={1.25}>
@@ -161,8 +390,7 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
             sx={{
               flex: { xs: 1, md: "0 1 520px" },
               minWidth: 0,
-              "& .MuiOutlinedInput-root": { borderRadius: 8, bgcolor: "action.hover" },
-              "& fieldset": { border: 0 },
+              "& .MuiOutlinedInput-root": { borderRadius: 1 },
             }}
             slotProps={{
               htmlInput: { "aria-label": `Search ${plural.toLowerCase()} by title or number` },
@@ -227,7 +455,7 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
               component="button"
               type="button"
               key={value}
-              label={investigationLabels[value]}
+              label={`${investigationLabels[value]} ${tasks.isSuccess ? filterWorkItems(query.data?.items ?? [], tasks.data.items, { search, state, investigation: value }).length : ""}`.trim()}
               onClick={() => updateFilters({ investigation: value })}
               aria-pressed={investigation === value}
               variant={investigation === value ? "filled" : "outlined"}
@@ -250,8 +478,7 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
       )}
       {tasks.isError && (
         <Alert severity="warning">
-          Investigation status could not be loaded. Source snapshots remain available; investigation
-          filtering will resume when status is loaded.{" "}
+          Investigation status is unavailable.{" "}
           <Button onClick={() => void tasks.refetch()}>Retry status</Button>
         </Alert>
       )}
@@ -275,192 +502,137 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
                 color="text.secondary"
                 sx={{ display: { xs: "none", sm: "block" } }}
               >
-                Source snapshot · Investigation
+                Next action
               </Typography>
             </Stack>
             {visible.map((item) => {
-              const current = currentWorkItemTask(item, tasks.data?.items ?? []);
+              const current = currentWorkItemTask(item, taskItems);
               const reviewState = workItemInvestigationState(current);
               const savedTask = current?.latestReportRef
                 ? current
-                : relatedWorkItemTasks(item, tasks.data?.items ?? []).find((task) =>
+                : relatedWorkItemTasks(item, taskItems).find((task) =>
                     Boolean(task.latestReportRef),
                   );
               const record = queueRecords.find((record) => record.id === item.id)!;
               return (
-                <ButtonBase
-                  component={Link}
-                  {...queue.getLinkProps(record)}
-                  key={item.id}
-                  sx={{
-                    display: "grid",
-                    width: "100%",
-                    textAlign: "left",
-                    gridTemplateColumns: {
-                      xs: "28px minmax(0, 1fr) 40px",
-                      md: "40px minmax(0, 1fr) 172px 40px",
-                    },
-                    gap: { xs: "8px 12px", md: 2 },
-                    alignItems: "center",
-                    px: { xs: 2, sm: 3 },
-                    py: 2,
-                    borderBottom: 1,
-                    borderColor: "divider",
-                    "&:hover": { bgcolor: "action.hover" },
-                  }}
-                >
-                  <Box
-                    aria-hidden="true"
-                    sx={{
-                      gridColumn: 1,
-                      gridRow: 1,
-                      width: { xs: 28, md: 40 },
-                      height: 40,
-                      display: "grid",
-                      placeItems: "center",
-                      alignSelf: "start",
-                      borderRadius: 3,
-                      color: item.kind === "issue" ? "success.main" : "primary.main",
-                      bgcolor: { xs: "transparent", md: "action.selected" },
-                    }}
-                  >
-                    {item.kind === "pull_request" ? (
-                      <MergeRounded />
-                    ) : (
-                      <RadioButtonCheckedRounded />
-                    )}
-                  </Box>
-                  <Box sx={{ minWidth: 0, gridColumn: 2, gridRow: 1 }}>
+                <Box component="article" className="source-queue-row" key={item.id}>
+                  <Box sx={{ minWidth: 0 }}>
                     <Typography
-                      component="span"
-                      sx={{
-                        display: "block",
-                        fontSize: 16,
-                        fontWeight: 500,
-                        lineHeight: 1.5,
-                        textDecoration: "none",
-                        color: "text.primary",
-                        overflowWrap: "anywhere",
-                        "&:hover": { color: "primary.main", textDecoration: "underline" },
-                      }}
+                      component={Link}
+                      {...queue.getLinkProps(record)}
+                      className="source-queue-title"
                     >
                       {item.title}
                     </Typography>
                     <Stack
                       direction="row"
-                      spacing={1.5}
+                      spacing={1.25}
                       useFlexGap
-                      sx={{ flexWrap: "wrap", mt: 0.5 }}
+                      sx={{ flexWrap: "wrap", alignItems: "center", mt: 0.75 }}
                     >
-                      <Typography variant="caption">#{item.number}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {item.kind === "pull_request" ? "PR" : "Issue"} #{item.number} ·{" "}
+                        {item.state}
+                      </Typography>
                       <Typography variant="caption" color="text.secondary">
                         {scope.query.data?.items.find(
                           (repository) => repository.id === item.repositoryId,
                         )?.fullName ?? item.repositoryId}
                       </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        Updated {new Date(item.updatedAt).toLocaleDateString()}
-                      </Typography>
+                      <Chip
+                        size="small"
+                        label={
+                          tasks.isPending
+                            ? "Loading status…"
+                            : tasks.isError
+                              ? "Status unavailable"
+                              : investigationStateLabel(current)
+                        }
+                        color={
+                          tasks.isError || tasks.isPending ? "default" : statusColor[reviewState]
+                        }
+                        sx={{ height: 24, fontSize: 12 }}
+                      />
+                      {savedTask && <SourceResultLabel item={item} task={savedTask} />}
                     </Stack>
                   </Box>
-                  <Stack
-                    spacing={0.75}
-                    sx={{
-                      gridColumn: { xs: "2 / 4", md: 3 },
-                      gridRow: { xs: 2, md: 1 },
-                      flexDirection: { xs: "row", md: "column" },
-                      alignItems: { xs: "center", md: "flex-start" },
-                      gap: { xs: 1.5, md: 0 },
+                  <SourceNextAction
+                    item={item}
+                    current={current}
+                    savedTask={savedTask}
+                    tasks={taskItems}
+                    fresh={!query.isError && tasks.isSuccess}
+                    onAction={openAction}
+                    onCreate={(source) => {
+                      const follow = queue.captureRelatedNavigation(record);
+                      setCreateTarget({
+                        item: source,
+                        onCompleted: (task) => {
+                          const target = sourceTaskReviewRecord(source, task);
+                          return target ? follow(target) : false;
+                        },
+                      });
                     }}
-                  >
-                    <SourceResultLabel item={item} task={savedTask} />
-                    <Chip
-                      size="small"
-                      label={
-                        tasks.isPending
-                          ? "Loading status…"
-                          : tasks.isError
-                            ? "Status unavailable"
-                            : investigationStateLabel(current)
-                      }
-                      color={
-                        tasks.isError || tasks.isPending ? "default" : statusColor[reviewState]
-                      }
-                    />
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ textTransform: "capitalize" }}
-                    >
-                      {item.state} · Snapshot
-                    </Typography>
-                  </Stack>
-                  <Box aria-hidden="true" sx={{ gridColumn: { xs: 3, md: 4 }, gridRow: 1 }}>
-                    <ChevronRightRounded />
-                  </Box>
-                </ButtonBase>
+                    relatedLink={(target) => queue.getRelatedLinkProps(record, target)}
+                  />
+                </Box>
               );
             })}
-            <Stack
-              component="footer"
-              direction="row"
-              spacing={2}
-              sx={{
-                px: { xs: 2, sm: 3 },
-                py: 1,
-                minHeight: 44,
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <Typography variant="caption" color="text.secondary" aria-live="polite">
-                {pageCount === 1
-                  ? `${filtered.length} ${filtered.length === 1 ? singular : plural.toLowerCase()} shown`
-                  : `${(currentPage - 1) * pageSize + 1}–${Math.min(currentPage * pageSize, filtered.length)} of ${filtered.length}`}
-              </Typography>
-              {pageCount > 1 && (
-                <Stack direction="row" spacing={0.5} sx={{ alignItems: "center" }}>
-                  <TextField
-                    select
-                    size="small"
-                    value={pageSize}
-                    onChange={(event) => updateFilters({ rows: event.target.value })}
-                    slotProps={{ select: { "aria-label": "Rows per page" } }}
-                    sx={{ width: 68, mr: 1 }}
-                  >
-                    {[8, 16, 32].map((size) => (
-                      <MenuItem value={size} key={size}>
-                        {size}
-                      </MenuItem>
-                    ))}
-                  </TextField>
-                  <IconButton
-                    aria-label="Previous page"
-                    disabled={currentPage === 1}
-                    onClick={() => updateFilters({ page: currentPage - 1 })}
-                  >
-                    <ArrowBackRounded />
-                  </IconButton>
-                  <IconButton
-                    aria-label="Next page"
-                    disabled={currentPage === pageCount}
-                    onClick={() => updateFilters({ page: currentPage + 1 })}
-                  >
-                    <ChevronRightRounded />
-                  </IconButton>
-                </Stack>
-              )}
-            </Stack>
+            {pageCount > 1 && (
+              <Stack
+                component="footer"
+                direction="row"
+                spacing={2}
+                sx={{
+                  px: { xs: 2, sm: 3 },
+                  py: 1,
+                  minHeight: 44,
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <Typography variant="caption" color="text.secondary" aria-live="polite">
+                  {`${(currentPage - 1) * pageSize + 1}–${Math.min(currentPage * pageSize, filtered.length)} of ${filtered.length}`}
+                </Typography>
+                {pageCount > 1 && (
+                  <Stack direction="row" spacing={0.5} sx={{ alignItems: "center" }}>
+                    <TextField
+                      select
+                      size="small"
+                      value={pageSize}
+                      onChange={(event) => updateFilters({ rows: event.target.value })}
+                      slotProps={{ select: { "aria-label": "Rows per page" } }}
+                      sx={{ width: 68, mr: 1 }}
+                    >
+                      {[10, 20, 50].map((size) => (
+                        <MenuItem value={size} key={size}>
+                          {size}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                    <IconButton
+                      aria-label="Previous page"
+                      disabled={currentPage === 1}
+                      onClick={() => updateFilters({ page: currentPage - 1 })}
+                    >
+                      <ArrowBackRounded />
+                    </IconButton>
+                    <IconButton
+                      aria-label="Next page"
+                      disabled={currentPage === pageCount}
+                      onClick={() => updateFilters({ page: currentPage + 1 })}
+                    >
+                      <ChevronRightRounded />
+                    </IconButton>
+                  </Stack>
+                )}
+              </Stack>
+            )}
           </Surface>
         ) : (
           <EmptyState
             icon={<SearchRounded />}
             title={activeFilters ? "No matching sources" : `No ${plural.toLowerCase()} yet`}
-            description={
-              activeFilters
-                ? "Try a different title, number, or investigation status."
-                : `Import a ${singular} to capture its source and discussion.`
-            }
             action={
               activeFilters ? (
                 <Button
@@ -475,6 +647,48 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
           />
         ))
       )}
+      {createTarget && (
+        <StartInvestigationButton
+          key={createTarget.item.id}
+          workItem={createTarget.item}
+          initialOpen
+          hideTrigger
+          onDismiss={() => setCreateTarget(undefined)}
+          onCompleted={createTarget.onCompleted}
+        />
+      )}
+      <Dialog
+        open={Boolean(actionTarget)}
+        onClose={() => {
+          if (!actionBusy) guardedAction(() => setActionTarget(undefined));
+        }}
+        fullWidth
+        maxWidth="md"
+        aria-labelledby={actionTitleId}
+      >
+        <DialogTitle id={actionTitleId}>
+          {actionTarget?.item.kind === "issue" ? "Issue" : "PR"} #{actionTarget?.item.number}
+        </DialogTitle>
+        <DialogContent>
+          {actionTarget && (
+            <StandaloneActions
+              workItem={actionTarget.item}
+              reportId={actionTarget.reportId}
+              request={actionTarget.request}
+              onBusyChange={setActionBusy}
+              guardScope={guardScope}
+            />
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            disabled={actionBusy}
+            onClick={() => guardedAction(() => setActionTarget(undefined))}
+          >
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog
         open={filtersOpen}
         onClose={() => setFiltersOpen(false)}

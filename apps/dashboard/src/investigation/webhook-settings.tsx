@@ -36,8 +36,8 @@ export const webhookSettingsQueryKey = (repositoryId: string) => [
 export function WebhookSettingsConflictNotice() {
   return (
     <Alert severity="warning">
-      These settings changed elsewhere. Your draft is still in this form. Reload saved settings to
-      replace the draft with the latest version, then make your changes again.
+      Settings changed. Your draft is kept. Reload saved settings to replace the draft with the
+      latest version, then make your changes again.
     </Alert>
   );
 }
@@ -198,21 +198,15 @@ export function WebhookSettingsForm({
             <Chip
               size="small"
               variant="outlined"
-              label={saved.enabled ? "Saved: Enabled" : "Saved: Disabled"}
+              label={saved.enabled || saved.e2eEnabled ? "Enabled" : "Disabled"}
             />
             {dirty && <Chip size="small" color="warning" label="Unsaved changes" />}
           </Stack>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Create a PR review or Issue investigation when a trusted user assigns an item in{" "}
-            {repository.fullName} to the configured GitHub account. Each task keeps its own source
-            and discussion snapshot.
-          </Typography>
         </Box>
         {!saved.receiverConfigured && (
           <Alert severity="info">
-            The server webhook receiver is not configured yet. You can save this repository's
-            settings now; an administrator must configure the receiver before events can be
-            accepted.
+            Webhook receiver is not configured. An administrator must configure it before events can
+            be accepted.
           </Alert>
         )}
         {process.env.NODE_ENV === "development" && (
@@ -222,7 +216,7 @@ export function WebhookSettingsForm({
         )}
         <Box className="repository-form-width">
           <Typography variant="subtitle1" component="h3">
-            Assignment intake
+            Static investigations
           </Typography>
           <FormControlLabel
             label="Listen for assignments"
@@ -245,7 +239,7 @@ export function WebhookSettingsForm({
             Trusted E2E commands
           </Typography>
           <FormControlLabel
-            label="Allow trusted @account e2e commands on pull requests"
+            label="Allow trusted E2E commands"
             labelPlacement="start"
             control={
               <Switch
@@ -257,14 +251,13 @@ export function WebhookSettingsForm({
             sx={{ width: "100%", justifyContent: "space-between" }}
           />
           <Typography variant="body2" color="text.secondary">
-            E2E uses the same recipient and trusted users below. It may build and run repository
-            code, operate the desktop, and publish screenshots or videos in a separate comment. Only
-            one E2E task can use the desktop at a time; static tasks can run alongside it.
+            Uses the trusted users below. E2E may run repository code, operate the desktop and
+            publish screenshots or videos.
           </Typography>
         </Box>
         <Stack spacing={3} className="repository-form-width">
           <TextField
-            label="Assignment recipient GitHub user ID"
+            label="Assignment recipient ID"
             value={form.reviewerUserIdText}
             onChange={(event) => patch({ reviewerUserIdText: event.target.value })}
             inputRef={reviewerRef}
@@ -272,13 +265,10 @@ export function WebhookSettingsForm({
             fullWidth
             error={!!fieldErrors.reviewerUserIdText}
             slotProps={{ htmlInput: { inputMode: "numeric" } }}
-            helperText={
-              fieldErrors.reviewerUserIdText ??
-              "Enter the account's numeric GitHub user ID. IDs stay stable when usernames change."
-            }
+            helperText={fieldErrors.reviewerUserIdText ?? "Numeric GitHub user ID."}
           />
           <TextField
-            label="Trusted assigning GitHub user IDs"
+            label="Trusted GitHub user IDs"
             value={form.allowedActorUserIdsText}
             onChange={(event) => patch({ allowedActorUserIdsText: event.target.value })}
             inputRef={actorsRef}
@@ -290,7 +280,7 @@ export function WebhookSettingsForm({
             error={!!fieldErrors.allowedActorUserIdsText}
             helperText={
               fieldErrors.allowedActorUserIdsText ??
-              "Enter numeric IDs separated by commas or new lines. Only these trusted users can start a task."
+              "Numeric IDs, separated by commas or new lines."
             }
           />
         </Stack>
@@ -312,8 +302,7 @@ export function WebhookSettingsForm({
                 helperText="Use this path on the public server URL and select Pull requests, Issues, and Issue comments events in GitHub."
               />
               <Typography variant="body2" color="text.secondary">
-                Saved settings version {saved.version}. The event history remains available when
-                intake is off.
+                Settings version {saved.version}
               </Typography>
               <Box>
                 <Button
@@ -335,7 +324,7 @@ export function WebhookSettingsForm({
         {error && <Alert severity="error">{error}</Alert>}
         {message && <Alert severity="success">{message}</Alert>}
         <Stack
-          className={dirty ? "repository-form-actions" : undefined}
+          className="repository-form-actions"
           direction="row"
           spacing={1}
           useFlexGap
@@ -343,7 +332,7 @@ export function WebhookSettingsForm({
         >
           {canManage && (
             <Button type="submit" variant="contained" disabled={busy || conflict || !dirty}>
-              {busy ? "Working…" : "Save webhook settings"}
+              {busy ? "Working…" : "Save settings"}
             </Button>
           )}
           {dirty && (
@@ -353,7 +342,7 @@ export function WebhookSettingsForm({
           )}
           {(dirty || conflict) && <Button onClick={downloadDraft}>Download draft</Button>}
           <Button disabled={busy} onClick={() => guardedAction(() => void reload())}>
-            Reload saved settings
+            Reload
           </Button>
         </Stack>
       </Stack>

@@ -113,6 +113,7 @@ export interface InvestigationWorkspacePage {
   readonly afterId?: string;
   readonly limit: number;
   readonly workItemId?: string;
+  readonly workItemKind?: "pull_request" | "issue";
   readonly taskId?: string;
   readonly attemptId?: string;
   readonly kind?: string;
@@ -358,6 +359,13 @@ export class InvestigationStore {
       predicates.push(
         `("id" GLOB 'auto-reply:report:*' OR "id" GLOB 'progress-reply:assignment:*' OR "id" GLOB 'progress-reply:task:*')`,
       );
+    if (collection === "idempotency" && query.workItemKind !== undefined) {
+      // Result, current progress, and legacy progress records retain the source kind separately.
+      predicates.push(
+        `coalesce(json_extract("value", '$.workItemKind'), json_extract("value", '$.target.kind'), json_extract("value", '$.workItem.kind')) = ?`,
+      );
+      values.push(query.workItemKind);
+    }
     const fields =
       collection === "reportDirectory"
         ? {

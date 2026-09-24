@@ -3,8 +3,8 @@ import {
   INVESTIGATION_PASSWORD_MIN_LENGTH,
   InvestigationNewPasswordSchema,
 } from "@agentic-review/contracts";
-import { CheckCircleOutlined, LockOutlined } from "@mui/icons-material";
-import { Alert, Avatar, Box, Button, Chip, Stack, TextField, Typography } from "@mui/material";
+import { LockOutlined } from "@mui/icons-material";
+import { Alert, Box, Button, Chip, Stack, Typography } from "@mui/material";
 import { Value } from "@sinclair/typebox/value";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { permissionOptions } from "./account-form";
@@ -97,55 +97,13 @@ export default function MyAccountPage() {
   };
   const user = session.user;
   if (!user) return <Alert severity="warning">Sign in to view your account.</Alert>;
-  const initials = user.displayName
-    .trim()
-    .split(/\s+/u)
-    .slice(0, 2)
-    .map((part) => part[0] ?? "")
-    .join("")
-    .toUpperCase();
   return (
     <Stack spacing={3.5} sx={{ minWidth: 0 }}>
-      <PageHeading title="My account" subtitle="Your profile, security, and workspace access." />
-      <Stack
-        direction="row"
-        spacing={3}
-        sx={{ alignItems: "center", pb: 3.5, borderBottom: 1, borderColor: "divider", minWidth: 0 }}
-      >
-        <Avatar
-          aria-hidden="true"
-          sx={{
-            width: { xs: 60, sm: 76 },
-            height: { xs: 60, sm: 76 },
-            fontSize: { xs: 22, sm: 26 },
-            bgcolor: "action.selected",
-            color: "primary.main",
-          }}
-        >
-          {initials}
-        </Avatar>
-        <Box sx={{ minWidth: 0, overflowWrap: "anywhere" }}>
-          <Typography
-            component="h2"
-            sx={{ fontSize: 24, lineHeight: 1.3, fontWeight: 500, mb: 0.5 }}
-          >
-            {user.displayName}
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            @{user.username}
-          </Typography>
-          <Chip
-            label={user.isAdmin ? "Administrator" : "Standard account"}
-            color={user.isAdmin ? "primary" : "default"}
-            size="small"
-            variant="outlined"
-          />
-        </Box>
-      </Stack>
+      <PageHeading title="My account" subtitle={`${user.displayName} · ${user.username}`} />
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: { xs: "minmax(0,1fr)", lg: "minmax(0,1.3fr) minmax(0,1fr)" },
+          gridTemplateColumns: { xs: "minmax(0,1fr)", md: "minmax(0,1.1fr) minmax(0,1fr)" },
           gap: { xs: 3, lg: 4 },
           alignItems: "start",
           maxWidth: 1180,
@@ -154,7 +112,7 @@ export default function MyAccountPage() {
         <Surface
           component="section"
           aria-labelledby={securityTitleId}
-          sx={{ p: { xs: 2.5, sm: 3.5 } }}
+          sx={{ p: { xs: 2, sm: 3 }, bgcolor: "background.paper" }}
         >
           <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 1 }}>
             <LockOutlined color="primary" aria-hidden="true" />
@@ -163,8 +121,7 @@ export default function MyAccountPage() {
             </Typography>
           </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-            Changing your password signs out every session for your account. Sign in again with the
-            new password.
+            Changing your password signs you out on all devices.
           </Typography>
           <Box
             component="form"
@@ -172,15 +129,15 @@ export default function MyAccountPage() {
             onSubmit={(event: FormEvent<HTMLFormElement>) => void submit(event)}
             aria-label="Change password"
             noValidate
+            sx={{ maxWidth: 420 }}
           >
             <Stack spacing={2.75}>
-              <TextField
-                label="Username"
+              <input
+                type="hidden"
                 name="username"
                 autoComplete="username"
                 value={user.username}
-                slotProps={{ input: { readOnly: true } }}
-                fullWidth
+                readOnly
               />
               <PasswordField
                 label="Current password"
@@ -208,7 +165,7 @@ export default function MyAccountPage() {
                 error={!!errors.newPassword}
                 helperText={
                   errors.newPassword ??
-                  `${INVESTIGATION_PASSWORD_MIN_LENGTH}–${INVESTIGATION_PASSWORD_MAX_LENGTH} characters. Passwords are case-sensitive and spaces are preserved.`
+                  `${INVESTIGATION_PASSWORD_MIN_LENGTH}–${INVESTIGATION_PASSWORD_MAX_LENGTH} characters.`
                 }
                 required
                 disabled={busy}
@@ -228,9 +185,6 @@ export default function MyAccountPage() {
                 disabled={busy}
               />
               {error && <Alert severity="error">{error}</Alert>}
-              <Typography variant="body2" color="text.secondary">
-                Password fields are cleared after every attempt.
-              </Typography>
               <Stack
                 direction={{ xs: "column", sm: "row" }}
                 spacing={1}
@@ -250,7 +204,7 @@ export default function MyAccountPage() {
                     })
                   }
                 >
-                  Discard changes
+                  Clear fields
                 </Button>
               </Stack>
               {dirty && (
@@ -265,14 +219,12 @@ export default function MyAccountPage() {
           <Surface
             component="section"
             aria-labelledby={accessTitleId}
-            sx={{ p: { xs: 2.5, sm: 3.5 } }}
+            sx={{ p: { xs: 2, sm: 3 }, bgcolor: "background.paper" }}
           >
             <Typography id={accessTitleId} component="h2" variant="h6" sx={{ mb: 2 }}>
-              Workspace access
+              Your access
             </Typography>
-            <Alert severity="info" sx={{ mb: 2.5 }}>
-              Contact a workspace administrator to change your access.
-            </Alert>
+            {user.isAdmin && <Chip label="Administrator" size="small" sx={{ mb: 2 }} />}
             <Box
               component="dl"
               sx={{
@@ -294,7 +246,7 @@ export default function MyAccountPage() {
                 </Box>
               </Box>
               <Box>
-                <Typography component="dt">Business permissions</Typography>
+                <Typography component="dt">Operations</Typography>
                 <Box component="dd">
                   {user.permissions.length
                     ? user.permissions
@@ -304,7 +256,7 @@ export default function MyAccountPage() {
                               ?.label ?? permission,
                         )
                         .join(", ")
-                    : "No business permissions"}
+                    : "Read-only"}
                 </Box>
               </Box>
               <Box>
@@ -314,32 +266,27 @@ export default function MyAccountPage() {
                 </Box>
               </Box>
             </Box>
-            {user.isAdmin && (
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 2.5 }}>
-                Administrator access manages accounts. It does not grant repository access, business
-                permissions, actions, or code execution.
-              </Typography>
-            )}
-            {!user.repositoryIds.length && (
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 2.5 }}>
-                You can manage your profile here. A repository grant is needed to open repository
-                work.
-              </Typography>
-            )}
           </Surface>
           <Surface
             component="section"
             aria-labelledby={actionsTitleId}
-            sx={{ p: { xs: 2.5, sm: 3.5 } }}
+            sx={{ p: { xs: 2, sm: 3 }, bgcolor: "background.paper" }}
           >
             <Typography id={actionsTitleId} component="h2" variant="h6" sx={{ mb: 1 }}>
               Allowed actions
             </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Actions also require the corresponding repository access and business permission.
-            </Typography>
             {user.actionCapabilities.length ? (
-              <Stack component="ul" spacing={1.5} sx={{ m: 0, p: 0, listStyle: "none" }}>
+              <Box
+                component="ul"
+                sx={{
+                  m: 0,
+                  p: 0,
+                  listStyle: "none",
+                  display: "grid",
+                  gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                  gap: 1.5,
+                }}
+              >
                 {user.actionCapabilities.map((action) => (
                   <Stack
                     key={action}
@@ -348,13 +295,12 @@ export default function MyAccountPage() {
                     spacing={1.25}
                     sx={{ alignItems: "center", minWidth: 0 }}
                   >
-                    <CheckCircleOutlined fontSize="small" color="primary" aria-hidden="true" />
                     <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
                       {actionLabels[action]}
                     </Typography>
                   </Stack>
                 ))}
-              </Stack>
+              </Box>
             ) : (
               <Typography variant="body2" color="text.secondary">
                 No actions are granted to this account.

@@ -1,0 +1,55 @@
+.source-queue-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--app-line);
+}
+.source-queue-title.MuiTypography-root {
+  display: block;
+  color: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 22px;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.source-queue-title:hover {
+  text-decoration: underline;
+}
+.source-next-action {
+  max-width: 210px;
+  justify-self: end;
+}
+.source-next-action .MuiButton-root {
+  width: max-content;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 5px 12px;
+  border-radius: 100px;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: normal;
+}
+@media (max-width: 600px) {
+  .source-queue-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 16px;
+  }
+  .source-next-action {
+    justify-self: start;
+    max-width: 100%;
+  }
+}
+@media (pointer: coarse) {
+  .source-queue-title.MuiTypography-root {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+  .source-next-action .MuiButton-root {
+    min-height: 44px;
+  }
+}

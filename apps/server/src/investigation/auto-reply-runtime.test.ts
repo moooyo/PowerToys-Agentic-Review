@@ -916,6 +916,22 @@ describe("automatic reply production runtime", () => {
     expect((await get(app, "/api/publications?state=pending&limit=51", cookie)).statusCode).toBe(
       400,
     );
+    for (const workItemKind of ["pull_request", "issue"]) {
+      const response = await get(
+        app,
+        `/api/publications?workItemKind=${workItemKind}&workItemNumber=7&limit=1`,
+        cookie,
+      );
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json()).toEqual({ items: [], nextCursor: null });
+    }
+    for (const query of [
+      "workItemKind=pr",
+      "workItemKind=",
+      "workItemKind=issue&workItemKind=pull_request",
+    ]) {
+      expect((await get(app, `/api/publications?${query}`, cookie)).statusCode).toBe(400);
+    }
     expect(context.execute).not.toHaveBeenCalled();
   });
 

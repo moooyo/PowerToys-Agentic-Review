@@ -50,7 +50,13 @@ export function Surface({ sx, children, ...props }: BoxProps) {
     <Box
       {...props}
       sx={[
-        { minWidth: 0, bgcolor: "background.paper", borderRadius: "16px" },
+        {
+          minWidth: 0,
+          bgcolor: "background.paper",
+          border: 1,
+          borderColor: "divider",
+          borderRadius: "16px",
+        },
         ...(Array.isArray(sx) ? sx : sx ? [sx] : []),
       ]}
     >

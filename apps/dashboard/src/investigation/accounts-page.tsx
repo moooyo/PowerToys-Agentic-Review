@@ -18,8 +18,6 @@ import {
   InputAdornment,
   Paper,
   Stack,
-  Tab,
-  Tabs,
   TextField,
   Typography,
 } from "@mui/material";
@@ -51,6 +49,23 @@ import { EmptyState, PageHeading, Surface } from "./workspace-ui";
 
 const accountsQueryKey = ["investigation-accounts"];
 const actionOptions = InvestigationActionKindSchema.anyOf.map((schema) => schema.const);
+const actionGroups = [
+  {
+    label: "Review & publish",
+    actions: [
+      "comment",
+      "approve",
+      "suggestion-comment",
+      "request-changes",
+      "close",
+      "merge",
+      "close-as-duplicate",
+      "create-pr",
+    ],
+  },
+  { label: "Investigations", actions: ["start-task", "reviews.verify", "trigger-ci", "resume"] },
+  { label: "View", actions: ["view-validation", "view-changes", "view-evidence"] },
+];
 
 function toggleValue<T extends string>(values: T[], value: T, checked: boolean): T[] {
   return checked ? [...new Set([...values, value])] : values.filter((item) => item !== value);
@@ -154,8 +169,8 @@ export function AccountConflictNotice({
   return (
     <Stack spacing={2}>
       <Alert severity="warning">
-        This account changed or could not accept this update. Your non-password fields are still in
-        this form. Refresh the account and review its current access before trying again.
+        Account access changed. Refresh and review the latest access before saving. Your edits are
+        kept.
       </Alert>
       <Button
         variant="outlined"
@@ -163,7 +178,7 @@ export function AccountConflictNotice({
         onClick={() => void review.refresh()}
         sx={{ alignSelf: "flex-start" }}
       >
-        {review.loading ? "Refreshing account…" : "Refresh account for review"}
+        {review.loading ? "Refreshing…" : "Review latest access"}
       </Button>
       {review.error && <Alert severity="error">{review.error}</Alert>}
       {review.latest && (
@@ -182,7 +197,7 @@ export function AccountConflictNotice({
                 onChange={(_, checked) => review.setReviewed(checked)}
               />
             }
-            label="I reviewed the latest account and want to apply this form."
+            label="Apply my changes to this version."
           />
         </Paper>
       )}
@@ -203,7 +218,15 @@ function AccountAccessFields({
   repositoriesUnavailable: boolean;
   repositoryError?: string;
 }) {
+  const repositoryIdsId = useId();
   const selectedRepositoryIds = form.repositoryIdsText.split(/[\s,]+/u).filter(Boolean);
+  const unknownRepositoryIds = selectedRepositoryIds.filter(
+    (id) => !repositories.some((repository) => repository.id === id),
+  );
+  const [showRepositoryIds, setShowRepositoryIds] = useState(unknownRepositoryIds.length > 0);
+  useEffect(() => {
+    if (repositoryError) setShowRepositoryIds(true);
+  }, [repositoryError]);
   const toggleRepository = (id: string, checked: boolean) => {
     setField("repositoryIdsText", toggleValue(selectedRepositoryIds, id, checked).join("\n"));
   };
@@ -213,56 +236,71 @@ function AccountAccessFields({
         <Typography component="legend" variant="subtitle1" sx={{ mb: 1.5 }}>
           Repository access
         </Typography>
-        <TextField
-          label="Repository IDs"
-          name="repositoryIdsText"
-          fullWidth
-          multiline
-          minRows={2}
-          maxRows={6}
-          value={form.repositoryIdsText}
-          onChange={(event) => setField("repositoryIdsText", event.target.value)}
-          error={!!repositoryError}
-          helperText={
-            repositoryError ??
-            "Enter exact IDs separated by commas or new lines. An empty list grants no repositories."
-          }
-        />
         {!!repositories.length && (
-          <Box sx={{ mt: 1.5 }}>
-            <Typography variant="body2" color="text.secondary">
-              Add from repositories visible to your account:
-            </Typography>
-            <FormGroup>
-              {repositories.map((repository) => (
-                <FormControlLabel
-                  key={repository.id}
-                  sx={{ overflowWrap: "anywhere" }}
-                  control={
-                    <Checkbox
-                      checked={selectedRepositoryIds.includes(repository.id)}
-                      onChange={(_, checked) => toggleRepository(repository.id, checked)}
-                    />
-                  }
-                  label={`${repository.fullName} (${repository.id})`}
-                />
-              ))}
-            </FormGroup>
-          </Box>
+          <FormGroup
+            sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 1 }}
+          >
+            {repositories.map((repository) => (
+              <FormControlLabel
+                key={repository.id}
+                sx={{ minWidth: 0, overflowWrap: "anywhere", alignItems: "flex-start" }}
+                control={
+                  <Checkbox
+                    checked={selectedRepositoryIds.includes(repository.id)}
+                    onChange={(_, checked) => toggleRepository(repository.id, checked)}
+                  />
+                }
+                label={
+                  <Box sx={{ py: 1 }}>
+                    <Typography variant="body2">{repository.fullName}</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {repository.id}
+                    </Typography>
+                  </Box>
+                }
+              />
+            ))}
+          </FormGroup>
         )}
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          {repositoriesUnavailable
-            ? "The repository directory is unavailable. You can still enter exact repository IDs."
-            : "You can enter registered repository IDs that are outside your own repository access."}
-        </Typography>
+        {repositoriesUnavailable && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Repository directory unavailable. Enter repository IDs below.
+          </Alert>
+        )}
+        <Button
+          type="button"
+          onClick={() => setShowRepositoryIds((shown) => !shown)}
+          aria-expanded={showRepositoryIds || repositoriesUnavailable || !!repositoryError}
+          aria-controls={repositoryIdsId}
+          sx={{ px: 0 }}
+        >
+          Repository IDs
+          {unknownRepositoryIds.length
+            ? ` · ${unknownRepositoryIds.length} outside this directory`
+            : ""}
+        </Button>
+        <Box
+          id={repositoryIdsId}
+          hidden={!showRepositoryIds && !repositoriesUnavailable && !repositoryError}
+        >
+          <TextField
+            label="Repository IDs"
+            name="repositoryIdsText"
+            fullWidth
+            multiline
+            minRows={2}
+            maxRows={6}
+            value={form.repositoryIdsText}
+            onChange={(event) => setField("repositoryIdsText", event.target.value)}
+            error={!!repositoryError}
+            helperText={repositoryError ?? "Exact IDs, separated by commas or new lines."}
+          />
+        </Box>
       </Box>
       <Divider />
       <Box component="fieldset" sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}>
         <Typography component="legend" variant="subtitle1">
-          Business permissions
-        </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          These permissions apply only within the granted repositories.
+          Operations
         </Typography>
         <FormGroup sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" } }}>
           {permissionOptions.map((permission) => (
@@ -284,48 +322,49 @@ function AccountAccessFields({
           ))}
         </FormGroup>
       </Box>
-      <Box
-        component="details"
-        sx={{
-          borderBlock: 1,
-          borderColor: "divider",
-          py: 0.5,
-          "& > summary": { cursor: "pointer", minHeight: 64, py: 1.5 },
-        }}
-      >
-        <Box component="summary">
-          <Typography component="span" variant="subtitle1">
-            Allowed actions
+      <Box>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>
+          Allowed actions{" "}
+          <Typography component="span" variant="body2" color="text.secondary">
+            · {form.actionCapabilities.length} selected
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            {form.actionCapabilities.length} selected · independent of business permissions
-          </Typography>
-        </Box>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Select which actions this account may use within its repository and business permissions.
         </Typography>
-        <FormGroup
-          aria-label="Allowed actions"
-          sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" } }}
+        <Box
+          sx={{
+            display: "grid",
+            gridTemplateColumns: { xs: "1fr", sm: "repeat(3,minmax(0,1fr))" },
+            gap: 2,
+          }}
         >
-          {actionOptions.map((action) => (
-            <FormControlLabel
-              key={action}
-              control={
-                <Checkbox
-                  checked={form.actionCapabilities.includes(action)}
-                  onChange={(_, checked) =>
-                    setField(
-                      "actionCapabilities",
-                      toggleValue(form.actionCapabilities, action, checked),
-                    )
-                  }
-                />
-              }
-              label={actionLabels[action]}
-            />
+          {actionGroups.map((group) => (
+            <Box component="fieldset" key={group.label} sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}>
+              <Typography component="legend" variant="body2" sx={{ mb: 1, fontWeight: 500 }}>
+                {group.label}
+              </Typography>
+              <FormGroup>
+                {actionOptions
+                  .filter((action) => group.actions.includes(action))
+                  .map((action) => (
+                    <FormControlLabel
+                      key={action}
+                      control={
+                        <Checkbox
+                          checked={form.actionCapabilities.includes(action)}
+                          onChange={(_, checked) =>
+                            setField(
+                              "actionCapabilities",
+                              toggleValue(form.actionCapabilities, action, checked),
+                            )
+                          }
+                        />
+                      }
+                      label={actionLabels[action]}
+                    />
+                  ))}
+              </FormGroup>
+            </Box>
           ))}
-        </FormGroup>
+        </Box>
       </Box>
       <Box sx={{ p: 2.5, bgcolor: "action.hover", borderRadius: "16px" }}>
         <FormControlLabel
@@ -338,8 +377,7 @@ function AccountAccessFields({
           label="Allow repository code execution"
         />
         <Typography variant="body2" color="text.secondary">
-          Allow tasks to run repository code for builds, tests, and desktop verification. This grant
-          is separate from administrator access and the worker's execution policy.
+          Allows builds, tests and desktop verification.
         </Typography>
       </Box>
     </Stack>
@@ -353,6 +391,7 @@ function AccountEditor({
   onClose,
   onSaved,
   reloadAccount,
+  onResetPassword,
 }: {
   account?: Account;
   repositories: Repository[];
@@ -360,14 +399,13 @@ function AccountEditor({
   onClose: () => void;
   onSaved: (account: Account, created: boolean) => Promise<void>;
   reloadAccount: (id: string) => Promise<Account>;
+  onResetPassword: (account: Account) => void;
 }) {
   const formId = useId();
   const titleId = useId();
-  const tabId = useId();
   const mounted = useMountedAccountForm();
   const guardedAction = useGuardedAction();
   const [form, setForm] = useState(() => accountFormValues(account));
-  const [tab, setTab] = useState<"identity" | "access">("identity");
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const [error, setError] = useState<string>();
@@ -402,7 +440,6 @@ function AccountEditor({
       if (!mounted.current) return;
       if (cause instanceof AccountFormError) {
         setFieldError(cause);
-        setTab(cause.field === "repositoryIdsText" ? "access" : "identity");
         focusInvalidAccountField(formId);
       } else {
         setError(cause instanceof Error ? cause.message : "The account could not be saved.");
@@ -421,9 +458,6 @@ function AccountEditor({
         <Typography component="h2" id={titleId} variant="h6">
           {account ? `Edit ${account.displayName}` : "Create account"}
         </Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          Set identity and repository access separately.
-        </Typography>
       </DialogTitle>
       <DialogContent dividers>
         <Box component="form" id={formId} noValidate onSubmit={(event) => void submit(event)}>
@@ -431,38 +465,11 @@ function AccountEditor({
             {error && <Alert severity="error">{error}</Alert>}
             <AccountConflictNotice review={review} disabled={busy} />
           </Stack>
-          <Tabs
-            value={tab}
-            onChange={(_, value: "identity" | "access") => setTab(value)}
-            aria-label="Account settings"
-            variant="scrollable"
-            scrollButtons="auto"
-            sx={{ mb: 3 }}
-          >
-            <Tab
-              id={`${tabId}-identity`}
-              aria-controls={`${tabId}-identity-panel`}
-              value="identity"
-              label="Identity"
-              disabled={busy}
-            />
-            <Tab
-              id={`${tabId}-access`}
-              aria-controls={`${tabId}-access-panel`}
-              value="access"
-              label="Access & permissions"
-              disabled={busy}
-            />
-          </Tabs>
           <Box component="fieldset" disabled={busy} sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}>
-            <Stack
-              spacing={2.5}
-              role="tabpanel"
-              id={`${tabId}-identity-panel`}
-              aria-labelledby={`${tabId}-identity`}
-              hidden={tab !== "identity"}
-              sx={{ display: tab === "identity" ? "flex" : "none" }}
-            >
+            <Stack spacing={2.5} component="section" aria-label="Identity" sx={{ mb: 3 }}>
+              <Typography component="h3" variant="subtitle1">
+                Identity
+              </Typography>
               <TextField
                 autoFocus
                 label="Username"
@@ -482,7 +489,7 @@ function AccountEditor({
                     ? fieldError.message
                     : account
                       ? "Usernames cannot be changed."
-                      : "3–64 letters, numbers, periods, underscores, or hyphens. Saved in lowercase."
+                      : "3–64 letters, numbers, periods, underscores or hyphens."
                 }
               />
               <TextField
@@ -508,14 +515,49 @@ function AccountEditor({
                   onChange={(event) => setField("password", event.target.value)}
                   error={fieldError?.field === "password"}
                   helperText={
-                    fieldError?.field === "password"
-                      ? fieldError.message
-                      : "Use 15–128 characters. The password field is cleared after each attempt."
+                    fieldError?.field === "password" ? fieldError.message : "15–128 characters."
                   }
                 />
               )}
+            </Stack>
+            <AccountAccessFields
+              form={form}
+              setField={setField}
+              repositories={repositories}
+              repositoriesUnavailable={repositoriesUnavailable}
+              repositoryError={
+                fieldError?.field === "repositoryIdsText" ? fieldError.message : undefined
+              }
+            />
+            <Stack
+              component="section"
+              spacing={2}
+              sx={{ mt: 3, pt: 3, borderTop: 1, borderColor: "divider" }}
+            >
+              <Typography component="h3" variant="subtitle1">
+                Workspace administration
+              </Typography>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={form.isAdmin}
+                    onChange={(_, value) => setField("isAdmin", value)}
+                  />
+                }
+                label="Administrator"
+              />
               {account && (
                 <Box>
+                  <Typography component="h3" variant="subtitle1" sx={{ mb: 1 }}>
+                    Security
+                  </Typography>
+                  <Button
+                    type="button"
+                    disabled={busy || review.loading}
+                    onClick={() => guardedAction(() => onResetPassword(account))}
+                  >
+                    Reset password
+                  </Button>
                   <FormControlLabel
                     control={
                       <Checkbox
@@ -530,56 +572,7 @@ function AccountEditor({
                   </Typography>
                 </Box>
               )}
-              <Box>
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={form.isAdmin}
-                      onChange={(_, value) => setField("isAdmin", value)}
-                    />
-                  }
-                  label="Administrator"
-                />
-                <Typography variant="body2" color="text.secondary">
-                  Administrators can manage every local account. Repository access and business
-                  permissions are granted separately.
-                </Typography>
-              </Box>
-              <Stack
-                direction={{ xs: "column", sm: "row" }}
-                spacing={1}
-                sx={{
-                  p: 2,
-                  borderRadius: "16px",
-                  bgcolor: "action.hover",
-                  alignItems: { sm: "center" },
-                  justifyContent: "space-between",
-                }}
-              >
-                <Typography variant="body2" color="text.secondary">
-                  Next: choose repositories and permissions.
-                </Typography>
-                <Button type="button" onClick={() => setTab("access")} disabled={busy}>
-                  Review access
-                </Button>
-              </Stack>
             </Stack>
-            <Box
-              role="tabpanel"
-              id={`${tabId}-access-panel`}
-              aria-labelledby={`${tabId}-access`}
-              hidden={tab !== "access"}
-            >
-              <AccountAccessFields
-                form={form}
-                setField={setField}
-                repositories={repositories}
-                repositoriesUnavailable={repositoriesUnavailable}
-                repositoryError={
-                  fieldError?.field === "repositoryIdsText" ? fieldError.message : undefined
-                }
-              />
-            </Box>
           </Box>
         </Box>
       </DialogContent>
@@ -718,10 +711,7 @@ function ResetPasswordDialog({
                 setPasswordError(undefined);
               }}
               error={!!passwordError}
-              helperText={
-                passwordError ??
-                "Use 15–128 characters. Both password fields are cleared after each attempt."
-              }
+              helperText={passwordError ?? "15–128 characters."}
             />
             <PasswordField
               label="Confirm new password"
@@ -847,7 +837,6 @@ function AdminAccountsPage() {
     <Stack spacing={3.5} sx={{ minWidth: 0 }}>
       <PageHeading
         title="Accounts"
-        subtitle="Give each person the access they need."
         action={
           <Button
             variant="contained"
@@ -873,7 +862,7 @@ function AdminAccountsPage() {
           label="Search accounts"
           value={search}
           onChange={(event) => setView(event.target.value, filter, true)}
-          placeholder="Name, username, or repository ID"
+          placeholder="Name or username"
           size="small"
           sx={{ width: { xs: "100%", sm: 340 }, maxWidth: "100%" }}
           slotProps={{
@@ -919,7 +908,7 @@ function AdminAccountsPage() {
           }
           sx={{ alignSelf: { xs: "flex-start", sm: "center" } }}
         >
-          {accounts.isFetching ? "Refreshing…" : "Refresh accounts"}
+          {accounts.isFetching ? "Refreshing…" : "Refresh"}
         </Button>
       </Stack>
       {accounts.isPending && (
@@ -942,8 +931,7 @@ function AdminAccountsPage() {
             aria-hidden="true"
             sx={{
               display: { xs: "none", lg: "grid" },
-              gridTemplateColumns:
-                "minmax(180px,1.5fr) minmax(120px,.9fr) minmax(110px,.8fr) 88px 190px",
+              gridTemplateColumns: "minmax(220px,1.5fr) minmax(150px,1fr) 100px",
               alignItems: "center",
               gap: 2,
               py: 1.5,
@@ -953,11 +941,9 @@ function AdminAccountsPage() {
               fontSize: 12,
             }}
           >
-            <Box>Person</Box>
-            <Box>Role</Box>
+            <Box>Account</Box>
             <Box>Repository access</Box>
             <Box>Status</Box>
-            <Box sx={{ textAlign: "center" }}>Actions</Box>
           </Box>
           {visibleAccounts.map((account) => (
             <Box
@@ -967,13 +953,13 @@ function AdminAccountsPage() {
               sx={{
                 px: { xs: 2, lg: 3 },
                 py: { xs: 2, lg: 1.5 },
-                minHeight: 92,
+                minHeight: 88,
                 borderBottom: 1,
                 borderColor: "divider",
                 display: "grid",
                 gridTemplateColumns: {
                   xs: "minmax(0,1fr) auto",
-                  lg: "minmax(180px,1.5fr) minmax(120px,.9fr) minmax(110px,.8fr) 88px 190px",
+                  lg: "minmax(220px,1.5fr) minmax(150px,1fr) 100px",
                 },
                 alignItems: "center",
                 gap: { xs: 1.25, lg: 2 },
@@ -1013,6 +999,9 @@ function AdminAccountsPage() {
                 <Box sx={{ minWidth: 0, overflowWrap: "anywhere" }}>
                   <Typography className="account-name" sx={{ fontWeight: 500, fontSize: 16 }}>
                     {account.displayName}
+                    {account.isAdmin && (
+                      <Chip component="span" label="Admin" size="small" sx={{ ml: 1 }} />
+                    )}
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ fontSize: 13 }}>
                     @{account.username}
@@ -1020,26 +1009,10 @@ function AdminAccountsPage() {
                   </Typography>
                 </Box>
               </Button>
-              <Stack
-                direction="row"
-                spacing={0.75}
+              <Box
                 sx={{
                   gridColumn: { xs: 1, lg: 2 },
                   gridRow: { xs: 2, lg: 1 },
-                  ml: { xs: 7.25, lg: 0 },
-                  alignItems: "center",
-                  minWidth: 0,
-                }}
-              >
-                {account.isAdmin && <AdminPanelSettingsOutlined fontSize="small" color="primary" />}
-                <Typography variant="body2">
-                  {account.isAdmin ? "Administrator" : "Standard account"}
-                </Typography>
-              </Stack>
-              <Box
-                sx={{
-                  gridColumn: { xs: 1, lg: 3 },
-                  gridRow: { xs: 3, lg: 1 },
                   ml: { xs: 7.25, lg: 0 },
                   minWidth: 0,
                   overflowWrap: "anywhere",
@@ -1063,32 +1036,8 @@ function AdminAccountsPage() {
                 size="small"
                 color={account.enabled ? "success" : "default"}
                 variant="outlined"
-                sx={{ gridColumn: { xs: 2, lg: 4 }, gridRow: 1, justifySelf: "end" }}
+                sx={{ gridColumn: { xs: 2, lg: 3 }, gridRow: 1, justifySelf: "end" }}
               />
-              <Stack
-                direction="row"
-                spacing={0.5}
-                useFlexGap
-                sx={{
-                  gridColumn: { xs: "1 / -1", lg: 5 },
-                  gridRow: { xs: 4, lg: 1 },
-                  justifyContent: "flex-end",
-                  flexWrap: "wrap",
-                }}
-              >
-                <Button
-                  aria-label={`Edit account ${account.username}`}
-                  onClick={() => guardedAction(() => setEditor({ account }))}
-                >
-                  Edit
-                </Button>
-                <Button
-                  aria-label={`Reset password for ${account.username}`}
-                  onClick={() => guardedAction(() => setPasswordAccount(account))}
-                >
-                  Reset password
-                </Button>
-              </Stack>
             </Box>
           ))}
           {visibleAccounts.length === 0 && (
@@ -1119,9 +1068,6 @@ function AdminAccountsPage() {
             <Typography role="status" variant="body2" sx={{ fontSize: 13 }}>
               {visibleAccounts.length} of {accounts.data?.items.length ?? 0} accounts
             </Typography>
-            <Typography variant="body2" sx={{ fontSize: 13 }}>
-              Account administration does not grant repository access.
-            </Typography>
           </Stack>
         </Surface>
       )}
@@ -1134,6 +1080,10 @@ function AdminAccountsPage() {
           onClose={() => setEditor(undefined)}
           onSaved={onSaved}
           reloadAccount={reloadAccount}
+          onResetPassword={(account) => {
+            setEditor(undefined);
+            setPasswordAccount(account);
+          }}
         />
       )}
       {passwordAccount && (

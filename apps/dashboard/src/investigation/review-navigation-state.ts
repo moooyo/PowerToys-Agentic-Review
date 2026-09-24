@@ -79,6 +79,17 @@ export function reviewRecordMatchesLocation(
   );
 }
 
+/** A list shortcut can open a related detail while retaining its original source member. */
+export function relatedReviewTarget(origin: ReviewRecord, target: ReviewRecord): boolean {
+  const url = localUrl(target.href);
+  return Boolean(
+    url &&
+      origin.repositoryId === target.repositoryId &&
+      origin.workItemId === target.workItemId &&
+      reviewRecordMatchesLocation(target, url),
+  );
+}
+
 export function createReviewQueue(
   input: Omit<ReviewQueue, "members" | "complete"> & {
     records: readonly ReviewRecord[];

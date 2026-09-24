@@ -10,7 +10,9 @@ import {
   readableSourceReport,
   sourceActionContextMatches,
   sourceActionKey,
+  sourceActionLabel,
   sourceReportKey,
+  sourceTaskReviewRecord,
 } from "./source-result";
 import { InvestigationHttpError } from "./transport";
 import { WorkItemDetails } from "./work-item-details";
@@ -74,6 +76,54 @@ function renderSource(client: QueryClient, source: { id: string; repositoryId: s
 }
 
 describe("source result and current action binding", () => {
+  it("only binds creation completion to the original source identity", async () => {
+    const { source, detail } = await fixture();
+    expect(sourceTaskReviewRecord(source, detail.task)).toMatchObject({
+      kind: "task",
+      id: detail.task.id,
+      workItemId: source.id,
+      repositoryId: source.repositoryId,
+    });
+    expect(
+      sourceTaskReviewRecord(source, {
+        ...detail.task,
+        workItem: { ...detail.task.workItem, id: "another-source" },
+      }),
+    ).toBeUndefined();
+    expect(
+      sourceTaskReviewRecord(source, {
+        ...detail.task,
+        repository: { ...detail.task.repository, id: "another-repository" },
+      }),
+    ).toBeUndefined();
+    expect(
+      sourceTaskReviewRecord(source, {
+        ...detail.task,
+        workItem: { ...detail.task.workItem, kind: "issue" },
+      }),
+    ).toBeUndefined();
+    expect(
+      sourceTaskReviewRecord(source, {
+        ...detail.task,
+        workItem: { ...detail.task.workItem, number: source.number + 1 },
+      }),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ["request-changes", null, "Request changes"],
+    ["comment", null, "Comment"],
+    ["suggestion-comment", null, "Suggest code"],
+    ["resume", null, "Resume task"],
+    ["start-task", "issue-verify", "Verify issue"],
+    ["start-task", "feature-implement", "Implement feature"],
+  ] as const)(
+    "keeps %s labels concise without changing the action",
+    (action, taskKind, expected) => {
+      expect(sourceActionLabel(action, taskKind)).toBe(expected);
+    },
+  );
+
   it("changes the action cache key with the source revision and rejects stale target bindings", async () => {
     const { source, header, context, identity } = await fixture();
     expect(sourceActionContextMatches(source, header, context, session.user.id)).toBe(true);
@@ -120,8 +170,8 @@ describe("source result and current action binding", () => {
     );
     const html = renderSource(client, changed);
     expect(html).toContain("earlier saved source");
-    expect(html).toContain("Read saved report");
-    expect(html).toContain("Loading current next actions");
+    expect(html).toContain("Read report");
+    expect(html).toContain("Loading actions");
     expect(html).not.toContain("OLD_CONTEXT_RECOMMENDATION");
   });
 
@@ -133,7 +183,7 @@ describe("source result and current action binding", () => {
       recommendation: { ...context.recommendation, reason: "MISMATCHED_RECOMMENDATION" },
     });
     const html = renderSource(client, source);
-    expect(html).toContain("cached action context does not match");
+    expect(html).toContain("Action context changed");
     expect(html).not.toContain("MISMATCHED_RECOMMENDATION");
   });
 
@@ -152,7 +202,7 @@ describe("source result and current action binding", () => {
       },
     });
     const html = renderSource(client, source);
-    const inspectButton = html.match(/<button\b[^>]*>Inspect pending submission/u)?.[0];
+    const inspectButton = html.match(/<button\b[^>]*>Check submission/u)?.[0];
     expect(inspectButton).toBeDefined();
     expect(inspectButton).not.toContain("disabled");
   });
@@ -199,7 +249,7 @@ describe("source result and current action binding", () => {
       fetchStatus: "idle",
     });
     const html = renderSource(client, source);
-    expect(html).toContain("Cached tasks and their saved conclusions are hidden");
+    expect(html).toContain("Cached tasks and saved conclusions are hidden");
     expect(html).not.toContain(`reportId=${header.report.id}`);
     expect(html).not.toContain(`taskId=${detail.task.id}`);
   });

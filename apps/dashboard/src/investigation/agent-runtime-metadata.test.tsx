@@ -82,4 +82,22 @@ describe("recorded runtime metadata", () => {
     expect(html).not.toContain("only-attempt-one");
     expect(html).not.toContain("awaiting usage");
   });
+  it("keeps compact task totals separate from the selected attempt's model and pending usage", () => {
+    const html = renderToStaticMarkup(
+      <AgentRuntimeMetadata
+        taskId="task-one"
+        attemptId="attempt-two"
+        summary={summary}
+        invocations={[{ ...call, model: "other-attempt-model" }]}
+        compact
+        actions={<button type="button">History</button>}
+      />,
+    );
+    expect(html).toContain("700+");
+    expect(html).toContain("History");
+    expect(html).toContain("Inspect token usage and model settings");
+    expect(html).not.toContain("other-attempt-model");
+    expect(html).not.toContain("awaiting usage");
+    expect(html).not.toContain("Reasoning effort");
+  });
 });

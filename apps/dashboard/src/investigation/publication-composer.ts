@@ -339,20 +339,16 @@ export function validatePublication(
   let suggestions = 0;
   for (const { entry, saved } of rows) {
     const field = `draft-${entry.draftId}`;
-    if (!entry.body.trim())
-      add(`${field}-body`, "Add publishing text or remove this draft from the selection.");
+    if (!entry.body.trim()) add(`${field}-body`, "Add a comment or remove this item.");
     if (publicationEntrySourceBody(entry, result, editedBodies) !== entry.sourceBody)
       add(
         `${field}-body`,
-        "Report feedback changed. Choose Use latest feedback or Keep publishing text before preparing.",
+        "Report feedback changed. Choose Use latest feedback or Keep my text before continuing.",
       );
     if (entry.mode !== "suggestion") continue;
     suggestions += 1;
     if (action === "comment")
-      add(
-        `${field}-mode`,
-        "Conversation comments contain text only. Explicitly choose summary text or another review operation.",
-      );
+      add(`${field}-mode`, "Comments contain text only. Choose summary text or a review action.");
     const status = publicationSuggestionStatus(entry, result, context);
     if (!status.valid) add(`${field}-mode`, status.reason!);
     if (entry.replacement.includes("```"))
@@ -361,7 +357,7 @@ export function validatePublication(
     if (encoder.encode(inlineBody).length > 60_000)
       add(
         `${field}-replacement`,
-        "Publishing text and replacement code together exceed the 60,000-byte UTF-8 limit. Shorten them explicitly.",
+        "The comment and replacement code exceed the 60,000-byte UTF-8 limit. Shorten them.",
       );
     if (saved.suggestion) {
       const anchor = saved.suggestion;
@@ -383,10 +379,7 @@ export function validatePublication(
     }
   }
   if (suggestions > 100)
-    add(
-      "selection",
-      "A review can include at most 100 code suggestions. Explicitly reduce the selection.",
-    );
+    add("selection", "A review can include at most 100 code suggestions. Remove some suggestions.");
   if (action === "suggestion-comment" && suggestions === 0)
     add("selection", "Select at least one valid code suggestion for a comment review.");
   const transportSummary = [
@@ -399,7 +392,7 @@ export function validatePublication(
   if (encoder.encode(transportSummary).length > 60_000)
     add(
       "summary",
-      "The summary and text findings exceed the 60,000-byte UTF-8 limit including reserved submission identity space. Shorten them explicitly.",
+      "The review exceeds the 60,000-byte UTF-8 submission limit. Shorten the summary or remove a finding.",
     );
   return errors;
 }

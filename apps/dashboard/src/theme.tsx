@@ -183,7 +183,7 @@ function materialTheme(mode: PaletteMode) {
             borderRadius: 100,
             minHeight: 40,
             maxWidth: "100%",
-            padding: "9px 24px",
+            padding: "9px 20px",
             fontWeight: 500,
             whiteSpace: "normal",
             overflowWrap: "anywhere",
@@ -387,6 +387,7 @@ function materialTheme(mode: PaletteMode) {
             minWidth: 0,
             "@media (max-width: 599px)": {
               margin: 12,
+              width: "calc(100% - 24px)",
               maxWidth: "calc(100% - 24px)",
               maxHeight: "calc(100% - 24px)",
             },

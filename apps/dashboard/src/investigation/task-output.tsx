@@ -32,7 +32,6 @@ import { sessionIdentity, useInvestigationSession } from "./session";
 import {
   emptyTaskOutput,
   exportLoadedOutput,
-  latestAttemptInvocation,
   mergeTaskOutput,
   normalizeTaskOutputView,
   type OutputItem,
@@ -233,7 +232,6 @@ function TaskOutputReader({
   const active =
     selectedAttempt !== undefined &&
     ["queued", "leased", "running"].includes(selectedAttempt.state);
-  const call = latestAttemptInvocation(invocations, attemptId);
   const queryKey = useMemo(
     () => taskOutputQueryKey(identity, task.id, attemptId ?? ""),
     [identity, task.id, attemptId],
@@ -365,7 +363,7 @@ function TaskOutputReader({
       component="section"
       className="task-output-surface"
       aria-label="Agent output"
-      sx={{ border: 1, borderColor: "divider", bgcolor: "background.paper", borderRadius: "20px" }}
+      sx={{ border: 1, borderColor: "divider", bgcolor: "background.paper", borderRadius: "16px" }}
     >
       <Box
         component="header"
@@ -379,13 +377,8 @@ function TaskOutputReader({
           sx={{ alignItems: "center", flexWrap: "wrap" }}
         >
           <Typography component="h2" variant="h6">
-            Agent output
+            Output
           </Typography>
-          {call && (
-            <Typography variant="caption" color="text.secondary">
-              {call.engine === "copilot" ? "Copilot CLI" : "Codex CLI"}
-            </Typography>
-          )}
           <Chip
             size="small"
             variant="outlined"
@@ -399,7 +392,7 @@ function TaskOutputReader({
               select
               size="small"
               value={attemptId ?? ""}
-              label="Output attempt"
+              label="Attempt"
               onChange={(event) => onAttemptChange(event.target.value)}
               sx={{ minWidth: 136, maxWidth: 220 }}
             >
@@ -444,26 +437,28 @@ function TaskOutputReader({
           </Tooltip>
         </Box>
       </Box>
-      {selectedAttempt && (
-        <Box className="task-output-attempt-context" sx={{ bgcolor: "action.hover" }}>
-          <Typography variant="body2" color="text.secondary">
-            {historical ? "Historical" : "Latest"} attempt {selectedAttempt.number} ·{" "}
-            {selectedAttempt.state}.
-            {historical
-              ? " This output does not describe the latest attempt."
-              : " Output and task outcome are separate records."}
-          </Typography>
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-            {historical && <Button onClick={() => onAttemptChange("")}>Latest attempt</Button>}
-            {onHistory && <Button onClick={onHistory}>Attempt history</Button>}
-          </Stack>
-        </Box>
-      )}
       <AgentRuntimeMetadata
         taskId={task.id}
         attemptId={attemptId}
         summary={summary}
         invocations={invocations}
+        compact
+        actions={
+          selectedAttempt && (
+            <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+              {historical && (
+                <Button size="small" onClick={() => onAttemptChange("")}>
+                  Latest attempt
+                </Button>
+              )}
+              {onHistory && (
+                <Button size="small" onClick={onHistory}>
+                  History
+                </Button>
+              )}
+            </Stack>
+          )
+        }
       />
       {searchVisible && (
         <Box
@@ -589,13 +584,6 @@ function TaskOutputReader({
                       ? "Waiting for recorded output"
                       : "No output recorded for this attempt"}
             </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              {output.items.length
-                ? "Search covers the events currently loaded in this view."
-                : !call
-                  ? "No model call has been registered in this attempt."
-                  : "Only output accepted by the server appears here."}
-            </Typography>
             {(search || filter !== "all") && (
               <Button
                 sx={{ mt: 1 }}
@@ -620,7 +608,7 @@ function TaskOutputReader({
       >
         <Typography variant="caption" color="text.secondary" role="status">
           {following
-            ? `${shown.length} loaded items${output.hasMore ? " · Loading retained history…" : ""}`
+            ? `${shown.length} loaded ${shown.length === 1 ? "item" : "items"}${output.hasMore ? " · Loading history…" : ""}`
             : `Follow paused${output.eventCount > seenCount ? ` · ${output.eventCount - seenCount} new updates` : ""}`}
           {query.data
             ? ` · Last checked ${new Date(query.data.checkedAt).toLocaleTimeString()}`
@@ -641,14 +629,6 @@ function TaskOutputReader({
           </Button>
         </Stack>
       </Box>
-      <Typography
-        variant="caption"
-        color="text.secondary"
-        sx={{ display: "block", px: { xs: 2, sm: 3 }, pb: 1.5 }}
-      >
-        Showing loaded, retained output, which may be incomplete. Accepted conclusions, usage, and
-        cleanup have separate receipts.
-      </Typography>
     </Box>
   );
 }

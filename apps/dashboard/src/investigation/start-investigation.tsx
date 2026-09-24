@@ -119,10 +119,20 @@ export function StartInvestigationButton({
   workItem,
   variant = "contained",
   disabled = false,
+  initialOpen = false,
+  hideTrigger = false,
+  onDismiss,
+  onCompleted,
 }: {
   workItem: WorkItem;
   variant?: "contained" | "outlined" | "text";
   disabled?: boolean;
+  /** Mount the existing form in a stable page-level host for list shortcuts. */
+  initialOpen?: boolean;
+  hideTrigger?: boolean;
+  onDismiss?: () => void;
+  /** Return true when a list host has handled navigation to the completed creation. */
+  onCompleted?: (task: InvestigationTaskV1) => boolean;
 }) {
   const budgetId = useId();
   const { session } = useInvestigationSession();
@@ -131,8 +141,10 @@ export function StartInvestigationButton({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const guarded = useGuardedAction();
-  const [open, setOpen] = useState(false);
-  const [source, setSource] = useState(workItem);
+  const [open, setOpen] = useState(initialOpen);
+  const [source, setSource] = useState(() =>
+    initialOpen ? (retainedInvestigationRequest(scope)?.source ?? workItem) : workItem,
+  );
   const [inputs, setInputs] = useState<InvestigationInputs>(
     () => retainedInvestigationRequest(scope)?.inputs ?? initialInvestigationInputs(workItem),
   );
@@ -200,9 +212,9 @@ export function StartInvestigationButton({
     if (completed && !open && !busy) {
       if (retainedInvestigationRequest(scope)?.state === "confirmed")
         clearInvestigationRequest(scope);
-      navigate(taskUrl(completed));
+      if (!onCompleted?.(completed)) navigate(taskUrl(completed));
     }
-  }, [completed, open, busy, scope, navigate]);
+  }, [completed, open, busy, scope, navigate, onCompleted]);
   const focusErrors = () =>
     requestAnimationFrame(() =>
       (
@@ -218,7 +230,11 @@ export function StartInvestigationButton({
     key.current = crypto.randomUUID();
   };
   const close = () => {
-    if (!busy && receipt?.state !== "pending") guarded(() => setOpen(false));
+    if (!busy && receipt?.state !== "pending")
+      guarded(() => {
+        setOpen(false);
+        onDismiss?.();
+      });
   };
   const openDialog = () => {
     const saved = retainedInvestigationRequest(scope);
@@ -323,18 +339,20 @@ export function StartInvestigationButton({
   };
   return (
     <>
-      <Button
-        variant={variant}
-        startIcon={<PlayArrowRounded />}
-        disabled={!canCreate || disabled}
-        onClick={openDialog}
-      >
-        {receipt
-          ? "Check investigation request"
-          : workItem.kind === "pull_request"
-            ? "Start review"
-            : "Investigate issue"}
-      </Button>
+      {!hideTrigger && (
+        <Button
+          variant={variant}
+          startIcon={<PlayArrowRounded />}
+          disabled={!canCreate || disabled}
+          onClick={openDialog}
+        >
+          {receipt
+            ? "Check investigation request"
+            : workItem.kind === "pull_request"
+              ? "Start review"
+              : "Investigate issue"}
+        </Button>
+      )}
       <Dialog
         open={open}
         onClose={close}

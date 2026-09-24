@@ -7,7 +7,6 @@ import {
   Box,
   Button,
   ButtonBase,
-  Chip,
   CircularProgress,
   InputAdornment,
   Stack,
@@ -35,7 +34,7 @@ export const repositorySettingsTabs = ["overview", "intake", "replies", "schedul
 type SettingsTab = (typeof repositorySettingsTabs)[number];
 const tabLabels: Record<SettingsTab, string> = {
   overview: "Overview",
-  intake: "Event intake",
+  intake: "Intake",
   replies: "Replies",
   scheduling: "Scheduling",
 };
@@ -113,7 +112,7 @@ function RepositoryDirectoryEntry({
           {repository.fullName}
         </Typography>
         <Typography component="span" variant="body2" color="text.secondary">
-          GitHub repository ID {repository.githubRepositoryId}
+          {repository.id}
         </Typography>
         <Typography
           className="repository-directory-mobile-status"
@@ -142,20 +141,20 @@ function RepositoryOverview({
 }) {
   const { intake, replies } = useRepositorySettings(repository);
   const links = [
-    ["Pull requests", "/pull-requests", "Review registered pull requests"],
-    ["Issues", "/issues", "Investigate reported issues"],
-    ["Tasks", "/tasks", "Follow investigation progress"],
-    ["Comments", "/comments", "Review comment deliveries"],
-    ["Webhook events", "/webhooks", "Inspect event intake history"],
+    ["Pull requests", "/pull-requests"],
+    ["Issues", "/issues"],
+    ["Tasks", "/tasks"],
+    ["Comments", "/comments"],
+    ["Webhook events", "/webhooks"],
   ];
   return (
     <Stack spacing={3}>
-      <Surface sx={{ p: { xs: 2, sm: 3.5 } }}>
+      <Surface sx={{ p: { xs: 2, sm: 3 } }}>
         <Typography variant="h6" component="h2" sx={{ mb: 1 }}>
           Review work
         </Typography>
         <Box className="repository-shortcuts">
-          {links.map(([label, path, description]) => (
+          {links.map(([label, path]) => (
             <Button
               key={path}
               component={Link}
@@ -165,7 +164,6 @@ function RepositoryOverview({
             >
               <Box component="span">
                 <strong>{label}</strong>
-                <small>{description}</small>
               </Box>
             </Button>
           ))}
@@ -174,7 +172,7 @@ function RepositoryOverview({
           <ImportWorkItemButton repository={repository} />
         </Box>
       </Surface>
-      <Surface sx={{ p: { xs: 2, sm: 3.5 } }}>
+      <Surface sx={{ p: { xs: 2, sm: 3 } }}>
         <Typography variant="h6" component="h2" sx={{ mb: 1 }}>
           Automation
         </Typography>
@@ -183,7 +181,7 @@ function RepositoryOverview({
             <Typography sx={{ fontWeight: 500 }}>Event intake</Typography>
             <Typography variant="body2" color="text.secondary">
               {intake.isError
-                ? "Saved intake settings are unavailable. Open Event intake to retry."
+                ? "Intake settings unavailable."
                 : intake.data
                   ? "Assignments " +
                     (intake.data.enabled ? "on" : "off") +
@@ -192,14 +190,14 @@ function RepositoryOverview({
                   : "Loading saved intake settings…"}
             </Typography>
           </Box>
-          <Button onClick={() => onTab("intake")}>View intake</Button>
+          <Button onClick={() => onTab("intake")}>Configure</Button>
         </Box>
         <Box className="repository-summary-row">
           <Box>
             <Typography sx={{ fontWeight: 500 }}>Automatic replies</Typography>
             <Typography variant="body2" color="text.secondary">
               {replies.isError
-                ? "Saved reply settings are unavailable. Open Replies to retry."
+                ? "Reply settings unavailable."
                 : replies.data
                   ? "Conclusions " +
                     (replies.data.enabled ? "on" : "off") +
@@ -208,16 +206,16 @@ function RepositoryOverview({
                   : "Loading saved reply settings…"}
             </Typography>
           </Box>
-          <Button onClick={() => onTab("replies")}>View replies</Button>
+          <Button onClick={() => onTab("replies")}>Configure</Button>
         </Box>
         <Box className="repository-summary-row">
           <Box>
-            <Typography sx={{ fontWeight: 500 }}>Scheduling</Typography>
+            <Typography sx={{ fontWeight: 500 }}>Workspace scheduling</Typography>
             <Typography variant="body2" color="text.secondary">
-              Shared workspace capacity and current resource owners.
+              All repositories
             </Typography>
           </Box>
-          <Button onClick={() => onTab("scheduling")}>View scheduling</Button>
+          <Button onClick={() => onTab("scheduling")}>Open</Button>
         </Box>
       </Surface>
       <Box className="repository-overview-footer">
@@ -263,7 +261,8 @@ export default function RepositoriesPage() {
     guardedAction(() => {
       const next = new URLSearchParams();
       if (search) next.set("q", search);
-      if (repositoryId) {
+      if (nextTab === "scheduling") next.set("tab", "scheduling");
+      else if (repositoryId) {
         next.set("repositoryId", repositoryId);
         next.set("tab", nextTab);
         if (repositoryId === selectedId && replyTemplate) next.set("replyTemplate", replyTemplate);
@@ -276,6 +275,18 @@ export default function RepositoriesPage() {
       .includes(search.trim().toLowerCase()),
   );
 
+  if (tab === "scheduling")
+    return (
+      <Stack spacing={3} className="repository-workspace">
+        <Box>
+          <Button startIcon={<ArrowBackRounded />} onClick={() => open()}>
+            Back to repositories
+          </Button>
+        </Box>
+        <PageHeading title="Workspace scheduling" subtitle="All repositories" />
+        <SchedulerPanel />
+      </Stack>
+    );
   if (selected)
     return (
       <Stack spacing={3} className="repository-workspace">
@@ -284,20 +295,7 @@ export default function RepositoriesPage() {
             Back to repositories
           </Button>
         </Box>
-        <PageHeading
-          title={selected.fullName}
-          subtitle="Review work and manage this repository's automation."
-          action={
-            <Chip
-              variant="outlined"
-              label={
-                session.user?.permissions.includes("repository:manage")
-                  ? "Repository management"
-                  : "Read only"
-              }
-            />
-          }
-        />
+        <PageHeading title={selected.fullName} subtitle={selected.id} />
         <Tabs
           value={tab}
           onChange={(_, value: SettingsTab) => open(selected.id, value)}
@@ -314,15 +312,17 @@ export default function RepositoriesPage() {
             },
           }}
         >
-          {repositorySettingsTabs.map((value) => (
-            <Tab
-              key={value}
-              value={value}
-              label={tabLabels[value]}
-              id={"repository-tab-" + value}
-              aria-controls={"repository-panel-" + value}
-            />
-          ))}
+          {repositorySettingsTabs
+            .filter((value) => value !== "scheduling")
+            .map((value) => (
+              <Tab
+                key={value}
+                value={value}
+                label={tabLabels[value]}
+                id={"repository-tab-" + value}
+                aria-controls={"repository-panel-" + value}
+              />
+            ))}
         </Tabs>
         <Box
           role="tabpanel"
@@ -334,12 +334,12 @@ export default function RepositoriesPage() {
             <RepositoryOverview repository={selected} onTab={(value) => open(selected.id, value)} />
           )}
           {tab === "intake" && (
-            <Surface sx={{ p: { xs: 2, sm: 3.5 } }}>
+            <Surface sx={{ p: { xs: 2, sm: 3 } }}>
               <RepositoryWebhookSettingsPanel repository={selected} />
             </Surface>
           )}
           {tab === "replies" && (
-            <Surface sx={{ p: { xs: 2, sm: 3.5 } }}>
+            <Surface sx={{ p: { xs: 2, sm: 3 } }}>
               <RepositoryAutoReplySettingsPanel
                 repository={selected}
                 selectedTemplate={replyTemplate}
@@ -354,7 +354,6 @@ export default function RepositoriesPage() {
               />
             </Surface>
           )}
-          {tab === "scheduling" && <SchedulerPanel />}
         </Box>
       </Stack>
     );
@@ -362,7 +361,7 @@ export default function RepositoriesPage() {
     <Stack spacing={3} className="repository-workspace">
       <PageHeading
         title="Repositories"
-        subtitle="Review work and manage automation for the repositories you can access."
+        action={<Button onClick={() => open(undefined, "scheduling")}>Workspace scheduling</Button>}
       />
       {repositoryIds.length > 0 && query.isPending && (
         <CircularProgress size={28} aria-label="Loading repositories" />
@@ -376,7 +375,7 @@ export default function RepositoriesPage() {
       {selectedId && !query.isPending && !query.isError ? (
         <EmptyState
           title="Repository not available"
-          description="It may be outside your current access. Return to the repositories you can review."
+          description="This repository is outside your current access or no longer available."
           action={<Button onClick={() => open()}>View repositories</Button>}
         />
       ) : !repositoryIds.length || (query.data && !repositories.length) ? (
@@ -422,13 +421,9 @@ export default function RepositoriesPage() {
             ) : (
               <EmptyState
                 title="No matching repositories"
-                description="Try a shorter name or clear your search."
                 action={<Button onClick={() => setSearch("")}>Clear search</Button>}
               />
             )}
-            <Typography variant="caption" color="text.secondary">
-              Repository access is managed by workspace administrators.
-            </Typography>
           </>
         )
       )}

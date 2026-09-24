@@ -13,10 +13,28 @@ import {
   assertReportBindings,
   selectionContext,
 } from "./report-state";
-import { reportTab } from "./report-workspace";
+import { recommendedReportRequest, reportTab } from "./report-workspace";
 import { createSampleInvestigationApi } from "./sample-adapter";
 
 describe("structured investigation result UI", () => {
+  it("carries report selection into recommended feedback while keeping task actions separate", () => {
+    for (const action of ["comment", "approve", "suggestion-comment", "request-changes"] as const) {
+      expect(recommendedReportRequest(action, "saved-next-action", true)).toEqual({
+        action,
+        nextActionId: "saved-next-action",
+        importReportSelection: true,
+      });
+      expect(
+        recommendedReportRequest(action, undefined, false).importReportSelection,
+      ).toBeUndefined();
+    }
+    for (const action of ["start-task", "reviews.verify", "merge", "close", "trigger-ci"] as const)
+      expect(recommendedReportRequest(action, "saved-next-action", true)).toEqual({
+        action,
+        nextActionId: "saved-next-action",
+      });
+  });
+
   it("keeps approval blocked when the P0 is outside the loaded findings page", async () => {
     const api = createSampleInvestigationApi();
     const header = await api.report("sample-pr-p0-report");
@@ -134,10 +152,10 @@ describe("structured investigation result UI", () => {
     const featureUi = renderToStaticMarkup(<AssessmentPanel assessment={feature.assessment} />);
     expect(bugUi).toContain("needs_verification");
     expect(bugUi).toContain("Reproduction");
-    expect(bugUi).toContain("does not establish that upstream is fixed");
+    expect(bugUi).toContain("not_run");
     expect(featureUi).toContain("ready");
     expect(featureUi).toContain("Acceptance criteria");
-    expect(featureUi).toContain("does not mean the maintainers have accepted");
+    expect(featureUi).not.toContain("does not mean the maintainers have accepted");
   });
 
   it("renders full finding content and partial coverage without claiming a final success", async () => {
@@ -157,12 +175,11 @@ describe("structured investigation result UI", () => {
       />,
     );
     for (const label of [
-      "Trigger conditions",
-      "Impact",
+      "Trigger &amp; impact",
       "Root cause",
-      "Evidence",
-      "Fix recommendation",
-      "Independent comment draft",
+      "Source evidence",
+      "Proposed fix",
+      "Feedback draft",
     ])
       expect(findingUi).toContain(label);
     const coverage = renderToStaticMarkup(<CoveragePanel report={result.report} />);
@@ -170,7 +187,7 @@ describe("structured investigation result UI", () => {
     expect(result.report.completeness).toBe("partial");
   });
 
-  it("keeps directory delivery, completeness, execution, and full finding counts independent", async () => {
+  it("keeps checkpoint status and full finding counts without inferring a final conclusion", async () => {
     const api = createSampleInvestigationApi();
     const header = await api.report("sample-pr-p0-report");
     const checkpoint = {
@@ -188,8 +205,9 @@ describe("structured investigation result UI", () => {
       </MemoryRouter>,
     );
     expect(markup).toContain("Checkpoint");
-    expect(markup).toContain("partial report");
-    expect(markup).toContain("Execution: completed");
+    expect(markup).toContain("Partial");
+    expect(markup).toContain("No final conclusion");
+    expect(markup).toContain("Review findings");
     expect(markup).toContain("26 findings");
     expect(markup).not.toContain("Evidence ready");
   });
@@ -211,10 +229,32 @@ describe("structured investigation result UI", () => {
       />,
     );
     expect(markup).toContain(finding.title);
-    expect(markup).toContain("Trigger conditions");
-    expect(markup).toContain("Exact finding and evidence provenance");
+    expect(markup).toContain("Trigger &amp; impact");
+    expect(markup).toContain("Provenance");
     expect(markup).not.toContain("Show finding details");
-    expect(markup).toContain("The sealed report stays unchanged");
+    expect(markup).toContain(finding.subjectRef);
+    expect(markup.match(/type="checkbox"/gu)).toHaveLength(1);
+    expect(markup).not.toContain("The sealed report stays unchanged");
+  });
+
+  it("opens restored unsaved feedback initially without making cleanliness its expansion state", async () => {
+    const result = await createSampleInvestigationApi().exportReport("sample-pr-p1-report");
+    const finding = result.findings[0]!;
+    const markup = renderToStaticMarkup(
+      <FindingCard
+        detail
+        draftDirty
+        finding={finding}
+        evidence={result.verificationEvidence}
+        selected={false}
+        draftBody="Retained edits"
+        suggestionValid={false}
+        onSelect={() => {}}
+        onDraftChange={() => {}}
+      />,
+    );
+    expect(markup).toMatch(/<details[^>]*class="[^"]*report-feedback-editor[^"]*"[^>]*open=""/u);
+    expect(markup).toContain("Retained edits");
   });
 
   it("retains saved plans, exact source context, and sealed accounting in Details", async () => {

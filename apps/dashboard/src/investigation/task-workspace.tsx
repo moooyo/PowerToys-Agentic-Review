@@ -5,14 +5,11 @@ import {
   type InvestigationUsageSummary,
   projectInvestigationCheckpointPresentation,
 } from "@agentic-review/contracts";
-import CheckRounded from "@mui/icons-material/CheckRounded";
+import AddRounded from "@mui/icons-material/AddRounded";
 import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
-import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
-import ScheduleRounded from "@mui/icons-material/ScheduleRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
-import WarningAmberRounded from "@mui/icons-material/WarningAmberRounded";
 import {
   Accordion,
   AccordionDetails,
@@ -50,13 +47,14 @@ import {
 } from "./comment-deliveries";
 import { GithubSourceLink } from "./github-source-link";
 import { useUnsavedChanges } from "./navigation-guard";
-import { OutcomeSummary } from "./outcome-summary";
+import { reportOutcome } from "./outcome-summary";
 import { Section, SubjectPanel, TextList } from "./report-sections";
 import { useInvestigationRepositoryScope } from "./repository-scope";
 import { ResumeTaskButton } from "./resume-task";
 import { ReviewQueueBar, type ReviewRecord, useReviewListNavigation } from "./review-navigation";
 import { schedulerQueryKey } from "./scheduler-panel";
 import { sessionIdentity, useInvestigationSession } from "./session";
+import { StartInvestigationButton } from "./start-investigation";
 import { TaskEvidencePanel } from "./task-evidence";
 import { outputAccessDenied, TaskOutputPanel } from "./task-output";
 import {
@@ -202,13 +200,17 @@ export function TaskList({
     );
   return (
     <Surface sx={{ border: 1, borderColor: "divider", overflow: "hidden" }}>
-      <Typography
-        variant="body2"
-        color="text.secondary"
-        sx={{ px: { xs: 2, sm: 3 }, py: 1.5, borderBottom: 1, borderColor: "divider" }}
+      <Box
+        className="production-task-list-heading"
+        sx={{ borderBottom: 1, borderColor: "divider" }}
       >
-        {tasks.length} {tasks.length === 1 ? "task" : "tasks"}
-      </Typography>
+        <Typography variant="body2" color="text.secondary">
+          {tasks.length} {tasks.length === 1 ? "task" : "tasks"}
+        </Typography>
+        <Typography variant="caption" color="text.secondary">
+          Next action
+        </Typography>
+      </Box>
       <Box component="ul" aria-label="Investigation tasks" sx={{ listStyle: "none", p: 0, m: 0 }}>
         {visibleTasks.map((task) => {
           const cleanupPending = taskCleanupPending(task, resourceLeases);
@@ -216,7 +218,10 @@ export function TaskList({
             .filter((item) => item.taskId === task.id || item.associatedTaskIds?.includes(task.id))
             .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
           const record = taskReviewRecord(task);
-          const { id: _rowLinkId, ...secondaryLinkProps } = listNavigation.getLinkProps(record);
+          const { id: _rowLinkId, ...secondaryLinkProps } = listNavigation.getLinkProps({
+            ...record,
+            href: `${record.href}${cleanupPending ? "&tab=details" : ""}`,
+          });
           const tone = cleanupPending
             ? "warning"
             : task.state === "failed"
@@ -228,17 +233,13 @@ export function TaskList({
                   : task.state === "running"
                     ? "primary"
                     : "default";
-          const icon = cleanupPending ? (
-            <ScheduleRounded />
-          ) : task.state === "completed" ? (
-            <CheckRounded />
-          ) : task.state === "running" ? (
-            <PlayArrowRounded />
-          ) : ["failed", "blocked", "interrupted"].includes(task.state) ? (
-            <WarningAmberRounded />
-          ) : (
-            <ScheduleRounded />
-          );
+          const reportAction =
+            !cleanupPending && task.state === "completed" && task.latestReportRef;
+          const nextAction = cleanupPending
+            ? "View cleanup"
+            : reportAction
+              ? "Review report"
+              : "View output";
           return (
             <Box
               component="li"
@@ -246,13 +247,6 @@ export function TaskList({
               className="production-task-row"
               sx={{ borderBottom: 1, borderColor: "divider", "&:last-child": { borderBottom: 0 } }}
             >
-              <Box
-                className="production-task-symbol"
-                sx={{ color: tone === "default" ? "text.secondary" : `${tone}.main` }}
-                aria-hidden="true"
-              >
-                {icon}
-              </Box>
               <Box className="production-task-row-main" sx={{ minWidth: 0 }}>
                 <Typography
                   component={Link}
@@ -262,126 +256,92 @@ export function TaskList({
                 >
                   {task.workItem.title}
                 </Typography>
-                <Typography
-                  variant="caption"
-                  component="div"
-                  color="text.secondary"
-                  sx={{ mt: 0.5, overflowWrap: "anywhere" }}
-                >
-                  {taskMode(task.kind)} · {task.repository.fullName} #{task.workItem.number}
-                </Typography>
-                <Box className="production-task-row-meta-actions">
+                <Box className="production-task-row-meta">
                   <Typography
-                    component="time"
-                    dateTime={task.updatedAt}
                     variant="caption"
                     color="text.secondary"
-                    title={new Date(task.updatedAt).toLocaleString()}
+                    sx={{ overflowWrap: "anywhere" }}
                   >
-                    Updated{" "}
-                    {new Date(task.updatedAt).toLocaleString(undefined, {
-                      month: "short",
-                      day: "numeric",
-                      hour: "numeric",
-                      minute: "2-digit",
-                    })}
+                    {task.id} · {task.workItem.kind === "issue" ? "Issue" : "PR"} #
+                    {task.workItem.number} · {taskMode(task.kind)} · {task.repository.fullName}
                   </Typography>
-                  {task.state === "running" && (
+                  <Chip
+                    size="small"
+                    label={
+                      cleanupPending
+                        ? `${task.state} · awaiting cleanup`
+                        : task.state === "running"
+                          ? "In progress"
+                          : task.state === "completed"
+                            ? "Completed"
+                            : task.state
+                    }
+                    color={tone}
+                    sx={{ height: 24, fontSize: 12, borderRadius: "6px" }}
+                  />
+                  <UsageSummaryLabel summary={usage?.[task.id]} compact />
+                  {comment ? (
                     <Button
-                      className="production-task-inline-action"
                       size="small"
                       component={Link}
-                      {...secondaryLinkProps}
-                    >
-                      View progress
-                    </Button>
-                  )}
-                  {task.latestReportRef && (
-                    <Button
+                      to={commentDetailsUrl(comment.id, comment.repositoryId)}
                       className="production-task-inline-action"
-                      size="small"
-                      component={Link}
-                      to={`/reports?reportId=${encodeURIComponent(task.latestReportRef.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`}
                     >
-                      Open report v{task.latestReportRef.version}
+                      <CommentStatus comment={comment} />
                     </Button>
-                  )}
+                  ) : comments.isError ? (
+                    <Typography variant="caption" color="text.secondary">
+                      Comment status unavailable
+                    </Typography>
+                  ) : null}
                 </Box>
               </Box>
-              <Stack
-                spacing={0.5}
-                direction={{ xs: "row", sm: "column" }}
-                useFlexGap
-                className="production-task-row-status"
-                sx={{ alignItems: { xs: "center", sm: "flex-end" }, flexWrap: "wrap" }}
-              >
-                <Chip
-                  size="small"
-                  label={
-                    cleanupPending
-                      ? `${task.state} · awaiting cleanup`
-                      : task.state === "running"
-                        ? "In progress"
-                        : task.state === "completed"
-                          ? "Execution completed"
-                          : task.state
-                  }
-                  color={tone}
-                  sx={{ height: 24, fontSize: 12, borderRadius: "6px" }}
-                />
-                <UsageSummaryLabel summary={usage?.[task.id]} compact />
-                {comment ? (
-                  <Button
-                    size="small"
-                    component={Link}
-                    to={commentDetailsUrl(comment.id, comment.repositoryId)}
-                    className="production-task-inline-action"
-                  >
-                    <CommentStatus comment={comment} />
-                  </Button>
-                ) : comments.isError ? (
-                  <Typography variant="caption" color="text.secondary">
-                    Comment status unavailable
-                  </Typography>
-                ) : null}
-              </Stack>
-              <IconButton
-                className="production-task-open"
+              <Button
+                className="production-task-next"
+                variant="outlined"
+                size="small"
                 component={Link}
-                {...secondaryLinkProps}
-                aria-label={`Open task: ${task.workItem.title}`}
+                {...(reportAction
+                  ? {
+                      to: `/reports?reportId=${encodeURIComponent(reportAction.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`,
+                    }
+                  : secondaryLinkProps)}
+                endIcon={<ChevronRightRounded />}
+                aria-label={`${nextAction}: ${task.workItem.title}`}
               >
-                <ChevronRightRounded />
-              </IconButton>
+                {nextAction}
+              </Button>
             </Box>
           );
         })}
       </Box>
-      <Box
-        sx={{
-          px: { xs: 2, sm: 3 },
-          py: 1.5,
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 1,
-        }}
-      >
-        <Typography variant="caption" color="text.secondary">
-          {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, tasks.length)} of{" "}
-          {tasks.length} tasks
-        </Typography>
-        {tasks.length > pageSize && (
-          <Pagination
-            size="small"
-            count={Math.ceil(tasks.length / pageSize)}
-            page={currentPage}
-            onChange={(_, next) => (onPageChange ? onPageChange(next) : setLocalPage(next))}
-            aria-label="Task pages"
-          />
-        )}
-      </Box>
+      {tasks.length > pageSize && (
+        <Box
+          sx={{
+            px: { xs: 2, sm: 3 },
+            py: 1.5,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 1,
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, tasks.length)} of{" "}
+            {tasks.length} tasks
+          </Typography>
+          {tasks.length > pageSize && (
+            <Pagination
+              size="small"
+              count={Math.ceil(tasks.length / pageSize)}
+              page={currentPage}
+              onChange={(_, next) => (onPageChange ? onPageChange(next) : setLocalPage(next))}
+              aria-label="Task pages"
+            />
+          )}
+        </Box>
+      )}
     </Surface>
   );
 }
@@ -585,21 +545,20 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           fallbackTo={`/tasks?repositoryId=${encodeURIComponent(task.repository.id)}`}
           fallbackLabel="All tasks"
         />
-        {active && (
-          <Button
-            color="error"
-            disabled={!canCancel || busy || !fresh}
-            onClick={() => setCancelOpen(true)}
-          >
-            Cancel task
-          </Button>
-        )}
       </Stack>
       <PageHeading
         title={task.workItem.title}
-        eyebrow={taskKindLabels[task.kind]}
         action={
           <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+            {active && (
+              <Button
+                color="error"
+                disabled={!canCancel || busy || !fresh}
+                onClick={() => setCancelOpen(true)}
+              >
+                Cancel task
+              </Button>
+            )}
             {recoverable && (
               <ResumeTaskButton
                 task={task}
@@ -641,7 +600,7 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
             {task.workItem.kind === "issue" ? "Issue" : "Pull request"} #{task.workItem.number}
           </Button>
           <Typography variant="body2" color="text.secondary">
-            {task.repository.fullName}
+            {taskKindLabels[task.kind]} · {task.repository.fullName}
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
             {task.id}
@@ -666,68 +625,66 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           require a successful refresh.
         </Alert>
       )}
-      {latestReport ? (
-        <OutcomeSummary
-          header={latestReport}
-          compact
-          actions={
+      <Box className="production-task-statusline" aria-label="Task status and saved report">
+        <Box className="production-task-execution">
+          <Chip
+            size="small"
+            label={
+              cleanup
+                ? `${task.state} · awaiting cleanup`
+                : task.state === "running"
+                  ? "In progress"
+                  : task.state === "completed"
+                    ? "Completed"
+                    : task.state
+            }
+            color={
+              cleanup
+                ? "warning"
+                : task.state === "failed"
+                  ? "error"
+                  : task.state === "completed"
+                    ? "success"
+                    : task.state === "blocked"
+                      ? "warning"
+                      : "default"
+            }
+          />
+          <TaskProgressPanel
+            task={task}
+            progress={query.data.progress}
+            scheduler={scheduler.data}
+            resourceLeases={resourceLeases}
+            invocations={invocations}
+            compact
+          />
+        </Box>
+        {latestReport && (
+          <Box className="production-task-saved-report">
+            <Typography variant="body2" color="text.secondary">
+              {latestReport.report.delivery === "checkpoint" ? "Checkpoint" : "Report"} ·{" "}
+              {reportOutcome(latestReport).label}
+            </Typography>
             <Button
+              size="small"
               component={Link}
               to={`/reports?reportId=${encodeURIComponent(latestReport.report.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`}
             >
-              Review saved report v{latestReport.report.version}
+              Read report
             </Button>
-          }
-        />
-      ) : (
-        <Alert severity="info">
+          </Box>
+        )}
+      </Box>
+      {!latestReport && (query.data.latestReport || task.latestReportRef) && (
+        <Alert severity="warning">
           {query.data.latestReport
-            ? "The returned report does not match this task's saved report reference. Its conclusion is not shown."
-            : task.latestReportRef
-              ? "The saved report header is unavailable in this snapshot. Refresh to load its conclusion; execution status is shown separately."
-              : "No saved report is available for this task yet. Execution progress does not establish a review or verification result."}
+            ? "The saved report does not match this task. Refresh to reload it."
+            : "The saved report is unavailable. Refresh to load it."}
+          <Button disabled={query.isFetching} onClick={() => void query.refetch()}>
+            Refresh
+          </Button>
         </Alert>
       )}
-      <Stack
-        direction="row"
-        spacing={1.5}
-        useFlexGap
-        sx={{ alignItems: "center", flexWrap: "wrap" }}
-      >
-        <Typography variant="body2">Current execution</Typography>
-        <Chip
-          size="small"
-          label={
-            cleanup
-              ? `${task.state} · awaiting cleanup`
-              : task.state === "running"
-                ? "In progress"
-                : task.state === "completed"
-                  ? "Completed"
-                  : task.state
-          }
-          color={
-            cleanup
-              ? "warning"
-              : task.state === "failed"
-                ? "error"
-                : task.state === "completed"
-                  ? "success"
-                  : task.state === "blocked"
-                    ? "warning"
-                    : "default"
-          }
-        />
-        <Typography variant="body2" color="text.secondary">
-          {task.kind === "pr-e2e"
-            ? "Desktop verification"
-            : task.executionPolicy.mode === "snapshot_only"
-              ? "Snapshot investigation"
-              : task.executionPolicy.mode === "source_read"
-                ? "Source investigation"
-                : "Repository execution"}
-        </Typography>
-      </Stack>
       {error && <Alert severity="error">{error}</Alert>}
       {checkpointMismatch && (
         <Alert severity="warning">
@@ -751,32 +708,23 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           severity="warning"
           action={<Button onClick={() => void query.refetch()}>Refresh receipt</Button>}
         >
-          Waiting for cleanup acknowledgment. The worker retains ownership until an accepted receipt
-          releases it. Refreshing does not establish cleanup success.
+          Awaiting worker cleanup. Resources remain reserved until cleanup is confirmed.
         </Alert>
       )}
       {task.parentTaskId && (
-        <Alert
-          severity="info"
-          action={
-            <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-              <Button component={Link} to={taskUrl(task.parentTaskId)}>
-                Open parent task
-              </Button>
-              {task.parentReportRef && (
-                <Button
-                  component={Link}
-                  to={`/reports?reportId=${encodeURIComponent(task.parentReportRef.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`}
-                >
-                  Parent report v{task.parentReportRef.version}
-                </Button>
-              )}
-            </Stack>
-          }
-        >
-          This task continues work from a linked investigation. Its execution and report are tracked
-          separately from the parent's saved result.
-        </Alert>
+        <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+          <Button component={Link} to={taskUrl(task.parentTaskId)}>
+            Parent task
+          </Button>
+          {task.parentReportRef && (
+            <Button
+              component={Link}
+              to={`/reports?reportId=${encodeURIComponent(task.parentReportRef.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`}
+            >
+              Parent report v{task.parentReportRef.version}
+            </Button>
+          )}
+        </Stack>
       )}
       <Box
         sx={{
@@ -799,13 +747,13 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
         >
           <Tab
             value="progress"
-            label="Progress"
+            label="Output"
             id="task-progress-tab"
             aria-controls="task-progress-panel"
           />
           <Tab
             value="evidence"
-            label="Evidence"
+            label="Files"
             id="task-evidence-tab"
             aria-controls="task-evidence-panel"
           />
@@ -827,8 +775,9 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
       </Box>
       {((active && !canCancel) || (recoverable && !canResume)) && (
         <Typography variant="caption" color="text.secondary">
-          Cancelling requires Cancel tasks access. Recovery requires Create tasks access and an
-          execution grant for execution tasks.
+          {active && !canCancel
+            ? "Cancel tasks permission required."
+            : "Recovery requires Create tasks access and an execution grant for execution tasks."}
         </Typography>
       )}
       {tab === "progress" && (
@@ -838,23 +787,6 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           aria-labelledby="task-progress-tab"
           spacing={2.5}
         >
-          <TaskProgressPanel
-            task={task}
-            progress={query.data.progress}
-            scheduler={scheduler.data}
-            resourceLeases={resourceLeases}
-            invocations={invocations}
-            compact
-          />
-          {checkpoint && (
-            <Typography variant="body2" color="text.secondary">
-              {projectInvestigationCheckpointPresentation(task, checkpoint).summary}
-            </Typography>
-          )}
-          <Typography variant="caption" color="text.secondary">
-            {usage?.invocationCount ?? "Unknown"} model calls · {checkpoint?.round ?? 0} accepted
-            analysis rounds{checkpoint ? ` · Saved state v${checkpoint.version}` : ""}
-          </Typography>
           <TaskOutputPanel
             task={task}
             attempts={attempts}
@@ -868,6 +800,11 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
             summary={usage}
             invocations={invocations}
           />
+          {checkpoint && recoverable && (
+            <Typography variant="body2" color="text.secondary">
+              {projectInvestigationCheckpointPresentation(task, checkpoint).summary}
+            </Typography>
+          )}
           {requestedAttempt && requestedAttempt !== attemptId && (
             <Alert severity="warning">
               The requested attempt is not available for this task. Showing the latest retained
@@ -900,15 +837,16 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           role="tabpanel"
           id="task-details-panel"
           aria-labelledby="task-details-tab"
-          spacing={3}
+          spacing={0}
+          className="production-task-details-grid"
         >
           <Section title="Run details">
             <Box
               component="dl"
               sx={{
                 display: "grid",
-                gridTemplateColumns: { xs: "1fr", sm: "180px minmax(0, 1fr)" },
-                gap: { xs: 1, sm: 2 },
+                gridTemplateColumns: { xs: "1fr", sm: "140px minmax(0, 1fr)" },
+                gap: 1,
                 m: 0,
               }}
             >
@@ -929,15 +867,32 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
             </Box>
           </Section>
           <Section title="Attempts">
-            <Stack spacing={2}>
+            <Stack spacing={1}>
               {[...attempts]
                 .sort((a, b) => b.number - a.number)
                 .map((attempt) => (
-                  <Box key={attempt.id}>
-                    <Typography variant="subtitle2">
-                      Attempt {attempt.number} · {attempt.state}
-                    </Typography>
+                  <Box key={attempt.id} className="production-task-attempt">
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography variant="subtitle2">
+                        Attempt {attempt.number} · {attempt.state}
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ overflowWrap: "anywhere" }}
+                      >
+                        {attempt.workerId ?? "Waiting for worker"} ·{" "}
+                        {attempt.startedAt
+                          ? new Date(attempt.startedAt).toLocaleString()
+                          : "Not started"}
+                      </Typography>
+                      {attempt.terminationReason && (
+                        <Typography variant="body2">{attempt.terminationReason}</Typography>
+                      )}
+                    </Box>
                     <Button
+                      size="small"
+                      aria-label={`View attempt ${attempt.number} output`}
                       onClick={() =>
                         updateRoute({
                           tab: "progress",
@@ -945,20 +900,8 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
                         })
                       }
                     >
-                      {attempt.id === currentAttempt?.id
-                        ? "View latest output"
-                        : `View attempt ${attempt.number} output`}
+                      Output
                     </Button>
-                    <Typography variant="body2" color="text.secondary">
-                      {attempt.workerId ?? "Waiting for worker"} ·{" "}
-                      {attempt.startedAt ?? "Not started"}
-                    </Typography>
-                    <Typography variant="caption" sx={{ overflowWrap: "anywhere" }}>
-                      {attempt.id}
-                    </Typography>
-                    {attempt.terminationReason && (
-                      <Typography variant="body2">{attempt.terminationReason}</Typography>
-                    )}
                   </Box>
                 ))}
               {resourceLeases
@@ -1042,9 +985,7 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           {checkpoint && (
             <Section title={`Saved state v${checkpoint.version}`}>
               <Typography variant="body2" color="text.secondary">
-                A checkpoint is a durable state snapshot used for recovery and duplicate protection.
-                Its version counts saved updates, including initialization and cancellation; it does
-                not count model calls.
+                {usage?.invocationCount ?? "Unknown"} model calls
               </Typography>
               <Typography variant="body2" sx={{ mt: 1 }}>
                 {checkpoint.round} accepted analysis rounds · Stop reason:{" "}
@@ -1061,23 +1002,26 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
               </Typography>
             </Section>
           )}
-          <SubjectPanel subjects={task.subjects} />
-          <Box>
+          <Box className="production-task-full-span">
+            <SubjectPanel subjects={task.subjects} />
+          </Box>
+          <Box className="production-task-full-span">
             <Button
               component={Link}
               to={`/webhooks?repositoryId=${encodeURIComponent(task.repository.id)}&kind=${task.workItem.kind}&number=${task.workItem.number}`}
             >
               View source events
             </Button>
-            <Typography variant="caption" color="text.secondary" component="div">
-              Events for this source item can include other attempts and tasks.
-            </Typography>
           </Box>
-          <TaskComments taskId={task.id} active={active} />
+          <Box className="production-task-full-span">
+            <TaskComments taskId={task.id} active={active} />
+          </Box>
           {children.length > 0 && (
-            <Section title="Linked tasks">
-              <TaskList tasks={children} />
-            </Section>
+            <Box className="production-task-full-span">
+              <Section title="Linked tasks">
+                <TaskList tasks={children} />
+              </Section>
+            </Box>
           )}
         </Stack>
       )}
@@ -1121,6 +1065,162 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
         </DialogActions>
       </Dialog>
     </Stack>
+  );
+}
+function TaskSourceChooser({
+  repositoryId,
+  repositories = [],
+}: {
+  repositoryId?: string;
+  repositories?: readonly { id: string; fullName: string }[];
+}) {
+  const { session } = useInvestigationSession();
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [kind, setKind] = useState<"all" | "pull_request" | "issue">("all");
+  const [page, setPage] = useState(1);
+  const titleId = useId();
+  const canCreate = session.user?.permissions.includes("task:create") === true;
+  const sources = useQuery({
+    queryKey: ["task-source-chooser", sessionIdentity(session), repositoryId ?? "all"],
+    queryFn: () => investigationApi.workItems(repositoryId),
+    enabled: open && canCreate,
+    retry: false,
+  });
+  const items = (outputAccessDenied(sources.error) ? [] : (sources.data?.items ?? [])).filter(
+    (item) =>
+      session.user?.repositoryIds.includes(item.repositoryId) &&
+      (!repositoryId || item.repositoryId === repositoryId) &&
+      (kind === "all" || item.kind === kind) &&
+      `${item.title} ${item.number}`.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
+  );
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(items.length / 10)));
+  return (
+    <>
+      <Button
+        variant="outlined"
+        startIcon={<AddRounded />}
+        disabled={!canCreate}
+        aria-describedby={!canCreate ? `${titleId}-permission` : undefined}
+        onClick={() => setOpen(true)}
+      >
+        New task
+      </Button>
+      {!canCreate && (
+        <Typography
+          id={`${titleId}-permission`}
+          variant="caption"
+          color="text.secondary"
+          component="p"
+        >
+          Create tasks permission required.
+        </Typography>
+      )}
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        fullWidth
+        maxWidth="md"
+        aria-labelledby={titleId}
+      >
+        <DialogTitle id={titleId}>New task</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2}>
+            <TextField
+              size="small"
+              type="search"
+              label="Search sources"
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(1);
+              }}
+              slotProps={{ htmlInput: { maxLength: 160 } }}
+            />
+            <ToggleButtonGroup
+              value={kind}
+              exclusive
+              size="small"
+              aria-label="Source type"
+              sx={{
+                flexWrap: "wrap",
+                gap: 0.5,
+                "& .MuiToggleButtonGroup-grouped": {
+                  borderRadius: "8px",
+                  border: 1,
+                  borderColor: "divider",
+                },
+              }}
+              onChange={(_, value: typeof kind | null) => {
+                if (value) {
+                  setKind(value);
+                  setPage(1);
+                }
+              }}
+            >
+              <ToggleButton value="all">All sources</ToggleButton>
+              <ToggleButton value="pull_request">Pull requests</ToggleButton>
+              <ToggleButton value="issue">Issues</ToggleButton>
+            </ToggleButtonGroup>
+            {sources.isError && (
+              <Alert
+                severity="error"
+                action={<Button onClick={() => void sources.refetch()}>Retry</Button>}
+              >
+                {sources.error.message}
+              </Alert>
+            )}
+            {sources.isPending ? (
+              <CircularProgress size={24} aria-label="Loading sources" />
+            ) : items.length ? (
+              <Box component="ul" className="production-task-source-list" aria-label="Task sources">
+                {items.slice((currentPage - 1) * 10, currentPage * 10).map((item) => (
+                  <Box component="li" key={item.id} className="production-task-source-row">
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography variant="subtitle2" sx={{ overflowWrap: "anywhere" }}>
+                        {item.title}
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ overflowWrap: "anywhere" }}
+                      >
+                        {item.kind === "issue" ? "Issue" : "PR"} #{item.number} · {item.state} ·{" "}
+                        {repositories.find((repository) => repository.id === item.repositoryId)
+                          ?.fullName ?? item.repositoryId}
+                      </Typography>
+                    </Box>
+                    <StartInvestigationButton
+                      workItem={item}
+                      variant="outlined"
+                      disabled={sources.isError || sources.isFetching}
+                    />
+                  </Box>
+                ))}
+              </Box>
+            ) : (
+              !sources.isError && (
+                <EmptyState
+                  title={search || kind !== "all" ? "No matching sources" : "No sources available"}
+                />
+              )
+            )}
+            {items.length > 10 && (
+              <Pagination
+                size="small"
+                count={Math.ceil(items.length / 10)}
+                page={currentPage}
+                onChange={(_, next) => setPage(next)}
+                aria-label="Source pages"
+              />
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+    </>
   );
 }
 export default function TasksPage() {
@@ -1184,18 +1284,21 @@ export default function TasksPage() {
       : ["failed", "interrupted", "blocked"].includes(task.state)
         ? 1
         : 2;
-  const tasks = (query.data?.items ?? [])
+  const scopedTasks = (query.data?.items ?? []).filter(
+    (task) =>
+      session.user?.repositoryIds.includes(task.repository.id) &&
+      (!scope.repositoryId || task.repository.id === scope.repositoryId) &&
+      `${task.workItem.title} ${task.id} ${task.workItem.number}`
+        .toLocaleLowerCase()
+        .includes(search.toLocaleLowerCase()),
+  );
+  const tasks = scopedTasks
     .filter(
       (task) =>
-        session.user?.repositoryIds.includes(task.repository.id) &&
-        (!scope.repositoryId || task.repository.id === scope.repositoryId) &&
-        (filter === "all" ||
-          (filter === "active"
-            ? taskIsActive(task, leases)
-            : ["failed", "interrupted", "blocked"].includes(task.state))) &&
-        `${task.workItem.title} ${task.id} ${task.workItem.number}`
-          .toLocaleLowerCase()
-          .includes(search.toLocaleLowerCase()),
+        filter === "all" ||
+        (filter === "active"
+          ? taskIsActive(task, leases)
+          : ["failed", "interrupted", "blocked"].includes(task.state)),
     )
     .sort(
       (left, right) =>
@@ -1205,20 +1308,12 @@ export default function TasksPage() {
     <Stack spacing={3}>
       <PageHeading
         title="Tasks"
-        subtitle="Follow investigations from the first check to the final report."
         action={
-          <Button
-            variant="contained"
-            component={Link}
-            to={
-              scope.repositoryId
-                ? `/pull-requests?${new URLSearchParams({ repositoryId: scope.repositoryId })}`
-                : "/pull-requests"
-            }
-            disabled={!session.user?.permissions.includes("task:create")}
-          >
-            Choose a source
-          </Button>
+          <TaskSourceChooser
+            key={JSON.stringify([sessionIdentity(session), scope.repositoryId])}
+            repositoryId={scope.repositoryId}
+            repositories={scope.query.data?.items}
+          />
         }
       />
       <Stack
@@ -1233,7 +1328,8 @@ export default function TasksPage() {
         <TextField
           size="small"
           type="search"
-          placeholder="Search tasks"
+          label="Search tasks"
+          placeholder="Title or number"
           value={search}
           onChange={(event) => updateList({ search: event.target.value })}
           slotProps={{
@@ -1250,12 +1346,6 @@ export default function TasksPage() {
             flex: { xs: "1 1 100%", sm: "0 1 380px" },
             width: { xs: "100%", sm: 380 },
             maxWidth: "100%",
-            "& .MuiInputBase-root": { height: 48, borderRadius: "28px", bgcolor: "action.hover" },
-            "& .MuiOutlinedInput-notchedOutline": { border: 0 },
-            "& .Mui-focused .MuiOutlinedInput-notchedOutline": {
-              border: "2px solid",
-              borderColor: "primary.main",
-            },
           }}
         />
         <ToggleButtonGroup
@@ -1276,9 +1366,27 @@ export default function TasksPage() {
             if (value) updateList({ filter: value });
           }}
         >
-          <ToggleButton value="all">All tasks</ToggleButton>
-          <ToggleButton value="active">Active</ToggleButton>
-          <ToggleButton value="attention">Needs attention</ToggleButton>
+          <ToggleButton value="all">
+            All tasks <span className="production-task-filter-count">{scopedTasks.length}</span>
+          </ToggleButton>
+          <ToggleButton value="active">
+            Active{" "}
+            <span className="production-task-filter-count">
+              {resources.isError || (resources.isPending && !!scopedTasks.length)
+                ? "?"
+                : scopedTasks.filter((task) => taskIsActive(task, leases)).length}
+            </span>
+          </ToggleButton>
+          <ToggleButton value="attention">
+            Needs attention{" "}
+            <span className="production-task-filter-count">
+              {
+                scopedTasks.filter((task) =>
+                  ["failed", "interrupted", "blocked"].includes(task.state),
+                ).length
+              }
+            </span>
+          </ToggleButton>
         </ToggleButtonGroup>
         <IconButton
           aria-label="Refresh tasks"
@@ -1303,14 +1411,8 @@ export default function TasksPage() {
           severity="warning"
           action={<Button onClick={() => void resources.refetch()}>Retry cleanup status</Button>}
         >
-          Resource ownership could not be refreshed. Cancellation does not establish cleanup
-          completion.
+          Cleanup status could not be refreshed. Active tasks may be missing from this view.
         </Alert>
-      )}
-      {filter === "active" && (
-        <Typography variant="body2" color="text.secondary">
-          Queued and running tasks, plus stopped tasks whose workers still hold resources.
-        </Typography>
       )}
       {query.isPending ||
       (filter === "active" &&

@@ -15,7 +15,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { latestAttemptInvocation } from "./task-output-state";
 import { TokenUsagePanel, tokenCount, usageTotal } from "./usage-panel";
 
@@ -34,11 +34,15 @@ export function AgentRuntimeMetadata({
   attemptId,
   summary,
   invocations,
+  compact = false,
+  actions,
 }: {
   taskId: string;
   attemptId?: string;
   summary?: InvestigationUsageSummary;
   invocations?: InvestigationModelInvocationReceipt[];
+  compact?: boolean;
+  actions?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const call = latestAttemptInvocation(invocations, attemptId);
@@ -49,59 +53,101 @@ export function AgentRuntimeMetadata({
   ];
   return (
     <>
-      <Box
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          gap: 1,
-          px: { xs: 2, sm: 3 },
-          py: 1.5,
-          borderBottom: 1,
-          borderColor: "divider",
-          bgcolor: "action.hover",
-        }}
-      >
+      {compact ? (
         <Box
-          component="dl"
+          className="task-output-subline"
+          sx={{ bgcolor: "action.hover", borderBottom: 1, borderColor: "divider" }}
+        >
+          <Box className="task-output-runtime">
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              title="Task usage across all attempts"
+            >
+              Task tokens: {usageTotal(summary)}
+            </Typography>
+            {call && (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ overflowWrap: "anywhere" }}
+              >
+                {call.engine === "copilot" ? "Copilot CLI" : "Codex CLI"} · Requested model:{" "}
+                {call.model ?? "CLI default"}
+              </Typography>
+            )}
+            {call && invocationUsageLabel(call) === "Awaiting usage" && (
+              <Typography variant="caption" color="text.secondary">
+                Latest call: awaiting usage
+              </Typography>
+            )}
+            <Tooltip title="Usage and model settings">
+              <IconButton
+                size="small"
+                aria-label="Inspect token usage and model settings"
+                onClick={() => setOpen(true)}
+              >
+                <InfoOutlined fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+          {actions}
+        </Box>
+      ) : (
+        <Box
           sx={{
-            display: "grid",
-            gridTemplateColumns: {
-              xs: "repeat(2, minmax(0, 1fr))",
-              sm: "repeat(3, minmax(0, 1fr))",
-            },
-            "@media (max-width: 359px)": { gridTemplateColumns: "minmax(0, 1fr)" },
-            flex: 1,
-            gap: { xs: 2, sm: 4 },
-            m: 0,
-            minWidth: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
+            px: { xs: 2, sm: 3 },
+            py: 1.5,
+            borderBottom: 1,
+            borderColor: "divider",
+            bgcolor: "action.hover",
           }}
         >
-          {fields.map(([label, value]) => (
-            <Box key={label} sx={{ minWidth: 0 }}>
-              <Typography component="dt" variant="caption" color="text.secondary">
-                {label}
-              </Typography>
-              <Typography
-                component="dd"
-                variant="body2"
-                sx={{ m: 0, fontWeight: 500, overflowWrap: "anywhere" }}
-              >
-                {value}
-              </Typography>
-            </Box>
-          ))}
-        </Box>
-        <Tooltip title="Usage and model settings">
-          <IconButton
-            aria-label="Inspect token usage and model settings"
-            onClick={() => setOpen(true)}
-            sx={{ alignSelf: "flex-start", flexShrink: 0, mt: 0.5 }}
+          <Box
+            component="dl"
+            sx={{
+              display: "grid",
+              gridTemplateColumns: {
+                xs: "repeat(2, minmax(0, 1fr))",
+                sm: "repeat(3, minmax(0, 1fr))",
+              },
+              "@media (max-width: 359px)": { gridTemplateColumns: "minmax(0, 1fr)" },
+              flex: 1,
+              gap: { xs: 2, sm: 4 },
+              m: 0,
+              minWidth: 0,
+            }}
           >
-            <InfoOutlined fontSize="small" />
-          </IconButton>
-        </Tooltip>
-      </Box>
-      {call && invocationUsageLabel(call) === "Awaiting usage" && (
+            {fields.map(([label, value]) => (
+              <Box key={label} sx={{ minWidth: 0 }}>
+                <Typography component="dt" variant="caption" color="text.secondary">
+                  {label}
+                </Typography>
+                <Typography
+                  component="dd"
+                  variant="body2"
+                  sx={{ m: 0, fontWeight: 500, overflowWrap: "anywhere" }}
+                >
+                  {value}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+          <Tooltip title="Usage and model settings">
+            <IconButton
+              aria-label="Inspect token usage and model settings"
+              onClick={() => setOpen(true)}
+              sx={{ alignSelf: "flex-start", flexShrink: 0, mt: 0.5 }}
+            >
+              <InfoOutlined fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      )}
+      {!compact && call && invocationUsageLabel(call) === "Awaiting usage" && (
         <Typography
           component="p"
           variant="caption"

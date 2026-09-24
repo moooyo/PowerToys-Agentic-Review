@@ -172,8 +172,8 @@ describe("task workspace runtime information", () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    expect(html).toContain("Current execution");
-    expect(html).toContain("Review saved report");
+    expect(html).toContain("Task status and saved report");
+    expect(html).toContain("Read report");
     expect(html).toContain(
       `https://github.com/${detail.task.repository.fullName}/pull/${detail.task.workItem.number}`,
     );
@@ -249,7 +249,6 @@ describe("task workspace runtime information", () => {
           </MemoryRouter>
         </QueryClientProvider>,
       );
-      expect(html).toContain("0 accepted analysis rounds");
       expect(html).toContain("Final analysis was not adopted because the task was cancelled");
       expect(html).toContain(
         stage === "started"
@@ -257,6 +256,14 @@ describe("task workspace runtime information", () => {
           : "Worker observations or artifacts were recorded; final E2E feature results are unavailable",
       );
       expect(html).not.toContain("Investigation has not started.");
+      const detailsHtml = renderToStaticMarkup(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter initialEntries={[`/tasks?taskId=${detail.task.id}&tab=details`]}>
+            <TaskDetails taskId={detail.task.id} />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      expect(detailsHtml).toContain("0 accepted analysis rounds");
       expect(checkpoint).toEqual(before);
     },
   );
@@ -335,9 +342,6 @@ describe("task workspace runtime information", () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    expect(html).toContain("3 model calls");
-    expect(html).toContain("3 accepted analysis rounds");
-    expect(html).toContain("Saved state v6");
     expect(html).not.toContain("Checkpoint version 6");
     expect(html).toContain("Agent output");
     expect(html).toContain("Task tokens");
@@ -350,7 +354,9 @@ describe("task workspace runtime information", () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    expect(detailsHtml).toContain("including initialization and cancellation");
+    expect(detailsHtml).toContain("3 model calls");
+    expect(detailsHtml).toContain("3 accepted analysis rounds");
+    expect(detailsHtml).toContain("Saved state v6");
     expect(detailsHtml).toContain("700 tokens");
     expect(detailsHtml).toContain("Worker heartbeat");
     expect(detailsHtml).toContain("Latest meaningful progress");
@@ -379,5 +385,43 @@ describe("task workspace runtime information", () => {
       expect(html.includes("Run details")).toBe(tab === "details");
       expect(html).not.toContain("Complete report");
     }
+  });
+
+  it("uses the next-action link for output, saved reports, and pending cleanup", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-p1-task");
+    const running = { ...detail.task, id: "running-task", state: "running" as const };
+    const cleaning = { ...detail.task, id: "cleaning-task", state: "cancelled" as const };
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={client()}>
+        <MemoryRouter>
+          <TaskList
+            tasks={[detail.task, running, cleaning]}
+            usageByTaskId={{}}
+            resourceLeases={[
+              {
+                taskId: cleaning.id,
+                attemptId: "cleanup-attempt",
+                workerId: "worker",
+                fence: 1,
+                pool: "e2e",
+                state: "needs_cleanup",
+                acquiredAt: cleaning.createdAt,
+                updatedAt: cleaning.updatedAt,
+                releasedAt: null,
+                reason: "cancelled",
+              },
+            ]}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(html).toContain("Review report:");
+    expect(html).toContain("View output:");
+    expect(html).toContain("View cleanup:");
+    expect(html).toContain(
+      `taskId=cleaning-task&amp;repositoryId=${cleaning.repository.id}&amp;tab=details`,
+    );
+    expect(html).toContain(`reportId=${detail.task.latestReportRef?.id}`);
+    expect(html).not.toContain("Task pages");
   });
 });

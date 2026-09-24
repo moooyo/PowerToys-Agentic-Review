@@ -7,6 +7,12 @@ import {
 } from "./workspace-view";
 
 describe("public workspace view", () => {
+  it("retains the Comments work item filter without accepting an unknown source type", () => {
+    expect(publicWorkspaceSearch("/comments", "?workItemKind=issue&search=settings")).toBe(
+      "workItemKind=issue&search=settings",
+    );
+    expect(publicWorkspaceSearch("/comments", "?workItemKind=unknown&payload=private")).toBe("");
+  });
   it("copies allowed report context but excludes arbitrary payloads, credentials and anchors", () => {
     const result = new URLSearchParams(
       publicWorkspaceSearch(

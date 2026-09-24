@@ -91,7 +91,7 @@ describe("repository directory and detail navigation", () => {
     expect(html).toContain(repository.fullName);
     expect(html).not.toContain(hidden.fullName);
     expect(html).toContain("Find a repository");
-    expect(html).not.toContain("Assignment recipient GitHub user ID");
+    expect(html).not.toContain("Assignment recipient ID");
     expect(html).not.toContain("Global scheduler fixture");
     expect(
       queryClient
@@ -119,16 +119,20 @@ describe("repository directory and detail navigation", () => {
     expect(html).toContain("Back to repositories");
     expect(html).toContain('role="tabpanel"');
     expect(html).toContain('aria-labelledby="repository-tab-intake"');
-    expect(html).toContain("Assignment recipient GitHub user ID");
+    expect(html).toContain("Assignment recipient ID");
     expect(html).toContain("/webhooks?repositoryId=repo-allowed");
     expect(html).not.toContain("PR reply template");
     expect(html).not.toContain("Global scheduler fixture");
   });
 
-  it("keeps global scheduling in its explicit tab and rejects an out-of-scope deep link", () => {
+  it("keeps global scheduling separate from repository settings and rejects an out-of-scope deep link", () => {
     expect(render(client(), "/repositories?repositoryId=repo-allowed&tab=scheduling")).toContain(
       "Global scheduler fixture",
     );
+    const globalHtml = render(client(), "/repositories?tab=scheduling");
+    expect(globalHtml).toContain("Workspace scheduling");
+    expect(globalHtml).toContain("Global scheduler fixture");
+    expect(globalHtml).not.toContain('aria-label="Repository settings"');
     const queryClient = client();
     const html = render(queryClient, "/repositories?repositoryId=repo-hidden&tab=intake");
     expect(html).toContain("Repository not available");

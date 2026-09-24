@@ -22,7 +22,7 @@
   gap: 12px;
 }
 .workers-card {
-  padding: 20px 24px 4px !important;
+  padding: 16px 20px 4px !important;
   min-width: 0;
 }
 .workers-summary {
@@ -55,7 +55,7 @@
 .workers-policy {
   display: grid;
   align-content: center;
-  gap: 4px;
+  gap: 8px;
   padding-left: 24px;
   border-left: 1px solid var(--mui-palette-divider);
 }
@@ -81,7 +81,7 @@
   min-height: 28px;
 }
 .workers-policy-status .MuiChip-label {
-  white-space: normal;
+  white-space: nowrap;
   padding-block: 4px;
 }
 .workers-summary-line {
@@ -96,11 +96,11 @@
   text-align: left;
   gap: 12px;
   width: 100%;
-  min-height: 48px;
+  min-height: 36px;
   border-radius: 0;
   border-top: 1px solid var(--mui-palette-divider);
   margin-top: 14px;
-  padding: 12px 0;
+  padding: 8px 0;
   color: var(--mui-palette-text-secondary);
 }
 .workers-detail-toggle .MuiButton-endIcon {
@@ -108,8 +108,105 @@
 }
 .workers-details {
   display: grid;
-  gap: 24px;
+  gap: 16px;
   padding: 12px 0 20px;
+}
+.workers-table-wrap {
+  overflow-x: auto;
+}
+.workers-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+.workers-table th {
+  font-size: 13px;
+  color: var(--mui-palette-text-secondary);
+  font-weight: 500;
+}
+.workers-table th,
+.workers-table td {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--mui-palette-divider);
+  vertical-align: middle;
+}
+.workers-table td:last-child {
+  text-align: right;
+}
+.workers-table tr:last-child td {
+  border-bottom: 0;
+}
+.workers-table .workers-table-link {
+  padding: 2px 0;
+  min-height: 28px;
+  font-weight: 600;
+  justify-content: flex-start;
+}
+.workers-table .MuiChip-root {
+  height: 28px;
+}
+.workers-table .MuiChip-label {
+  white-space: nowrap;
+}
+.workers-table .MuiButton-root {
+  white-space: nowrap;
+}
+.workers-policy > .MuiButton-root {
+  justify-self: end;
+}
+.workers-policy-status {
+  justify-content: flex-end;
+}
+@media (max-width: 700px) {
+  .workers-table,
+  .workers-table tbody,
+  .workers-table tr {
+    display: block;
+  }
+  .workers-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    clip-path: inset(50%);
+    overflow: hidden;
+  }
+  .workers-table tr {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--mui-palette-divider);
+  }
+  .workers-table td {
+    display: grid;
+    grid-template-columns: 96px minmax(0, 1fr);
+    padding: 6px 0;
+    border: 0;
+    gap: 6px 8px;
+  }
+  .workers-table td::before {
+    content: attr(data-label);
+    font-size: 12px;
+    color: var(--mui-palette-text-secondary);
+  }
+  .workers-table td:first-child {
+    display: block;
+  }
+  .workers-table td:first-child::before,
+  .workers-table td:last-child::before {
+    display: none;
+  }
+  .workers-table td > * {
+    grid-column: 2;
+    justify-self: start;
+    min-width: 0;
+  }
+  .workers-table td:last-child {
+    display: flex;
+    justify-content: flex-end;
+  }
+  .workers-table td[data-label="E2E work"] {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+  }
 }
 .workers-definition {
   margin: 0;

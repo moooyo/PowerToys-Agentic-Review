@@ -1,15 +1,15 @@
 .production-task-row {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto 40px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 16px;
-  align-items: start;
-  padding: 16px 24px;
+  align-items: center;
+  padding: 14px 20px;
 }
-.production-task-symbol {
-  display: grid;
-  place-items: center;
-  align-self: start;
-  padding-top: 2px;
+.production-task-list-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 20px;
 }
 .production-task-title {
   display: block;
@@ -26,15 +26,12 @@
   outline-offset: 4px;
   border-radius: 4px;
 }
-.production-task-row-status {
-  text-align: right;
-}
-.production-task-row-meta-actions {
+.production-task-row-meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 14px;
-  margin-top: 4px;
+  gap: 4px 10px;
+  margin-top: 6px;
   min-height: 24px;
 }
 .production-task-row .production-task-inline-action {
@@ -45,8 +42,69 @@
   line-height: 20px;
   border-radius: 4px;
 }
-.production-task-open {
-  align-self: center;
+.production-task-row .production-task-next {
+  justify-self: end;
+  min-width: 0;
+  width: max-content;
+  max-width: 185px;
+  min-height: 32px;
+  padding: 5px 12px;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: normal;
+}
+.production-task-row .production-task-next .MuiButton-endIcon {
+  margin-left: 6px;
+}
+.production-task-filter-count {
+  margin-left: 6px;
+  color: var(--app-muted);
+  font-variant-numeric: tabular-nums;
+}
+.production-task-statusline,
+.production-task-execution,
+.production-task-saved-report {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+}
+.production-task-statusline {
+  justify-content: space-between;
+}
+.production-task-execution {
+  flex: 1 1 240px;
+}
+.production-task-stage {
+  flex: 1;
+  min-width: 180px;
+}
+.production-task-detail .production-task-details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 20px;
+}
+.production-task-attempt,
+.production-task-source-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-block: 10px;
+  border-bottom: 1px solid var(--app-line);
+}
+.production-task-source-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.production-task-source-row > .MuiButton-root {
+  flex-shrink: 0;
+}
+.production-task-full-span {
+  grid-column: 1 / -1;
 }
 .production-task-frozen-inputs {
   display: grid;
@@ -64,7 +122,20 @@
 }
 @media (pointer: coarse) {
   .production-task-row .production-task-inline-action {
-    min-height: 48px;
+    min-height: 44px;
+  }
+  .production-task-row .production-task-next,
+  .production-task-title {
+    min-height: 44px;
+  }
+  .production-task-title {
+    display: flex;
+    align-items: center;
+  }
+}
+@media (max-width: 900px) {
+  .production-task-detail .production-task-details-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 @media (max-width: 599px) {
@@ -76,27 +147,19 @@
     margin-bottom: 8px;
   }
   .production-task-row {
-    grid-template-columns: 24px minmax(0, 1fr) 40px;
-    gap: 6px 10px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
     padding: 14px;
   }
-  .production-task-symbol {
-    grid-column: 1;
-    grid-row: 1;
+  .production-task-row .production-task-next {
+    justify-self: start;
+    max-width: 100%;
   }
-  .production-task-row-main {
-    grid-column: 2;
-    grid-row: 1;
+  .production-task-list-heading > :last-child {
+    display: none;
   }
-  .production-task-row > a:last-child {
-    grid-column: 3;
-    grid-row: 1;
-    align-self: start;
-  }
-  .production-task-row .production-task-row-status {
-    grid-column: 2 / 4;
-    align-items: center;
-    column-gap: 10px;
-    text-align: left;
+  .production-task-source-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

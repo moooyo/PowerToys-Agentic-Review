@@ -125,6 +125,42 @@ describe("explicit development read fixtures", () => {
     expect(exact.items[0]?.workItemTitle).toContain("Sample");
   });
 
+  it.each(["pull_request", "issue"] as const)(
+    "filters %s publications before sample pagination and binds cursors to the work item kind",
+    async (workItemKind) => {
+      const api = createSampleInvestigationApi();
+      const all = await api.publications({ repositoryId, limit: 50 });
+      expect(all.nextCursor).toBeNull();
+      const expected = all.items.filter((item) => item.workItemKind === workItemKind);
+      expect(expected.length).toBeGreaterThan(1);
+      const ids: string[] = [];
+      let cursor: string | undefined;
+      let firstCursor: string | null = null;
+      do {
+        const page = await api.publications({
+          repositoryId,
+          workItemKind,
+          limit: 1,
+          ...(cursor ? { cursor } : {}),
+        });
+        expect(page.items).toHaveLength(1);
+        expect(page.items[0]?.workItemKind).toBe(workItemKind);
+        ids.push(...page.items.map((item) => item.id));
+        firstCursor ??= page.nextCursor;
+        cursor = page.nextCursor ?? undefined;
+      } while (cursor !== undefined);
+      expect(ids).toEqual(expected.map((item) => item.id));
+      if (firstCursor === null) throw new Error("Expected a filtered publication continuation.");
+      await expect(
+        api.publications({
+          repositoryId,
+          workItemKind: workItemKind === "issue" ? "pull_request" : "issue",
+          cursor: firstCursor,
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    },
+  );
+
   it("retains a frozen discussion copy and labels an unknown revision unavailable", async () => {
     const api = createSampleInvestigationApi();
     const first = await api.workItemSnapshot(workItemId);

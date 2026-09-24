@@ -30,6 +30,19 @@ import {
 
 export type PublicationStep = "select" | "compose";
 
+export function expandPublicationEditorsForErrors(
+  expanded: ReadonlyMap<string, boolean>,
+  errors: Readonly<Record<string, string>>,
+): ReadonlyMap<string, boolean> {
+  let next = expanded;
+  for (const [key, message] of Object.entries(errors)) {
+    const match = key.match(/^draft-(.+)-(?:body|mode|replacement)$/u);
+    if (!message || !match || next.get(match[1]!) === true) continue;
+    next = new Map(next).set(match[1]!, true);
+  }
+  return next;
+}
+
 export function PublicationComposerPanel({
   action,
   context,
@@ -68,7 +81,10 @@ export function PublicationComposerPanel({
   const [focusIntent, setFocusIntent] = useState<{ id: string; alignTop: boolean } | null>(null);
   const stepTop = useRef<HTMLDivElement>(null);
   const findings = result?.findings ?? [];
-  const selectionChanged = draft.reportSelectionKey !== publicationSelectionKey(reportSelection);
+  const selectionChanged =
+    draft.reportSelectionKey !== publicationSelectionKey(reportSelection) &&
+    (draft.reportSelectionKey !== null ||
+      reportSelection.selectedFindings.length + reportSelection.selectedDraftIds.length > 0);
   const visible = findings.filter(
     (finding) =>
       (show !== "selected" || draft.selectedFindingIds.includes(finding.id)) &&
@@ -88,6 +104,15 @@ export function PublicationComposerPanel({
     ]),
   ];
   const entries = selectedIds.flatMap((id) => (draft.entries[id] ? [draft.entries[id]!] : []));
+  const [expandedEditors, setExpandedEditors] = useState<ReadonlyMap<string, boolean>>(() =>
+    expandPublicationEditorsForErrors(
+      new Map(selectedIds[0] ? [[selectedIds[0], true]] : []),
+      errors,
+    ),
+  );
+  useEffect(() => {
+    setExpandedEditors((current) => expandPublicationEditorsForErrors(current, errors));
+  }, [errors]);
   const findingDraftIds = new Set(
     draft.selectedFindingIds.flatMap(
       (id) => findings.find((finding) => finding.id === id)?.feedbackDraft.id ?? [],
@@ -100,6 +125,8 @@ export function PublicationComposerPanel({
     if (!focusIntent) return;
     const frame = requestAnimationFrame(() => {
       const target = document.getElementById(focusIntent.id);
+      for (let parent = target?.parentElement; parent; parent = parent.parentElement)
+        if (parent instanceof HTMLDetailsElement) parent.open = true;
       if (focusIntent.alignTop) stepTop.current?.scrollIntoView({ block: "start" });
       target?.focus({ preventScroll: true });
       if (!focusIntent.alignTop) target?.scrollIntoView({ block: "nearest" });
@@ -147,26 +174,40 @@ export function PublicationComposerPanel({
       spacing={2}
       sx={{ minWidth: 0, scrollMarginBlockStart: 16 }}
     >
-      <Stack
-        direction="row"
-        useFlexGap
-        spacing={1}
-        sx={{ flexWrap: "wrap" }}
+      <Box
+        component="ol"
         aria-label="Publication steps"
+        sx={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 3,
+          m: 0,
+          pl: 2,
+          color: "text.secondary",
+          typography: "caption",
+        }}
       >
-        <Chip label="1 · Select findings" color={step === "select" ? "primary" : "default"} />
-        <Chip label="2 · Compose" color={step === "compose" ? "primary" : "default"} />
-        <Chip label="3 · Server preview" />
-      </Stack>
-      <Typography variant="body2" color="text.secondary">
-        This action keeps its own selection and publishing text. Report checkboxes and private
-        report feedback stay unchanged.
-      </Typography>
+        <Box
+          component="li"
+          aria-current={step === "select" ? "step" : undefined}
+          sx={{ color: step === "select" ? "primary.main" : undefined }}
+        >
+          Select findings
+        </Box>
+        <Box
+          component="li"
+          aria-current={step === "compose" ? "step" : undefined}
+          sx={{ color: step === "compose" ? "primary.main" : undefined }}
+        >
+          Compose
+        </Box>
+        <li>Preview</li>
+      </Box>
       {selectionChanged && (
         <Alert severity="info">
           {draft.reportSelectionKey === null
-            ? "Report selection has not been imported into this action."
-            : "Report selection changed. This action still uses its own saved selection."}
+            ? "Use the selected report findings?"
+            : "Report selection changed."}
           <Stack direction="row" useFlexGap spacing={1} sx={{ flexWrap: "wrap", mt: 1 }}>
             <Button disabled={disabled || !result} onClick={importReport}>
               Use report selection ({reportSelection.selectedFindings.length})
@@ -177,21 +218,9 @@ export function PublicationComposerPanel({
                 onChange({ ...draft, reportSelectionKey: publicationSelectionKey(reportSelection) })
               }
             >
-              Keep this action selection
+              Keep current selection
             </Button>
           </Stack>
-        </Alert>
-      )}
-      {action === "approve" && (
-        <Alert severity="info">
-          Findings and summary are optional. Approval does not clear saved findings or establish
-          that runtime validation passed.
-        </Alert>
-      )}
-      {action === "comment" && (
-        <Alert severity="info">
-          Conversation comments contain text only. Choose a review action to publish inline code
-          suggestions.
         </Alert>
       )}
       {step === "select" ? (
@@ -199,7 +228,7 @@ export function PublicationComposerPanel({
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
             <TextField
               id={fieldId("search")}
-              label="Search all findings"
+              label="Search findings"
               type="search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
@@ -219,8 +248,10 @@ export function PublicationComposerPanel({
           </Stack>
           <Typography variant="body2" role="status">
             {selectedFindingCount} of {findings.length}{" "}
-            {findings.length === 1 ? "finding" : "findings"} selected · {independentCount}{" "}
-            independent {independentCount === 1 ? "draft" : "drafts"}
+            {findings.length === 1 ? "finding" : "findings"} selected
+            {independentCount > 0
+              ? ` · ${independentCount} additional ${independentCount === 1 ? "comment" : "comments"}`
+              : ""}
             {hidden > 0 ? ` · ${hidden} selected hidden by filters` : ""}
           </Typography>
           <Stack direction="row" useFlexGap spacing={1} sx={{ flexWrap: "wrap" }}>
@@ -251,7 +282,7 @@ export function PublicationComposerPanel({
                 onClearError("selection");
               }}
             >
-              Clear this action selection
+              Clear selection
             </Button>
           </Stack>
           <Button
@@ -260,19 +291,14 @@ export function PublicationComposerPanel({
             onClick={importReport}
             aria-describedby={errors.selection ? `${fieldId("selection")}-error` : undefined}
           >
-            Import report selection
+            Use report selection
           </Button>
           {errors.selection && (
             <Typography id={`${fieldId("selection")}-error`} color="error" variant="body2">
               {errors.selection}
             </Typography>
           )}
-          {!result && (
-            <Alert severity="info">
-              Load the complete saved report to choose findings. A manual conversation comment or an
-              empty approval can still be prepared when the server permits it.
-            </Alert>
-          )}
+          {!result && <Alert severity="info">Load the saved report to choose findings.</Alert>}
           {visible.map((finding, index) => {
             const saved = finding.feedbackDraft;
             const option = context.suggestionSelectionDefaults.find(
@@ -282,7 +308,7 @@ export function PublicationComposerPanel({
               <Box
                 component="section"
                 key={finding.id}
-                sx={{ border: 1, borderColor: "divider", borderRadius: 3, p: 2, minWidth: 0 }}
+                sx={{ borderBottom: 1, borderColor: "divider", py: 1.5, minWidth: 0 }}
               >
                 <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
                   <FormControlLabel
@@ -317,7 +343,10 @@ export function PublicationComposerPanel({
                       />
                     }
                     label={
-                      <Typography sx={{ overflowWrap: "anywhere" }}>
+                      <Typography
+                        variant="body2"
+                        sx={{ fontWeight: 500, overflowWrap: "anywhere" }}
+                      >
                         {finding.ordinal + 1}. {finding.title}
                       </Typography>
                     }
@@ -329,41 +358,37 @@ export function PublicationComposerPanel({
                   />
                 </Stack>
                 <Typography variant="body2" color="text.secondary">
-                  {finding.confirmation.status === "confirmed" ? "Confirmed" : "Needs verification"}{" "}
-                  ·{" "}
+                  {finding.confirmation.status === "confirmed" ? "Confirmed" : "Needs verification"}
+                  {saved.suggestion ? " · " : ""}
                   {saved.suggestion
                     ? option?.valid
-                      ? "Saved suggestion available"
-                      : "Saved suggestion needs anchor review"
-                    : "No saved code replacement"}
+                      ? "Code suggestion available"
+                      : "Suggestion needs review"
+                    : ""}
                 </Typography>
                 <Box component="details" sx={{ mt: 1 }}>
                   <Typography component="summary" variant="body2" sx={{ cursor: "pointer" }}>
-                    Finding context and fix recommendation
+                    {context.target.kind === "issue" ? "Evidence" : "Evidence & fix"}
                   </Typography>
                   <Typography variant="body2" sx={{ mt: 1 }}>
                     {finding.impact.description}
                   </Typography>
-                  <Typography variant="body2" sx={{ mt: 1 }}>
-                    {finding.fixRecommendation.summary}
-                  </Typography>
+                  {finding.fixRecommendation.summary && (
+                    <Typography variant="body2" sx={{ mt: 1 }}>
+                      {finding.fixRecommendation.summary}
+                    </Typography>
+                  )}
                 </Box>
               </Box>
             );
           })}
           {result && visible.length === 0 && (
-            <Typography color="text.secondary">
-              No matching findings. Existing selections are retained.
-            </Typography>
+            <Typography color="text.secondary">No matching findings.</Typography>
           )}
           {(result?.feedbackDrafts.length ?? 0) > 0 && (
             <Box component="details">
               <Typography component="summary" sx={{ cursor: "pointer" }}>
-                Independent saved feedback
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                These drafts publish text only; their saved suggestions are not sent from this
-                section.
+                Additional comments
               </Typography>
               {result?.feedbackDrafts.map((saved) => (
                 <FormControlLabel
@@ -406,7 +431,7 @@ export function PublicationComposerPanel({
               onStepChange("compose");
             }}
           >
-            Continue to compose
+            Continue
           </Button>
           {nextDisabled && (
             <Typography variant="body2" color="text.secondary">
@@ -430,17 +455,27 @@ export function PublicationComposerPanel({
                 onStepChange("select");
               }}
             >
-              Back to findings
+              Back
             </Button>
             <Typography variant="body2">
-              {selectedFindingCount} {selectedFindingCount === 1 ? "finding" : "findings"} ·{" "}
-              {independentCount} independent {independentCount === 1 ? "draft" : "drafts"} ·{" "}
-              {suggestionCount} suggested {suggestionCount === 1 ? "change" : "changes"}
+              {selectedFindingCount} {selectedFindingCount === 1 ? "finding" : "findings"} selected
+              {independentCount > 0
+                ? ` · ${independentCount} additional ${independentCount === 1 ? "comment" : "comments"}`
+                : ""}
+              {suggestionCount > 0
+                ? ` · ${suggestionCount} code ${suggestionCount === 1 ? "suggestion" : "suggestions"}`
+                : ""}
             </Typography>
           </Stack>
           <TextField
             id={fieldId("summary")}
-            label={action === "comment" ? "Conversation introduction" : "Review summary"}
+            label={
+              action === "comment"
+                ? entries.length
+                  ? "Introduction · optional"
+                  : "Comment"
+                : "Review summary · optional"
+            }
             multiline
             minRows={3}
             fullWidth
@@ -451,10 +486,7 @@ export function PublicationComposerPanel({
               onClearError("summary");
             }}
             error={Boolean(errors.summary)}
-            helperText={
-              errors.summary ||
-              "Selected publishing text is included once; it is not automatically pasted into this summary."
-            }
+            helperText={errors.summary}
           />
           {errors.selection && (
             <Alert severity="error">
@@ -470,7 +502,7 @@ export function PublicationComposerPanel({
               {errors.selection}
             </Alert>
           )}
-          {entries.map((entry) => {
+          {entries.map((entry, index) => {
             const finding = findings.find((item) => item.id === entry.findingId);
             const saved =
               finding?.feedbackDraft ??
@@ -484,25 +516,57 @@ export function PublicationComposerPanel({
               replacementKey = `draft-${entry.draftId}-replacement`;
             return (
               <Box
-                component="section"
+                component="details"
                 key={entry.draftId}
+                open={expandedEditors.get(entry.draftId) ?? index === 0}
+                onToggle={(event) => {
+                  const open = event.currentTarget.open;
+                  setExpandedEditors((current) =>
+                    current.get(entry.draftId) === open
+                      ? current
+                      : new Map(current).set(entry.draftId, open),
+                  );
+                }}
                 sx={{
                   border: 1,
                   borderColor: "divider",
-                  borderRadius: 3,
-                  p: { xs: 1.5, sm: 2 },
+                  borderRadius: 1.5,
                   minWidth: 0,
                 }}
               >
-                <Stack spacing={1.5}>
-                  <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
-                    <Typography
-                      variant="subtitle1"
-                      component="h3"
-                      sx={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}
-                    >
-                      {finding ? `${finding.ordinal + 1}. ${finding.title}` : label}
+                <Box
+                  component="summary"
+                  sx={{
+                    cursor: "pointer",
+                    p: 1.5,
+                    overflowWrap: "anywhere",
+                    typography: "body2",
+                    fontWeight: 500,
+                  }}
+                >
+                  {finding ? `${finding.ordinal + 1}. ${finding.title}` : label}
+                  <Stack direction="row" spacing={1} sx={{ mt: 0.5, ml: 2, alignItems: "center" }}>
+                    {finding && (
+                      <Chip
+                        size="small"
+                        label={finding.priority}
+                        color={finding.priority === "P0" ? "error" : "default"}
+                      />
+                    )}
+                    <Typography variant="caption" color="text.secondary">
+                      {changed
+                        ? "Feedback changed"
+                        : finding?.confirmation.status === "hypothesis"
+                          ? "Needs verification"
+                          : entry.mode === "suggestion"
+                            ? "Code suggestion"
+                            : "Comment"}
                     </Typography>
+                  </Stack>
+                </Box>
+                <Stack spacing={1.5} sx={{ p: 1.5, pt: 0 }}>
+                  <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
+                    <Box sx={{ flex: 1 }} />
                     <Button
                       disabled={disabled}
                       aria-label={`Remove ${label.toLowerCase()} from this publication`}
@@ -511,15 +575,9 @@ export function PublicationComposerPanel({
                       Remove
                     </Button>
                   </Stack>
-                  {finding?.confirmation.status === "hypothesis" && (
-                    <Alert severity="warning">
-                      Needs verification. Publishing this opinion does not confirm it or establish a
-                      passed runtime check.
-                    </Alert>
-                  )}
                   {changed && (
                     <Alert severity="warning">
-                      Report feedback changed after this publishing draft was reviewed.
+                      Report feedback changed.
                       <Stack
                         direction="row"
                         useFlexGap
@@ -546,14 +604,14 @@ export function PublicationComposerPanel({
                             changeEntry(entry, { sourceBody: currentBody }, bodyKey);
                           }}
                         >
-                          Keep publishing text
+                          Keep my text
                         </Button>
                       </Stack>
                     </Alert>
                   )}
                   <TextField
                     id={fieldId(bodyKey)}
-                    label={`${label} · publishing text`}
+                    label={`${label} · comment`}
                     multiline
                     minRows={3}
                     fullWidth
@@ -566,7 +624,7 @@ export function PublicationComposerPanel({
                   <TextField
                     id={fieldId(modeKey)}
                     select
-                    label={`${label} · delivery`}
+                    label={`${label} · include as`}
                     value={entry.mode}
                     disabled={disabled}
                     onChange={(event) => {
@@ -578,33 +636,23 @@ export function PublicationComposerPanel({
                       onClearError(replacementKey);
                     }}
                     error={Boolean(errors[modeKey])}
-                    helperText={
-                      errors[modeKey] ||
-                      (action === "comment"
-                        ? "Conversation comments contain summary text only."
-                        : entry.findingId === null
-                          ? "Independent drafts publish summary text only."
-                          : !saved?.suggestion
-                            ? "No saved code suggestion is available; this finding publishes summary text."
-                            : "Choose explicitly whether to include the saved code suggestion.")
-                    }
+                    helperText={errors[modeKey]}
                   >
                     <MenuItem value="summary">
-                      Text in {action === "comment" ? "conversation comment" : "review summary"}
+                      {action === "comment" ? "Comment" : "Review summary"}
                     </MenuItem>
                     <MenuItem
                       value="suggestion"
                       disabled={action === "comment" || !finding || !saved?.suggestion}
                     >
-                      GitHub suggested change{!saved?.suggestion ? " · no saved replacement" : ""}
+                      Code suggestion{!saved?.suggestion ? " · unavailable" : ""}
                     </MenuItem>
                   </TextField>
                   {entry.mode === "suggestion" ? (
                     <>
                       {!status.valid && (
                         <Alert severity="error">
-                          {status.reason} Choose summary text or remove this item; no automatic
-                          fallback is applied.
+                          {status.reason} Choose summary text or remove this item.
                         </Alert>
                       )}
                       {saved?.suggestion && (
@@ -614,7 +662,7 @@ export function PublicationComposerPanel({
                             variant="body2"
                             sx={{ cursor: "pointer" }}
                           >
-                            Saved source anchor
+                            Source details
                           </Typography>
                           <Typography variant="body2" sx={{ mt: 1, overflowWrap: "anywhere" }}>
                             {saved.suggestion.path} · lines {saved.suggestion.startLine}–
@@ -645,19 +693,14 @@ export function PublicationComposerPanel({
                         error={Boolean(errors[replacementKey])}
                         helperText={
                           errors[replacementKey] ||
-                          "Only replacement code is editable. An empty replacement proposes deleting the bound content; publishing does not apply a commit."
+                          (!entry.replacement
+                            ? "Empty replacement deletes the selected code."
+                            : undefined)
                         }
                         sx={{ "& textarea": { fontFamily: "monospace" } }}
                       />
                     </>
-                  ) : (
-                    <Typography variant="body2" color="text.secondary">
-                      {saved?.suggestion
-                        ? "The saved code suggestion is omitted by your delivery choice."
-                        : finding?.fixRecommendation.summary ||
-                          "This independent draft publishes summary text only."}
-                    </Typography>
-                  )}
+                  ) : null}
                 </Stack>
               </Box>
             );

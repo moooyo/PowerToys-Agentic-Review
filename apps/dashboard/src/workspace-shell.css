@@ -16,11 +16,14 @@
   gap: 24px;
 }
 .workspace-brand-mark.MuiIconButton-root {
-  color: var(--app-accent);
+  color: var(--mui-palette-primary-contrastText);
   width: 44px;
   height: 44px;
   border-radius: 16px;
-  background: var(--app-primary-container);
+  background: var(--app-accent);
+}
+.workspace-brand-mark.MuiIconButton-root:hover {
+  background: color-mix(in srgb, var(--app-accent) 92%, var(--mui-palette-primary-contrastText));
 }
 .workspace-brand-mark svg {
   width: 24px;
@@ -45,7 +48,7 @@
   color: var(--app-muted);
   text-decoration: none;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 400;
   line-height: 16px;
 }
 .workspace-nav-symbol {
@@ -68,6 +71,7 @@
 }
 .workspace-nav-link.selected {
   color: var(--app-on-secondary-container);
+  font-weight: 500;
 }
 .workspace-nav-link.selected .workspace-nav-symbol {
   background: var(--app-secondary-container);
@@ -101,16 +105,34 @@
   line-height: 24px;
   font-weight: 500;
   text-decoration: none;
-  min-width: 0;
+  min-width: 150px;
   overflow-wrap: anywhere;
 }
-.workspace-app-bar .workspace-mobile-menu {
+.workspace-page-picker {
   display: none;
 }
+.workspace-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.workspace-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 .workspace-repository-picker {
-  flex: 0 1 284px;
-  width: min(284px, 35vw);
+  flex: 0 1 250px;
+  width: min(250px, 30vw);
   min-width: 0;
+  margin-left: auto;
 }
 .workspace-repository-picker > .MuiBox-root,
 .workspace-repository-picker .MuiAutocomplete-root {
@@ -120,6 +142,8 @@
 .workspace-repository-picker .MuiOutlinedInput-root {
   border-radius: 8px;
   background: var(--app-surface-container);
+  min-height: 40px;
+  font-size: 14px;
 }
 .workspace-repository-picker .MuiOutlinedInput-notchedOutline {
   border-color: transparent;
@@ -205,9 +229,6 @@
   flex-wrap: wrap;
   justify-content: flex-end;
 }
-.workspace-bottom-nav {
-  display: none;
-}
 .workspace-skip {
   position: fixed;
   top: -100px;
@@ -240,73 +261,79 @@
     padding-inline: 24px;
   }
 }
-@media (max-width: 839px) {
-  .workspace-rail {
+@media (max-width: 900px) {
+  .workspace-rail,
+  .workspace-brand,
+  .workspace-group-tabs {
     display: none;
   }
   .workspace-app-bar {
-    min-height: 64px;
+    min-height: 72px;
     flex-wrap: wrap;
-    padding: 8px 16px;
-    gap: 8px;
+    padding: 16px 24px;
+    gap: 12px;
   }
-  .workspace-app-bar .workspace-mobile-menu {
-    display: inline-flex;
+  .workspace-page-picker {
+    display: block;
+    min-width: 0;
+    flex: 0 1 180px;
   }
-  .workspace-repository-picker {
-    order: 1;
-    flex: 1 0 100%;
+  .workspace-page-picker select {
+    display: block;
     width: 100%;
-    padding-block: 4px;
+    max-width: 180px;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: var(--app-on-secondary-container);
+    background: var(--app-secondary-container);
+    font: inherit;
+    font-size: 14px;
   }
-  .workspace-copy-view.MuiButton-root {
-    padding-inline: 12px;
+  .workspace-page-picker optgroup,
+  .workspace-page-picker option {
+    background: var(--app-surface);
+    color: var(--app-text);
   }
   .workspace-main {
-    padding: 12px 24px calc(100px + env(safe-area-inset-bottom));
-    scroll-padding-bottom: calc(100px + env(safe-area-inset-bottom));
+    padding: 16px 24px max(28px, env(safe-area-inset-bottom));
+    scroll-padding-bottom: 32px;
   }
-  .workspace-bottom-nav {
-    display: flex;
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    z-index: 1100;
-    padding: 6px 8px max(8px, env(safe-area-inset-bottom));
-    background: var(--app-surface-container);
-    border-top: 1px solid var(--app-line);
+  .workspace-header-actions .workspace-search-button {
+    min-width: 40px;
+    width: 40px;
+    padding: 8px;
   }
-  .workspace-bottom-nav .workspace-nav-link {
-    flex: 1;
-    min-height: 58px;
-    font-size: 12px;
-    line-height: 16px;
-    gap: 4px;
+  .workspace-search-button > span:not(.MuiButton-startIcon) {
+    display: none;
   }
-  .workspace-bottom-nav .workspace-nav-symbol {
-    min-height: 32px;
-    width: 56px;
-  }
-  .workspace-group-tabs {
-    margin-bottom: 20px;
-    gap: 4px;
-  }
-  .workspace-group-tabs .MuiButton-root {
-    padding-inline: 16px;
+  .workspace-search-button .MuiButton-startIcon {
+    margin: 0;
   }
 }
 @media (max-width: 599px) {
   .workspace-main {
     padding-inline: 16px;
   }
-  .workspace-brand {
-    font-size: 16px;
-    line-height: 24px;
-  }
   .workspace-app-bar {
-    padding-inline: 12px;
-    gap: 4px;
+    padding: 16px;
+    gap: 12px;
+  }
+  .workspace-repository-picker {
+    order: 1;
+    flex: 1 0 100%;
+    width: 100%;
+    margin-left: 0;
+  }
+  .workspace-header-actions .workspace-copy-view {
+    display: none;
+  }
+  .workspace-page-picker {
+    flex: 1;
+  }
+  .workspace-page-picker select {
+    font-size: 16px;
   }
   .workspace-page-title-row {
     flex-direction: column;
@@ -317,7 +344,7 @@
     width: 100%;
   }
   .workspace-page-action > .MuiButton-root {
-    width: 100%;
+    width: auto;
   }
   .workspace-page-action > .MuiStack-root {
     justify-content: flex-start;
@@ -325,9 +352,6 @@
   .workspace-page-heading h1 {
     font-size: 24px;
     line-height: 32px;
-  }
-  .workspace-group-tabs .MuiButton-root {
-    padding-inline: 14px;
   }
 }
 @media (pointer: coarse) {
@@ -356,5 +380,9 @@
   #root .MuiInputBase-root {
     font-size: 16px;
     min-height: 48px;
+  }
+  .workspace-page-picker select {
+    min-height: 48px;
+    font-size: 16px;
   }
 }

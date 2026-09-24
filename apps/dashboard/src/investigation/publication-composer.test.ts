@@ -280,7 +280,7 @@ describe("publication composer", () => {
       validatePublication(full, result, context, "comment", "")[
         `draft-${suggestion.feedbackDraft.id}-mode`
       ],
-    ).toContain("Conversation comments");
+    ).toContain("Comments contain text only");
     const conversation = importPublicationSelection(empty, selection, result, {}, "comment");
     expect(
       materializePublication(conversation, result, context, "comment", "").drafts.every(
@@ -456,7 +456,7 @@ describe("publication composer", () => {
       },
     };
     const errors = validatePublication(fenced, result, context, "request-changes", "");
-    expect(errors[`draft-${draftId}-body`]).toContain("Add publishing text");
+    expect(errors[`draft-${draftId}-body`]).toContain("Add a comment");
     expect(errors[`draft-${draftId}-replacement`]).toContain("triple-backtick");
   });
 

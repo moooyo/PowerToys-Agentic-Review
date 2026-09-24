@@ -116,8 +116,8 @@ describe("account administration access", () => {
     const html = renderPage(queryClient);
     expect(html).toContain("Create account");
     expect(html).toContain("Workspace Administrator");
-    expect(html).toContain("Edit account workspace.admin");
-    expect(html).toContain("Reset password for workspace.admin");
+    expect(html).toContain("Open account workspace.admin");
+    expect(html).not.toContain("Edit account workspace.admin");
     expect(html).toContain("No repositories");
     expect(html).toContain("Search accounts");
     expect(html).toContain('aria-label="Account status"');
@@ -135,7 +135,7 @@ describe("account administration access", () => {
     });
     const errorHtml = renderPage(failedClient);
     expect(errorHtml).toContain("The account directory is unavailable.");
-    expect(errorHtml).toContain("Refresh accounts");
+    expect(errorHtml).toContain("Refresh");
     expect(errorHtml).not.toContain("Loading accounts");
     await failedClient.fetchQuery({
       queryKey: ["investigation-accounts"],
@@ -173,7 +173,7 @@ describe("typed account forms", () => {
     expect(html).not.toContain('aria-label="Open account workspace.admin"');
     queryClient.clear();
   });
-  it("filters the directory by identity, exact stored repository text, and enabled state", () => {
+  it("filters by displayed identity and enabled state without matching hidden metadata", () => {
     const disabled = {
       ...account,
       id: "disabled-account",
@@ -184,7 +184,9 @@ describe("typed account forms", () => {
     };
     const items = [account, disabled];
     expect(filterAccounts(items, "  WORKSPACE  ", "all")).toEqual([account]);
-    expect(filterAccounts(items, "repo:outside-scope", "disabled")).toEqual([disabled]);
+    expect(filterAccounts(items, "repo:outside-scope", "disabled")).toEqual([]);
+    expect(filterAccounts(items, "isAdmin", "all")).toEqual([]);
+    expect(filterAccounts(items, "scoped.viewer", "disabled")).toEqual([disabled]);
     expect(filterAccounts(items, "viewer", "enabled")).toEqual([]);
     expect(filterAccounts(items, "", "all")).toEqual(items);
   });
@@ -431,11 +433,11 @@ describe("password handling and account conflict recovery", () => {
         }}
       />,
     );
-    expect(html).toContain("Your non-password fields are still in");
-    expect(html).toContain("Refresh account for review");
+    expect(html).toContain("Account access changed");
+    expect(html).toContain("Review latest access");
     expect(html).toContain("Latest saved account · version 4");
     expect(html).toContain("Changed elsewhere");
     expect(html).toContain("Disabled");
-    expect(html).toContain("I reviewed the latest account");
+    expect(html).toContain("Apply my changes to this version.");
   });
 });

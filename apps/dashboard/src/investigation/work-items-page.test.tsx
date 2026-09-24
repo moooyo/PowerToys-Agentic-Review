@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { createSampleInvestigationApi } from "./sample-adapter";
-import { sourceReportKey } from "./source-result";
+import { sourceActionKey, sourceReportKey } from "./source-result";
 import { WorkItemsPage } from "./work-items-page";
 
 vi.mock("./session", () => ({
@@ -65,10 +65,29 @@ describe("source list presentation", () => {
     expect(html).toContain(source.title);
     expect(html).toContain("Running");
     expect(html).toContain("open");
-    expect(html).toContain("1 pull request shown");
+    expect(html).toContain("1 pull request");
     expect(html).not.toContain('aria-label="Previous page"');
     expect(html).not.toContain("Review pull request</button>");
     expect(html).toContain("workItemId=");
+  });
+
+  it("uses a live report-bound next action beside the source link", async () => {
+    const { queryClient, source, task } = await fixture();
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-pr-p1-report");
+    const context = await api.actionContext(source.id, header.report.id);
+    queryClient.setQueryData(["investigation-tasks", "source-list"], { items: [task] });
+    queryClient.setQueryData(sourceReportKey("source-list-test", source.id, task), header);
+    queryClient.setQueryData(sourceActionKey("source-list-test", source, header), {
+      ...context,
+      actor: { ...context.actor, id: "reader" },
+    });
+    const html = render(queryClient);
+    expect(html).toContain("source-queue-row");
+    expect(html).toContain("source-queue-title");
+    expect(html).toContain("Next action");
+    expect(html).toContain("Request changes");
+    expect(html).not.toContain("Prepare request changes");
   });
 
   it("keeps sources visible while investigation status required by a filter is loading", async () => {

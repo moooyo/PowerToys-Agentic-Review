@@ -1,5 +1,5 @@
 import { normalizeInvestigationUsername } from "@agentic-review/contracts";
-import { CheckOutlined, FolderOutlined, SearchOutlined, ShieldOutlined } from "@mui/icons-material";
+import { ShieldOutlined } from "@mui/icons-material";
 import { Alert, Box, Button, Stack, TextField, Typography } from "@mui/material";
 import { type FormEvent, useId, useRef, useState } from "react";
 import type { PasswordLoginInput } from "./auth-api";
@@ -56,7 +56,7 @@ export function PasswordSignInForm({
       component="main"
       sx={{
         minHeight: "100dvh",
-        bgcolor: "background.paper",
+        bgcolor: "background.default",
         p: { xs: 2, sm: 4, lg: 6 },
         display: "flex",
         flexDirection: "column",
@@ -86,79 +86,13 @@ export function PasswordSignInForm({
       <Box
         sx={{
           width: "100%",
-          maxWidth: 1120,
+          maxWidth: 456,
           mx: "auto",
           my: "auto",
-          display: "grid",
-          gridTemplateColumns: { xs: "minmax(0, 1fr)", md: "minmax(0, 1fr) minmax(360px, 456px)" },
           alignItems: "center",
           gap: { md: 6, lg: 12 },
         }}
       >
-        <Box
-          component="section"
-          aria-label="Workspace introduction"
-          sx={{ display: { xs: "none", md: "block" }, py: 5, minWidth: 0 }}
-        >
-          <Typography
-            sx={{
-              fontSize: 13,
-              letterSpacing: ".04em",
-              textTransform: "uppercase",
-              fontWeight: 500,
-              color: "primary.main",
-              mb: 3,
-            }}
-          >
-            A clearer path from change to confidence
-          </Typography>
-          <Typography
-            sx={{
-              fontSize: "clamp(42px, 4.4vw, 64px)",
-              lineHeight: 1.1,
-              letterSpacing: "-2px",
-              mb: 3,
-            }}
-          >
-            Your review
-            <br />
-            workspace.
-          </Typography>
-          <Typography
-            color="text.secondary"
-            sx={{ fontSize: 18, lineHeight: 1.6, maxWidth: 440, mb: 5 }}
-          >
-            Investigate changes, follow the evidence, and make the next decision with context.
-          </Typography>
-          <Stack
-            direction="row"
-            spacing={1.5}
-            useFlexGap
-            aria-hidden="true"
-            sx={{
-              flexWrap: "wrap",
-              alignItems: "center",
-              color: "primary.main",
-              "& > span": { display: "flex", alignItems: "center", gap: 1, fontSize: 13 },
-              "& > i": { width: 24, height: "1px", bgcolor: "divider" },
-            }}
-          >
-            <Box component="span">
-              <FolderOutlined fontSize="small" />
-              Source
-            </Box>
-            <Box component="i" />
-            <Box component="span">
-              <SearchOutlined fontSize="small" />
-              Investigation
-            </Box>
-            <Box component="i" />
-            <Box component="span">
-              <CheckOutlined fontSize="small" />
-              Decision
-            </Box>
-          </Stack>
-        </Box>
         <Box
           component="section"
           aria-labelledby={titleId}
@@ -167,18 +101,17 @@ export function PasswordSignInForm({
             maxWidth: 456,
             mx: "auto",
             minWidth: 0,
-            borderRadius: { xs: "24px", sm: "28px" },
-            bgcolor: "background.default",
+            borderRadius: "16px",
+            bgcolor: "background.paper",
+            border: 1,
+            borderColor: "divider",
             p: { xs: 3, sm: 4, lg: 4.5 },
           }}
         >
           <Stack spacing={3}>
             <Box>
               <Typography component="h1" id={titleId} sx={{ fontSize: 28, lineHeight: 1.3, mb: 1 }}>
-                Welcome back
-              </Typography>
-              <Typography color="text.secondary" variant="body2">
-                Sign in with your workspace account.
+                Sign in
               </Typography>
             </Box>
             {(message || error) && (
@@ -221,18 +154,18 @@ export function PasswordSignInForm({
                     setErrors((current) => ({ ...current, password: undefined }));
                   }}
                   error={!!errors.password}
-                  helperText={
-                    errors.password ?? "The password field is cleared after each sign-in attempt."
-                  }
+                  helperText={errors.password}
                   disabled={busy}
                   required
                 />
                 <Button type="submit" variant="contained" disabled={busy}>
                   {busy ? "Signing in…" : "Sign in"}
                 </Button>
-                <Button disabled={busy} onClick={() => void onRetry()}>
-                  Retry connection
-                </Button>
+                {(message || error) && (
+                  <Button disabled={busy} onClick={() => void onRetry()}>
+                    Retry connection
+                  </Button>
+                )}
               </Stack>
             </Box>
             <Typography color="text.secondary" sx={{ fontSize: 13, lineHeight: 1.55 }}>

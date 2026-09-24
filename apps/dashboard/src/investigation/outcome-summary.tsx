@@ -2,7 +2,7 @@ import type {
   InvestigationNextActionV1,
   InvestigationReportHeaderV1,
 } from "@agentic-review/contracts";
-import { Box, Stack, Typography } from "@mui/material";
+import { Box, Chip, Stack, Typography } from "@mui/material";
 import { type ReactNode, useId } from "react";
 import { Surface } from "./workspace-ui";
 
@@ -120,89 +120,91 @@ export function OutcomeSummary({
       action.sourceReportRef.id === header.report.id &&
       action.sourceReportRef.version === header.report.version,
   );
-  const hasNextSteps = Boolean(actions) || savedActions.length > 0;
 
   return (
     <Surface
       component="section"
       aria-labelledby={titleId}
-      sx={{
-        p: compact ? 2 : { xs: 2, sm: 3 },
-        bgcolor: (theme) => `var(--app-surface-container, ${theme.palette.background.paper})`,
-        display: "grid",
-        gridTemplateColumns: {
-          xs: "minmax(0, 1fr)",
-          md: hasNextSteps ? "minmax(0, 1.35fr) minmax(0, 1fr)" : "minmax(0, 1fr)",
-        },
-        gap: compact ? 2 : 3,
-        overflowWrap: "anywhere",
-      }}
+      sx={{ p: compact ? 2 : { xs: 2, sm: 3 }, overflowWrap: "anywhere" }}
     >
-      <Stack spacing={1} sx={{ minWidth: 0 }}>
-        <Typography variant="body2" color="text.secondary">
-          {outcome.finality}
-        </Typography>
-        <Typography id={titleId} component="h2" variant={compact ? "h6" : "h5"}>
-          {outcome.label}
-        </Typography>
-        <Typography variant={compact ? "body2" : "body1"}>{outcome.description}</Typography>
-        <Box sx={{ pt: 1 }}>
-          <Typography component="h3" variant="subtitle2">
-            {outcome.validation.label}
-          </Typography>
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            sx={{ mt: 0.5, whiteSpace: "pre-line" }}
-          >
-            {outcome.validation.description}
-          </Typography>
-        </Box>
-        <Typography variant="caption" color="text.secondary">
-          Saved report v{header.report.version} ·{" "}
-          {header.report.completeness === "complete" ? "Complete" : "Partial"} ·{" "}
-          {header.report.delivery === "final" ? "Final delivery" : "Checkpoint delivery"}
-        </Typography>
-      </Stack>
-      {hasNextSteps && (
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        spacing={2}
+        sx={{
+          alignItems: { xs: "stretch", sm: "center" },
+          justifyContent: "space-between",
+          py: compact ? 1 : 1.5,
+        }}
+      >
         <Stack
-          spacing={1.5}
-          sx={{
-            minWidth: 0,
-            pt: { xs: 2, md: 0 },
-            pl: { xs: 0, md: 3 },
-            borderTop: { xs: 1, md: 0 },
-            borderLeft: { xs: 0, md: 1 },
-            borderColor: "divider",
-          }}
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ flexWrap: "wrap", alignItems: "center", minWidth: 0 }}
         >
-          <Typography component="h3" variant="subtitle2">
-            Next steps
+          <Typography id={titleId} component="h2" variant="h6" sx={{ fontSize: compact ? 16 : 18 }}>
+            {outcome.label}
           </Typography>
-          {actions && <Box sx={{ minWidth: 0 }}>{actions}</Box>}
-          {savedActions.length > 0 && (
-            <>
-              <Stack component="ul" spacing={1.5} sx={{ p: 0, m: 0, listStyle: "none" }}>
-                {savedActions.map((action) => (
-                  <Box component="li" key={action.id}>
-                    <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                      {action.label}
-                      {action.recommended ? " · Recommended in saved report" : ""}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      {action.reason}
-                    </Typography>
-                  </Box>
-                ))}
-              </Stack>
-              <Typography variant="caption" color="text.secondary">
-                Saved suggestions describe the report’s next steps. Current permissions and
-                prerequisites determine availability.
-              </Typography>
-            </>
+          {!outcome.isFinal && (
+            <Chip
+              size="small"
+              label={header.report.delivery === "checkpoint" ? "Checkpoint" : "Partial report"}
+              color="warning"
+              variant="outlined"
+            />
+          )}
+          {!["feature", "other_issue"].includes(header.assessment.kind) && (
+            <Chip size="small" label={outcome.validation.label} variant="outlined" />
           )}
         </Stack>
-      )}
+        {actions && (
+          <Box sx={{ minWidth: 0, "& .MuiButton-root": { whiteSpace: "normal" } }}>{actions}</Box>
+        )}
+      </Stack>
+      <Box
+        component="details"
+        sx={{
+          borderTop: 1,
+          borderColor: "divider",
+          py: 0.5,
+          "& summary": {
+            cursor: "pointer",
+            typography: "body2",
+            color: "text.secondary",
+            py: 1,
+            minHeight: 36,
+          },
+        }}
+      >
+        <summary>Assessment details</summary>
+        <Stack spacing={1.5} sx={{ pt: 1, pb: 2 }}>
+          <Typography>{outcome.description}</Typography>
+          {outcome.validation.description && (
+            <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: "pre-line" }}>
+              {outcome.validation.description}
+            </Typography>
+          )}
+          <Typography variant="caption" color="text.secondary">
+            Report v{header.report.version} ·{" "}
+            {header.report.completeness === "complete" ? "Complete" : "Partial"} ·{" "}
+            {header.report.delivery === "final" ? "Final" : "Checkpoint"}
+          </Typography>
+          {savedActions.length > 0 && (
+            <Stack component="ul" spacing={1.5} sx={{ pl: 2.5, my: 0 }}>
+              {savedActions.map((action) => (
+                <Box component="li" key={action.id}>
+                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                    {action.label}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {action.reason}
+                  </Typography>
+                </Box>
+              ))}
+            </Stack>
+          )}
+        </Stack>
+      </Box>
     </Surface>
   );
 }

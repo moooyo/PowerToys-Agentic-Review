@@ -101,9 +101,8 @@ describe("global task concurrency controls", () => {
   it("keeps the global setting read-only for repository managers who are not administrators", () => {
     const html = renderStatus();
     expect(html).toContain("Only workspace administrators");
-    expect(html).toContain("Global setting");
-    expect(html).toContain("across all repositories");
-    expect(html).not.toContain("Save concurrency");
+    expect(html).toContain("All repositories");
+    expect(html).not.toContain("Save changes");
   });
 
   it("uses administrator status independently from repository grants or business permissions", () => {
@@ -112,8 +111,8 @@ describe("global task concurrency controls", () => {
     context.session.user.repositoryIds = [];
     context.session.user.permissions = [];
     const html = renderStatus();
-    expect(html).toContain("Save concurrency");
-    expect(html).toContain("Reload saved value");
+    expect(html).toContain("Save changes");
+    expect(html).toContain("Reload");
     expect(html).toContain("Discard changes");
   });
 
@@ -123,8 +122,8 @@ describe("global task concurrency controls", () => {
     expect(html).toContain("1 / 1 occupied");
     expect(html).toContain("Needs cleanup");
     expect(html).toContain("Cleanup pending");
-    expect(html).toContain("The next E2E task is blocked");
-    expect(html).toContain("offline worker do not confirm cleanup");
+    expect(html).toContain("The next E2E task waits until cleanup finishes");
+    expect(html).toContain("Waiting for worker cleanup confirmation");
     expect(html).toContain("taskId=task-e2e");
     expect(html).toContain("attempt-e2e");
     expect(html).toContain("desktop-worker");
@@ -134,8 +133,8 @@ describe("global task concurrency controls", () => {
     const html = renderStatus({ ...status, leases: [] });
     expect(html).toContain("2 of 4 static slots occupied");
     expect(html).toContain("1 / 1 occupied");
-    expect(html).toContain("The slot remains owned");
-    expect(html).toContain("No resource owners are visible within your repository access");
+    expect(html).toContain("Reserved until cleanup is confirmed");
+    expect(html).toContain("No resource owners within your repository access");
     expect(html).not.toContain("No E2E slot is occupied");
   });
 
@@ -148,8 +147,8 @@ describe("global task concurrency controls", () => {
     });
     expect(html).toContain("0 / 1 occupied");
     expect(html).toContain("Needs cleanup");
-    expect(html).not.toContain("The next E2E task is blocked");
-    expect(html).not.toContain("Cleanup is holding the slot");
+    expect(html).not.toContain("The next E2E task waits until cleanup finishes");
+    expect(html).not.toContain("Waiting for worker cleanup confirmation");
   });
 
   it("shows held leases as ownership without inventing a running task state", () => {
@@ -173,7 +172,7 @@ describe("global task concurrency controls", () => {
         releasedAt: "2026-09-19T01:03:00.000Z",
       })),
     });
-    expect(html).toContain("No resource owners are visible");
+    expect(html).toContain("No resource owners within your repository access");
     expect(html).not.toContain("taskId=task-e2e");
     expect(html).not.toContain("Cleanup pending");
   });
@@ -187,8 +186,9 @@ describe("global task concurrency controls", () => {
       />,
     );
     expect(html).toContain("3 of 1 static slots occupied");
-    expect(html).toContain("Current occupancy is above the saved limit");
-    expect(html).toContain("It does not cancel existing investigations");
+    expect(html).toContain("Occupied slots exceed the limit");
+    expect(html).toContain("Existing slots stay reserved until released");
+    expect(html).toContain("Lowering the limit lets running work finish");
   });
 
   it("provides a loading state and a retryable read failure", async () => {

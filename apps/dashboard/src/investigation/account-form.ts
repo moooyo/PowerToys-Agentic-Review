@@ -103,9 +103,7 @@ export function filterAccounts(
   return accounts.filter(
     (account) =>
       (filter === "all" || (filter === "enabled" ? account.enabled : !account.enabled)) &&
-      `${account.displayName} ${account.username} ${account.id} ${account.repositoryIds.join(" ")}`
-        .toLocaleLowerCase()
-        .includes(query),
+      `${account.displayName} ${account.username}`.toLocaleLowerCase().includes(query),
   );
 }
 

@@ -11,7 +11,7 @@ describe("sign-in presentation", () => {
       <PasswordSignInForm busy={false} onLogin={async () => {}} onRetry={async () => {}} />,
     );
     expect(html).toContain("<main");
-    expect(html).toContain("Welcome back");
+    expect(html).toMatch(/<h1[^>]*>Sign in<\/h1>/u);
     expect(html).toContain('aria-label="Sign in"');
     expect(html).toContain('aria-label="Show password"');
     expect(html).toContain('aria-pressed="false"');
@@ -35,6 +35,6 @@ describe("sign-in presentation", () => {
     );
     expect(html).toContain("Your password was reset. Sign in again.");
     expect(html).toContain("Retry connection");
-    expect(html).toContain("The password field is cleared after each sign-in attempt.");
+    expect(html).toMatch(/autocomplete="current-password"/i);
   });
 });

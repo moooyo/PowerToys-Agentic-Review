@@ -61,7 +61,10 @@ export function InvestigationRepositorySelector({ fullWidth = false }: { fullWid
         renderInput={(parameters) => (
           <TextField
             {...parameters}
-            label="Repository"
+            slotProps={{
+              ...parameters.slotProps,
+              htmlInput: { ...parameters.slotProps.htmlInput, "aria-label": "Repository" },
+            }}
             error={scope.query.isError}
             helperText={scope.query.isError ? "Repository directory unavailable" : undefined}
           />

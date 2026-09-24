@@ -13,7 +13,7 @@ import {
   InvestigationWorkspaceSearchQuerySchema,
   type InvestigationWorkspaceSearchResult,
 } from "@agentic-review/contracts";
-import { type Static, type TSchema } from "@sinclair/typebox";
+import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { Repository, TaskDetail, WorkItem } from "./api";
 import type { InvestigationReadApi } from "./read-api";
@@ -156,6 +156,7 @@ export function createSampleReadApi(state: SampleReadState): InvestigationReadAp
         (item) =>
           (query.repositoryId === undefined || item.repositoryId === query.repositoryId) &&
           (query.workItemId === undefined || item.workItemId === query.workItemId) &&
+          (query.workItemKind === undefined || item.workItemKind === query.workItemKind) &&
           (query.workItemNumber === undefined || item.workItemNumber === query.workItemNumber) &&
           (query.taskId === undefined || item.taskId === query.taskId) &&
           (query.mode === undefined || item.mode === query.mode) &&

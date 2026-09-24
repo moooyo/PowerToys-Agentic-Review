@@ -17,7 +17,6 @@ import {
   Checkbox,
   Chip,
   Collapse,
-  Divider,
   FormControlLabel,
   Paper,
   Stack,
@@ -66,7 +65,7 @@ export function TextList({ items }: { items: readonly string[] }) {
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <Box>
-      <Typography component="h3" variant="overline" color="text.secondary">
+      <Typography component="h3" variant="subtitle2">
         {label}
       </Typography>
       <Box sx={{ overflowWrap: "anywhere" }}>{children}</Box>
@@ -96,7 +95,7 @@ export function AssessmentPanel({ assessment }: { assessment: InvestigationAsses
               {assessment.reviewConclusion.rationale}
             </Typography>
           </Field>
-          <Field label="Independent E2E assessment">
+          <Field label="E2E assessment">
             <Chip
               label={assessment.e2eAssessment.level}
               size="small"
@@ -106,12 +105,6 @@ export function AssessmentPanel({ assessment }: { assessment: InvestigationAsses
               {assessment.e2eAssessment.rationale}
             </Typography>
           </Field>
-          {assessment.e2eAssessment.level === "required" && (
-            <Alert severity="info">
-              Required E2E evidence is tracked independently of investigation completeness. Review
-              the actual checks below.
-            </Alert>
-          )}
           {assessment.e2eAssessment.scenarioIds.length > 0 && (
             <Field label="Planned scenarios">
               <TextList items={assessment.e2eAssessment.scenarioIds} />
@@ -133,10 +126,6 @@ export function AssessmentPanel({ assessment }: { assessment: InvestigationAsses
               {assessment.reproduction.summary}
             </Typography>
           </Field>
-          <Alert severity="info">
-            A failed reproduction does not establish that this is not a bug. A local fix does not
-            establish that upstream is fixed.
-          </Alert>
           {assessment.bugAssessment.missingInformation.length > 0 && (
             <Field label="Missing information">
               <TextList items={assessment.bugAssessment.missingInformation} />
@@ -177,12 +166,6 @@ export function AssessmentPanel({ assessment }: { assessment: InvestigationAsses
             size="small"
             sx={{ alignSelf: "flex-start" }}
           />
-          {assessment.featureAssessment.status === "ready" && (
-            <Alert severity="info">
-              The plan is implementable. This does not mean the maintainers have accepted the
-              feature or that every validation prerequisite is ready.
-            </Alert>
-          )}
           <Field label="Requirements">
             <TextList items={assessment.featureAssessment.requirements} />
           </Field>
@@ -238,7 +221,7 @@ export function AssessmentPanel({ assessment }: { assessment: InvestigationAsses
 export function CoveragePanel({ report }: { report: InvestigationReportMetadata }) {
   const candidatesId = useId();
   return (
-    <Section title="Investigation coverage and review loop">
+    <Section title="Coverage">
       <Stack direction="row" useFlexGap spacing={1} sx={{ mb: 2, flexWrap: "wrap" }}>
         <Chip
           label={`${report.coverage.completedUnitRefs.length}/${report.coverage.includedUnits.length} scope units completed`}
@@ -316,7 +299,7 @@ export function CoveragePanel({ report }: { report: InvestigationReportMetadata 
 
 export function SubjectPanel({ subjects }: { subjects: InvestigationSubjectV1[] }) {
   return (
-    <Section title="Exact subjects">
+    <Section title="Sources">
       <Stack spacing={2}>
         {subjects.map((subject) => (
           <Box key={subject.id} sx={{ overflowWrap: "anywhere" }}>
@@ -366,7 +349,7 @@ export function SubjectPanel({ subjects }: { subjects: InvestigationSubjectV1[] 
 
 export function ValidationPanel({ validation }: { validation: InvestigationValidation }) {
   return (
-    <Section title="Actual validation">
+    <Section title="Checks">
       <Typography sx={{ mb: 2 }}>{validation.summary}</Typography>
       <Stack spacing={2}>
         {validation.checks.map((check) => (
@@ -418,6 +401,8 @@ export function FindingCard({
   suggestionValid,
   selectionEnabled = true,
   detail = false,
+  issue = false,
+  draftDirty = false,
   onSelect,
   onDraftChange,
 }: {
@@ -428,10 +413,13 @@ export function FindingCard({
   suggestionValid: boolean;
   selectionEnabled?: boolean;
   detail?: boolean;
+  issue?: boolean;
+  draftDirty?: boolean;
   onSelect: (selected: boolean) => void;
   onDraftChange: (body: string) => void;
 }) {
   const [expanded, setExpanded] = useState(finding.ordinal === 0);
+  const [feedbackOpen, setFeedbackOpen] = useState(draftDirty);
   const references = new Set([
     ...finding.evidenceRefs,
     ...finding.rootCause.evidenceRefs,
@@ -441,41 +429,46 @@ export function FindingCard({
     <Paper
       variant="outlined"
       className={detail ? "report-selected-finding" : undefined}
-      sx={{ p: { xs: 2, sm: 2.5 }, borderRadius: 3, minWidth: 0 }}
+      sx={{ p: 2, borderRadius: 3, minWidth: 0 }}
     >
-      <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
-        <Checkbox
-          checked={selected}
-          disabled={!selectionEnabled}
-          onChange={(event) => onSelect(event.target.checked)}
-          slotProps={{ input: { "aria-label": `Select ${finding.title}` } }}
-        />
-        <Box sx={{ flex: 1, minWidth: 0, pt: 0.8, overflowWrap: "anywhere" }}>
-          <Stack
-            direction="row"
-            useFlexGap
-            spacing={1}
-            sx={{ flexWrap: "wrap", alignItems: "center" }}
-          >
-            <Chip
-              label={finding.priority}
-              color={
-                finding.priority === "P0"
-                  ? "error"
-                  : finding.priority === "P1"
-                    ? "warning"
-                    : "default"
-              }
+      <Typography component="h2" variant="h6" sx={{ overflowWrap: "anywhere" }}>
+        {finding.title}
+      </Typography>
+      <Stack
+        direction="row"
+        spacing={1}
+        useFlexGap
+        sx={{ alignItems: "center", flexWrap: "wrap", mt: 1 }}
+      >
+        {!issue && (
+          <Chip
+            label={finding.priority}
+            color={
+              finding.priority === "P0"
+                ? "error"
+                : finding.priority === "P1"
+                  ? "warning"
+                  : "default"
+            }
+            size="small"
+          />
+        )}
+        <Typography variant="caption" color="text.secondary">
+          {finding.confirmation.status === "confirmed" ? "Confirmed" : "Needs verification"}
+        </Typography>
+        <FormControlLabel
+          sx={{ ml: "auto", mr: 0 }}
+          control={
+            <Checkbox
               size="small"
+              checked={selected}
+              disabled={!selectionEnabled}
+              onChange={(event) => onSelect(event.target.checked)}
+              slotProps={{ input: { "aria-label": `Include ${finding.title} in feedback` } }}
             />
-            <Typography component="h2" variant="h6">
-              {finding.title}
-            </Typography>
-          </Stack>
-          <Typography variant="caption" color="text.secondary">
-            {finding.confirmation.status} · Finding version {finding.version} · {finding.subjectRef}
-          </Typography>
-        </Box>
+          }
+          label={<Typography variant="body2">Include in feedback</Typography>}
+        />
       </Stack>
       {!detail && (
         <Button
@@ -484,30 +477,19 @@ export function FindingCard({
           aria-expanded={expanded}
           sx={{ mt: 1 }}
         >
-          {expanded ? "Hide finding details" : "Show finding details"}
+          {expanded ? "Hide details" : "Show details"}
         </Button>
       )}
       <Collapse in={detail || expanded}>
         <Stack spacing={2} sx={{ mt: 2 }}>
-          <Field label="Trigger conditions">
+          <Field label={issue ? "Reported behavior" : "Trigger & impact"}>
             <TextList items={finding.trigger.conditions} />
             <TextList items={finding.trigger.inputs} />
             <TextList items={finding.trigger.steps} />
-          </Field>
-          <Field label="Impact">
             <Typography variant="body2">{finding.impact.description}</Typography>
             <TextList items={finding.impact.affectedParties} />
           </Field>
-          <Field label={`Root cause · ${finding.rootCause.status}`}>
-            <Typography variant="body2">{finding.rootCause.explanation}</Typography>
-          </Field>
-          <Field label="Confirmation and final review">
-            <Typography variant="body2">{finding.confirmation.rationale}</Typography>
-            <Typography variant="caption" color="text.secondary">
-              {finding.confirmation.recheckRef ?? "No confirming recheck recorded"}
-            </Typography>
-          </Field>
-          <Field label="Locations">
+          <Field label={issue ? "Reported evidence" : "Source evidence"}>
             <TextList
               items={finding.locations.map((location) =>
                 location.kind === "source"
@@ -515,59 +497,46 @@ export function FindingCard({
                   : location.description,
               )}
             />
-          </Field>
-          <Field label="Evidence">
             <Stack spacing={1}>
               {[...references].map((id) => {
                 const record = evidence.find((item) => item.id === id);
                 return (
-                  <Box key={id}>
-                    <Typography variant="body2">
-                      {record?.summary ?? `Evidence ${id} is unavailable.`}
-                    </Typography>
-                    {record && (
-                      <Typography variant="caption" color="text.secondary">
-                        {id} · {record.source} · {record.authority} · {record.subjectRef}
-                      </Typography>
-                    )}
-                  </Box>
+                  <Typography key={id} variant="body2">
+                    {record?.summary ?? `Evidence ${id} is unavailable.`}
+                  </Typography>
                 );
               })}
             </Stack>
           </Field>
-          <Field label="Fix recommendation">
-            <Typography variant="body2">{finding.fixRecommendation.summary}</Typography>
-            <TextList items={finding.fixRecommendation.constraints} />
-          </Field>
-          <Divider />
-          <TextField
-            label="Independent comment draft"
-            multiline
-            minRows={3}
-            fullWidth
-            value={draftBody}
-            disabled={!selectionEnabled}
-            onChange={(event) => onDraftChange(event.target.value)}
-            helperText="Edits affect your private feedback draft. The sealed report stays unchanged. Only selected findings are included in prepared feedback."
-          />
+          <Box component="details" className="report-finding-recheck">
+            <Typography component="summary">
+              {issue ? "Assessment notes" : "Recorded recheck"}
+            </Typography>
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              <Field label={`Root cause · ${finding.rootCause.status}`}>
+                <Typography variant="body2">{finding.rootCause.explanation}</Typography>
+              </Field>
+              <Typography variant="body2">{finding.confirmation.rationale}</Typography>
+              <Typography variant="caption" color="text.secondary">
+                {finding.confirmation.recheckRef ?? "No confirming recheck recorded"}
+              </Typography>
+            </Stack>
+          </Box>
+          {(finding.fixRecommendation.summary.trim() ||
+            finding.fixRecommendation.constraints.length > 0) && (
+            <Field label={issue ? "Next step" : "Proposed fix"}>
+              {finding.fixRecommendation.summary.trim() && (
+                <Typography variant="body2">{finding.fixRecommendation.summary}</Typography>
+              )}
+              <TextList items={finding.fixRecommendation.constraints} />
+            </Field>
+          )}
           {finding.feedbackDraft.suggestion && (
-            <Box>
-              <Stack
-                direction={{ xs: "column", sm: "row" }}
-                spacing={1}
-                useFlexGap
-                sx={{ alignItems: { xs: "flex-start", sm: "center" }, flexWrap: "wrap" }}
-              >
-                <Typography variant="subtitle2">Code replacement suggestion</Typography>
-                <Chip
-                  size="small"
-                  label={
-                    suggestionValid ? "Source anchor validated" : "Not available for submission"
-                  }
-                  color={suggestionValid ? "success" : "default"}
-                />
-              </Stack>
-              <Typography variant="caption">
+            <Box component="details" className="report-code-suggestion">
+              <Typography component="summary">
+                Code suggestion · {suggestionValid ? "Available" : "Needs review"}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
                 {finding.feedbackDraft.suggestion.path}:{finding.feedbackDraft.suggestion.startLine}
                 –{finding.feedbackDraft.suggestion.endLine}
               </Typography>
@@ -583,25 +552,43 @@ export function FindingCard({
               >
                 {finding.feedbackDraft.suggestion.replacement}
               </Box>
-              <Typography variant="caption" color="text.secondary">
-                A suggested change does not choose a review verdict or establish runtime
-                correctness. Choose its delivery and the review action in the publishing workflow.
-              </Typography>
+              {!suggestionValid && (
+                <Typography variant="caption" color="text.secondary">
+                  This suggestion is unavailable for submission. Review the source or use comment
+                  text.
+                </Typography>
+              )}
             </Box>
           )}
-          <FormControlLabel
-            control={
-              <Checkbox
-                checked={selected}
-                disabled={!selectionEnabled}
-                onChange={(event) => onSelect(event.target.checked)}
-              />
-            }
-            label="Include this finding in prepared feedback"
-          />
+          <Box
+            component="details"
+            className="report-feedback-editor"
+            open={feedbackOpen}
+            onToggle={(event) => setFeedbackOpen(event.currentTarget.open)}
+          >
+            <Typography component="summary">
+              Feedback draft{draftDirty ? " · unsaved" : ""}
+            </Typography>
+            <TextField
+              label="Comment"
+              multiline
+              minRows={3}
+              fullWidth
+              value={draftBody}
+              slotProps={{ input: { readOnly: !selectionEnabled } }}
+              onChange={(event) => onDraftChange(event.target.value)}
+              sx={{ mt: 1 }}
+            />
+            {!selectionEnabled && (
+              <Typography variant="caption" color="text.secondary">
+                Editing requires Prepare actions permission.
+              </Typography>
+            )}
+          </Box>
           <Box component="details" sx={{ overflowWrap: "anywhere" }}>
-            <Typography component="summary" sx={{ cursor: "pointer", py: 1 }}>
-              Exact finding and evidence provenance
+            <Typography component="summary">Provenance</Typography>
+            <Typography variant="caption" color="text.secondary">
+              Finding version {finding.version} · {finding.subjectRef}
             </Typography>
             <Box
               component="pre"

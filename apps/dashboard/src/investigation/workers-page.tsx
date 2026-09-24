@@ -14,13 +14,10 @@ import {
   Dialog,
   DialogActions,
   DialogContent,
-  DialogContentText,
   DialogTitle,
-  FormControlLabel,
   InputAdornment,
   MenuItem,
   Stack,
-  Switch,
   TextField,
   Typography,
 } from "@mui/material";
@@ -180,9 +177,6 @@ export function WorkerDisableSummary({ worker }: { worker: InvestigationWorkerCo
           <dd>All repositories assigned to this worker</dd>
         </div>
       </dl>
-      <Typography variant="body2" color="text.secondary">
-        This changes server admission policy. Local screenshots and the model shell are unaffected.
-      </Typography>
     </Stack>
   );
 }
@@ -336,7 +330,8 @@ export function WorkerControlCard({
     };
   }, []);
   const change = async (enabled: boolean, version: number, disableConfirmed = false) => {
-    if (locked || changing.current || enabled === worker.e2eEnabled) return;
+    if (locked || changing.current || enabled === worker.e2eEnabled || (enabled && pendingCleanup))
+      return;
     changing.current = true;
     setBusy(true);
     onBusyChange?.(true);
@@ -389,26 +384,18 @@ export function WorkerControlCard({
           </div>
         </div>
         <div className="workers-policy">
-          <FormControlLabel
-            labelPlacement="start"
-            control={
-              <Switch
-                checked={worker.e2eEnabled}
-                disabled={locked}
-                onChange={(_event, checked) =>
-                  checked
-                    ? void change(true, worker.version)
-                    : setConfirmationVersion(worker.version)
-                }
-                slotProps={{ input: { "aria-label": `Allow E2E task admission on ${worker.id}` } }}
-              />
+          <Button
+            variant={worker.e2eEnabled ? "outlined" : "contained"}
+            disabled={locked || (!worker.e2eEnabled && pendingCleanup)}
+            onClick={() =>
+              worker.e2eEnabled
+                ? setConfirmationVersion(worker.version)
+                : void change(true, worker.version)
             }
-            label="Allow E2E task admission"
-          />
+          >
+            {busy ? "Saving…" : worker.e2eEnabled ? "Stop E2E work" : "Allow E2E work"}
+          </Button>
           <div className="workers-policy-status">
-            <Typography variant="caption" color="text.secondary">
-              Saved policy
-            </Typography>
             <Chip
               size="small"
               label={busy ? "Saving policy…" : workerStatusLabel(worker)}
@@ -438,8 +425,7 @@ export function WorkerControlCard({
           {worker.status === "disabling"
             ? "New E2E assignments are stopped. Running E2E tasks are being cancelled and cleaned up. "
             : "The worker has not confirmed cleanup of its owned E2E resources. "}
-          Ownership remains recorded until the worker confirms release. Offline contact, saving
-          policy, or refreshing this page does not release it.
+          Resources stay reserved until the worker confirms cleanup.
         </Alert>
       )}
       {worker.status === "awaiting_confirmation" && !pendingCleanup && (
@@ -453,8 +439,7 @@ export function WorkerControlCard({
           (kind) => kind !== "pr-review" && kind !== "issue-investigate",
         ) && (
           <Typography variant="body2" color="text.secondary" className="workers-notice">
-            Admission is enabled, but no E2E task type is currently confirmed. The worker must also
-            advertise the required task type.
+            Waiting for the worker to report E2E support.
           </Typography>
         )}
       {error && (
@@ -488,22 +473,23 @@ export function WorkerControlCard({
       )}
       {saved && !error && (
         <Alert severity="success" className="workers-notice">
-          Worker admission policy saved. Existing ownership still requires worker confirmation.
+          E2E setting saved.
         </Alert>
       )}
-      <Button
-        className="workers-detail-toggle"
-        disabled={busy || disabled}
-        aria-expanded={detailsOpen}
-        aria-controls={contentId}
-        endIcon={detailsOpen ? <ExpandLess /> : <ExpandMore />}
-        onClick={() => {
-          setLocalExpanded(!detailsOpen);
-          onExpandedChange?.(!detailsOpen);
-        }}
-      >
-        {detailsOpen ? "Hide worker details" : "Task types, repositories and policy details"}
-      </Button>
+      {!onExpandedChange && (
+        <Button
+          className="workers-detail-toggle"
+          disabled={busy || disabled}
+          aria-expanded={detailsOpen}
+          aria-controls={contentId}
+          endIcon={detailsOpen ? <ExpandLess /> : <ExpandMore />}
+          onClick={() => {
+            setLocalExpanded(!detailsOpen);
+          }}
+        >
+          {detailsOpen ? "Hide details" : "Worker details"}
+        </Button>
+      )}
       {detailsOpen && (
         <div id={contentId} className="workers-details">
           <section aria-label="Task capabilities">
@@ -517,10 +503,6 @@ export function WorkerControlCard({
                   {worker.effectiveKinds.length
                     ? worker.effectiveKinds.map((kind) => taskLabels[kind]).join(" · ")
                     : "No confirmed task capabilities."}
-                  <span className="workers-hint">
-                    Eligibility combines server policy and advertised task types. Contact and free
-                    capacity are also required.
-                  </span>
                 </dd>
               </div>
               <div>
@@ -571,19 +553,12 @@ export function WorkerControlCard({
                 <dt>Owned E2E tasks</dt>
                 <dd>
                   <WorkerReferences ids={worker.activeE2eTaskIds} empty="None recorded" />
-                  <span className="workers-hint">
-                    Task references are retained IDs. This worker record does not establish
-                    repository access to task details.
-                  </span>
                 </dd>
               </div>
               <div>
                 <dt>Pending cleanup attempts</dt>
                 <dd>
                   <WorkerReferences ids={worker.cleanupPendingAttemptIds} empty="None recorded" />
-                  <span className="workers-hint">
-                    Attempt IDs identify cleanup ownership; they are not task IDs.
-                  </span>
                 </dd>
               </div>
             </dl>
@@ -635,11 +610,8 @@ export function WorkerControlCard({
         aria-labelledby={dialogTitleId}
         maxWidth="sm"
       >
-        <DialogTitle id={dialogTitleId}>Turn off E2E task admission?</DialogTitle>
+        <DialogTitle id={dialogTitleId}>Stop E2E work?</DialogTitle>
         <DialogContent>
-          <DialogContentText sx={{ mb: 2 }}>
-            Review the worker's current ownership before changing admission.
-          </DialogContentText>
           <WorkerDisableSummary worker={worker} />
           {confirmationVersion !== undefined && confirmationVersion !== worker.version && (
             <Alert severity="warning" sx={{ mt: 2 }}>
@@ -650,7 +622,7 @@ export function WorkerControlCard({
         </DialogContent>
         <DialogActions>
           <Button autoFocus disabled={busy} onClick={() => setConfirmationVersion(undefined)}>
-            Keep admission on
+            Cancel
           </Button>
           <Button
             variant="contained"
@@ -660,7 +632,7 @@ export function WorkerControlCard({
               if (confirmationVersion !== undefined) void change(false, confirmationVersion, true);
             }}
           >
-            {busy ? "Saving…" : "Turn off admission"}
+            {busy ? "Saving…" : "Stop E2E work"}
           </Button>
         </DialogActions>
       </Dialog>
@@ -746,17 +718,21 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
     if (!mounted.current) return;
     if (result.isSuccess) {
       setRefreshGeneration((value) => value + 1);
-      setRefreshMessage(
-        "Current worker records loaded. Ownership changes only after server confirmation.",
-      );
+      setRefreshMessage("Worker status updated.");
     }
     setRefreshing(false);
   };
   return (
     <Stack spacing={3} className="workers-page">
+      {selectedWorkerId && (
+        <Box>
+          <Button disabled={busy} onClick={() => setParameter("workerId", "")}>
+            Back to workers
+          </Button>
+        </Box>
+      )}
       <PageHeading
-        title="Workers"
-        subtitle="Task admission and worker contact across assigned repositories."
+        title={selectedWorkerId || "Workers"}
         action={
           <Button
             variant="outlined"
@@ -764,7 +740,7 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
             disabled={busy || query.isFetching}
             onClick={() => void refresh()}
           >
-            {refreshing ? "Refreshing…" : "Refresh workers"}
+            {refreshing ? "Refreshing…" : "Refresh status"}
           </Button>
         }
       />
@@ -788,116 +764,172 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
       )}
       {query.data && (
         <>
-          <div className="workers-toolbar">
-            <TextField
-              label="Search workers"
-              placeholder="Worker, repository or ownership ID"
-              value={search}
-              disabled={busy}
-              onChange={(event) => setParameter("q", event.target.value, true)}
-              slotProps={{
-                input: {
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <Search aria-hidden="true" />
-                    </InputAdornment>
-                  ),
-                },
-              }}
-            />
-            <TextField
-              select
-              label="Contact and E2E cleanup"
-              value={filter}
-              disabled={busy}
-              onChange={(event) => setParameter("contact", event.target.value, true)}
-            >
-              <MenuItem value="all">All workers</MenuItem>
-              <MenuItem value="recent">Recent contact</MenuItem>
-              <MenuItem value="not-recent">No recent contact</MenuItem>
-              <MenuItem value="never">Never contacted</MenuItem>
-              <MenuItem value="cleanup">E2E cleanup pending</MenuItem>
-            </TextField>
-            <Typography variant="body2" color="text.secondary" className="workers-count">
-              {visible.length} of {query.data.items.length} workers
-            </Typography>
-          </div>
+          {!selectedWorkerId && (
+            <Surface className="workers-toolbar" sx={{ p: 2 }}>
+              <TextField
+                label="Search workers"
+                placeholder="Worker, repository or ownership ID"
+                value={search}
+                disabled={busy}
+                onChange={(event) => setParameter("q", event.target.value, true)}
+                slotProps={{
+                  input: {
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <Search aria-hidden="true" />
+                      </InputAdornment>
+                    ),
+                  },
+                }}
+              />
+              <TextField
+                select
+                label="Contact and E2E cleanup"
+                value={filter}
+                disabled={busy}
+                onChange={(event) => setParameter("contact", event.target.value, true)}
+              >
+                <MenuItem value="all">All workers</MenuItem>
+                <MenuItem value="recent">Recent contact</MenuItem>
+                <MenuItem value="not-recent">No recent contact</MenuItem>
+                <MenuItem value="never">Never contacted</MenuItem>
+                <MenuItem value="cleanup">E2E cleanup pending</MenuItem>
+              </TextField>
+              <Typography variant="body2" color="text.secondary" className="workers-count">
+                {visible.length} {visible.length === 1 ? "worker" : "workers"}
+              </Typography>
+              {(search || filter !== "all") && (
+                <Button onClick={resetFilters}>Clear filters</Button>
+              )}
+            </Surface>
+          )}
           {selectedWorkerId &&
             !query.data.items.some((worker) => worker.id === selectedWorkerId) && (
               <Alert severity="info">This worker is not in the current directory.</Alert>
             )}
           {query.data.items.length === 0 ? (
-            <EmptyState
-              title="No workers registered"
-              description="Workers appear here after registration. Contact and eligible task types determine available capacity."
-              icon={<ComputerOutlined />}
-            />
-          ) : visible.length === 0 ? (
+            <EmptyState title="No workers registered" icon={<ComputerOutlined />} />
+          ) : !selectedWorkerId && visible.length === 0 ? (
             <EmptyState
               title="No workers match this view"
-              description="Change the search or filter to find a registered worker."
               action={<Button onClick={resetFilters}>Show all workers</Button>}
               icon={<Search />}
             />
+          ) : !selectedWorkerId ? (
+            <Surface sx={{ overflow: "hidden" }}>
+              <div className="workers-table-wrap">
+                <table className="workers-table">
+                  <thead>
+                    <tr>
+                      {["Worker", "Current E2E tasks", "E2E work", "Actions"].map((label) => (
+                        <th key={label} scope="col">
+                          {label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((worker) => (
+                      <tr key={worker.id}>
+                        <td data-label="Worker">
+                          <Button
+                            className="workers-table-link"
+                            onClick={() => setParameter("workerId", worker.id)}
+                          >
+                            {worker.id}
+                          </Button>
+                          <Typography variant="caption" color="text.secondary" component="div">
+                            {workerContactLabel(worker)}
+                          </Typography>
+                        </td>
+                        <td data-label="Current E2E tasks">
+                          {worker.activeE2eTaskIds.length || "—"}
+                          {worker.cleanupPendingAttemptIds.length > 0 && (
+                            <Typography variant="caption" color="warning.main" component="div">
+                              {worker.cleanupPendingAttemptIds.length} awaiting cleanup
+                            </Typography>
+                          )}
+                        </td>
+                        <td data-label="E2E work">
+                          <Chip
+                            size="small"
+                            label={workerStatusLabel(worker)}
+                            color={
+                              workerHasE2eOwnership(worker) && !worker.e2eEnabled
+                                ? "warning"
+                                : "default"
+                            }
+                          />
+                        </td>
+                        <td data-label="Actions">
+                          <Button size="small" onClick={() => setParameter("workerId", worker.id)}>
+                            {worker.cleanupPendingAttemptIds.length
+                              ? "Cleanup status"
+                              : "View worker"}
+                          </Button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Surface>
           ) : (
             <div className="workers-directory">
-              {visible.map((worker) => (
-                <WorkerControlCard
-                  key={worker.id}
-                  worker={worker}
-                  repositories={permittedRepositories}
-                  readableRepositoryIds={readableRepositoryIds}
-                  canEdit
-                  disabled={busy}
-                  policyUnavailable={query.isError}
-                  refreshGeneration={refreshGeneration}
-                  expanded={selectedWorkerId === worker.id}
-                  staticLeases={scheduler.data?.leases}
-                  staticOwnershipLoading={scheduler.isPending}
-                  staticOwnershipError={scheduler.isError ? scheduler.error.message : undefined}
-                  onRetryStaticOwnership={() => {
-                    if (!busy) void scheduler.refetch();
-                  }}
-                  onExpandedChange={(open) => setParameter("workerId", open ? worker.id : "")}
-                  onBusyChange={(value) => {
-                    if (mounted.current) setMutationBusy(value);
-                  }}
-                  review={reviews[worker.id]}
-                  onReviewChange={(review) =>
-                    setReviews((current) => ({ ...current, [worker.id]: review }))
-                  }
-                  onSave={async (input) => {
-                    await client.cancelQueries({ queryKey: workersQueryKey });
-                    const updated = await investigationApi.updateWorkerE2e(worker.id, input);
-                    if (!mounted.current) return;
-                    await client.cancelQueries({ queryKey: workersQueryKey });
-                    if (!mounted.current) return;
-                    client.setQueryData<Awaited<ReturnType<typeof investigationApi.workers>>>(
-                      workersQueryKey,
-                      (current) =>
-                        current
-                          ? {
-                              items: current.items.map((item) =>
-                                item.id === updated.id ? updated : item,
-                              ),
-                            }
-                          : { items: [updated] },
-                    );
-                    await Promise.all([
-                      client.invalidateQueries({ queryKey: workersQueryKey }),
-                      client.invalidateQueries({ queryKey: schedulerQueryKey }),
-                      client.invalidateQueries({ queryKey: ["investigation-tasks"] }),
-                    ]);
-                  }}
-                />
-              ))}
+              {query.data.items
+                .filter((worker) => worker.id === selectedWorkerId)
+                .map((worker) => (
+                  <WorkerControlCard
+                    key={worker.id}
+                    worker={worker}
+                    repositories={permittedRepositories}
+                    readableRepositoryIds={readableRepositoryIds}
+                    canEdit
+                    disabled={busy}
+                    policyUnavailable={query.isError}
+                    refreshGeneration={refreshGeneration}
+                    expanded={selectedWorkerId === worker.id}
+                    staticLeases={scheduler.data?.leases}
+                    staticOwnershipLoading={scheduler.isPending}
+                    staticOwnershipError={scheduler.isError ? scheduler.error.message : undefined}
+                    onRetryStaticOwnership={() => {
+                      if (!busy) void scheduler.refetch();
+                    }}
+                    onExpandedChange={(open) => setParameter("workerId", open ? worker.id : "")}
+                    onBusyChange={(value) => {
+                      if (mounted.current) setMutationBusy(value);
+                    }}
+                    review={reviews[worker.id]}
+                    onReviewChange={(review) =>
+                      setReviews((current) => ({ ...current, [worker.id]: review }))
+                    }
+                    onSave={async (input) => {
+                      await client.cancelQueries({ queryKey: workersQueryKey });
+                      const updated = await investigationApi.updateWorkerE2e(worker.id, input);
+                      if (!mounted.current) return;
+                      await client.cancelQueries({ queryKey: workersQueryKey });
+                      if (!mounted.current) return;
+                      client.setQueryData<Awaited<ReturnType<typeof investigationApi.workers>>>(
+                        workersQueryKey,
+                        (current) =>
+                          current
+                            ? {
+                                items: current.items.map((item) =>
+                                  item.id === updated.id ? updated : item,
+                                ),
+                              }
+                            : { items: [updated] },
+                      );
+                      await Promise.all([
+                        client.invalidateQueries({ queryKey: workersQueryKey }),
+                        client.invalidateQueries({ queryKey: schedulerQueryKey }),
+                        client.invalidateQueries({ queryKey: ["investigation-tasks"] }),
+                      ]);
+                    }}
+                  />
+                ))}
             </div>
           )}
-          <Typography variant="body2" color="text.secondary">
-            Saved policy does not confirm worker availability. Local screenshots and the model shell
-            are unaffected by E2E admission. Static images and videos are not eligible for GitHub
-            upload.
-          </Typography>
         </>
       )}
     </Stack>
@@ -909,7 +941,7 @@ export default function WorkersPage() {
   if (!session.authenticated || !session.user.isAdmin)
     return (
       <Stack spacing={3}>
-        <PageHeading title="Workers" subtitle="Task admission and worker contact." />
+        <PageHeading title="Workers" />
         <EmptyState
           title="Administrator access is required"
           description="Only workspace administrators can manage worker admission across repositories."

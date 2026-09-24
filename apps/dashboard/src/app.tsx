@@ -10,7 +10,6 @@ import {
   LightModeOutlined,
   LinkRounded,
   LogoutRounded,
-  MenuRounded,
   PersonOutlineRounded,
   PlayCircleRounded,
   RateReviewRounded,
@@ -27,7 +26,6 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
-  Drawer,
   IconButton,
   InputAdornment,
   List,
@@ -37,7 +35,6 @@ import {
   Menu,
   MenuItem,
   Snackbar,
-  Stack,
   TextField,
   Tooltip,
   Typography,
@@ -221,7 +218,7 @@ function WorkspaceSearch({ open, close }: { open: boolean; close: () => void }) 
         )}
         {debounced.length < 2 ? (
           <Typography color="text.secondary" sx={{ py: 3 }}>
-            Enter at least two characters. Results include only repositories you can access.
+            Enter at least two characters.
           </Typography>
         ) : results.isFetching ? (
           <Typography role="status" color="text.secondary" sx={{ py: 3 }}>
@@ -290,7 +287,6 @@ function ApplicationShell() {
   const { mode, toggle } = useColorMode();
   const guard = useGuardedAction();
   const navigate = useNavigate();
-  const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [error, setError] = useState<string>();
@@ -331,6 +327,8 @@ function ApplicationShell() {
   const activeGroup = groups.find((group) => group.paths.includes(location.pathname));
   const allowed = (path: string) =>
     !["/accounts", "/workers"].includes(path) || Boolean(session.user?.isAdmin);
+  const selectedPage =
+    Object.hasOwn(labels, location.pathname) && allowed(location.pathname) ? location.pathname : "";
   const isDetail = isWorkspaceDetail(location.pathname, location.search);
   const home = session.user?.repositoryIds.length ? "/pull-requests" : "/account";
   const initials = (session.user?.displayName || session.user?.username || "Account")
@@ -342,7 +340,6 @@ function ApplicationShell() {
     .toUpperCase();
   useEffect(() => {
     document.title = `${labels[location.pathname] ?? "Workspace"} · Agentic Review`;
-    setMobileOpen(false);
     setAnchor(null);
   }, [location.pathname]);
   useLayoutEffect(() => {
@@ -364,11 +361,8 @@ function ApplicationShell() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, []);
-  const navigation = (compact: boolean) => (
-    <nav
-      className={compact ? "workspace-bottom-nav" : "workspace-rail-nav"}
-      aria-label={compact ? "Main navigation" : "Workspace navigation"}
-    >
+  const navigation = () => (
+    <nav className="workspace-rail-nav" aria-label="Workspace navigation">
       {groups.map((group) => {
         const Icon = group.icon;
         const destination = group.paths.find(allowed);
@@ -408,7 +402,7 @@ function ApplicationShell() {
             <GridViewRounded />
           </IconButton>
         </Tooltip>
-        {navigation(false)}
+        {navigation()}
         <Tooltip title={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}>
           <IconButton
             className="workspace-theme-button"
@@ -421,49 +415,70 @@ function ApplicationShell() {
       </aside>
       <Box className="workspace-content">
         <header className="workspace-app-bar">
-          <IconButton
-            className="workspace-mobile-menu"
-            aria-label="Open navigation"
-            onClick={() => setMobileOpen(true)}
-          >
-            <MenuRounded />
-          </IconButton>
+          <Box className="workspace-page-picker">
+            <label>
+              <span className="workspace-visually-hidden">Page</span>
+              <select
+                aria-label="Page"
+                value={selectedPage}
+                onChange={(event) => navigate(destinationFor(event.target.value))}
+              >
+                {!selectedPage && <option value="">Choose page</option>}
+                {groups.map((group) => (
+                  <optgroup key={group.id} label={group.label}>
+                    {group.paths.filter(allowed).map((path) => (
+                      <option key={path} value={path}>
+                        {labels[path]}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+                <option value="/account">My account</option>
+              </select>
+            </label>
+          </Box>
           <Link to={destinationFor(home)} className="workspace-brand">
             Agentic Review
           </Link>
-          <Box sx={{ flex: 1 }} />
           {businessPage && (
             <Box className="workspace-repository-picker">
               <InvestigationRepositorySelector fullWidth />
             </Box>
           )}
-          <Tooltip title="Copy view link">
-            <IconButton
-              className="workspace-copy-view"
-              aria-label="Copy view link"
-              onClick={() => void copyView()}
-            >
-              <LinkRounded />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="Search workspace (Ctrl+K)">
-            <IconButton aria-label="Search workspace (Ctrl+K)" onClick={() => setSearchOpen(true)}>
-              <SearchRounded />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="My account">
-            <IconButton
-              aria-label="Open account menu"
-              aria-controls={anchor ? "workspace-account-menu" : undefined}
-              aria-haspopup="menu"
-              aria-expanded={Boolean(anchor)}
-              onClick={(event) => setAnchor(event.currentTarget)}
-            >
-              <Avatar sx={{ width: 36, height: 36, fontSize: 14, fontWeight: 500 }}>
-                {initials}
-              </Avatar>
-            </IconButton>
-          </Tooltip>
+          <Box className="workspace-header-actions">
+            <Tooltip title="Search workspace (Ctrl+K)">
+              <Button
+                className="workspace-search-button"
+                aria-label="Search workspace (Ctrl+K)"
+                startIcon={<SearchRounded />}
+                onClick={() => setSearchOpen(true)}
+              >
+                <span>Search</span>
+              </Button>
+            </Tooltip>
+            <Tooltip title="Copy view link">
+              <IconButton
+                className="workspace-copy-view"
+                aria-label="Copy view link"
+                onClick={() => void copyView()}
+              >
+                <LinkRounded />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="My account">
+              <IconButton
+                aria-label="Open account menu"
+                aria-controls={anchor ? "workspace-account-menu" : undefined}
+                aria-haspopup="menu"
+                aria-expanded={Boolean(anchor)}
+                onClick={(event) => setAnchor(event.currentTarget)}
+              >
+                <Avatar sx={{ width: 40, height: 40, fontSize: 14, fontWeight: 500 }}>
+                  {initials}
+                </Avatar>
+              </IconButton>
+            </Tooltip>
+          </Box>
         </header>
         <Box
           component="main"
@@ -539,51 +554,6 @@ function ApplicationShell() {
           </Box>
         </Box>
       </Box>
-      {navigation(true)}
-      <Drawer
-        open={mobileOpen}
-        onClose={() => setMobileOpen(false)}
-        slotProps={{ paper: { sx: { width: "min(320px, 90vw)", p: 2 } } }}
-      >
-        <Stack
-          direction="row"
-          sx={{ mb: 2, alignItems: "center", justifyContent: "space-between" }}
-        >
-          <Typography variant="h6">Agentic Review</Typography>
-          <IconButton aria-label="Close navigation" onClick={() => setMobileOpen(false)}>
-            <CloseRounded />
-          </IconButton>
-        </Stack>
-        {groups.map((group) => (
-          <Box key={group.id} sx={{ mb: 2 }}>
-            <Typography color="text.secondary" variant="body2" sx={{ px: 2, pb: 1 }}>
-              {group.label}
-            </Typography>
-            <List disablePadding>
-              {group.paths.filter(allowed).map((path) => (
-                <ListItemButton
-                  key={path}
-                  component={Link}
-                  to={destinationFor(path)}
-                  onClick={() => setMobileOpen(false)}
-                  selected={location.pathname === path}
-                  sx={{ borderRadius: 2 }}
-                >
-                  <ListItemText primary={labels[path]} />
-                </ListItemButton>
-              ))}
-            </List>
-          </Box>
-        ))}
-        <Divider />
-        <Button
-          onClick={toggle}
-          startIcon={mode === "light" ? <DarkModeOutlined /> : <LightModeOutlined />}
-          sx={{ mt: 2 }}
-        >
-          {mode === "light" ? "Dark theme" : "Light theme"}
-        </Button>
-      </Drawer>
       <Menu
         id="workspace-account-menu"
         anchorEl={anchor}
@@ -612,6 +582,17 @@ function ApplicationShell() {
           </Typography>
         </Box>
         <Divider />
+        <MenuItem
+          onClick={() => {
+            toggle();
+            setAnchor(null);
+          }}
+        >
+          <ListItemIcon>
+            {mode === "light" ? <DarkModeOutlined /> : <LightModeOutlined />}
+          </ListItemIcon>
+          {mode === "light" ? "Dark theme" : "Light theme"}
+        </MenuItem>
         <MenuItem
           onClick={() => {
             setAnchor(null);
@@ -644,7 +625,7 @@ function ApplicationShell() {
         open={copied}
         autoHideDuration={3500}
         onClose={() => setCopied(false)}
-        message="View link copied. Private drafts and payloads are excluded."
+        message="View link copied"
       />
       <Dialog
         open={Boolean(copyFallback)}
@@ -655,10 +636,7 @@ function ApplicationShell() {
       >
         <DialogTitle id="copy-view-title">Copy current view</DialogTitle>
         <DialogContent>
-          <Typography sx={{ mb: 2 }}>
-            Clipboard access is unavailable. Copy this link to restore the current view with your
-            own access.
-          </Typography>
+          <Typography sx={{ mb: 2 }}>Copy this link to share the current view.</Typography>
           <TextField
             autoFocus
             fullWidth

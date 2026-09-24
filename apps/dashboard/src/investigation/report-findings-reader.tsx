@@ -75,13 +75,24 @@ export function ReportFindingsReader({
   const [toolsOpen, setToolsOpen] = useState(false);
   const [indexOpen, setIndexOpen] = useState(false);
   const [selectedOpen, setSelectedOpen] = useState(false);
+  const [discardOpen, setDiscardOpen] = useState(false);
   const [copyFallback, setCopyFallback] = useState("");
   const [message, setMessage] = useState("");
   const detailRef = useRef<HTMLDivElement>(null);
+  const directoryRef = useRef<HTMLDivElement>(null);
   const focusRequested = useRef(false);
   const removeButtons = useRef(new Map<string, HTMLButtonElement>());
   const selectedDone = useRef<HTMLButtonElement>(null);
-  const filters = useMemo(() => readFindingFilters(params), [params]);
+  const singleFinding = result?.findings.length === 1;
+  const issue = header.context.workItem.kind === "issue";
+  const filters = useMemo(() => {
+    const current = readFindingFilters(params);
+    return singleFinding
+      ? { search: "", priority: "all" as const, assessment: "all" as const }
+      : issue
+        ? { ...current, priority: "all" as const }
+        : current;
+  }, [params, singleFinding, issue]);
   const selection = draft.current.selection;
   const editedBodies = draft.current.editedBodies;
   const view = useMemo(
@@ -95,6 +106,13 @@ export function ReportFindingsReader({
     [result, filters, params],
   );
   const finding = view.finding;
+  const findingId = finding?.id;
+  const firstFinding = result?.findings[0];
+  const dirty = isReportDraftDirty(draft);
+  const currentEdited = finding
+    ? (editedBodies[finding.feedbackDraft.id] ?? finding.feedbackDraft.body) !==
+      (draft.saved.editedBodies[finding.feedbackDraft.id] ?? finding.feedbackDraft.body)
+    : false;
   const totalSelected = selection.selectedFindings.length + selection.selectedDraftIds.length;
   const hiddenSelected = selection.selectedFindings.filter(
     (selected) => !view.matching.some((entry) => entry.id === selected.findingId),
@@ -106,6 +124,19 @@ export function ReportFindingsReader({
     detailRef.current?.scrollIntoView({ block: "start" });
     detailRef.current?.focus({ preventScroll: true });
   }, [finding]);
+
+  useEffect(() => {
+    const directory = directoryRef.current;
+    if (!directory || directory.dataset.findingPage !== String(view.page)) return;
+    const selected = Array.from(directory.querySelectorAll<HTMLElement>("[data-finding-id]")).find(
+      (entry) => entry.dataset.findingId === findingId,
+    );
+    if (!selected || !directory.clientHeight) return;
+    const bounds = directory.getBoundingClientRect();
+    const entry = selected.getBoundingClientRect();
+    if (entry.top < bounds.top) directory.scrollTop += entry.top - bounds.top;
+    else if (entry.bottom > bounds.bottom) directory.scrollTop += entry.bottom - bounds.bottom;
+  }, [findingId, view.page]);
 
   const selectFinding = (id: string) => {
     const next = new URLSearchParams(params);
@@ -167,13 +198,9 @@ export function ReportFindingsReader({
   };
   const saveAndNext = () => {
     if (!finding || !canEdit) return;
-    onDraft({ type: "save-finding", draftId: finding.feedbackDraft.id });
+    if (currentEdited) onDraft({ type: "save-finding", draftId: finding.feedbackDraft.id });
     if (view.next) selectFinding(view.next.id);
-    setMessage(
-      view.next
-        ? "Current feedback saved. Showing the next matching finding."
-        : "Current feedback saved. This is the last matching finding.",
-    );
+    if (currentEdited) setMessage("Draft saved.");
   };
   const removeSelected = (key: string, remove: () => void) => {
     const keys = [
@@ -201,7 +228,7 @@ export function ReportFindingsReader({
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
       await navigator.clipboard.writeText(link);
-      setMessage("Finding link copied. Private selections and feedback are not included.");
+      setMessage("Finding link copied.");
     } catch {
       setCopyFallback(link);
     }
@@ -212,7 +239,7 @@ export function ReportFindingsReader({
       <Box role="status" sx={{ py: 4, textAlign: "center" }}>
         <CircularProgress size={24} aria-label="Loading all report findings" />
         <Typography color="text.secondary" sx={{ mt: 1 }}>
-          Loading the complete saved collection for search and selection…
+          Loading findings…
         </Typography>
       </Box>
     ) : null;
@@ -221,79 +248,81 @@ export function ReportFindingsReader({
     <Stack spacing={2}>
       {result.findings.some((entry) => entry.priority === "P0") && (
         <Alert severity="warning" action={<Button onClick={locateP0}>Locate P0</Button>}>
-          This saved report includes{" "}
-          {result.findings.filter((entry) => entry.priority === "P0").length} P0 findings. Review
-          their evidence and confirmation status.
+          {result.findings.filter((entry) => entry.priority === "P0").length} P0 finding
+          {result.findings.filter((entry) => entry.priority === "P0").length === 1 ? "" : "s"}.
+          Review the evidence before approving.
         </Alert>
       )}
-      <Box className="report-findings-tools-toggle">
-        <Button
-          startIcon={<FilterListRounded />}
-          onClick={() => setToolsOpen((open) => !open)}
-          aria-expanded={toolsOpen}
-          aria-controls="report-findings-tools"
-        >
-          Filters and feedback
-        </Button>
-        <Typography variant="body2" color="text.secondary">
-          {result.findings.length} total · {view.matching.length} matching · {totalSelected}{" "}
-          selected
-        </Typography>
-      </Box>
-      <Box id="report-findings-tools" className="report-findings-tools" data-open={toolsOpen}>
-        <Box className="report-finding-filters">
-          <TextField
-            type="search"
-            label="Search all findings"
-            placeholder="Title, file path or saved finding text"
-            value={filters.search}
-            onChange={(event) => setFilter("findingSearch", event.target.value)}
-            fullWidth
-          />
-          <TextField
-            select
-            label="Priority"
-            value={filters.priority}
-            onChange={(event) => setFilter("findingPriority", event.target.value)}
+      {!singleFinding && result.findings.length > 0 && (
+        <Box className="report-findings-tools-toggle">
+          <Button
+            startIcon={<FilterListRounded />}
+            onClick={() => setToolsOpen((open) => !open)}
+            aria-expanded={toolsOpen}
+            aria-controls="report-findings-tools"
           >
-            <MenuItem value="all">All priorities</MenuItem>
-            {["P0", "P1", "P2", "P3"].map((priority) => (
-              <MenuItem value={priority} key={priority}>
-                {priority} · {result.findings.filter((entry) => entry.priority === priority).length}
-              </MenuItem>
-            ))}
-          </TextField>
-          <TextField
-            select
-            label="Finding assessment"
-            value={filters.assessment}
-            onChange={(event) => setFilter("findingAssessment", event.target.value)}
-          >
-            <MenuItem value="all">All assessments</MenuItem>
-            <MenuItem value="confirmed">Confirmed</MenuItem>
-            <MenuItem value="hypothesis">Hypothesis · needs verification</MenuItem>
-          </TextField>
-          {(filters.search || filters.priority !== "all" || filters.assessment !== "all") && (
-            <Button onClick={clearFilters}>Clear finding filters</Button>
-          )}
+            Filters
+          </Button>
+          <Typography variant="body2" color="text.secondary">
+            {view.matching.length} finding{view.matching.length === 1 ? "" : "s"}
+          </Typography>
         </Box>
+      )}
+      {!singleFinding && result.findings.length > 0 && (
+        <Box id="report-findings-tools" className="report-findings-tools" data-open={toolsOpen}>
+          <Box className="report-finding-filters">
+            <TextField
+              type="search"
+              label="Search findings"
+              placeholder="Title, file or text"
+              value={filters.search}
+              onChange={(event) => setFilter("findingSearch", event.target.value)}
+              fullWidth
+            />
+            {!issue && (
+              <TextField
+                select
+                label="Priority"
+                value={filters.priority}
+                onChange={(event) => setFilter("findingPriority", event.target.value)}
+              >
+                <MenuItem value="all">All priorities</MenuItem>
+                {["P0", "P1", "P2", "P3"].map((priority) => (
+                  <MenuItem value={priority} key={priority}>
+                    {priority} ·{" "}
+                    {result.findings.filter((entry) => entry.priority === priority).length}
+                  </MenuItem>
+                ))}
+              </TextField>
+            )}
+            <TextField
+              select
+              label="Assessment"
+              value={filters.assessment}
+              onChange={(event) => setFilter("findingAssessment", event.target.value)}
+            >
+              <MenuItem value="all">All assessments</MenuItem>
+              <MenuItem value="confirmed">Confirmed</MenuItem>
+              <MenuItem value="hypothesis">Needs verification</MenuItem>
+            </TextField>
+            {(filters.search || filters.priority !== "all" || filters.assessment !== "all") && (
+              <Button onClick={clearFilters}>Clear</Button>
+            )}
+          </Box>
+        </Box>
+      )}
+      {totalSelected > 0 && (
         <Stack
           direction="row"
           spacing={1}
           useFlexGap
-          sx={{ flexWrap: "wrap", alignItems: "center", mt: 2 }}
+          className="report-selection-bar"
+          sx={{ flexWrap: "wrap", alignItems: "center", bgcolor: "action.selected" }}
         >
-          <Button variant="outlined" onClick={() => setSelectedOpen(true)}>
-            Review selected ({totalSelected})
-          </Button>
-          <Button
-            disabled={!canEdit || !view.visible.length}
-            onClick={() => {
-              for (const entry of view.visible) setFindingSelected(entry, true);
-            }}
-          >
-            Select current page
-          </Button>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {totalSelected} selected
+          </Typography>
+          <Button onClick={() => setSelectedOpen(true)}>Review selection</Button>
           <Button
             disabled={!canEdit || !totalSelected}
             onClick={() => {
@@ -303,43 +332,50 @@ export function ReportFindingsReader({
                 dispatch({ type: "set-draft", draftId, selected: false });
             }}
           >
-            Clear selection
+            Clear
           </Button>
           <Button
-            disabled={!canEdit || !isReportDraftDirty(draft)}
-            onClick={() => {
-              onDraft({ type: "save" });
-              setMessage(
-                "All private report feedback saved for this session. Nothing was published.",
-              );
-            }}
+            variant="contained"
+            disabled={!canPublish}
+            onClick={onPublish}
+            sx={{ ml: "auto" }}
           >
-            Save all report drafts
-          </Button>
-          <Button
-            disabled={!canEdit || !isReportDraftDirty(draft)}
-            onClick={() => onDraft({ type: "discard" })}
-          >
-            Discard report edits
-          </Button>
-          <Button variant="contained" disabled={!canPublish || !totalSelected} onClick={onPublish}>
-            Publish selected findings
+            Publish selected
           </Button>
         </Stack>
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
-          {isReportDraftDirty(draft)
-            ? "Unsaved private feedback"
-            : "Private feedback saved for this session"}{" "}
-          · {hiddenSelected} selected findings hidden by filters
+      )}
+      {dirty && (
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ flexWrap: "wrap", alignItems: "center" }}
+        >
+          <Typography variant="caption" color="text.secondary" sx={{ mr: "auto" }}>
+            Unsaved feedback
+          </Typography>
+          <Button disabled={!canEdit} onClick={() => setDiscardOpen(true)}>
+            Discard
+          </Button>
+          <Button
+            disabled={!canEdit}
+            onClick={() => {
+              onDraft({ type: "save" });
+              setMessage("Draft saved.");
+            }}
+          >
+            Save draft{singleFinding ? "" : "s"}
+          </Button>
+        </Stack>
+      )}
+      {message && (
+        <Typography role="status" aria-live="polite" variant="body2" color="text.secondary">
+          {message}
         </Typography>
-      </Box>
-      <Typography role="status" aria-live="polite" variant="body2" color="text.secondary">
-        {message}
-      </Typography>
+      )}
       {result.findings.length === 0 ? (
         <EmptyState
           title="No review findings"
-          description="Review the saved coverage and supporting evidence before choosing the next action."
           action={
             <Button
               onClick={() => {
@@ -348,7 +384,7 @@ export function ReportFindingsReader({
                 setParams(next);
               }}
             >
-              Review evidence
+              View evidence
             </Button>
           }
         />
@@ -357,16 +393,15 @@ export function ReportFindingsReader({
           {!view.matching.length && (
             <EmptyState
               title="No matching findings"
-              description="Search covers the complete saved collection. Your selections and private drafts are kept."
               action={<Button onClick={clearFilters}>Clear finding filters</Button>}
             />
           )}
-          {view.matching.length > 0 && (
+          {!singleFinding && view.matching.length > 0 && (
             <Box className="report-mobile-finding-picker">
               <TextField
                 select
                 fullWidth
-                label={`Current finding · ${view.matching.length} matches`}
+                label="Finding"
                 value={view.outsideFilters || view.unavailable ? "" : (finding?.id ?? "")}
                 onChange={(event) => selectFinding(event.target.value)}
               >
@@ -377,7 +412,8 @@ export function ReportFindingsReader({
                 )}
                 {view.matching.map((entry) => (
                   <MenuItem key={entry.id} value={entry.id}>
-                    {entry.priority} · {entry.ordinal + 1}. {entry.title}
+                    {issue ? "" : `${entry.priority} · `}
+                    {entry.ordinal + 1}. {entry.title}
                   </MenuItem>
                 ))}
               </TextField>
@@ -386,87 +422,121 @@ export function ReportFindingsReader({
                 aria-expanded={indexOpen}
                 aria-controls="report-finding-directory"
               >
-                {indexOpen ? "Hide findings directory" : "Show findings directory"}
+                {indexOpen ? "Hide directory" : "Show directory"}
               </Button>
             </Box>
           )}
-          <Box className="report-findings-layout">
-            <Box
-              component="nav"
-              id="report-finding-directory"
-              className="report-finding-nav"
-              data-open={indexOpen}
-              aria-label="Report findings"
-              sx={{ borderColor: "divider" }}
-            >
-              <Typography variant="caption" color="text.secondary">
-                {view.matching.length
-                  ? `${view.offset + 1}–${view.offset + view.visible.length}`
-                  : "0"}{" "}
-                of {view.matching.length} matching · {result.findings.length} total
-              </Typography>
-              {view.visible.map((entry) => (
-                <ButtonBase
-                  key={entry.id}
-                  className="report-finding-nav-item"
-                  aria-current={finding?.id === entry.id ? "true" : undefined}
-                  aria-controls="selected-report-finding"
-                  onClick={() => selectFinding(entry.id)}
-                  sx={{
-                    bgcolor: finding?.id === entry.id ? "action.selected" : "transparent",
-                    "&:hover": { bgcolor: "action.hover" },
-                    borderRadius: 2,
-                  }}
+          <Box
+            className={`report-findings-layout${singleFinding ? " report-findings-single" : ""}`}
+          >
+            {!singleFinding && (
+              <Box
+                component="nav"
+                id="report-finding-directory"
+                className="report-finding-nav"
+                data-open={indexOpen}
+                aria-label="Report findings"
+                sx={{ borderColor: "divider" }}
+              >
+                <Stack
+                  direction="row"
+                  useFlexGap
+                  sx={{ gap: 1, justifyContent: "space-between", alignItems: "center", p: 1 }}
                 >
-                  <Stack
-                    direction="row"
-                    spacing={1}
-                    useFlexGap
-                    sx={{ width: "100%", flexWrap: "wrap", alignItems: "center" }}
-                  >
-                    <Chip
-                      size="small"
-                      label={entry.priority}
-                      color={
-                        entry.priority === "P0"
-                          ? "error"
-                          : entry.priority === "P1"
-                            ? "warning"
-                            : "default"
-                      }
-                    />
-                    <Typography variant="caption">{entry.confirmation.status}</Typography>
-                    {isFindingSelected(selection, entry.id) && (
-                      <CheckRounded
-                        fontSize="small"
-                        aria-label="Included in feedback"
-                        sx={{ ml: "auto" }}
-                      />
-                    )}
-                  </Stack>
-                  <Typography variant="subtitle2">
-                    {entry.ordinal + 1}. {entry.title}
-                  </Typography>
                   <Typography variant="caption" color="text.secondary">
-                    {findingLocation(entry)}
+                    {view.matching.length
+                      ? `${view.offset + 1}–${view.offset + view.visible.length}`
+                      : "0"}{" "}
+                    of {view.matching.length}
                   </Typography>
-                </ButtonBase>
-              ))}
-              <Stack direction="row" sx={{ justifyContent: "space-between" }}>
-                <Button disabled={view.page === 1} onClick={() => changePage(view.page - 1)}>
-                  Previous page
-                </Button>
-                <Button
-                  disabled={view.page === view.pageCount}
-                  onClick={() => changePage(view.page + 1)}
+                  <Button
+                    size="small"
+                    disabled={!canEdit || !view.visible.length}
+                    onClick={() => {
+                      for (const entry of view.visible) setFindingSelected(entry, true);
+                    }}
+                  >
+                    Select page
+                  </Button>
+                </Stack>
+                <Box
+                  className="report-finding-directory-items"
+                  ref={directoryRef}
+                  data-finding-page={view.page}
                 >
-                  Next page
-                </Button>
-              </Stack>
-              <Typography variant="caption" color="text.secondary">
-                Page {view.page} of {view.pageCount} · {findingPageSize} per page
-              </Typography>
-            </Box>
+                  {view.visible.map((entry) => (
+                    <ButtonBase
+                      key={entry.id}
+                      data-finding-id={entry.id}
+                      className="report-finding-nav-item"
+                      aria-current={finding?.id === entry.id ? "true" : undefined}
+                      aria-controls="selected-report-finding"
+                      onClick={() => selectFinding(entry.id)}
+                      sx={{
+                        bgcolor: finding?.id === entry.id ? "action.selected" : "transparent",
+                        "&:hover": { bgcolor: "action.hover" },
+                        borderRadius: 0,
+                      }}
+                    >
+                      <Stack
+                        direction="row"
+                        spacing={1}
+                        useFlexGap
+                        sx={{ width: "100%", flexWrap: "wrap", alignItems: "center" }}
+                      >
+                        {!issue && (
+                          <Chip
+                            size="small"
+                            label={entry.priority}
+                            color={
+                              entry.priority === "P0"
+                                ? "error"
+                                : entry.priority === "P1"
+                                  ? "warning"
+                                  : "default"
+                            }
+                          />
+                        )}
+                        <Typography variant="subtitle2">
+                          {entry.ordinal + 1}. {entry.title}
+                        </Typography>
+                        {isFindingSelected(selection, entry.id) && (
+                          <CheckRounded
+                            fontSize="small"
+                            aria-label="Included in feedback"
+                            sx={{ ml: "auto" }}
+                          />
+                        )}
+                      </Stack>
+                      <Typography variant="caption" color="text.secondary">
+                        {findingLocation(entry)} ·{" "}
+                        {entry.confirmation.status === "confirmed"
+                          ? "Confirmed"
+                          : "Needs verification"}
+                      </Typography>
+                    </ButtonBase>
+                  ))}
+                </Box>
+                {view.pageCount > 1 && (
+                  <>
+                    <Stack direction="row" sx={{ justifyContent: "space-between" }}>
+                      <Button disabled={view.page === 1} onClick={() => changePage(view.page - 1)}>
+                        Previous page
+                      </Button>
+                      <Button
+                        disabled={view.page === view.pageCount}
+                        onClick={() => changePage(view.page + 1)}
+                      >
+                        Next page
+                      </Button>
+                    </Stack>
+                    <Typography variant="caption" color="text.secondary">
+                      Page {view.page} of {view.pageCount} · {findingPageSize} per page
+                    </Typography>
+                  </>
+                )}
+              </Box>
+            )}
             <Box
               id="selected-report-finding"
               ref={detailRef}
@@ -484,8 +554,7 @@ export function ReportFindingsReader({
                   action={<Button onClick={clearFilters}>Clear filters</Button>}
                   sx={{ mb: 2 }}
                 >
-                  This linked finding belongs to the complete report but is outside the current
-                  filters.
+                  This finding is hidden by the current filters.
                 </Alert>
               )}
               {finding ? (
@@ -509,6 +578,8 @@ export function ReportFindingsReader({
                   <FindingCard
                     key={`${finding.id}:${finding.version}`}
                     detail
+                    issue={issue}
+                    draftDirty={currentEdited}
                     finding={finding}
                     evidence={result.verificationEvidence}
                     selected={isFindingSelected(selection, finding.id)}
@@ -527,44 +598,52 @@ export function ReportFindingsReader({
                       onDraft({ type: "edit", draftId: finding.feedbackDraft.id, body })
                     }
                   />
-                  <Stack
-                    direction="row"
-                    spacing={1}
-                    useFlexGap
-                    sx={{ flexWrap: "wrap", justifyContent: "space-between", mt: 2 }}
-                  >
-                    <Button
-                      startIcon={<ArrowBackRounded />}
-                      disabled={!view.previous}
-                      onClick={() => view.previous && selectFinding(view.previous.id)}
+                  {!singleFinding && (
+                    <Stack
+                      direction="row"
+                      spacing={1}
+                      useFlexGap
+                      sx={{ flexWrap: "wrap", justifyContent: "space-between", mt: 2 }}
                     >
-                      Previous finding
-                    </Button>
-                    {canEdit ? (
-                      <Button variant="contained" onClick={saveAndNext}>
-                        {view.next ? "Save draft & next" : "Save current draft"}
-                      </Button>
-                    ) : (
                       <Button
-                        variant="contained"
-                        endIcon={<ArrowForwardRounded />}
-                        disabled={!view.next}
-                        onClick={() => view.next && selectFinding(view.next.id)}
+                        startIcon={<ArrowBackRounded />}
+                        disabled={!view.previous}
+                        onClick={() => view.previous && selectFinding(view.previous.id)}
                       >
-                        Next finding
+                        Previous
                       </Button>
-                    )}
-                  </Stack>
-                  <Typography variant="caption" color="text.secondary">
-                    {canEdit
-                      ? "Saves only this finding’s text. Selection and other edits stay unchanged."
-                      : "Navigate within the current filtered collection."}
-                  </Typography>
+                      {canEdit ? (
+                        <Button
+                          variant={currentEdited ? "contained" : "outlined"}
+                          disabled={!currentEdited && !view.next}
+                          onClick={saveAndNext}
+                        >
+                          {currentEdited ? (view.next ? "Save & next" : "Save draft") : "Next"}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="contained"
+                          endIcon={<ArrowForwardRounded />}
+                          disabled={!view.next}
+                          onClick={() => view.next && selectFinding(view.next.id)}
+                        >
+                          Next
+                        </Button>
+                      )}
+                    </Stack>
+                  )}
                 </>
               ) : view.unavailable ? (
                 <EmptyState
                   title="Finding unavailable"
-                  description="This link does not identify a finding in the complete saved report. Choose a finding from the directory."
+                  description="This link does not identify a finding in this report."
+                  action={
+                    firstFinding ? (
+                      <Button onClick={() => selectFinding(firstFinding.id)}>
+                        Open first finding
+                      </Button>
+                    ) : undefined
+                  }
                 />
               ) : null}
             </Box>
@@ -574,7 +653,7 @@ export function ReportFindingsReader({
       {result.feedbackDrafts.length > 0 && (
         <Box component="details" className="report-independent-drafts">
           <Typography component="summary">
-            Independent feedback drafts ({result.feedbackDrafts.length})
+            Additional feedback ({result.feedbackDrafts.length})
           </Typography>
           <Stack spacing={2} sx={{ mt: 2 }}>
             {result.feedbackDrafts.map((entry) => (
@@ -593,7 +672,7 @@ export function ReportFindingsReader({
                       }
                     />
                   }
-                  label="Include this independent feedback"
+                  label="Include in feedback"
                 />
                 <TextField
                   multiline
@@ -620,13 +699,15 @@ export function ReportFindingsReader({
         aria-labelledby="selected-report-feedback-title"
       >
         <DialogTitle id="selected-report-feedback-title">
-          Review selected feedback ({totalSelected})
+          Selected feedback ({totalSelected})
         </DialogTitle>
         <DialogContent dividers>
-          <Typography color="text.secondary" sx={{ mb: 2 }}>
-            {hiddenSelected} selected findings are hidden by the current filters. Removing a
-            selection keeps its private text.
-          </Typography>
+          {hiddenSelected > 0 && (
+            <Typography color="text.secondary" sx={{ mb: 2 }}>
+              {hiddenSelected} selected finding{hiddenSelected === 1 ? " is" : "s are"} hidden by
+              filters.
+            </Typography>
+          )}
           <Stack spacing={2}>
             {selection.selectedFindings.map((entry) => {
               const record = result.findings.find((candidate) => candidate.id === entry.findingId);
@@ -700,12 +781,7 @@ export function ReportFindingsReader({
               </Box>
             ))}
           </Stack>
-          {!totalSelected && (
-            <EmptyState
-              title="No selected feedback"
-              description="Choose findings or independent drafts before publishing."
-            />
-          )}
+          {!totalSelected && <EmptyState title="No selected feedback" />}
         </DialogContent>
         <DialogActions>
           <Button ref={selectedDone} onClick={() => setSelectedOpen(false)}>
@@ -719,7 +795,28 @@ export function ReportFindingsReader({
               onPublish();
             }}
           >
-            Publish selected findings
+            Publish selected
+          </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog
+        open={discardOpen}
+        onClose={() => setDiscardOpen(false)}
+        aria-labelledby="discard-report-feedback-title"
+      >
+        <DialogTitle id="discard-report-feedback-title">Discard feedback changes?</DialogTitle>
+        <DialogContent>Unsaved text and selection changes will be lost.</DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDiscardOpen(false)}>Keep editing</Button>
+          <Button
+            color="error"
+            onClick={() => {
+              onDraft({ type: "discard" });
+              setDiscardOpen(false);
+              setMessage("Changes discarded.");
+            }}
+          >
+            Discard
           </Button>
         </DialogActions>
       </Dialog>
@@ -733,8 +830,7 @@ export function ReportFindingsReader({
         <DialogTitle id="copy-finding-link-title">Copy finding link</DialogTitle>
         <DialogContent>
           <Typography color="text.secondary" sx={{ mb: 2 }}>
-            Clipboard access is unavailable. This link does not contain private selections or
-            feedback.
+            Copy this link manually.
           </Typography>
           <TextField
             autoFocus

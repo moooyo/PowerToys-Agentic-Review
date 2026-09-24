@@ -90,10 +90,11 @@ describe("report evidence composition", () => {
         ...result,
         context: { ...result.context, task: { ...result.context.task, kind } },
       });
-      expect(html).toContain("Files registered by this execution");
+      expect(html).toContain("Checks");
       expect(html).not.toContain("Files registered by this static investigation");
       expect(html).not.toContain("E2E feature coverage");
-      expect(html).toContain("Uploaded files alone do not establish passing verification");
+      expect(html).not.toContain("GitHub media publication");
+      expect(html.match(/data-file-id=/gu)).toHaveLength(result.artifacts.length);
     },
   );
 });

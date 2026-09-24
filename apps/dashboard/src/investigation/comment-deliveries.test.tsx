@@ -11,6 +11,7 @@ import {
   CommentDeliveryHistory,
   CommentDeliveryHistoryPanel,
   CommentPublicationControls,
+  CommentPublicationRow,
   commentDeliveriesQueryKey,
   commentPollingInterval,
   commentQueryKey,
@@ -20,6 +21,7 @@ import {
   TaskComments,
 } from "./comment-deliveries";
 import CommentsPage, {
+  CommentBody,
   CommentDetails,
   commentHistoryFilters,
   commentPublicationFilters,
@@ -118,6 +120,40 @@ function renderHistory(items: InvestigationCommentDelivery[]) {
 }
 
 describe("comment delivery history", () => {
+  it("renders a compact five-cell publication row with one detail action", () => {
+    const client = new QueryClient();
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <table>
+            <tbody>
+              <CommentPublicationRow comment={summary({ state: "needs_attention" })} tableRow />
+            </tbody>
+          </table>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(html.match(/<td /gu)).toHaveLength(5);
+    expect(html).toContain('data-label="Publication"');
+    expect(html).toContain('data-label="Actions"');
+    expect(html).toContain("Review retry");
+    expect(html.match(/href="[^"]*commentId=comment-1/gu)).toHaveLength(1);
+    expect(html).not.toContain("Publication and investigation outcomes");
+    client.clear();
+  });
+
+  it("reads the comment without executing HTML and preserves the original source", () => {
+    const html = renderToStaticMarkup(
+      <CommentBody
+        body={"## Review\n\n<script>unsafe()</script>\n\n```ts\nconst value = '<tag>';\n```"}
+      />,
+    );
+    expect(html).toContain("<h3>Review</h3>");
+    expect(html).toContain("&lt;script&gt;unsafe()&lt;/script&gt;");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("Source</summary>");
+    expect(html).toContain("## Review");
+  });
   it("retains each create and update body with its own status and safe failure explanation", () => {
     const html = renderHistory([
       delivery(),
@@ -314,6 +350,11 @@ describe("comment delivery history", () => {
     expect(
       commentPublicationFilters("?state=failed&mode=e2e&taskKind=invented&workItemNumber=-1"),
     ).toEqual({});
+    expect(commentPublicationFilters("?workItemKind=pull_request")).toEqual({
+      workItemKind: "pull_request",
+    });
+    expect(commentPublicationFilters("?workItemKind=issue")).toEqual({ workItemKind: "issue" });
+    expect(commentPublicationFilters("?workItemKind=unknown")).toEqual({});
     expect(publicationKindLabel(summary({ mode: "result", producerTaskKind: "pr-e2e" }))).toBe(
       "E2E result",
     );
@@ -407,7 +448,7 @@ describe("comment delivery history", () => {
       </MemoryRouter>,
     );
     expect(html).toContain("Refresh unavailable");
-    expect(html).toContain("last loaded publication");
+    expect(html).toContain("Refresh before scheduling another operation");
     expect(html).toContain("Retained body from the recorded delivery.");
     expect(html).toContain('href="https://github.com/owner/repository/pull/7"');
     queryClient.clear();

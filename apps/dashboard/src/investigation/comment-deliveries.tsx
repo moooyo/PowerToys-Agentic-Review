@@ -19,7 +19,6 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
   Stack,
   Typography,
 } from "@mui/material";
@@ -116,6 +115,12 @@ export function CommentStatus({ comment }: { comment: InvestigationCommentPublic
       size="small"
       label={publicationLabels[comment.state]}
       color={publicationColors[comment.state]}
+      sx={{
+        height: "auto",
+        minHeight: 28,
+        flexShrink: 0,
+        "& .MuiChip-label": { whiteSpace: "normal", overflowWrap: "normal" },
+      }}
     />
   );
 }
@@ -202,8 +207,10 @@ export function CommentContextLinks({
 
 export function CommentPublicationRow({
   comment,
+  tableRow = false,
 }: {
   comment: InvestigationCommentPublicationSummary;
+  tableRow?: boolean;
 }) {
   const request = useQuery<RetainedCommentCommand | null>({
     queryKey: commentCommandQueryKey(comment.id),
@@ -212,6 +219,58 @@ export function CommentPublicationRow({
     enabled: false,
     gcTime: Infinity,
   }).data;
+  const pendingRequest = request && ["submitting", "unknown", "conflict"].includes(request.state);
+  const actionLabel = pendingRequest
+    ? "Review request"
+    : comment.state === "needs_attention" || comment.state === "retrying"
+      ? "Review retry"
+      : ["sending", "pending"].includes(comment.state)
+        ? "Track delivery"
+        : "View publication";
+  if (tableRow)
+    return (
+      <tr>
+        <td data-label="Publication">
+          <strong>{comment.workItemTitle || publicationKindLabel(comment)}</strong>
+          <Typography variant="caption" color="text.secondary" component="div">
+            {publicationKindLabel(comment)}
+          </Typography>
+        </td>
+        <td data-label="Target">
+          <span className="comments-target">
+            {comment.workItemKind === "pull_request" ? "PR" : "Issue"} #{comment.workItemNumber}
+          </span>
+          <Typography variant="caption" color="text.secondary" component="div">
+            {comment.repositoryFullName}
+          </Typography>
+        </td>
+        <td data-label="Delivery">
+          <CommentStatus comment={comment} />
+          {pendingRequest && (
+            <Typography variant="caption" color="warning.main" component="div">
+              {request.state === "submitting"
+                ? "Request in progress"
+                : request.state === "unknown"
+                  ? "Request unconfirmed"
+                  : "Request needs review"}
+            </Typography>
+          )}
+        </td>
+        <td data-label="Updated">
+          <RecordedTime value={comment.updatedAt} />
+        </td>
+        <td data-label="Actions">
+          <Button
+            component={Link}
+            to={commentDetailsUrl(comment.id, comment.repositoryId)}
+            size="small"
+            variant={actionLabel === "Review retry" ? "contained" : "text"}
+          >
+            {actionLabel}
+          </Button>
+        </td>
+      </tr>
+    );
   return (
     <Box
       component={Link}
@@ -238,12 +297,11 @@ export function CommentPublicationRow({
         <Typography variant="subtitle1">
           {comment.workItemTitle || publicationKindLabel(comment)}
         </Typography>
-        <Typography variant="body2" color="text.secondary">
-          {comment.reason ||
-            (comment.state === "synced"
-              ? "The recorded update was delivered."
-              : "Publication and investigation outcomes are tracked separately.")}
-        </Typography>
+        {comment.reason && (
+          <Typography variant="body2" color="text.secondary">
+            {comment.reason}
+          </Typography>
+        )}
       </Box>
       <Box className="comments-record-state">
         <CommentStatus comment={comment} />
@@ -571,14 +629,13 @@ export function CommentPublicationControls({
         queryClient.setQueryData(requestKey, {
           ...current,
           state: "refreshed",
-          message:
-            "Latest status loaded. Review the current destination and operation before making a new request.",
+          message: "Latest status loaded. Review the action before retrying.",
         } satisfies RetainedCommentCommand);
       } else if (current?.state === "unknown") {
         queryClient.setQueryData(requestKey, {
           ...current,
           message:
-            "The latest publication status is loaded. Reading it cannot confirm this saved request. Its original operation, version, and request identity remain available for retrying.",
+            "Status refreshed. The saved request is still unconfirmed; retry it before starting another.",
         } satisfies RetainedCommentCommand);
       }
       await Promise.all([
@@ -611,12 +668,11 @@ export function CommentPublicationControls({
   const commentUrl = safeCommentUrl(comment);
   const syncLabel =
     comment.state === "synced" && comment.producerTaskKind === "pr-e2e"
-      ? "Refresh E2E publication"
-      : "Publish prepared update";
+      ? "Republish"
+      : "Publish update";
   return (
     <Stack spacing={2} className="comments-publication-controls">
       <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
-        <CommentStatus comment={comment} />
         {comment.lastAttemptAt && (
           <Typography variant="caption" color="text.secondary">
             Last delivery <RecordedTime value={comment.lastAttemptAt} />
@@ -673,7 +729,7 @@ export function CommentPublicationControls({
               sx={{ mt: 1 }}
             >
               <Button disabled={busy} onClick={() => void refresh()}>
-                Refresh publication status
+                Refresh status
               </Button>
               <Button
                 disabled={busy || !hasCommentActionGrant(comment, session.user, request.action)}
@@ -681,7 +737,7 @@ export function CommentPublicationControls({
                   void scheduleCommentCommand(queryClient, comment, request.action, request)
                 }
               >
-                Retry same request
+                Retry saved request
               </Button>
             </Stack>
           )}
@@ -702,15 +758,10 @@ export function CommentPublicationControls({
           </Box>
         </Alert>
       )}
-      <Box>
-        <Typography variant="subtitle1">{syncLabel}</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Schedule publication from the latest saved task state and configured templates. This can
-          create or update a GitHub comment; it does not rerun the investigation.
-        </Typography>
+      <Box className="comments-command-actions">
         {comment.availableActions.includes("sync") ? (
           <Button
-            variant="outlined"
+            variant="contained"
             disabled={busy || !canSchedule("sync")}
             onClick={() =>
               setPreview({ action: "sync", version: comment.version, commentId: comment.id })
@@ -721,10 +772,10 @@ export function CommentPublicationControls({
         ) : (
           <Typography variant="caption" color="text.secondary">
             {comment.mode === "result"
-              ? "Conclusion-only publication keeps its saved ActionIntent recovery. Open the report to review next steps."
+              ? "Open the report to review publication actions."
               : comment.state === "synced"
-                ? "The recorded update is already delivered."
-                : "No publication action is available for this record."}
+                ? "Delivered."
+                : "Publication unavailable."}
           </Typography>
         )}
         {comment.availableActions.includes("sync") &&
@@ -734,13 +785,7 @@ export function CommentPublicationControls({
             </Typography>
           )}
       </Box>
-      <Divider />
-      <Box>
-        <Typography variant="subtitle1">Check delivery</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Read the existing GitHub comment and retain an observation. This check does not publish,
-          resend, or restart the investigation.
-        </Typography>
+      <Box className="comments-command-actions">
         {comment.availableActions.includes("reconcile") ? (
           <Button
             variant="outlined"
@@ -782,14 +827,12 @@ export function CommentPublicationControls({
             </Box>
             {preview?.action === "sync" ? (
               <Alert severity="warning">
-                The publisher prepares the latest saved task state when it processes this request.
-                Earlier delivery bodies are retained history, not an exact preview of the next
-                update. Current publication policy and permissions are checked before dispatch.
+                Creates or updates the GitHub comment using the latest task state and configured
+                template. The next body may differ from the recorded comment.
               </Alert>
             ) : (
               <Alert severity="info">
-                The service reads the existing comment and records the result. No comment body is
-                sent again.
+                Checks the existing GitHub comment without publishing another update.
               </Alert>
             )}
             {preview &&

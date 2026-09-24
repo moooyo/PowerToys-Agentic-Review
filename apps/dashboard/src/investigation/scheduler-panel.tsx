@@ -164,18 +164,14 @@ export function SchedulerForm({
   };
 
   return (
-    <Section title="Task concurrency">
+    <Section title="Static concurrency">
       <Stack component="form" noValidate onSubmit={(event) => void submit(event)} spacing={3}>
         <Stack
           direction={{ xs: "column", sm: "row" }}
           spacing={1.5}
           sx={{ alignItems: { xs: "flex-start", sm: "center" }, justifyContent: "space-between" }}
         >
-          <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 640 }}>
-            Workspace-wide scheduling. This configuration and the occupancy totals apply across all
-            repositories.
-          </Typography>
-          <Chip label="Global setting" size="small" />
+          <Chip label="All repositories" size="small" />
         </Stack>
         <Box sx={{ maxWidth: 640 }}>
           <Stack
@@ -212,7 +208,7 @@ export function SchedulerForm({
         </Box>
         {status.occupiedStatic > status.staticConcurrency && (
           <Alert severity="info">
-            Current occupancy is above the saved limit. Existing work keeps its slots until release.
+            Occupied slots exceed the limit. Existing slots stay reserved until released.
           </Alert>
         )}
         <TextField
@@ -241,13 +237,13 @@ export function SchedulerForm({
           helperText={
             fieldError ??
             (canEdit
-              ? "A whole number from 1 to 16. Worker capacity may reduce actual concurrency."
+              ? "Whole number from 1 to 16."
               : "Only workspace administrators can change this global limit.")
           }
           sx={{ maxWidth: 640 }}
         />
         <Typography variant="body2" color="text.secondary">
-          Lowering the limit lets running work finish. It does not cancel existing investigations.
+          Lowering the limit lets running work finish.
         </Typography>
         {remoteChanged && (
           <Alert
@@ -258,8 +254,8 @@ export function SchedulerForm({
               </Button>
             }
           >
-            The saved limit changed from {draft.baseline} to {draft.latest} while you were editing.
-            Your draft is kept. Saving will replace the current global limit.
+            The saved limit changed from {draft.baseline} to {draft.latest}. Saving replaces it with
+            your draft.
           </Alert>
         )}
         {error && <Alert severity="error">{error}</Alert>}
@@ -280,15 +276,12 @@ export function SchedulerForm({
             <Box>
               <Typography variant="body2" sx={{ fontWeight: 500 }}>
                 {busy === "save"
-                  ? "Saving concurrency…"
+                  ? "Saving…"
                   : busy === "reload"
-                    ? "Reloading scheduler…"
+                    ? "Reloading…"
                     : dirty
-                      ? "Unsaved concurrency change"
-                      : "Saved global configuration"}
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                {`Current saved limit: ${status.staticConcurrency} static investigations.`}
+                      ? "Unsaved change"
+                      : "Saved"}
               </Typography>
             </Box>
           </Stack>
@@ -298,7 +291,7 @@ export function SchedulerForm({
                 disabled={busy !== undefined}
                 onClick={() => guardedAction(() => void reload())}
               >
-                Reload saved value
+                Reload
               </Button>
             )}
             {canEdit && (
@@ -317,7 +310,7 @@ export function SchedulerForm({
                     busy === "save" ? <CircularProgress size={16} color="inherit" /> : undefined
                   }
                 >
-                  Save concurrency
+                  Save changes
                 </Button>
               </>
             )}
@@ -376,11 +369,8 @@ export function SchedulerPanel() {
               return result.data;
             }}
           />
-          <Section title="Exclusive E2E slot">
+          <Section title="E2E capacity">
             <Stack spacing={2}>
-              <Typography variant="body2" color="text.secondary">
-                One global slot remains owned through E2E execution and cleanup confirmation.
-              </Typography>
               <Stack
                 direction="row"
                 useFlexGap
@@ -394,10 +384,10 @@ export function SchedulerPanel() {
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                     {e2eCleanupPending
-                      ? "Cleanup is holding the slot. A worker receipt must confirm release."
+                      ? "Waiting for worker cleanup confirmation."
                       : query.data.occupiedE2e > 0
-                        ? "The slot remains owned. Release requires confirmed cleanup."
-                        : "No E2E slot is occupied. Worker admission, task types, and recent contact still determine readiness."}
+                        ? "Reserved until cleanup is confirmed."
+                        : "No E2E slot is occupied."}
                   </Typography>
                 </Box>
                 <Chip
@@ -413,25 +403,17 @@ export function SchedulerPanel() {
                 />
               </Stack>
               {e2eCleanupPending && (
-                <Alert severity="warning">
-                  The next E2E task is blocked until the previous task's owned processes and desktop
-                  state are cleaned up.
-                </Alert>
+                <Alert severity="warning">The next E2E task waits until cleanup finishes.</Alert>
               )}
-              <Typography variant="body2" color="text.secondary">
-                Static investigations can run alongside E2E work. Policy changes, a status refresh,
-                or an offline worker do not confirm cleanup or release an owned slot.
-              </Typography>
             </Stack>
           </Section>
           <Section title="Current resource owners">
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
-              Global occupancy includes all repositories. Only resource owners within your
-              repository access are shown below.
+              Showing tasks within your repository access.
             </Typography>
             {owners.length === 0 ? (
               <Typography variant="body2" color="text.secondary">
-                No resource owners are visible within your repository access.
+                No resource owners within your repository access.
               </Typography>
             ) : (
               <Stack component="ul" spacing={0} sx={{ m: 0, p: 0, listStyle: "none" }}>

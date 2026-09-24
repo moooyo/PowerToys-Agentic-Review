@@ -241,6 +241,7 @@ export class InvestigationWorkspaceReads {
     for (let scanned = 0; scanned < 500; scanned += 1) {
       const record = this.store.pageWorkspace<{ id: string }>("idempotency", {
         repositoryIds,
+        ...(query.workItemKind === undefined ? {} : { workItemKind: query.workItemKind }),
         ...(query.taskId === undefined ? {} : { taskId: query.taskId }),
         ...(query.workItemId === undefined ? {} : { workItemId: query.workItemId }),
         ...(afterId === undefined ? {} : { afterId }),
@@ -266,6 +267,7 @@ export class InvestigationWorkspaceReads {
           "The shared comment does not match the task's source.",
         );
       const matches =
+        (query.workItemKind === undefined || entry.workItemKind === query.workItemKind) &&
         (query.mode === undefined || entry.mode === query.mode) &&
         (query.state === undefined || entry.state === query.state) &&
         (query.taskKind === undefined || entry.producerTaskKind === query.taskKind) &&

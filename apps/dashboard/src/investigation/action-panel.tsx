@@ -5,6 +5,7 @@ import type {
   InvestigationActionPayload,
   InvestigationResultV1,
 } from "@agentic-review/contracts";
+import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
 import {
   Alert,
   Box,
@@ -70,12 +71,13 @@ import {
 import { PublicationComposerPanel, type PublicationStep } from "./publication-composer-panel";
 import { TextList } from "./report-sections";
 import { sessionIdentity, useInvestigationSession } from "./session";
+import { sourceActionLabel } from "./source-result";
 import { InvestigationHttpError } from "./transport";
 
 export const actionLabels: Record<InvestigationActionKind, string> = {
-  comment: "Conversation comment",
+  comment: "Comment",
   approve: "Approve",
-  "suggestion-comment": "Review comments & suggestions",
+  "suggestion-comment": "Suggest code",
   "request-changes": "Request changes",
   close: "Close",
   merge: "Merge",
@@ -87,8 +89,23 @@ export const actionLabels: Record<InvestigationActionKind, string> = {
   "view-changes": "View changes",
   "create-pr": "Create pull request",
   "view-evidence": "View evidence",
-  resume: "Resume investigation",
+  resume: "Resume task",
 };
+
+export function actionGroupLabel(action: InvestigationActionKind, issue: boolean): string {
+  if (["comment", "approve", "suggestion-comment", "request-changes"].includes(action))
+    return "Review feedback";
+  if (["start-task", "reviews.verify", "trigger-ci", "resume"].includes(action)) return "Follow-up";
+  if (["close", "close-as-duplicate", "merge", "create-pr"].includes(action))
+    return issue ? "Issue management" : "PR management";
+  return "Report";
+}
+
+export function publicationActionLabel(action: InvestigationActionKind): string {
+  if (action === "comment") return "Post comment";
+  if (action === "suggestion-comment") return "Submit suggestions";
+  return actionLabels[action];
+}
 
 export interface ActionPanelRequest {
   /** A new ID represents a deliberate request from the report or saved plan. */
@@ -309,7 +326,15 @@ function PreviewFields({ fields }: { fields: readonly (readonly [string, ReactNo
   );
 }
 
-function ExactText({ children, empty }: { children: string; empty: string }) {
+function ExactText({
+  children,
+  empty,
+  code = false,
+}: {
+  children: string;
+  empty: string;
+  code?: boolean;
+}) {
   return children.length > 0 ? (
     <Box
       component="pre"
@@ -320,7 +345,7 @@ function ExactText({ children, empty }: { children: string; empty: string }) {
         bgcolor: "action.hover",
         whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
-        fontFamily: "inherit",
+        fontFamily: code ? "monospace" : "inherit",
         fontSize: "0.875rem",
         lineHeight: 1.6,
       }}
@@ -331,6 +356,137 @@ function ExactText({ children, empty }: { children: string; empty: string }) {
     <Typography variant="body2" color="text.secondary">
       {empty}
     </Typography>
+  );
+}
+
+/** Render feedback as safe React nodes; submitted text stays unchanged in the intent. */
+export function PublicationMarkdown({ children }: { children: string }) {
+  const inline = (text: string): ReactNode[] => {
+    const nodes: ReactNode[] = [];
+    const tokens = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gu;
+    let offset = 0;
+    for (const match of text.matchAll(tokens)) {
+      nodes.push(text.slice(offset, match.index));
+      nodes.push(
+        match[1] !== undefined ? (
+          <code key={match.index}>{match[1]}</code>
+        ) : match[2] !== undefined ? (
+          <strong key={match.index}>{match[2]}</strong>
+        ) : (
+          <a key={match.index} href={match[4]} target="_blank" rel="noopener noreferrer">
+            {match[3]}
+          </a>
+        ),
+      );
+      offset = match.index + match[0].length;
+    }
+    nodes.push(text.slice(offset));
+    return nodes;
+  };
+  const blocks: ReactNode[] = [];
+  const lines = children.replace(/\r\n?/gu, "\n").split("\n");
+  const lineOffsets: number[] = [];
+  let sourceOffset = 0;
+  for (const line of lines) {
+    lineOffsets.push(sourceOffset);
+    sourceOffset += line.length + 1;
+  }
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index]!;
+    const key = index;
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    if (/^\s*```/u.test(line)) {
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```/u.test(lines[index]!)) code.push(lines[index++]!);
+      if (index < lines.length) index += 1;
+      blocks.push(
+        <pre key={key}>
+          <code>{code.join("\n")}</code>
+        </pre>,
+      );
+      continue;
+    }
+    const heading = line.match(/^#{1,6}\s+(.+)$/u);
+    if (heading) {
+      blocks.push(<h4 key={key}>{inline(heading[1]!)}</h4>);
+      index += 1;
+      continue;
+    }
+    const list = line.match(/^\s*(?:([-*+])|(\d+)\.)\s+(.+)$/u);
+    if (list) {
+      const ordered = !list[1];
+      const rows: ReactNode[] = [];
+      while (index < lines.length) {
+        const entry = lines[index]!.match(ordered ? /^\s*\d+\.\s+(.+)$/u : /^\s*[-*+]\s+(.+)$/u);
+        if (!entry) break;
+        rows.push(<li key={index}>{inline(entry[1]!)}</li>);
+        index += 1;
+      }
+      blocks.push(
+        ordered ? (
+          <ol key={key} start={Number(list[2])}>
+            {rows}
+          </ol>
+        ) : (
+          <ul key={key}>{rows}</ul>
+        ),
+      );
+      continue;
+    }
+    const paragraph: { text: string; sourceOffset: number }[] = [];
+    while (
+      index < lines.length &&
+      lines[index]!.trim() &&
+      !/^\s*```|^#{1,6}\s+|^\s*(?:[-*+]|\d+\.)\s+/u.test(lines[index]!)
+    ) {
+      paragraph.push({ text: lines[index]!, sourceOffset: lineOffsets[index]! });
+      index += 1;
+    }
+    if (!paragraph.length) {
+      paragraph.push({ text: lines[index]!, sourceOffset: lineOffsets[index]! });
+      index += 1;
+    }
+    blocks.push(
+      <p key={key}>
+        {paragraph.map((part, at) => (
+          <Fragment key={part.sourceOffset}>
+            {at > 0 && <br />}
+            {inline(part.text)}
+          </Fragment>
+        ))}
+      </p>,
+    );
+  }
+  return (
+    <Box
+      sx={{
+        typography: "body2",
+        lineHeight: 1.65,
+        overflowWrap: "anywhere",
+        display: "grid",
+        gap: 1.5,
+        "& > *": { m: 0, minWidth: 0 },
+        "& h4": { fontSize: "inherit", m: 0 },
+        "& pre": {
+          m: 0,
+          p: 1.5,
+          borderRadius: 1,
+          bgcolor: "action.hover",
+          whiteSpace: "pre-wrap",
+          overflowWrap: "anywhere",
+        },
+        "& code": { fontFamily: "monospace", fontSize: "0.9em" },
+        "& :not(pre) > code": { px: 0.5, borderRadius: 0.5, bgcolor: "action.hover" },
+        "& ul, & ol": { pl: 3 },
+      }}
+    >
+      {blocks}
+    </Box>
   );
 }
 
@@ -391,30 +547,37 @@ export function ExactActionPreview({
         />
         <Typography variant="subtitle1">{actionLabels[intent.action]}</Typography>
       </Stack>
-      <PreviewFields
-        fields={[
-          ...(destination ? [["Destination", destination] as const] : []),
-          ["Repository", intent.repositoryId],
-          ["Work item", intent.workItemId],
-          ["Subject", intent.subjectRef],
-          ["Expected head SHA", intent.expectedHeadSha ?? "None · issue snapshot"],
-        ]}
-      />
+      {destination && <Typography variant="body2">{destination}</Typography>}
+      <Box component="details">
+        <Typography
+          component="summary"
+          variant="body2"
+          sx={{ cursor: "pointer", color: "text.secondary" }}
+        >
+          Source details
+        </Typography>
+        <PreviewFields
+          fields={[
+            ["Repository", intent.repositoryId],
+            ["Work item", intent.workItemId],
+            ["Subject", intent.subjectRef],
+            ["Expected head SHA", intent.expectedHeadSha ?? "None · issue snapshot"],
+          ]}
+        />
+      </Box>
       <Divider />
       {payload.kind === "feedback" && (
         <Stack spacing={2}>
           <Typography variant="subtitle2">
-            {intent.action === "comment" ? "Conversation comment body" : "Review summary"}
+            {intent.action === "comment" ? "Comment" : "Review summary"}
           </Typography>
-          <ExactText empty="No additional comment.">{feedbackSummary}</ExactText>
-          <Typography variant="body2" color="text.secondary">
-            The introduction and text-only findings appear in this summary once. Feedback with a
-            code suggestion appears only in its corresponding inline comment below.
-          </Typography>
-          <Typography variant="subtitle2">
-            Selected feedback · {payload.drafts.length}{" "}
-            {payload.drafts.length === 1 ? "draft" : "drafts"}
-          </Typography>
+          {feedbackSummary ? (
+            <PublicationMarkdown>{feedbackSummary}</PublicationMarkdown>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              No additional comment.
+            </Typography>
+          )}
           {payload.drafts
             .filter((draft) => draft.suggestion !== null)
             .map((draft, index) => (
@@ -422,41 +585,73 @@ export function ExactActionPreview({
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>
                   Inline comment {index + 1} · {draft.id}
                 </Typography>
-                <ExactText empty="Empty draft body.">{draft.body}</ExactText>
+                {draft.body ? (
+                  <PublicationMarkdown>{draft.body}</PublicationMarkdown>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    Empty draft body.
+                  </Typography>
+                )}
                 {draft.suggestion && (
                   <Stack spacing={1.5} sx={{ mt: 2 }}>
                     <Typography variant="subtitle2">Code suggestion</Typography>
-                    <PreviewFields
-                      fields={[
-                        ["File", draft.suggestion.path],
-                        ["Lines", `${draft.suggestion.startLine}–${draft.suggestion.endLine}`],
-                        ["Subject", draft.suggestion.subjectRef],
-                        ["Head SHA", draft.suggestion.headSha],
-                        ["Original content digest", draft.suggestion.originalContentDigest],
-                      ]}
-                    />
-                    <Typography variant="body2" color="text.secondary">
-                      Exact replacement
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ overflowWrap: "anywhere" }}
+                    >
+                      {draft.suggestion.path} · lines {draft.suggestion.startLine}–
+                      {draft.suggestion.endLine}
                     </Typography>
-                    <ExactText empty="Empty replacement · removes the selected content.">
+                    <Box component="details">
+                      <Typography
+                        component="summary"
+                        variant="caption"
+                        sx={{ cursor: "pointer", color: "text.secondary" }}
+                      >
+                        Source details
+                      </Typography>
+                      <PreviewFields
+                        fields={[
+                          ["File", draft.suggestion.path],
+                          ["Lines", `${draft.suggestion.startLine}–${draft.suggestion.endLine}`],
+                          ["Subject", draft.suggestion.subjectRef],
+                          ["Head SHA", draft.suggestion.headSha],
+                          ["Original content digest", draft.suggestion.originalContentDigest],
+                        ]}
+                      />
+                    </Box>
+                    <Typography variant="body2" color="text.secondary">
+                      Suggested change
+                    </Typography>
+                    <ExactText code empty="Empty replacement · removes the selected content.">
                       {draft.suggestion.replacement}
                     </ExactText>
                   </Stack>
                 )}
               </Box>
             ))}
-          <PreviewFields
-            fields={[
-              ["Finding IDs", payload.findingIds.length ? payload.findingIds.join("\n") : "None"],
-              [
-                "Text draft IDs",
-                payload.drafts
-                  .filter((draft) => draft.suggestion === null)
-                  .map((draft) => draft.id)
-                  .join("\n") || "None",
-              ],
-            ]}
-          />
+          <Box component="details">
+            <Typography
+              component="summary"
+              variant="body2"
+              sx={{ cursor: "pointer", color: "text.secondary" }}
+            >
+              Selected feedback details
+            </Typography>
+            <PreviewFields
+              fields={[
+                ["Finding IDs", payload.findingIds.length ? payload.findingIds.join("\n") : "None"],
+                [
+                  "Text draft IDs",
+                  payload.drafts
+                    .filter((draft) => draft.suggestion === null)
+                    .map((draft) => draft.id)
+                    .join("\n") || "None",
+                ],
+              ]}
+            />
+          </Box>
         </Stack>
       )}
       {payload.kind === "task" && (
@@ -557,9 +752,6 @@ export function ExactActionPreview({
             ]}
           />
         </Box>
-        <Typography variant="caption" component="p" color="text.secondary">
-          Closing this preview or discarding form edits keeps this submission identity.
-        </Typography>
       </Box>
       <Box component="details">
         <Typography component="summary" variant="subtitle2" sx={{ cursor: "pointer" }}>
@@ -581,7 +773,9 @@ export function ExactActionPreview({
           Raw server intent
         </Typography>
         <Box sx={{ mt: 1.5 }}>
-          <ExactText empty="No server intent.">{JSON.stringify(intent, null, 2)}</ExactText>
+          <ExactText code empty="No server intent.">
+            {JSON.stringify(intent, null, 2)}
+          </ExactText>
         </Box>
       </Box>
     </Stack>
@@ -735,8 +929,7 @@ export function ActionPanel({
     scope: guardScope,
     busy,
     allowPresentationNavigation: true,
-    description:
-      "Action drafts have unsaved edits. Saved submission identities and receipts are retained.",
+    description: "Action drafts have unsaved edits.",
     onDiscard: discard,
   });
   const submissionUnresolved = hasUnresolvedActionSubmission(draft);
@@ -874,14 +1067,16 @@ export function ActionPanel({
     });
     setChoosingAction(false);
     setImportOnChoice(false);
-    setPublicationStep(options.importSelection ? "compose" : "select");
+    const composeFirst =
+      options.importSelection || (feedbackKinds.has(selected) && !result?.findings.length);
+    setPublicationStep(composeFirst ? "compose" : "select");
     setError(undefined);
     setFieldErrors({});
     if (feedbackKinds.has(selected))
       requestAnimationFrame(() => {
         document.getElementById(fieldId("publication-step"))?.scrollIntoView({ block: "start" });
         document
-          .getElementById(fieldId(options.importSelection ? "step-back" : "show"))
+          .getElementById(fieldId(composeFirst ? "summary" : "show"))
           ?.focus({ preventScroll: true });
       });
   };
@@ -1042,6 +1237,8 @@ export function ActionPanel({
     else if (name.startsWith("draft-") || name === "summary") setPublicationStep("compose");
     requestAnimationFrame(() => {
       const target = document.getElementById(fieldId(name));
+      for (let parent = target?.parentElement; parent; parent = parent.parentElement)
+        if (parent instanceof HTMLDetailsElement) parent.open = true;
       target?.focus({ preventScroll: true });
       target?.scrollIntoView({ block: "nearest" });
     });
@@ -1396,14 +1593,9 @@ export function ActionPanel({
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2, overflowWrap: "anywhere" }}>
         {workItem.title}
       </Typography>
-      <Alert severity="info" sx={{ mb: 2 }}>
-        <Typography variant="subtitle2">Recommendation</Typography>
-        {context.recommendation.reason}
-      </Alert>
       {context.hardContentBlockers.length > 0 && (
         <Alert severity="error" sx={{ mb: 2 }}>
-          Approve is unavailable: the server found a confirmed unresolved P0 on the current original
-          version. This applies across every findings page.
+          Resolve the confirmed P0 findings before approving.
           <TextList
             items={context.hardContentBlockers.map((item) => `${item.findingId}: ${item.reason}`)}
           />
@@ -1427,10 +1619,9 @@ export function ActionPanel({
       )}
       {preparationUnresolved && (
         <Alert severity="warning" sx={{ mb: 2 }}>
-          The preparation response is not confirmed. Recover the exact saved request before
-          preparing another action. Its content and request key are retained across navigation.
+          Preview creation is unconfirmed. Recover the saved request before starting another action.
           <Button disabled={busy} onClick={() => void prepare()}>
-            Recover saved preparation
+            Recover preview
           </Button>
           <Typography variant="caption" component="div" sx={{ overflowWrap: "anywhere" }}>
             Request key: {draft.prepareRequest?.idempotencyKey}
@@ -1441,7 +1632,7 @@ export function ActionPanel({
         <Alert severity={submissionUnresolved ? "warning" : "info"} sx={{ mb: 2 }}>
           {submissionUnresolved
             ? "Check the saved submission before preparing another action."
-            : "Your exact server preview is saved in this session."}
+            : "Saved preview available."}
           <Button
             disabled={busy}
             onClick={() => {
@@ -1457,7 +1648,7 @@ export function ActionPanel({
       )}
       {lastReceipt && lastReceipt.id !== intent?.id && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          A previous submission is retained independently of this draft.
+          Previously submitted.
           <Button
             disabled={busy}
             onClick={() => {
@@ -1471,8 +1662,7 @@ export function ActionPanel({
       )}
       {draft.contextRefreshRequired && (
         <Alert severity="warning" sx={{ mb: 2 }}>
-          The source or action context needs a fresh review before a new preparation. Your draft is
-          retained.
+          Refresh the source before continuing.
           <Button disabled={busy} onClick={() => void refreshActionContext()}>
             Refresh action context
           </Button>
@@ -1480,8 +1670,7 @@ export function ActionPanel({
       )}
       {!canPrepareActions && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          This account can inspect available context and its own saved submissions. Editing or
-          preparing an action requires Prepare actions permission.
+          Editing requires Prepare actions permission.
         </Alert>
       )}
       {Object.keys(fieldErrors).length > 0 && (
@@ -1522,7 +1711,7 @@ export function ActionPanel({
         {context.nextActions.length > 0 && (
           <Box component="details" open={choosingAction} sx={{ mb: 2 }}>
             <Typography component="summary" variant="subtitle2" sx={{ cursor: "pointer" }}>
-              Saved next actions · {context.nextActions.length}
+              Follow-up actions · {context.nextActions.length}
             </Typography>
             <Stack spacing={1} sx={{ mt: 1.5 }}>
               {context.nextActions.map((item) => (
@@ -1538,7 +1727,7 @@ export function ActionPanel({
                         workItem.repositoryId,
                       )}
                     >
-                      {item.label}
+                      {sourceActionLabel(item.action, item.taskKind)}
                     </Button>
                   ) : (
                     <Button
@@ -1549,20 +1738,21 @@ export function ActionPanel({
                       }
                       onClick={() => selectAction(item.action, item.id)}
                     >
-                      {item.label}
+                      {sourceActionLabel(item.action, item.taskKind)}
                     </Button>
                   )}
                   {item.recommended && <Chip size="small" label="Recommended" sx={{ ml: 1 }} />}
-                  <Typography variant="body2" color="text.secondary">
-                    {item.reason}
-                  </Typography>
-                  {item.canPrepare && !item.readyToExecute && (
-                    <Typography variant="caption" component="div" color="warning.main">
-                      Preparation is available. Execution still requires the listed prerequisites.
+                  {(!item.canPrepare || !item.readyToExecute) && (
+                    <Typography variant="body2" color="text.secondary">
+                      {item.reason}
                     </Typography>
                   )}
                   {item.guards
-                    .filter((guard) => !guard.satisfied)
+                    .filter(
+                      (guard) =>
+                        !guard.satisfied &&
+                        (guard.message !== item.reason || (item.canPrepare && item.readyToExecute)),
+                    )
                     .map((guard) => (
                       <Typography
                         key={guard.code}
@@ -1584,64 +1774,135 @@ export function ActionPanel({
               Choose an action
             </Typography>
             {importOnChoice && (
-              <Alert severity="info">
-                The current report selection will be imported only if you choose a feedback action.
-                Existing publishing text in that action is retained.
-              </Alert>
+              <Typography variant="body2" color="text.secondary">
+                {selection.selectedFindings.length}{" "}
+                {selection.selectedFindings.length === 1 ? "finding" : "findings"} selected
+              </Typography>
             )}
             <Box
               sx={{
                 display: "grid",
-                gridTemplateColumns: { xs: "1fr", sm: "repeat(2, minmax(0, 1fr))" },
-                gap: 1.5,
+                gridTemplateColumns: "minmax(0, 1fr)",
+                gap: 2,
               }}
             >
-              {context.fixedActions.map((item, index) => (
-                <Box
-                  key={item.action}
-                  sx={{ border: 1, borderColor: "divider", borderRadius: 3, p: 2, minWidth: 0 }}
-                >
-                  <Button
-                    id={
-                      index ===
-                      context.fixedActions.findIndex((candidate) =>
-                        isActionAllowed(context, candidate.action),
-                      )
-                        ? fieldId("operation")
-                        : undefined
-                    }
-                    variant="outlined"
-                    disabled={
-                      !isActionAllowed(context, item.action) ||
-                      busy ||
-                      submissionUnresolved ||
-                      Boolean(context.pendingSubmission)
-                    }
-                    onClick={() => selectAction(item.action)}
+              {[
+                ...new Set(
+                  context.fixedActions.map((item) =>
+                    actionGroupLabel(item.action, workItem.kind === "issue"),
+                  ),
+                ),
+              ]
+                .sort(
+                  (left, right) =>
+                    [
+                      "Review feedback",
+                      "Follow-up",
+                      "PR management",
+                      "Issue management",
+                      "Report",
+                    ].indexOf(left) -
+                    [
+                      "Review feedback",
+                      "Follow-up",
+                      "PR management",
+                      "Issue management",
+                      "Report",
+                    ].indexOf(right),
+                )
+                .map((group) => (
+                  <Box
+                    key={group}
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: { xs: "1fr", sm: "124px minmax(0, 1fr)" },
+                      gap: { xs: 0.5, sm: 2 },
+                      minWidth: 0,
+                    }}
                   >
-                    {actionLabels[item.action]}
-                  </Button>
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ mt: 1, overflowWrap: "anywhere" }}
-                  >
-                    {item.reason}
-                  </Typography>
-                  {item.guards
-                    .filter((guard) => !guard.satisfied)
-                    .map((guard) => (
-                      <Typography
-                        key={guard.code}
-                        variant="caption"
-                        component="p"
-                        color="warning.main"
-                      >
-                        {guard.message}
-                      </Typography>
-                    ))}
-                </Box>
-              ))}
+                    <Typography
+                      variant="caption"
+                      component="h3"
+                      color="text.secondary"
+                      sx={{ m: 0, pt: { sm: 1 } }}
+                    >
+                      {group}
+                    </Typography>
+                    <Box sx={{ minWidth: 0 }}>
+                      {context.fixedActions
+                        .filter(
+                          (item) =>
+                            actionGroupLabel(item.action, workItem.kind === "issue") === group,
+                        )
+                        .map((item) => (
+                          <Box
+                            key={item.action}
+                            sx={{ borderBottom: 1, borderColor: "divider", minWidth: 0, py: 0.5 }}
+                          >
+                            <Button
+                              id={
+                                item ===
+                                context.fixedActions.find((candidate) =>
+                                  isActionAllowed(context, candidate.action),
+                                )
+                                  ? fieldId("operation")
+                                  : undefined
+                              }
+                              variant="text"
+                              color={
+                                ["close", "close-as-duplicate"].includes(item.action)
+                                  ? "error"
+                                  : "inherit"
+                              }
+                              endIcon={<ChevronRightRounded />}
+                              sx={{
+                                width: "100%",
+                                justifyContent: "space-between",
+                                textAlign: "left",
+                                px: 1,
+                                minHeight: 36,
+                              }}
+                              disabled={
+                                !isActionAllowed(context, item.action) ||
+                                busy ||
+                                submissionUnresolved ||
+                                Boolean(context.pendingSubmission)
+                              }
+                              onClick={() => selectAction(item.action)}
+                            >
+                              {actionLabels[item.action]}
+                            </Button>
+                            {!isActionAllowed(context, item.action) && (
+                              <Typography
+                                variant="body2"
+                                color="text.secondary"
+                                sx={{ px: 1, overflowWrap: "anywhere" }}
+                              >
+                                {item.reason}
+                              </Typography>
+                            )}
+                            {item.guards
+                              .filter(
+                                (guard) =>
+                                  !guard.satisfied &&
+                                  (guard.message !== item.reason ||
+                                    isActionAllowed(context, item.action)),
+                              )
+                              .map((guard) => (
+                                <Typography
+                                  key={guard.code}
+                                  variant="caption"
+                                  component="p"
+                                  color="warning.main"
+                                >
+                                  {guard.message}
+                                </Typography>
+                              ))}
+                          </Box>
+                        ))}
+                    </Box>
+                  </Box>
+                ))}
             </Box>
             {action && (
               <Button onClick={() => setChoosingAction(false)}>
@@ -1677,7 +1938,7 @@ export function ActionPanel({
         )}
         {proposal && !choosingAction && !proposal.readyToExecute && (
           <Alert severity="info" sx={{ mb: 2 }}>
-            Preparation is available, but execution still needs the server's current prerequisites.
+            Complete the prerequisites before executing.
             <TextList
               items={proposal.guards
                 .filter((guard) => !guard.satisfied)
@@ -1755,9 +2016,10 @@ export function ActionPanel({
         {action === "close" && !choosingAction && (
           <Stack spacing={2}>
             <Alert severity="warning">
-              Close changes only the source state. It does not publish feedback, merge changes or
-              delete a branch. Prepare a separate conversation comment if you need to explain the
-              closure.
+              {workItem.kind === "pull_request"
+                ? "Close this PR without merging or deleting its branch."
+                : "Close this issue."}{" "}
+              No comment will be posted.
             </Alert>
             {workItem.kind === "issue" && (
               <TextField
@@ -1779,8 +2041,7 @@ export function ActionPanel({
         {action === "close-as-duplicate" && !choosingAction && (
           <Stack spacing={1.5}>
             <Alert severity={duplicateTarget ? "info" : "warning"}>
-              Duplicate closure uses only the other Issue identified in the saved assessment. The
-              server verifies that target and its repository; an arbitrary number cannot replace it.
+              Close this issue as a duplicate of the saved target below.
             </Alert>
             <TextField
               id={fieldId("duplicateNumber")}
@@ -1796,17 +2057,13 @@ export function ActionPanel({
                 fieldErrors.duplicateNumber ||
                 (!duplicateTarget
                   ? "Reload the saved report or choose another operation."
-                  : "This target is read-only.")
+                  : undefined)
               }
             />
           </Stack>
         )}
         {action === "merge" && !choosingAction && (
           <Stack spacing={2}>
-            <Alert severity="warning">
-              Merge uses its own current source and permission guards. It does not publish a review,
-              finding text or a code suggestion.
-            </Alert>
             <TextField
               id={fieldId("mergeMethod")}
               select
@@ -1844,10 +2101,7 @@ export function ActionPanel({
               value={workflowRef}
               onChange={(event) => setField("workflowRef", event.target.value)}
               error={Boolean(fieldErrors.workflowRef)}
-              helperText={
-                fieldErrors.workflowRef ||
-                "The server must resolve this ref to the reviewed PR head. Queueing CI does not establish a passed check."
-              }
+              helperText={fieldErrors.workflowRef || "Use the reviewed PR head."}
             />
             <TextField
               id={fieldId("workflowInputs")}
@@ -1863,9 +2117,6 @@ export function ActionPanel({
         )}
         {action === "create-pr" && !choosingAction && (
           <Stack spacing={2}>
-            <Alert severity="info">
-              Create PR uses an existing verified remote branch. It does not commit or push changes.
-            </Alert>
             <TextField
               id={fieldId("branchSubjectRef")}
               select
@@ -1917,24 +2168,9 @@ export function ActionPanel({
           </Alert>
         )}
       </Box>
-      <Stack direction="row" useFlexGap spacing={1} sx={{ flexWrap: "wrap", mt: 2 }}>
-        <Button
-          disabled={busy || !action || !canPrepareActions || !actionFormIsDirty(draft)}
-          onClick={() => {
-            updateDraft(saveActionDraft);
-          }}
-        >
-          Save this action draft
-        </Button>
-        <Button disabled={!dirty || busy} onClick={discard}>
-          Discard unsaved action edits
-        </Button>
-      </Stack>
       {duplicateReceipt && !choosingAction && (
         <Alert severity="warning" sx={{ mt: 2 }}>
-          This exact content and action already succeeded for the same source and report. Preparing
-          again creates a separate submission; the final confirmation will explicitly say “Confirm
-          another”.
+          This action and content already succeeded. Submitting again creates a duplicate.
           <Button
             disabled={busy}
             onClick={() => {
@@ -1946,28 +2182,51 @@ export function ActionPanel({
           </Button>
         </Alert>
       )}
-      <Button
-        variant="contained"
-        disabled={
-          choosingAction ||
-          !allowed ||
-          !feedbackReady ||
-          busy ||
-          submissionUnresolved ||
-          draft.contextRefreshRequired ||
-          Boolean(context.pendingSubmission) ||
-          (action !== null && navigationActions.has(action)) ||
-          ((action === "start-task" || action === "reviews.verify") && !plan)
-        }
-        onClick={() => void prepare()}
-        sx={{ mt: 2 }}
-      >
-        {busy ? "Working…" : "Prepare preview"}
-      </Button>
-      <Typography variant="caption" component="div" color="text.secondary" sx={{ mt: 1 }}>
-        Preparing saves an exact preview. Execution requires a separate confirmation and fresh
-        server checks. Private drafts are kept only for this signed-in session.
-      </Typography>
+      {action && !choosingAction && (
+        <Stack
+          direction="row"
+          useFlexGap
+          spacing={1}
+          sx={{
+            flexWrap: "wrap",
+            mt: 2,
+            alignItems: "center",
+            borderTop: 1,
+            borderColor: "divider",
+            pt: 1.5,
+          }}
+        >
+          <Button
+            disabled={busy || !canPrepareActions || !actionFormIsDirty(draft)}
+            onClick={() => updateDraft(saveActionDraft)}
+          >
+            Save draft
+          </Button>
+          <Button disabled={!dirty || busy} onClick={discard}>
+            Discard edits
+          </Button>
+          <Box sx={{ flex: 1 }} />
+          {(!feedbackAction || publicationStep === "compose") && !navigationActions.has(action) && (
+            <Button
+              variant="contained"
+              disabled={
+                choosingAction ||
+                !allowed ||
+                !feedbackReady ||
+                busy ||
+                submissionUnresolved ||
+                draft.contextRefreshRequired ||
+                Boolean(context.pendingSubmission) ||
+                (action !== null && navigationActions.has(action)) ||
+                ((action === "start-task" || action === "reviews.verify") && !plan)
+              }
+              onClick={() => void prepare()}
+            >
+              {busy ? "Working…" : "Preview"}
+            </Button>
+          )}
+        </Stack>
+      )}
       <Dialog
         open={previewOpen && Boolean(previewIntent)}
         onClose={() => {
@@ -1979,25 +2238,15 @@ export function ActionPanel({
         fullWidth
         maxWidth="md"
         aria-labelledby={fieldId("preview-title")}
-        aria-describedby={fieldId("preview-description")}
       >
         <DialogTitle id={fieldId("preview-title")}>
           {previewIntent
-            ? `${["succeeded", "failed", "cancelled"].includes(previewIntent.state) ? "Submission receipt" : "Review"} · ${actionLabels[previewIntent.action]}`
+            ? `${actionLabels[previewIntent.action]} · ${["succeeded", "failed", "cancelled"].includes(previewIntent.state) ? "Receipt" : "Preview"}`
             : "Action preview"}
         </DialogTitle>
         <DialogContent dividers>
           {previewIntent && (
             <Stack spacing={2}>
-              <Typography
-                id={fieldId("preview-description")}
-                variant="body2"
-                color="text.secondary"
-              >
-                {receiptId || ["succeeded", "failed", "cancelled"].includes(previewIntent.state)
-                  ? "This is a retained server submission snapshot. Viewing it does not change the current draft or submit another operation."
-                  : "This is the exact content and destination returned by the server. Confirming executes this saved preview after the server rechecks its current guards."}
-              </Typography>
               <ExactActionPreview
                 intent={previewIntent}
                 destination={destination}
@@ -2029,8 +2278,8 @@ export function ActionPanel({
                 ))}
               {!receiptId && repeatedPreview && previewIntent.state === "prepared" && (
                 <Alert severity="warning">
-                  The same action and content already succeeded for this source and report. Confirm
-                  another only if you intend a separate submission.
+                  The same action and content already succeeded. Submit again only if you intend a
+                  separate submission.
                 </Alert>
               )}
               {previewIntent.result && (
@@ -2049,9 +2298,8 @@ export function ActionPanel({
               {(previewIntent.state === "unknown" ||
                 (!receiptId && draft.confirmationUncertain)) && (
                 <Alert severity="warning">
-                  The submission outcome is not confirmed. Check this saved intent; do not submit a
-                  new review or resend individual findings. A review-level receipt does not
-                  independently verify each inline comment.
+                  The result is unconfirmed. Check this submission before sending another review or
+                  resending findings.
                 </Alert>
               )}
               {!receiptId &&
@@ -2081,14 +2329,14 @@ export function ActionPanel({
               setReceiptId(null);
             }}
           >
-            {receiptId ? "Return to current draft" : "Close preview"}
+            {receiptId ? "Back to draft" : "Close"}
           </Button>
           {!receiptId && intent && ["unknown", "executing"].includes(intent.state) && (
             <Button
               disabled={busy || !hasExecutionPermission}
               onClick={() => void updateIntent("reconcile")}
             >
-              Reconcile saved submission
+              Check submission
             </Button>
           )}
           {!receiptId &&
@@ -2096,7 +2344,7 @@ export function ActionPanel({
             (["confirmed", "executing", "unknown"].includes(intent.state) ||
               draft.confirmationUncertain) && (
               <Button disabled={busy} onClick={() => void updateIntent("refresh")}>
-                Refresh saved status
+                Refresh status
               </Button>
             )}
           {!receiptId && intent?.state === "prepared" && !draft.confirmationUncertain && (
@@ -2114,7 +2362,8 @@ export function ActionPanel({
               }
               onClick={() => void updateIntent("confirm")}
             >
-              {repeatedPreview ? "Confirm another" : "Confirm"} {actionLabels[intent.action]}
+              {publicationActionLabel(intent.action)}
+              {repeatedPreview ? " again" : ""}
             </Button>
           )}
         </DialogActions>

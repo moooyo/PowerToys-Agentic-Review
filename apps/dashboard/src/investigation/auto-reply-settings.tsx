@@ -182,8 +182,8 @@ export function AutoReplyTemplatePreview({
 export function AutoReplySettingsConflictNotice() {
   return (
     <Alert severity="warning">
-      These settings changed elsewhere. Your draft is still in this form. Reload saved settings to
-      replace the draft with the latest version, then make your changes again.
+      Settings changed. Your draft is kept. Reload saved settings to replace the draft with the
+      latest version, then make your changes again.
     </Alert>
   );
 }
@@ -420,25 +420,19 @@ export function AutoReplySettingsForm({
             sx={{ alignItems: "center", flexWrap: "wrap" }}
           >
             <Typography variant="h6" component="h2">
-              Automatic investigation replies
+              Automatic replies
             </Typography>
-            <Chip
-              size="small"
-              variant="outlined"
-              label={saved.enabled ? "Saved: Enabled" : "Saved: Disabled"}
-            />
+            <Chip size="small" variant="outlined" label={saved.enabled ? "Enabled" : "Disabled"} />
             {dirty && <Chip size="small" color="warning" label="Unsaved changes" />}
           </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Automatically comment on completed PR and Issue investigations. No per-report
-            confirmation. Enabling automatic replies authorizes English conclusion comments in{" "}
-            {repository.fullName} using these templates.
+            Publishes conclusion comments in {repository.fullName} without per-report confirmation.
           </Typography>
         </Box>
         {!saved.publisherConfigured && (
           <Alert severity="info">
-            The server comment publisher is not configured yet. You can save settings now; an
-            administrator must configure publishing before automatic comments can be sent.
+            Comment publisher is not configured. An administrator must configure it before automatic
+            comments can be sent.
           </Alert>
         )}
         {process.env.NODE_ENV === "development" && (
@@ -449,7 +443,7 @@ export function AutoReplySettingsForm({
         )}
         <Box className="repository-form-width">
           <FormControlLabel
-            label="Automatically publish investigation conclusions"
+            label="Enable automatic replies"
             labelPlacement="start"
             control={
               <Switch
@@ -463,7 +457,7 @@ export function AutoReplySettingsForm({
             sx={{ width: "100%", justifyContent: "space-between" }}
           />
           <FormControlLabel
-            label="Publish assignment task progress"
+            label="Post assignment progress"
             labelPlacement="start"
             control={
               <Switch
@@ -475,9 +469,7 @@ export function AutoReplySettingsForm({
             sx={{ width: "100%", justifyContent: "space-between" }}
           />
           <Typography variant="body2" color="text.secondary">
-            Assignment progress creates one comment when an assignment is accepted, explains the
-            trigger, and updates that same comment when work starts, stops, or completes. Enabling
-            assignment progress also authorizes these comment updates in {repository.fullName}.
+            Creates a comment when an assignment is accepted and updates it as work progresses.
           </Typography>
           {fieldErrors.progressEnabled && (
             <Alert severity="error">{fieldErrors.progressEnabled}</Alert>
@@ -485,12 +477,10 @@ export function AutoReplySettingsForm({
         </Box>
         <Box>
           <Typography variant="h6" component="h3">
-            English reply templates
+            Reply templates
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            Template changes apply to the next update, including active investigations. Saving does
-            not rewrite existing comments or add comments to earlier tasks. Retries keep the
-            original prepared body. Disabling replies pauses publication.
+            Changes apply to future updates. Existing comments remain unchanged.
           </Typography>
         </Box>
         <Stack
@@ -499,22 +489,6 @@ export function AutoReplySettingsForm({
           spacing={3}
           sx={{ flexWrap: "wrap", alignItems: "center" }}
         >
-          <Box>
-            <Typography variant="body2" sx={{ fontWeight: 500 }}>
-              Conclusion templates
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Pull requests and Issues
-            </Typography>
-          </Box>
-          <Box>
-            <Typography variant="body2" sx={{ fontWeight: 500 }}>
-              Progress templates
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Received, started, stopped, completed
-            </Typography>
-          </Box>
           <Button
             onClick={() => setEditingTemplates(!editingTemplates)}
             aria-expanded={editingTemplates}
@@ -531,7 +505,7 @@ export function AutoReplySettingsForm({
           <Stack id="repository-template-editor" spacing={2.5}>
             <TextField
               select
-              label="Template type and stage"
+              label="Template"
               value={template}
               onChange={(event) => setTemplate(event.target.value as AutoReplyTemplateKey)}
               sx={{ maxWidth: 360 }}
@@ -559,16 +533,9 @@ export function AutoReplySettingsForm({
               </Stack>
               <Typography variant="body2" color="text.secondary">
                 {progressTemplate
-                  ? "The optional {{status}} may appear once before {{trigger}}. The server adds the AI identity statement. The completed template inserts the full PR or Issue reply into {{result}}."
-                  : "Begin with {{identity}} and end with {{details}}. The AI identity names the recorded model and verified GitHub publishing user, and explains that AI-generated content may contain errors. Details are collapsed by default."}
+                  ? "Optional: {{status}} once before {{trigger}}."
+                  : "Begin with {{identity}} and end with {{details}}."}
               </Typography>
-              {template === "issue" && (
-                <Typography variant="body2" color="text.secondary">
-                  The summary is included in Triage result, without a separate Summary section. Bug
-                  triage shows Runtime reproduction separately. Next steps appear before collapsed
-                  Investigation details.
-                </Typography>
-              )}
             </Stack>
             <TextField
               label={templateLabels[template]}
@@ -590,10 +557,7 @@ export function AutoReplySettingsForm({
               minRows={8}
               maxRows={18}
               error={!!fieldErrors[template]}
-              helperText={
-                fieldErrors[template] ??
-                "Custom wording should be English. Keep the exact placeholder syntax."
-              }
+              helperText={fieldErrors[template] ?? "Use English and preserve the placeholders."}
               slotProps={{
                 input: {
                   sx: { fontFamily: "var(--app-code-font)", fontSize: 13, lineHeight: 1.75 },
@@ -623,8 +587,10 @@ export function AutoReplySettingsForm({
             </Stack>
           </Stack>
         )}
-        <Box>
-          <Typography sx={{ fontWeight: 500 }}>Publishing authorization</Typography>
+        <Box component="details">
+          <Typography component="summary" sx={{ fontWeight: 500, cursor: "pointer", py: 1 }}>
+            Publishing authorization
+          </Typography>
           <Typography variant="body2" color="text.secondary">
             {saved.authorizedById
               ? "Authorized by account " + saved.authorizedById + ". "
@@ -649,7 +615,7 @@ export function AutoReplySettingsForm({
         {error && <Alert severity="error">{error}</Alert>}
         {message && <Alert severity="success">{message}</Alert>}
         <Stack
-          className={dirty ? "repository-form-actions" : undefined}
+          className="repository-form-actions"
           direction="row"
           spacing={1}
           useFlexGap
@@ -664,10 +630,8 @@ export function AutoReplySettingsForm({
               {busy
                 ? "Working…"
                 : form.enabled && (!saved.enabled || form.progressEnabled !== saved.progressEnabled)
-                  ? form.progressEnabled
-                    ? "Save and authorize comments and progress updates"
-                    : "Save and authorize automatic comments"
-                  : "Save automatic reply settings"}
+                  ? "Save and authorize"
+                  : "Save settings"}
             </Button>
           )}
           {saved.enabled && canAuthorize && (
@@ -675,7 +639,7 @@ export function AutoReplySettingsForm({
               disabled={busy || conflict || !form.enabled}
               onClick={() => requestSave(undefined, true)}
             >
-              Save and renew publishing authorization
+              Renew authorization
             </Button>
           )}
           {dirty && (
@@ -685,7 +649,7 @@ export function AutoReplySettingsForm({
           )}
           {(dirty || conflict) && <Button onClick={downloadDraft}>Download draft</Button>}
           <Button disabled={busy} onClick={() => guardedAction(() => void reload())}>
-            Reload saved settings
+            Reload
           </Button>
         </Stack>
       </Stack>
@@ -962,9 +926,6 @@ function ScopedAutoReplySettingsPanel({
         />
       )}
       <Divider />
-      <Typography variant="body2" color="text.secondary">
-        Review saved comment bodies, delivery outcomes, and recovery actions in Comments.
-      </Typography>
       <Box>
         <Button component={Link} to={`/comments?repositoryId=${encodeURIComponent(repository.id)}`}>
           View comment deliveries

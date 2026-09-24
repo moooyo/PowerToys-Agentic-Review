@@ -63,18 +63,16 @@ export function taskQueueReason(
     task.executionPolicy?.mode !== "execute";
   if (!scheduler)
     return isStatic
-      ? "Waiting for an eligible worker and available task capacity. Resource status is unavailable."
-      : "Waiting for a worker that allows E2E and available task capacity. Resource status is unavailable.";
+      ? "Waiting for a worker. Resource status is unavailable."
+      : "Waiting for a worker that allows E2E. Resource status is unavailable.";
   if (isStatic && scheduler.occupiedStatic >= scheduler.staticConcurrency)
-    return "Waiting for static task capacity. Running tasks will finish before another task is admitted.";
+    return "Waiting for static task capacity.";
   if (!isStatic && scheduler.occupiedE2e >= scheduler.e2eConcurrency) {
     if (scheduler.leases.some((lease) => lease.pool === "e2e" && lease.state === "needs_cleanup"))
-      return "Waiting for desktop cleanup confirmation. The next E2E task cannot start while the previous desktop lease needs cleanup.";
-    return "Waiting for the exclusive E2E desktop. Only one E2E task can run globally; static tasks can continue.";
+      return "Waiting for desktop cleanup confirmation before E2E can start.";
+    return "Waiting for the exclusive E2E desktop.";
   }
-  return isStatic
-    ? "Capacity is available. Waiting for an eligible worker to claim this task."
-    : "Capacity is available. Waiting for a worker that allows E2E to claim this task.";
+  return isStatic ? "Waiting for an eligible worker." : "Waiting for a worker that allows E2E.";
 }
 
 export function TaskProgressPanel({
@@ -122,62 +120,27 @@ export function TaskProgressPanel({
   });
   if (compact)
     return (
-      <Stack spacing={1.5}>
-        {queueReason && <Alert severity="info">{queueReason}</Alert>}
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: { xs: "flex-start", sm: "center" },
-            justifyContent: "space-between",
-            flexDirection: { xs: "column", sm: "row" },
-            gap: 1,
-            px: 0.5,
-          }}
-        >
-          <Box>
-            <Typography variant="caption" color="text.secondary">
-              {task.state === "queued"
-                ? "Waiting to start"
-                : active
-                  ? "Last reported activity"
-                  : task.state === "completed"
-                    ? "Execution"
-                    : "Saved progress"}
-            </Typography>
-            <Typography variant="h6" sx={{ mt: 0.5 }}>
-              {cleanupPending && !["queued", "running"].includes(task.state)
-                ? "Awaiting worker cleanup"
-                : progress?.stage
-                  ? stage
-                  : task.state === "queued"
-                    ? "Waiting for resources"
-                    : task.state === "completed"
-                      ? "Task complete"
-                      : task.state === "blocked"
-                        ? "Task blocked"
-                        : "Stage not reported"}
-            </Typography>
-            {cleanupPending && !["queued", "running"].includes(task.state) && (
-              <Typography variant="body2" color="text.secondary">
-                Execution has stopped. Resource ownership ends only after the worker cleanup receipt
-                is accepted.
-              </Typography>
-            )}
-          </Box>
-          {progress?.stageStartedAt && (
-            <Typography variant="caption" color="text.secondary">
-              {active ? "Current stage" : "Stage duration at stop"}:{" "}
-              {elapsedTime(progress.stageStartedAt, observedUntil)}
-            </Typography>
-          )}
-        </Box>
-        {task.state === "running" && invocations?.length === 0 && (
-          <Typography variant="body2" color="text.secondary">
-            No model call has been registered. Source preparation can take place before model
-            execution.
+      <Box
+        className="production-task-stage"
+        sx={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1 }}
+      >
+        <Typography variant="body2" color="text.secondary">
+          {cleanupPending && !["queued", "running"].includes(task.state)
+            ? "Awaiting worker cleanup"
+            : queueReason
+              ? queueReason
+              : progress?.stage
+                ? stage
+                : task.state === "completed"
+                  ? "Execution finished"
+                  : "Stage not reported"}
+        </Typography>
+        {progress?.stageStartedAt && (
+          <Typography variant="caption" color="text.secondary">
+            {active ? "Elapsed" : "At stop"}: {elapsedTime(progress.stageStartedAt, observedUntil)}
           </Typography>
         )}
-      </Stack>
+      </Box>
     );
   return (
     <Stack spacing={2}>
@@ -206,10 +169,6 @@ export function TaskProgressPanel({
               />
             ))}
           </Stack>
-          <Typography variant="caption" color="text.secondary">
-            Completed intervals across attempts; the active interval is shown separately. Unrecorded
-            stages remain unknown.
-          </Typography>
         </Stack>
       ) : (
         <Typography variant="caption" color="text.secondary">
@@ -229,35 +188,37 @@ export function TaskProgressPanel({
             {call.model ?? call.engine}
           </Typography>
         ))}
-      <Box
-        component="dl"
-        sx={{
-          display: "grid",
-          gridTemplateColumns: { xs: "1fr", md: "repeat(3, 1fr)" },
-          gap: 2,
-          m: 0,
-        }}
-      >
-        {events.map(([label, timestamp]) => (
-          <Box key={label}>
-            <Typography component="dt" variant="caption" color="text.secondary">
-              {label}
-            </Typography>
-            <Typography component="dd" variant="body2" sx={{ m: 0 }}>
-              {timestamp ? new Date(timestamp).toLocaleString() : "Not reported"}
-            </Typography>
-            {timestamp && active && (
-              <Typography variant="caption" color="text.secondary">
-                {elapsedTime(timestamp, now)} ago
+      {events.some(([, timestamp]) => timestamp) ? (
+        <Box
+          component="dl"
+          sx={{
+            display: "grid",
+            gridTemplateColumns: { xs: "1fr", md: "repeat(3, 1fr)" },
+            gap: 2,
+            m: 0,
+          }}
+        >
+          {events.map(([label, timestamp]) => (
+            <Box key={label}>
+              <Typography component="dt" variant="caption" color="text.secondary">
+                {label}
               </Typography>
-            )}
-          </Box>
-        ))}
-      </Box>
-      <Typography variant="caption" color="text.secondary">
-        A worker heartbeat confirms worker communication. It does not establish model activity or
-        analysis progress.
-      </Typography>
+              <Typography component="dd" variant="body2" sx={{ m: 0 }}>
+                {timestamp ? new Date(timestamp).toLocaleString() : "Not reported"}
+              </Typography>
+              {timestamp && active && (
+                <Typography variant="caption" color="text.secondary">
+                  {elapsedTime(timestamp, now)} ago
+                </Typography>
+              )}
+            </Box>
+          ))}
+        </Box>
+      ) : (
+        <Typography variant="body2" color="text.secondary">
+          Activity timing unavailable.
+        </Typography>
+      )}
     </Stack>
   );
 }

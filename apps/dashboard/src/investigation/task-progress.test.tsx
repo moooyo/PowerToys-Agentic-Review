@@ -28,7 +28,7 @@ describe("task progress and resource waiting", () => {
       />,
     );
     expect(html).toContain("Preparing source");
-    expect(html).toContain("No model call has been registered");
+    expect(html).not.toContain("Worker heartbeat");
     expect(html).not.toContain("Recorded stage totals");
     expect(html).not.toContain("Model call running");
   });
@@ -102,7 +102,6 @@ describe("task progress and resource waiting", () => {
     expect(html).toContain("Model analysis");
     expect(html).toContain("2m 5s");
     expect(html).toContain("Not reported");
-    expect(html).toContain("does not establish model activity");
     expect(html).toContain("Recorded stage timings are unavailable");
   });
 
@@ -125,7 +124,7 @@ describe("task progress and resource waiting", () => {
     expect(html).toContain("Model analysis: 9m 0s");
     expect(html).toContain("Cleaning up: 450ms");
     expect(html).not.toContain("Saving analysis: 0");
-    expect(html).toContain("Unrecorded stages remain unknown");
+    expect(html).toContain("Activity timing unavailable");
   });
 
   it("stops elapsed counters when the task is terminal and retains unknown timestamps", () => {
@@ -207,7 +206,7 @@ describe("task progress and resource waiting", () => {
       />,
     );
     expect(compact).toContain("Awaiting worker cleanup");
-    expect(compact).toContain("Execution has stopped");
+    expect(compact).toContain("Elapsed");
     expect(compact).not.toContain("Task complete");
   });
 });

@@ -1,6 +1,7 @@
 import type { InvestigationSession } from "@agentic-review/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { actionLabels } from "./action-panel";
 import MyAccountPage, { passwordChangeValidation } from "./my-account";
 
 const context = vi.hoisted(() => ({ session: null as InvestigationSession | null }));
@@ -34,14 +35,14 @@ describe("personal account access", () => {
     expect(html).toContain("My account");
     expect(html).toContain("own-account");
     expect(html).toContain("No repositories");
-    expect(html).toContain("No business permissions");
+    expect(html).toContain("Read-only");
     expect(html).toContain("No actions are granted to this account.");
     expect(html).toContain("Not allowed");
-    expect(html).toContain("It does not grant repository access");
+    expect(html).not.toContain("Create investigations");
     expect(html).toContain('aria-label="Show current password"');
     expect(html).toContain('aria-label="Show confirm new password"');
     expect(html).toMatch(/autocomplete="current-password"/i);
-    expect(html).toContain("signs out every session");
+    expect(html).toContain("signs you out on all devices");
   });
 
   it("keeps exact repository IDs and action grants separate from administration", () => {
@@ -56,9 +57,9 @@ describe("personal account access", () => {
     const html = renderToStaticMarkup(<MyAccountPage />);
     expect(html).toContain("repo:outside-directory");
     expect(html).toContain("Create investigations");
-    expect(html).toContain(">Conversation comment<");
+    expect(html).toContain(`>${actionLabels.comment}<`);
     expect(html).toContain(">Allowed<");
-    expect(html).toContain("Standard account");
+    expect(html).toContain("Your access");
     expect(html).not.toContain(">Administrator<");
     expect(html).not.toContain(">Approve<");
   });

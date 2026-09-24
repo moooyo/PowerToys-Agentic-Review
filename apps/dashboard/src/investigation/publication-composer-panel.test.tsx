@@ -2,11 +2,34 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { createFeedbackSelection } from "./feedback-selection";
 import { createPublicationComposer, setPublicationFinding } from "./publication-composer";
-import { PublicationComposerPanel } from "./publication-composer-panel";
+import {
+  expandPublicationEditorsForErrors,
+  PublicationComposerPanel,
+} from "./publication-composer-panel";
 import { selectionContext } from "./report-state";
 import { createSampleInvestigationApi } from "./sample-adapter";
 
 describe("publication editor accessibility", () => {
+  it("keeps the second editor open while its last error is corrected", () => {
+    const initial = new Map([
+      ["first-draft", true],
+      ["second-draft", false],
+    ]);
+    const revealed = expandPublicationEditorsForErrors(initial, {
+      "draft-second-draft-body": "Add a comment.",
+    });
+    expect(revealed.get("second-draft")).toBe(true);
+    const corrected = expandPublicationEditorsForErrors(revealed, {});
+    expect(corrected).toBe(revealed);
+    expect(corrected.get("second-draft")).toBe(true);
+    expect(corrected.get("first-draft")).toBe(true);
+    expect(initial.get("second-draft")).toBe(false);
+    const manuallyCollapsed = new Map(corrected).set("second-draft", false);
+    expect(expandPublicationEditorsForErrors(manuallyCollapsed, {}).get("second-draft")).toBe(
+      false,
+    );
+  });
+
   it("keeps publishing labels stable and associates body, mode and replacement errors", async () => {
     const api = createSampleInvestigationApi();
     const result = await api.exportReport("sample-pr-p1-report");
@@ -52,9 +75,51 @@ describe("publication editor accessibility", () => {
       expect(html).toContain(`aria-describedby="${fieldId(`${key}-${part}`)}-helper-text"`);
     }
     const labels = html.match(/<label\b[^>]*>[\s\S]*?<\/label>/g) ?? [];
-    expect(labels.some((label) => label.includes("publishing text"))).toBe(true);
+    expect(labels.some((label) => label.includes("comment"))).toBe(true);
     for (const label of labels) expect(label).not.toContain("Review this changed text.");
     expect(html).toContain(finding.feedbackDraft.suggestion!.originalContentDigest);
     expect(html).toContain("Remove the code fence.");
+  });
+
+  it("keeps long selections compact and exposes errors inside their finding editor", async () => {
+    const api = createSampleInvestigationApi();
+    const result = await api.exportReport("sample-pr-p1-report");
+    const context = await api.actionContext(result.context.workItem.id, result.id);
+    const chosen = result.findings.slice(0, 2);
+    expect(chosen).toHaveLength(2);
+    let draft = createPublicationComposer();
+    for (const finding of chosen)
+      draft = setPublicationFinding(draft, finding.id, true, result, {}, "request-changes");
+    const fieldId = (name: string) => `publication-${encodeURIComponent(name)}`;
+    const render = (errors: Record<string, string>) =>
+      renderToStaticMarkup(
+        <PublicationComposerPanel
+          action="request-changes"
+          context={context}
+          result={result}
+          draft={draft}
+          reportSelection={createFeedbackSelection(selectionContext(context))}
+          editedBodies={{}}
+          summary=""
+          step="compose"
+          disabled={false}
+          errors={errors}
+          fieldId={fieldId}
+          onChange={() => {}}
+          onSummaryChange={() => {}}
+          onClearError={() => {}}
+          onStepChange={() => {}}
+        />,
+      );
+    const normal = render({});
+    expect(normal.match(/<details\b[^>]*\bopen=""/g)).toHaveLength(1);
+    const secondBody = `draft-${chosen[1]!.feedbackDraft.id}-body`;
+    const invalid = render({ [secondBody]: "Add a comment." });
+    expect(invalid.match(/<details\b[^>]*\bopen=""/g)).toHaveLength(2);
+    expect(invalid).toContain(`id="${fieldId(secondBody)}"`);
+    expect(invalid).toContain(`aria-describedby="${fieldId(secondBody)}-helper-text"`);
+    expect(normal).not.toContain("Report checkboxes");
+    expect(normal).not.toContain("not automatically pasted");
+    expect(normal).not.toContain("Server preview");
   });
 });

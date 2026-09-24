@@ -249,9 +249,66 @@ describe("authorized workspace read projections", () => {
     expect(h.reads.publications(h.actor, { ...query, taskKind: "pr-e2e" }, summary).items).toEqual(
       [],
     );
+    expect(
+      h.reads.publications(h.actor, { ...query, workItemKind: "issue" }, summary).items,
+    ).toEqual([]);
     expect(() =>
       h.reads.publications(h.actor, { taskId: producer.id, cursor: first.nextCursor! }, summary),
     ).toThrow(expect.objectContaining({ code: "directory_cursor_invalid" }));
+  });
+
+  it("filters publication work item kinds in SQLite before scanning and paging authorized records", () => {
+    const h = harness();
+    const summaries = new Map<string, InvestigationCommentPublicationSummary>();
+    for (let index = 0; index < 510; index += 1) {
+      const id = `auto-reply:report:before-${String(index).padStart(3, "0")}`;
+      h.store.insert("idempotency", id, {
+        id,
+        repository: h.fixture.task.repository,
+        workItemKind: "pull_request",
+      });
+    }
+    for (const [id, source] of [
+      ["auto-reply:report:issue", { workItemKind: "issue" }],
+      ["progress-reply:assignment:issue", { target: { kind: "issue" } }],
+      ["progress-reply:task:issue", { workItem: { kind: "issue" } }],
+    ] as const) {
+      summaries.set(id, publication(h, id, { workItemKind: "issue" }));
+      h.store.insert("idempotency", id, {
+        id,
+        repository: h.fixture.task.repository,
+        ...source,
+      });
+    }
+    h.store.insert("idempotency", "auto-reply:report:foreign", {
+      id: "auto-reply:report:foreign",
+      repository: { ...h.fixture.task.repository, id: "foreign" },
+      workItemKind: "issue",
+    });
+    const summary = vi.fn((id: string) => {
+      const entry = summaries.get(id);
+      if (entry === undefined) throw new Error(`Unexpected publication read: ${id}`);
+      return entry;
+    });
+    const query = { workItemKind: "issue" as const, limit: 1 };
+    const first = h.reads.publications(h.actor, query, summary);
+    expect(first.items.map((entry) => entry.id)).toEqual(["auto-reply:report:issue"]);
+    expect(first.nextCursor).not.toBeNull();
+    if (first.nextCursor === null) throw new Error("Expected a continuation after the result.");
+    const firstCursor = first.nextCursor;
+    const second = h.reads.publications(h.actor, { ...query, cursor: firstCursor }, summary);
+    expect(second.items.map((entry) => entry.id)).toEqual(["progress-reply:assignment:issue"]);
+    if (second.nextCursor === null) throw new Error("Expected a continuation after progress.");
+    const third = h.reads.publications(h.actor, { ...query, cursor: second.nextCursor }, summary);
+    expect(third.items.map((entry) => entry.id)).toEqual(["progress-reply:task:issue"]);
+    expect(third.nextCursor).toBeNull();
+    expect(summary.mock.calls.every(([id]) => summaries.has(id))).toBe(true);
+    expect(() =>
+      h.reads.publications(h.actor, { workItemKind: "pull_request", cursor: firstCursor }, summary),
+    ).toThrow(expect.objectContaining({ code: "directory_cursor_invalid" }));
+    expect(() =>
+      h.reads.publications(h.actor, { ...query, repositoryId: "foreign" }, summary),
+    ).toThrow(expect.objectContaining({ code: "repository_forbidden" }));
   });
 
   it("checks task grants and rejects a shared index that points to another source", () => {

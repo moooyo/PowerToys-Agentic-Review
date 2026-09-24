@@ -24,6 +24,7 @@ import WebhookDeliveriesPage, {
   webhookDeliveryFilters,
   webhookDeliveryQueryKey,
   webhookDetailsUrl,
+  webhookFilterUrl,
   webhookPollingInterval,
   webhookRecoveryGrantProblem,
   webhookRecoveryQueryKey,
@@ -96,6 +97,33 @@ function client() {
 }
 
 describe("webhook event management", () => {
+  it("keeps additional filters visible and removes only the selected URL filter", () => {
+    const filters = webhookDeliveryFilters(
+      "?repositoryId=repo-1&number=22&mode=e2e&kind=pull_request&state=failed",
+    );
+    expect(webhookDeliveryFilters(webhookFilterUrl(filters, "number").split("?")[1] ?? "")).toEqual(
+      { repositoryId: "repo-1", mode: "e2e", kind: "pull_request", state: "failed" },
+    );
+    expect(webhookDeliveryFilters(webhookFilterUrl(filters, "mode").split("?")[1] ?? "")).toEqual({
+      repositoryId: "repo-1",
+      number: 22,
+      kind: "pull_request",
+      state: "failed",
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/webhooks?repositoryId=repo-1&number=22&mode=e2e"]}>
+        <QueryClientProvider client={client}>
+          <WebhookDeliveriesPage />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(html).toContain("More filters (2)");
+    expect(html).toContain("Work item: #22");
+    expect(html).toContain("Mode: E2E");
+    expect(html).toContain('aria-label="Remove work item number 22 filter"');
+    client.clear();
+  });
   it("explains known source, authorization, and duplicate reasons without adding retry conclusions", () => {
     expect(webhookReasonDescription("source_read_failed")).toBe(
       "The complete source could not be read from GitHub.",
@@ -181,7 +209,7 @@ describe("webhook event management", () => {
     const primary = withoutDiagnosticDisclosures(html);
     expect(primary).toContain(unknownWebhookReasonDescription);
     expect(primary).toContain("No task linked");
-    expect(primary).toContain("Retry event handling");
+    expect(primary).toContain("Retry event");
     expect(primary).not.toContain(reason);
     expect(primary).not.toContain("fixture task commit response lost");
     expect(primary).not.toMatch(/No task (?:was )?created|retries (?:are )?exhausted/iu);
@@ -236,14 +264,14 @@ describe("webhook event management", () => {
     expect(html).not.toContain("source_read_failed");
     expect(html).not.toContain("No task was created");
     expect(html).not.toContain("exhausted");
-    expect(html).toContain("No task linked");
+    expect(html).toContain('data-label="Task"');
     expect(html).toContain("Processed");
     expect(html).toContain("taskId=task-2");
     expect(html).toContain("deliveryId=delivery-1");
     expect(html).not.toContain("Task succeeded");
     expect(html).not.toContain("opaque-version");
     expect(renderToStaticMarkup(<WebhookDeliveryHistory items={[]} />)).toContain(
-      "No webhook events match these filters.",
+      "No events match",
     );
   });
 
@@ -301,15 +329,11 @@ describe("webhook event management", () => {
           <WebhookRetryControls delivery={record} user={operator} />
         </QueryClientProvider>,
       );
-    expect(renderControls(delivery())).toContain("Retry event handling");
-    expect(renderControls(delivery())).toContain(
-      "does not rerun an existing task or retry a GitHub comment delivery",
-    );
-    expect(renderControls(delivery({ availableActions: [] }))).not.toContain(
-      "Retry event handling",
-    );
+    expect(renderControls(delivery())).toContain("Retry event");
+    expect(renderControls(delivery())).toContain("Refresh status");
+    expect(renderControls(delivery({ availableActions: [] }))).not.toContain("Retry event");
     expect(renderControls(delivery({ state: "completed", availableActions: [] }))).not.toContain(
-      "Retry event handling",
+      "Retry event",
     );
     expect(webhookRetryErrorMessage(new InvestigationHttpError(409, "version mismatch"))).toBe(
       "This event changed. Refresh its status before retrying event handling.",
@@ -344,8 +368,8 @@ describe("webhook event management", () => {
     expect(html).toContain("Open canonical event");
     expect(html).toContain("repositoryId=repo-1&amp;deliveryId=delivery-canonical");
     expect(html).toContain("repositoryId=repo-1&amp;taskId=task-1");
-    expect(html).toContain("Processed means event handling finished");
-    expect(html).toContain("Task execution and GitHub comment delivery have separate outcomes");
+    expect(html).toContain("Related work");
+    expect(html).toContain("Event history");
     queryClient.clear();
   });
 
@@ -362,7 +386,7 @@ describe("webhook event management", () => {
     );
     expect(html).toContain("This event does not belong to the selected repository.");
     expect(html).not.toContain("The complete source could not be read from GitHub.");
-    expect(html).not.toContain("Retry event handling");
+    expect(html).not.toContain("Retry event");
     queryClient.clear();
   });
 
@@ -427,7 +451,7 @@ describe("webhook event management", () => {
       </MemoryRouter>,
     );
     expect(html).toContain('href="/webhooks?repositoryId=repo-1"');
-    expect(html).toContain("No webhook events match these filters.");
+    expect(html).toContain("No events match");
     queryClient.clear();
   });
 
@@ -493,8 +517,8 @@ describe("webhook event management", () => {
     );
     expect(html).toContain("Recovery request unconfirmed");
     expect(html).toContain("Refresh event status");
-    expect(html).toContain("Resend saved request");
-    expect(html).not.toContain(">Retry event handling</button>");
+    expect(html).toContain("Retry saved request");
+    expect(html).not.toContain(">Retry event</button>");
     const list = renderToStaticMarkup(
       <MemoryRouter>
         <QueryClientProvider client={queryClient}>
@@ -794,7 +818,7 @@ describe("webhook event management", () => {
     expect(html).toContain("Handling timeline");
     expect(html).toContain("taskId=existing-task");
     expect(html).toMatch(/datetime="2026-09-19T02:00:00\.000Z"/i);
-    expect(html).not.toContain("Retry event handling");
+    expect(html).not.toContain("Retry event");
     queryClient.clear();
   });
 
@@ -814,11 +838,11 @@ describe("webhook event management", () => {
       </MemoryRouter>,
     );
     expect(html).toContain("Event refresh unavailable");
-    expect(html).toContain("last loaded event and linked work remain visible");
+    expect(html).toContain("Refresh before retrying");
     expect(html).toContain('href="https://github.com/owner/repository/pull/7"');
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
-    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Retry event handling<\/button>/u);
+    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Retry event<\/button>/u);
     queryClient.clear();
   });
 });

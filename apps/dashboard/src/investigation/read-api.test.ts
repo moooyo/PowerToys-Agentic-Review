@@ -114,13 +114,14 @@ describe("production investigation readers", () => {
     expect(
       await api.publicationDirectory({
         taskId: "task:selected",
+        workItemKind: "pull_request",
         mode: "result",
         cursor: "page/2",
         limit: 1,
       }),
     ).toEqual(publications);
     expect(fetcher).toHaveBeenLastCalledWith(
-      "/api/publications?taskId=task%3Aselected&mode=result&cursor=page%2F2&limit=1",
+      "/api/publications?taskId=task%3Aselected&workItemKind=pull_request&mode=result&cursor=page%2F2&limit=1",
       expect.anything(),
     );
     expect(reports.nextCursor).not.toBeNull();

@@ -54,8 +54,8 @@ describe("report-local filters and workspace repository scope", () => {
           </QueryClientProvider>
         </MemoryRouter>,
       );
-      expect(html).toContain("Investigation type");
-      expect(html).toContain("Completeness");
+      expect(html).toContain("Type");
+      expect(html).toContain("Status");
       expect(html).toContain("Delivery");
       expect(html).not.toContain(">Repository<");
       expect(html).not.toContain("All accessible repositories");

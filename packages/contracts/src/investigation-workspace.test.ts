@@ -247,6 +247,7 @@ describe("investigation workspace directory queries", () => {
     const publications: InvestigationPublicationDirectoryQuery = {
       repositoryId: "repo-fixture",
       workItemId: "work-item-fixture",
+      workItemKind: "pull_request",
       taskId: "task-fixture",
       mode: "result",
       state: "needs_attention",
@@ -302,14 +303,23 @@ describe("investigation workspace directory queries", () => {
     }
   });
 
-  it("restricts publication mode, state, and task kind filters", () => {
+  it("restricts publication mode, state, task kind, and work item kind filters", () => {
     expect(
       Value.Check(InvestigationPublicationDirectoryQuerySchema, {
         mode: "progress",
         state: "synced",
+        workItemKind: "issue",
       }),
     ).toBe(true);
-    for (const query of [{ mode: "draft" }, { state: "succeeded" }, { taskKind: "review" }]) {
+    for (const query of [
+      { mode: "draft" },
+      { state: "succeeded" },
+      { taskKind: "review" },
+      { workItemKind: "pr" },
+      { workItemKind: "" },
+      { workItemKind: null },
+      { workItemKind: ["issue", "pull_request"] },
+    ]) {
       expect(Value.Check(InvestigationPublicationDirectoryQuerySchema, query)).toBe(false);
     }
   });

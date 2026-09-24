@@ -9,7 +9,6 @@ import {
   Alert,
   Box,
   Button,
-  Chip,
   CircularProgress,
   Dialog,
   DialogActions,
@@ -23,7 +22,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { ActionPanel, type ActionPanelRequest } from "./action-panel";
+import { ActionPanel, type ActionPanelRequest, actionLabels } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
 import {
   createFeedbackSelection,
@@ -49,6 +48,7 @@ import { ReportFindingsReader } from "./report-findings-reader";
 import { assertActionContext, assertReportBindings, selectionContext } from "./report-state";
 import { ReviewQueueBar } from "./review-navigation";
 import { sessionIdentity, useInvestigationSession } from "./session";
+import { sourceActionLabel } from "./source-result";
 import { PageHeading } from "./workspace-ui";
 import "./report-workspace.css";
 
@@ -164,23 +164,20 @@ function ActionsWithState({
 }
 
 export type ReportTab = "findings" | "evidence" | "details";
-const reportActionLabels: Record<InvestigationActionKind, string> = {
-  comment: "Prepare a conversation comment",
-  approve: "Review approval",
-  "suggestion-comment": "Prepare review comments and suggestions",
-  "request-changes": "Prepare request changes",
-  close: "Review closure",
-  merge: "Review merge",
-  "trigger-ci": "Prepare workflow dispatch",
-  "close-as-duplicate": "Review duplicate closure",
-  "start-task": "Review saved follow-up",
-  "reviews.verify": "Prepare verification",
-  "view-validation": "View validation",
-  "view-changes": "View saved changes",
-  "create-pr": "Prepare pull request",
-  "view-evidence": "View evidence",
-  resume: "Review resume options",
-};
+export function recommendedReportRequest(
+  action: InvestigationActionKind,
+  nextActionId: string | undefined,
+  hasSelection: boolean,
+): Omit<ActionPanelRequest, "id"> {
+  return {
+    action,
+    nextActionId,
+    ...(hasSelection &&
+    ["comment", "approve", "suggestion-comment", "request-changes"].includes(action)
+      ? { importReportSelection: true }
+      : {}),
+  };
+}
 export function reportTab(value: string | null): ReportTab {
   if (["evidence", "validation", "changes"].includes(value ?? "")) return "evidence";
   if (["details", "coverage", "plans", "diagnostics", "usage"].includes(value ?? ""))
@@ -204,7 +201,7 @@ export function ReportWorkspace({ reportId }: { reportId: string }) {
     return (
       <Box role="status" sx={{ py: 4 }}>
         <CircularProgress size={28} />
-        <Typography sx={{ mt: 1 }}>Loading structured report…</Typography>
+        <Typography sx={{ mt: 1 }}>Loading report…</Typography>
       </Box>
     );
   if (!header.data)
@@ -223,7 +220,7 @@ export function ReportWorkspace({ reportId }: { reportId: string }) {
           severity="warning"
           action={<Button onClick={() => void header.refetch()}>Retry report</Button>}
         >
-          Report refresh failed. The last successfully loaded saved report remains visible.
+          Refresh failed. Showing the last loaded report.
         </Alert>
       )}
       <BoundReportWorkspace
@@ -293,8 +290,7 @@ function BoundReportWorkspace({
   const editedBodies = draft.current.editedBodies;
   const dirty = isReportDraftDirty(draft);
   useUnsavedChanges(dirty, {
-    description:
-      "Your report feedback has unsaved edits. Save a private draft to retain it when navigating.",
+    description: "Unsaved feedback changes will be lost.",
     busy: exporting,
     allowPresentationNavigation: true,
     onDiscard: () => updateDraft({ type: "discard" }),
@@ -366,9 +362,11 @@ function BoundReportWorkspace({
   );
   const fixed = context.data?.fixedActions.find((entry) => entry.action === recommendation?.action);
   const recommendedReady = suggested ? suggested.canPrepare : (fixed?.allowed ?? false);
-  const recommendedLabel =
-    suggested?.label ??
-    (recommendation?.action ? reportActionLabels[recommendation.action] : "Review evidence");
+  const recommendedLabel = recommendation?.action
+    ? recommendation.action === "start-task"
+      ? sourceActionLabel(recommendation.action, suggested?.taskKind)
+      : actionLabels[recommendation.action]
+    : actionLabels["view-evidence"];
   const recommendationNeedsDetails = Boolean(suggested?.planRef || suggested?.draftRef);
   const recommendationDisabled =
     !canOpenActions || !recommendedReady || (recommendationNeedsDetails && !result);
@@ -419,7 +417,7 @@ function BoundReportWorkspace({
     if (!actionBusy) guarded(() => setActionOpen(false));
   };
   return (
-    <Stack spacing={3} className="report-workspace">
+    <Stack spacing={2} className="report-workspace">
       <ReviewQueueBar
         record={{
           kind: "report",
@@ -435,7 +433,7 @@ function BoundReportWorkspace({
       <PageHeading
         eyebrow={`${reportKindLabel(value.context.task.kind)} · ${value.context.repository.fullName} · ${value.context.workItem.kind === "pull_request" ? "Pull request" : "Issue"} #${value.context.workItem.number}`}
         title={value.context.workItem.title}
-        subtitle={`Saved report · Version ${value.report.version}`}
+        subtitle={`Report v${value.report.version} · ${value.report.completeness === "partial" ? "Partial" : "Complete"}`}
         action={
           <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
             <GithubSourceLink
@@ -443,9 +441,6 @@ function BoundReportWorkspace({
               kind={value.context.workItem.kind}
               number={value.context.workItem.number}
             />
-            <Button variant="outlined" disabled={!canOpenActions} onClick={() => openActions()}>
-              Other actions
-            </Button>
           </Stack>
         }
       />
@@ -457,13 +452,9 @@ function BoundReportWorkspace({
             : result?.nextActions.filter((entry) => entry.recommended).slice(0, 1)
         }
         actions={
-          <Stack spacing={1}>
+          <Stack spacing={1} sx={{ alignItems: "flex-start" }}>
             {recommendation ? (
               <>
-                <Typography variant="subtitle1">{recommendedLabel}</Typography>
-                <Typography variant="body2" color="text.secondary">
-                  {recommendation.reason}
-                </Typography>
                 {recommendation.action &&
                   (navigationRecommendation ? (
                     <Button
@@ -480,10 +471,15 @@ function BoundReportWorkspace({
                       disabled={recommendationDisabled}
                       onClick={() => {
                         if (recommendation.action)
-                          openActions({
-                            action: recommendation.action,
-                            nextActionId: suggested?.id,
-                          });
+                          openActions(
+                            recommendedReportRequest(
+                              recommendation.action,
+                              suggested?.id,
+                              selection.selectedFindings.length +
+                                selection.selectedDraftIds.length >
+                                0,
+                            ),
+                          );
                       }}
                     >
                       {recommendedLabel}
@@ -496,98 +492,47 @@ function BoundReportWorkspace({
                       {guard.message}
                     </Typography>
                   ))}
-                {suggested?.canPrepare && !suggested.readyToExecute && (
-                  <Typography variant="caption" color="text.secondary">
-                    Preparation is available. Execution still requires the listed prerequisites.
-                  </Typography>
-                )}
                 {recommendationNeedsDetails && !result && (
                   <Typography variant="caption" color="text.secondary">
-                    Load the complete saved plan and feedback before preparing this action.
+                    Loading plan and feedback…
                   </Typography>
                 )}
-                <Typography variant="caption" color="text.secondary">
-                  A saved recommendation is not an executed action. Writes require an exact preview
-                  and separate confirmation.
-                </Typography>
               </>
             ) : (
               <Typography color="text.secondary" role="status">
                 {context.isPending
-                  ? "Checking current action availability…"
-                  : "Current action availability is unavailable. The saved assessment remains readable."}
+                  ? "Checking available actions…"
+                  : "Actions unavailable. Refresh to try again."}
               </Typography>
             )}
-            <Button onClick={() => setSection("evidence")}>Review saved evidence</Button>
+            <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+              <Button onClick={() => setSection("evidence")}>View evidence</Button>
+              <Button disabled={!canOpenActions} onClick={() => openActions()}>
+                Other actions
+              </Button>
+              <Button
+                startIcon={<RefreshRounded />}
+                disabled={context.isFetching || workItem.isFetching}
+                onClick={() => {
+                  void context.refetch();
+                  void workItem.refetch();
+                }}
+              >
+                Refresh actions
+              </Button>
+            </Stack>
           </Stack>
         }
       />
-      <Box component="details" className="report-context">
-        <Typography component="summary">
-          Report context · {value.report.completeness} · {value.report.delivery}
-        </Typography>
-        <Stack spacing={2} sx={{ mt: 2 }}>
-          <Typography>{value.report.summary}</Typography>
-          <Stack
-            direction="row"
-            spacing={1}
-            useFlexGap
-            sx={{ flexWrap: "wrap", alignItems: "center" }}
-          >
-            <Chip
-              label={`Execution: ${value.outcome}`}
-              color={
-                value.outcome === "failed"
-                  ? "error"
-                  : value.outcome === "completed"
-                    ? "success"
-                    : "warning"
-              }
-            />
-            <Chip
-              label={`Report: ${value.report.completeness}`}
-              color={value.report.completeness === "partial" ? "warning" : "default"}
-            />
-            <Chip
-              label={value.report.delivery === "final" ? "Final delivery" : "Checkpoint only"}
-              variant="outlined"
-            />
-            <Button
-              component={Link}
-              to={`/tasks?taskId=${encodeURIComponent(value.context.task.id)}&repositoryId=${encodeURIComponent(value.context.repository.id)}`}
-            >
-              Open task
-            </Button>
-            <Button
-              startIcon={<RefreshRounded />}
-              disabled={context.isFetching || workItem.isFetching}
-              onClick={() => {
-                void context.refetch();
-                void workItem.refetch();
-              }}
-            >
-              Refresh actions
-            </Button>
-          </Stack>
-          <Typography variant="body2" color="text.secondary">
-            Report {reportId} · Version {value.report.version} · Saved assessment and evidence
-            remain bound to their original source.
-          </Typography>
-        </Stack>
-      </Box>
       {value.report.completeness === "partial" && (
-        <Alert severity="warning">
-          This checkpoint is incomplete. Retained findings and evidence do not cover the entire
-          declared scope. Stop reason: {value.report.loop.stopReason}.
-        </Alert>
+        <Alert severity="warning">Partial report · {value.report.loop.stopReason}.</Alert>
       )}
       {context.data?.pendingSubmission && (
         <Alert
           severity="warning"
           action={<Button onClick={() => openActions()}>Inspect submission</Button>}
         >
-          A saved submission needs review. Its server identity remains available when you leave this
-          report or discard private edits.
+          A submission needs review. Check it before submitting again.
         </Alert>
       )}
       {(exportError || full.isError) && (
@@ -606,7 +551,14 @@ function BoundReportWorkspace({
           {context.error.message}
         </Alert>
       )}
-      {workItem.isError && <Alert severity="error">{workItem.error.message}</Alert>}
+      {workItem.isError && (
+        <Alert
+          severity="error"
+          action={<Button onClick={() => void workItem.refetch()}>Retry source</Button>}
+        >
+          {workItem.error.message}
+        </Alert>
+      )}
       <Box className="report-tabs-row" sx={{ borderBottom: 1, borderColor: "divider" }}>
         <Tabs
           value={tab}
@@ -619,7 +571,7 @@ function BoundReportWorkspace({
             value="findings"
             id="report-tab-findings"
             aria-controls="report-panel-findings"
-            label={`Findings (${value.report.collections.findings})`}
+            label={`${value.report.collections.findings === 1 ? "Finding" : "Findings"} (${value.report.collections.findings})`}
           />
           <Tab
             value="evidence"
@@ -640,7 +592,7 @@ function BoundReportWorkspace({
           onClick={() => void download()}
           aria-label="Export complete JSON"
         >
-          Export report
+          Export JSON
         </Button>
       </Box>
       <Box role="tabpanel" id={`report-panel-${tab}`} aria-labelledby={`report-tab-${tab}`}>
@@ -674,11 +626,8 @@ function BoundReportWorkspace({
         maxWidth="lg"
         aria-labelledby="prepare-report-action-title"
       >
-        <DialogTitle id="prepare-report-action-title">Prepare the next action</DialogTitle>
+        <DialogTitle id="prepare-report-action-title">Actions</DialogTitle>
         <DialogContent dividers>
-          <Typography color="text.secondary" sx={{ mb: 2 }}>
-            Choose an operation, then inspect the exact saved preview before confirming it.
-          </Typography>
           {actionOpen && context.data && workItem.data && selectionReady && (
             <ActionPanel
               workItem={workItem.data}

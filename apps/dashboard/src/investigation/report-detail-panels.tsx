@@ -36,9 +36,8 @@ export function ReportEvidence({
   result: InvestigationResultV1;
   identity: string;
 }) {
-  const staticInvestigation = ["pr-review", "issue-investigate"].includes(result.context.task.kind);
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       {result.context.task.kind === "pr-e2e" && (
         <E2eCoveragePanel
           result={result.context.e2e}
@@ -47,11 +46,9 @@ export function ReportEvidence({
         />
       )}
       <ValidationPanel validation={result.validation} />
-      <Section title="Verification evidence">
+      <Section title="Evidence">
         {result.verificationEvidence.length === 0 ? (
-          <Typography color="text.secondary">
-            No verification evidence was registered for this report.
-          </Typography>
+          <Typography color="text.secondary">No evidence recorded.</Typography>
         ) : (
           <Stack spacing={2}>
             {result.verificationEvidence.map((evidence) => (
@@ -63,7 +60,7 @@ export function ReportEvidence({
                 <Typography variant="caption">
                   Subject {evidence.subjectRef} · Attempt {evidence.provenance.attemptId}
                 </Typography>
-                <ExactRecord label="Evidence identity and provenance" value={evidence} />
+                <ExactRecord label="Provenance" value={evidence} />
               </Box>
             ))}
           </Stack>
@@ -73,19 +70,8 @@ export function ReportEvidence({
       {result.context.sourceArtifacts && result.context.sourceArtifacts.length > 0 && (
         <ArtifactPanel artifacts={result.context.sourceArtifacts} origin="inherited" />
       )}
-      {result.context.task.kind === "pr-e2e" ? (
+      {result.context.task.kind === "pr-e2e" && (
         <ReportMediaPublication result={result} identity={identity} />
-      ) : staticInvestigation ? (
-        <Typography variant="body2" color="text.secondary">
-          Files registered by this static investigation remain available in the workspace. Static
-          artifacts are not eligible for GitHub media publication.
-        </Typography>
-      ) : (
-        <Typography variant="body2" color="text.secondary">
-          Files registered by this execution remain available in the workspace. Uploaded files alone
-          do not establish passing verification. GitHub media publication requires eligible evidence
-          from an independent E2E task.
-        </Typography>
       )}
     </Stack>
   );
@@ -105,9 +91,6 @@ function ReportMediaPublication({
   });
   return (
     <Section title="GitHub media publication">
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Workspace evidence and GitHub media delivery have separate recorded states.
-      </Typography>
       {query.isPending && <CircularProgress size={22} aria-label="Loading media publication" />}
       {query.isError && (
         <Alert
@@ -119,7 +102,7 @@ function ReportMediaPublication({
           action={<Button onClick={() => void query.refetch()}>Refresh</Button>}
         >
           {query.error instanceof InvestigationHttpError && query.error.status === 404
-            ? "Media publication status is unavailable from this server runtime. Workspace evidence remains available above."
+            ? "Media publication status is unavailable."
             : query.error.message}
         </Alert>
       )}
@@ -148,10 +131,10 @@ function ReportMediaPublication({
                 {upload.reason && <Typography variant="body2">{upload.reason}</Typography>}
                 {!artifact && (
                   <Typography variant="caption" color="text.secondary">
-                    This publication record has no matching artifact identity in this report export.
+                    No matching artifact in this report.
                   </Typography>
                 )}
-                <ExactRecord label="Recorded publication metadata" value={upload} />
+                <ExactRecord label="Publication details" value={upload} />
               </Box>
             );
           })}
@@ -170,9 +153,8 @@ export function ReportDetails({
 }) {
   return (
     <Box className="report-details-layout">
-      <Stack spacing={3}>
+      <Stack spacing={2}>
         <AssessmentPanel assessment={value.assessment} />
-        <CoveragePanel report={result.report} />
         <Section title="Saved plans">
           {result.plans.length === 0 ? (
             <Typography color="text.secondary">No saved plans.</Typography>
@@ -202,10 +184,8 @@ export function ReportDetails({
             </Stack>
           )}
         </Section>
-        <Section title="Diagnostics">
-          {result.diagnostics.length === 0 ? (
-            <Typography color="text.secondary">No diagnostics recorded.</Typography>
-          ) : (
+        {result.diagnostics.length > 0 && (
+          <Section title="Diagnostics">
             <Stack spacing={1}>
               {result.diagnostics.map((diagnostic) => {
                 const recovered =
@@ -236,18 +216,19 @@ export function ReportDetails({
                         ? "Source preparation subsequently succeeded and this task completed. The earlier diagnostic is retained for history."
                         : diagnostic.retryable
                           ? "Retry may resolve this condition."
-                          : "Review the recorded prerequisites before continuing."}
+                          : ""}
                     </Typography>
                     <ExactRecord label="Exact diagnostic" value={diagnostic} />
                   </Alert>
                 );
               })}
             </Stack>
-          )}
-        </Section>
+          </Section>
+        )}
       </Stack>
-      <Stack spacing={3} className="report-identity-column">
-        <Section title="Report identity">
+      <Stack spacing={2} className="report-identity-column">
+        <Section title="Report details">
+          <Typography variant="body2">{value.report.summary}</Typography>
           <Box component="dl" className="report-identity">
             <Typography component="dt" color="text.secondary">
               Report
@@ -257,10 +238,6 @@ export function ReportDetails({
               Version
             </Typography>
             <Typography component="dd">{value.report.version}</Typography>
-            <Typography component="dt" color="text.secondary">
-              Immutable digest
-            </Typography>
-            <Typography component="dd">{value.report.logicalContentDigest}</Typography>
             <Typography component="dt" color="text.secondary">
               Producer
             </Typography>
@@ -275,19 +252,37 @@ export function ReportDetails({
               Execution outcome
             </Typography>
             <Typography component="dd">{value.outcome}</Typography>
+            <Typography component="dt" color="text.secondary">
+              Completeness
+            </Typography>
+            <Typography component="dd">{value.report.completeness}</Typography>
+            <Typography component="dt" color="text.secondary">
+              Delivery
+            </Typography>
+            <Typography component="dd">{value.report.delivery}</Typography>
           </Box>
-          <Typography variant="body2" color="text.secondary">
-            Execution outcome, report completeness, source confirmation, and actual runtime
-            validation are independent.
-          </Typography>
+          <Box component="details">
+            <Typography component="summary">Digest</Typography>
+            <Typography variant="caption">{value.report.logicalContentDigest}</Typography>
+          </Box>
         </Section>
-        <TokenUsagePanel
-          summary={value.report.usage}
-          legacyTokens={value.report.loop.consumed.tokens}
-          scope="report"
-        />
-        <SubjectPanel subjects={result.context.subjects} />
-        <Section title="Saved provenance">
+        <Box component="details" className="report-detail-disclosure">
+          <Typography component="summary">Coverage</Typography>
+          <CoveragePanel report={result.report} />
+        </Box>
+        <Box component="details" className="report-detail-disclosure">
+          <Typography component="summary">Usage</Typography>
+          <TokenUsagePanel
+            summary={value.report.usage}
+            legacyTokens={value.report.loop.consumed.tokens}
+            scope="report"
+          />
+        </Box>
+        <Box component="details" className="report-detail-disclosure">
+          <Typography component="summary">Sources</Typography>
+          <SubjectPanel subjects={result.context.subjects} />
+        </Box>
+        <Section title="Provenance">
           <ExactRecord
             label="Exact context and report metadata"
             value={{

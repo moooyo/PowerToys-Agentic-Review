@@ -90,14 +90,14 @@ describe("repository assignment webhook settings", () => {
     const queryClient = client();
     queryClient.setQueryData(webhookSettingsQueryKey(repository.id), settings);
     const html = renderPanel(queryClient);
-    expect(html).toContain(repository.fullName);
+    expect(html).toContain("Static investigations");
     expect(html).toContain("Listen for assignments");
-    expect(html).toContain("Assignment recipient GitHub user ID");
-    expect(html).toContain("Trusted assigning GitHub user IDs");
+    expect(html).toContain("Assignment recipient ID");
+    expect(html).toContain("Trusted GitHub user IDs");
     expect(html).toContain("/api/github/webhook");
-    expect(html).toContain("receiver is not configured yet");
-    expect(html).toContain("Save webhook settings");
-    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Save webhook settings<\/button>/u);
+    expect(html).toContain("receiver is not configured");
+    expect(html).toContain("Save settings");
+    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Save settings<\/button>/u);
     expect(html).not.toContain("review_requested");
   });
 
@@ -108,9 +108,9 @@ describe("repository assignment webhook settings", () => {
     const queryClient = client();
     queryClient.setQueryData(webhookSettingsQueryKey(repository.id), settings);
     const html = renderPanel(queryClient);
-    expect(html).toContain("Assignment recipient GitHub user ID");
+    expect(html).toContain("Assignment recipient ID");
     expect(html).toContain("Repository management permission is required");
-    expect(html).not.toContain("Save webhook settings");
+    expect(html).not.toContain("Save settings");
   });
 
   it("shows settings loading and a retryable read failure", async () => {
@@ -137,7 +137,7 @@ describe("repository assignment webhook settings", () => {
         </QueryClientProvider>
       </MemoryRouter>,
     );
-    expect(html).not.toContain("receiver is not configured yet");
+    expect(html).not.toContain("receiver is not configured");
   });
 });
 
@@ -271,7 +271,7 @@ describe("webhook settings input and conflict recovery", () => {
       allowedActorUserIds: [2001, 2002],
     });
     const notice = renderToStaticMarkup(<WebhookSettingsConflictNotice />);
-    expect(notice).toContain("Your draft is still in this form");
+    expect(notice).toContain("Your draft is kept");
     expect(notice).toContain("replace the draft with the latest version");
   });
 

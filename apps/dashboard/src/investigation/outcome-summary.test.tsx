@@ -196,7 +196,8 @@ describe("saved report outcome", () => {
     expect(html).toContain("Inspect current action guards");
     expect(html).toContain(action.label);
     expect(html).toContain(action.reason);
-    expect(html).toContain("Current permissions and prerequisites determine availability.");
+    expect(html).toContain("Assessment details");
+    expect(html).not.toContain("Current permissions and prerequisites determine availability.");
     expect(html).not.toContain("Wrong version recommendation");
     expect(html).not.toContain("Wrong report recommendation");
   });

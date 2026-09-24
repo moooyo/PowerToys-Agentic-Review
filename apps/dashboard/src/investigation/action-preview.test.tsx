@@ -6,9 +6,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   actionExecutionAccess,
+  actionGroupLabel,
   actionIntentMatchesContext,
   assertActionPreparationBindings,
   ExactActionPreview,
+  PublicationMarkdown,
+  publicationActionLabel,
 } from "./action-panel";
 import { createSampleInvestigationApi } from "./sample-adapter";
 
@@ -44,6 +47,46 @@ function readablePreview(payload: InvestigationActionPayload): string {
 }
 
 describe("exact saved action preview", () => {
+  it("groups feedback, follow-up, and source management with direct final action names", () => {
+    expect(actionGroupLabel("request-changes", false)).toBe("Review feedback");
+    expect(actionGroupLabel("trigger-ci", false)).toBe("Follow-up");
+    expect(actionGroupLabel("merge", false)).toBe("PR management");
+    expect(actionGroupLabel("close", true)).toBe("Issue management");
+    expect(publicationActionLabel("request-changes")).toBe("Request changes");
+    expect(publicationActionLabel("comment")).toBe("Post comment");
+  });
+
+  it("renders review prose and numbered steps safely, including unfinished Markdown", () => {
+    const text =
+      "### Review\n\n**Keep settings** and `SaveAsync`.\n\n3. Preserve existing settings\n4. Verify cancellation\n\n- \n## \n<script>unsafe()</script>\n\n[unsafe](javascript:alert(1))";
+    const html = renderToStaticMarkup(<PublicationMarkdown>{text}</PublicationMarkdown>);
+    expect(html).toContain("<h4>Review</h4>");
+    expect(html).toContain("<strong>Keep settings</strong>");
+    expect(html).toContain("<code>SaveAsync</code>");
+    expect(html).toContain('<ol start="3">');
+    expect(html).toContain("<p>- </p>");
+    expect(html).toContain("<p>## </p>");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain('href="javascript:');
+  });
+
+  it("formats feedback without altering the frozen submission payload", () => {
+    const payload = {
+      kind: "feedback" as const,
+      body: "### Review\n\n- Keep the saved values",
+      findingIds: [],
+      drafts: [],
+    };
+    const original = structuredClone(payload);
+    const intent = preview(payload);
+    const html = renderToStaticMarkup(<ExactActionPreview intent={intent} />);
+    expect(html).toContain("<h4>Review</h4>");
+    expect(html).toContain("<li>Keep the saved values</li>");
+    expect(html).toContain("Raw server intent");
+    expect(intent.payload).toEqual(original);
+  });
+
   it("requires task creation and repository execution for follow-up confirm and reconcile", () => {
     for (const action of ["start-task", "reviews.verify"] as const) {
       const user = {

@@ -4,14 +4,8 @@ import type {
   InvestigationWorkItemDiscussion,
 } from "@agentic-review/contracts";
 import ChatBubbleOutlineRounded from "@mui/icons-material/ChatBubbleOutlineRounded";
-import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
-import HistoryRounded from "@mui/icons-material/HistoryRounded";
-import OpenInNewRounded from "@mui/icons-material/OpenInNewRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import {
-  Accordion,
-  AccordionDetails,
-  AccordionSummary,
   Alert,
   Avatar,
   Box,
@@ -30,13 +24,12 @@ import {
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { type ActionPanelRequest, actionLabels, isActionAllowed } from "./action-panel";
+import { type ActionPanelRequest, isActionAllowed } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
 import { CommentStatus, commentDetailsUrl, commentPollingInterval } from "./comment-deliveries";
 import { GithubSourceLink } from "./github-source-link";
 import { useGuardedAction } from "./navigation-guard";
 import { OutcomeSummary } from "./outcome-summary";
-import { assertActionContext } from "./report-state";
 import { StandaloneActions } from "./report-workspace";
 import { useInvestigationRepositoryScope } from "./repository-scope";
 import { ReviewQueueBar } from "./review-navigation";
@@ -46,8 +39,9 @@ import {
   readableSourceData,
   readableSourceReport,
   sourceAccessDenied,
-  sourceActionContextMatches,
-  sourceActionKey,
+  sourceActionLabel,
+  sourceActionReason,
+  useSourceActionContext,
   useSourceReport,
 } from "./source-result";
 import { StartInvestigationButton } from "./start-investigation";
@@ -114,14 +108,14 @@ export function SourceTaskRow({ task, item }: { task: InvestigationTaskV1; item:
     <Stack
       direction={{ xs: "column", sm: "row" }}
       spacing={1.5}
-      sx={{ py: 2, borderBottom: 1, borderColor: "divider", justifyContent: "space-between" }}
+      sx={{ py: 1.5, borderBottom: 1, borderColor: "divider", justifyContent: "space-between" }}
     >
       <Box sx={{ minWidth: 0 }}>
         <Typography
           component={Link}
           to={taskUrl(task)}
           sx={{
-            fontSize: 16,
+            fontSize: 14,
             fontWeight: 500,
             color: "text.primary",
             textDecoration: "none",
@@ -130,14 +124,19 @@ export function SourceTaskRow({ task, item }: { task: InvestigationTaskV1; item:
         >
           {taskNames[task.kind]}
         </Typography>
-        <Typography variant="caption" component="p" color="text.secondary" sx={{ mt: 0.75, mb: 0 }}>
-          {new Date(task.createdAt).toLocaleString()} ·{" "}
+        <Typography
+          variant="caption"
+          component="p"
+          color="text.secondary"
+          sx={{ mt: 0.75, mb: 0, overflowWrap: "anywhere" }}
+        >
+          {task.id} ·{" "}
           {task.executionPolicy.mode === "snapshot_only"
             ? "Snapshot only"
             : task.executionPolicy.mode === "source_read"
-              ? "Exact source"
+              ? "Source review"
               : "Execution"}{" "}
-          · {currentSource ? "Current source revision" : "Earlier or linked source revision"}
+          · {currentSource ? "Current revision" : "Earlier or linked revision"}
         </Typography>
       </Box>
       <Stack
@@ -164,7 +163,7 @@ export function SourceTaskRow({ task, item }: { task: InvestigationTaskV1; item:
             component={Link}
             to={`/reports?${new URLSearchParams({ repositoryId: item.repositoryId, reportId: task.latestReportRef.id })}`}
           >
-            View saved report
+            Read report
           </Button>
         )}
       </Stack>
@@ -183,15 +182,13 @@ function FrozenDiscussion({
   if (!input)
     return (
       <Alert severity="info">
-        The frozen discussion is unavailable for this source revision. The registered description
-        remains available in Overview.
+        Discussion is unavailable. The description is available in Overview.
       </Alert>
     );
   return (
     <Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        These posts belong to the saved source snapshot. Author names and post times were not
-        recorded.
+        Authors and timestamps were not recorded.
       </Typography>
       {[
         { id: "opening-post", body: input.body, opening: true, provenance: undefined },
@@ -227,14 +224,6 @@ function FrozenDiscussion({
                 : comment.provenance
                   ? "Recorded workspace progress"
                   : "Imported comment"}
-              <Typography
-                component="span"
-                variant="caption"
-                color="text.secondary"
-                sx={{ ml: 1.5 }}
-              >
-                Source snapshot
-              </Typography>
             </Typography>
             <Typography sx={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.7 }}>
               {comment.body || "This post has no text."}
@@ -283,10 +272,7 @@ function WorkspaceUpdates({ item, tasks }: { item: WorkItem; tasks: Investigatio
   });
   const entries = query.data?.pages.flatMap((page) => page.items) ?? [];
   return (
-    <DetailSection
-      title="Workspace updates"
-      description="Delivery records are separate from the frozen source discussion."
-    >
+    <DetailSection title="Workspace updates">
       {query.isPending ? (
         <CircularProgress size={24} aria-label="Loading workspace updates" />
       ) : query.isError ? (
@@ -297,9 +283,7 @@ function WorkspaceUpdates({ item, tasks }: { item: WorkItem; tasks: Investigatio
           {query.error.message}
         </Alert>
       ) : entries.length === 0 ? (
-        <Typography color="text.secondary">
-          Updates appear here when an investigation prepares progress or results.
-        </Typography>
+        <Typography color="text.secondary">No updates yet.</Typography>
       ) : (
         entries.map((entry) => (
           <Stack
@@ -327,7 +311,6 @@ function WorkspaceUpdates({ item, tasks }: { item: WorkItem; tasks: Investigatio
               {entry.state === "synced"
                 ? `Delivery confirmed${entry.lastConfirmedAt ? ` ${new Date(entry.lastConfirmedAt).toLocaleString()}` : ""}.`
                 : "The current update has not been confirmed as delivered."}{" "}
-              Open its delivery record to read the recorded content and attempt history.
             </Typography>
             <Box>
               <Button
@@ -335,7 +318,7 @@ function WorkspaceUpdates({ item, tasks }: { item: WorkItem; tasks: Investigatio
                 component={Link}
                 to={commentDetailsUrl(entry.id, item.repositoryId)}
               >
-                View delivery details
+                View delivery
               </Button>
             </Box>
           </Stack>
@@ -369,23 +352,7 @@ function SourceDecision({
   openActions: (request?: Omit<ActionPanelRequest, "id">) => void;
   refreshSource: () => void;
 }) {
-  const { session } = useInvestigationSession();
-  const context = useQuery({
-    queryKey: sourceActionKey(sessionIdentity(session), source, header),
-    queryFn: async () => {
-      const result = await investigationApi.actionContext(source.id, header.report.id);
-      assertActionContext(header, result);
-      if (!sourceActionContextMatches(source, header, result, session.user?.id))
-        throw new Error("Action availability changed. Refresh the source before preparing.");
-      return result;
-    },
-  });
-  const currentContext =
-    context.data &&
-    !sourceAccessDenied(context.error) &&
-    sourceActionContextMatches(source, header, context.data, session.user?.id)
-      ? context.data
-      : undefined;
+  const { query: context, context: currentContext } = useSourceActionContext(source, header);
   const reportUrl = `/reports?${new URLSearchParams({ reportId: header.report.id, repositoryId: source.repositoryId })}`;
   const action = currentContext?.recommendation.action;
   const saved = currentContext?.nextActions.find(
@@ -402,49 +369,58 @@ function SourceDecision({
     <OutcomeSummary
       header={header}
       actions={
-        <Stack spacing={1.5}>
-          {activeTask ? (
-            <>
-              <Typography variant="body2">
-                A linked task is {activeTask.state}. Its execution and validation remain separate
-                from this saved report.
-              </Typography>
+        <Stack spacing={1}>
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{ flexWrap: "wrap", alignItems: "center" }}
+          >
+            {activeTask && !currentContext?.pendingSubmission ? (
               <Button component={Link} to={taskUrl(activeTask)} variant="contained">
-                Open linked task
+                View follow-up
               </Button>
-            </>
-          ) : (
-            <>
-              {currentContext && (
-                <Typography variant="body2">{currentContext.recommendation.reason}</Typography>
-              )}
-              {(action || currentContext?.pendingSubmission) && (
-                <Button
-                  variant="contained"
-                  disabled={currentContext?.pendingSubmission ? context.isError : !allowed}
-                  onClick={() =>
-                    openActions(
-                      currentContext?.pendingSubmission || !action
-                        ? undefined
-                        : { action, nextActionId: saved?.id },
-                    )
-                  }
-                >
-                  {currentContext?.pendingSubmission
-                    ? "Inspect pending submission"
-                    : (saved?.label ?? (action ? actionLabels[action] : "Choose an action"))}
-                </Button>
-              )}
-            </>
-          )}
-          <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+            ) : (
+              <>
+                {(action || currentContext?.pendingSubmission) && (
+                  <Button
+                    variant="contained"
+                    disabled={currentContext?.pendingSubmission ? context.isError : !allowed}
+                    onClick={() =>
+                      openActions(
+                        currentContext?.pendingSubmission || !action
+                          ? undefined
+                          : { action, nextActionId: saved?.id },
+                      )
+                    }
+                  >
+                    {currentContext?.pendingSubmission
+                      ? "Check submission"
+                      : action
+                        ? sourceActionLabel(action, saved?.taskKind)
+                        : "Choose action"}
+                  </Button>
+                )}
+              </>
+            )}
             <Button component={Link} to={reportUrl}>
-              Read saved report
+              Read report
             </Button>
             <Button disabled={!fresh} onClick={() => openActions()}>
               Other actions
             </Button>
           </Stack>
+          {currentContext &&
+            action &&
+            !allowed &&
+            !currentContext.pendingSubmission &&
+            !activeTask &&
+            fresh &&
+            !context.isError && (
+              <Typography variant="caption" color="text.secondary">
+                {sourceActionReason(currentContext, action)}
+              </Typography>
+            )}
           {context.isError && (
             <Alert
               severity="warning"
@@ -463,19 +439,17 @@ function SourceDecision({
               severity="warning"
               action={<Button onClick={() => void context.refetch()}>Refresh actions</Button>}
             >
-              The cached action context does not match this source revision or account. Reload
-              current action availability.
+              Action context changed. Refresh to continue.
             </Alert>
           )}
           {!fresh && (
             <Typography variant="caption" color="text.secondary">
-              Saved data remains readable. Refresh the source and task status before preparing an
-              action.
+              Refresh the source and task status to enable actions.
             </Typography>
           )}
           {context.isPending && (
             <Typography variant="body2" role="status">
-              Loading current next actions…
+              Loading actions…
             </Typography>
           )}
         </Stack>
@@ -579,10 +553,6 @@ export function WorkItemDetails({ id }: { id: string }) {
   const canCreate =
     !!session.user?.permissions.includes("task:create") &&
     !!session.user.repositoryIds.includes(source.repositoryId);
-  const sourceUrl =
-    repository && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository.fullName)
-      ? `https://github.com/${repository.fullName}/${source.kind === "pull_request" ? "pull" : "issues"}/${source.number}`
-      : undefined;
   const changeTab = (value: string) => {
     const parameters = new URLSearchParams(location.search);
     if (value === "overview") parameters.delete("tab");
@@ -604,9 +574,8 @@ export function WorkItemDetails({ id }: { id: string }) {
         fallbackLabel={source.kind === "pull_request" ? "Pull requests" : "Issues"}
       />
       <PageHeading
-        eyebrow={`${source.kind === "pull_request" ? "Pull request" : "Issue"} #${source.number}`}
         title={source.title}
-        subtitle={`${repository?.fullName ?? source.repositoryId} · Updated ${new Date(source.updatedAt).toLocaleString()}`}
+        subtitle={`${source.kind === "pull_request" ? "PR" : "Issue"} #${source.number} · ${source.state} · ${repository?.fullName ?? source.repositoryId}`}
         action={
           <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
             {repository && (
@@ -616,20 +585,9 @@ export function WorkItemDetails({ id }: { id: string }) {
                 number={source.number}
               />
             )}
-            <StartInvestigationButton
-              workItem={source}
-              variant={header ? "outlined" : "contained"}
-              disabled={!fresh}
-            />
           </Stack>
         }
-      >
-        <Chip
-          label={source.state.charAt(0).toUpperCase() + source.state.slice(1)}
-          color={source.state === "open" ? "success" : "default"}
-          size="small"
-        />
-      </PageHeading>
+      />
       {item.isError && (
         <Alert
           severity="warning"
@@ -651,8 +609,7 @@ export function WorkItemDetails({ id }: { id: string }) {
         <>
           {latestSavedTask && !taskUsesCurrentSource(source, latestSavedTask) && (
             <Alert severity="warning">
-              This report describes an earlier saved source. Its findings have not been verified
-              against the current revision.
+              This report covers an earlier saved source. Recheck the current revision.
             </Alert>
           )}
           <SourceDecision
@@ -672,8 +629,7 @@ export function WorkItemDetails({ id }: { id: string }) {
           severity="warning"
           action={<Button onClick={() => void tasks.refetch()}>Check investigation access</Button>}
         >
-          Investigation access is unavailable. Cached tasks and their saved conclusions are hidden
-          until access is confirmed.
+          Investigation access is unavailable. Cached tasks and saved conclusions are hidden.
         </Alert>
       ) : currentReport.isError ? (
         <Alert
@@ -683,105 +639,19 @@ export function WorkItemDetails({ id }: { id: string }) {
           {currentReport.error.message}
         </Alert>
       ) : (
-        <Surface sx={{ p: { xs: 2, sm: 3 }, bgcolor: "var(--app-surface-container)" }}>
-          <Typography component="h2" variant="h6">
-            {latestSavedTask?.latestReportRef
-              ? "Loading saved conclusion…"
-              : "No saved conclusion yet"}
-          </Typography>
-          <Typography color="text.secondary" sx={{ mt: 1 }}>
-            Task progress is separate from a saved assessment and accepted validation.
-          </Typography>
-        </Surface>
-      )}
-      {!canCreate && (
-        <Alert severity="info">
-          Read-only access. Creating an investigation requires the Create tasks permission and
-          access to this repository.
-        </Alert>
-      )}
-      <Box
-        sx={{
-          display: "grid",
-          gridTemplateColumns: {
-            xs: "repeat(2, minmax(0, 1fr))",
-            sm: "fit-content(320px) fit-content(180px) minmax(0, 1fr)",
-          },
-          columnGap: { xs: 2, sm: 3 },
-          rowGap: 1.5,
-          p: 2,
-          bgcolor: "var(--app-surface-container)",
-          borderRadius: "14px",
-          "& .MuiButton-root": {
-            display: "block",
-            minWidth: 0,
-            minHeight: 0,
-            maxWidth: "100%",
-            p: 0,
-            mt: 0.25,
-            borderRadius: "4px",
-            fontSize: 13,
-            lineHeight: "20px",
-            textAlign: "left",
-            whiteSpace: "normal",
-            overflowWrap: "anywhere",
-            "@media (pointer: coarse)": { minHeight: 48 },
-          },
-        }}
-      >
-        <Box sx={{ minWidth: 0, gridColumn: 1, gridRow: 1 }}>
-          <Typography variant="caption" color="text.secondary">
-            Source
-          </Typography>
-          <Button size="small" onClick={() => setSourceOpen(true)}>
-            {repository?.fullName ?? source.repositoryId} #{source.number}
-          </Button>
-        </Box>
-        <Box sx={{ minWidth: 0, gridColumn: 2, gridRow: 1 }}>
-          <Typography variant="caption" color="text.secondary">
-            Current investigation
-          </Typography>
-          {current ? (
-            <Button size="small" component={Link} to={taskUrl(current)}>
-              {investigationStateLabel(current)}
-            </Button>
-          ) : (
-            <Typography variant="body2" sx={{ mt: 0.25, lineHeight: "20px" }}>
-              {tasks.isPending ? "Loading…" : tasks.isError ? "Unavailable" : "Not started"}
-            </Typography>
-          )}
-        </Box>
-        <Box
-          sx={{
-            minWidth: 0,
-            gridColumn: { xs: "1 / -1", sm: 3 },
-            gridRow: { xs: 2, sm: 1 },
-          }}
+        <Stack
+          direction="row"
+          spacing={2}
+          sx={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}
         >
-          <Typography variant="caption" color="text.secondary">
-            Saved result
+          <Typography component="h2" variant="h6">
+            {latestSavedTask?.latestReportRef ? "Loading conclusion…" : "No saved conclusion"}
           </Typography>
-          {latestSavedTask?.latestReportRef ? (
-            <Button
-              size="small"
-              component={Link}
-              to={`/reports?${new URLSearchParams({ reportId: latestSavedTask.latestReportRef.id, repositoryId: source.repositoryId })}`}
-            >
-              {latestSavedTask.id === current?.id
-                ? header?.report.delivery === "checkpoint"
-                  ? "Checkpoint available"
-                  : "View saved report"
-                : "From an earlier or linked investigation"}
-            </Button>
-          ) : (
-            <Typography variant="body2" sx={{ mt: 0.25, lineHeight: "20px" }}>
-              {sourceAccessDenied(tasks.error)
-                ? "Unavailable with current access"
-                : "Not available yet"}
-            </Typography>
-          )}
-        </Box>
-      </Box>
+          <Button onClick={() => openActions()} disabled={!fresh}>
+            Other actions
+          </Button>
+        </Stack>
+      )}
       <Tabs
         value={tab}
         onChange={(_event, value: string) => changeTab(value)}
@@ -813,38 +683,81 @@ export function WorkItemDetails({ id }: { id: string }) {
           <Box
             sx={{
               display: "grid",
-              gridTemplateColumns: { xs: "minmax(0, 1fr)", lg: "minmax(0, 1fr) 280px" },
-              gap: { xs: 3, lg: 4 },
+              gridTemplateColumns: {
+                xs: "minmax(0, 1fr)",
+                md: "minmax(0, 1.7fr) minmax(240px, 1fr)",
+              },
+              gap: 3,
               alignItems: "start",
             }}
           >
-            <Stack spacing={4} sx={{ minWidth: 0 }}>
+            <Surface sx={{ p: { xs: 2, sm: 3 }, border: 1, borderColor: "divider" }}>
               <DetailSection
-                title={source.kind === "pull_request" ? "About this change" : "Reported behavior"}
+                title={
+                  source.kind === "pull_request"
+                    ? "About this change"
+                    : header?.assessment.kind === "feature"
+                      ? "Feature request"
+                      : "Reported behavior"
+                }
               >
                 <Typography
-                  sx={{
-                    whiteSpace: "pre-wrap",
-                    overflowWrap: "anywhere",
-                    lineHeight: 1.7,
-                    maxWidth: "72ch",
-                  }}
+                  sx={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.7 }}
                 >
-                  {source.body || "This source has no description."}
+                  {source.body || "No description."}
                 </Typography>
-                {source.kind === "issue" && (
-                  <Alert severity="info" sx={{ mt: 3 }}>
-                    This issue is a source snapshot. Choose an exact commit when investigating the
-                    code behind it.
-                  </Alert>
-                )}
               </DetailSection>
+              <Box
+                component="details"
+                sx={{
+                  mt: 3,
+                  borderTop: 1,
+                  borderColor: "divider",
+                  pt: 1.5,
+                  "& summary": {
+                    cursor: "pointer",
+                    minHeight: 40,
+                    typography: "body2",
+                    color: "text.secondary",
+                  },
+                }}
+              >
+                <summary>Source snapshot</summary>
+                <Stack spacing={1.5} sx={{ pt: 1 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    Updated {new Date(source.updatedAt).toLocaleString()}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {snapshot.isPending
+                      ? "Loading discussion…"
+                      : snapshot.isError
+                        ? "Discussion unavailable"
+                        : snapshotData?.availability === "available"
+                          ? `${snapshotData.inputSnapshot?.comments.length ?? 0} imported comments`
+                          : "Discussion not retained"}
+                  </Typography>
+                  <Typography component="code" sx={{ fontSize: 12, overflowWrap: "anywhere" }}>
+                    {source.subject.kind === "original_pr"
+                      ? source.subject.headSha
+                      : source.subject.revisionKey}
+                  </Typography>
+                  <Box>
+                    <Button onClick={() => setSourceOpen(true)}>Inspect snapshot</Button>
+                  </Box>
+                </Stack>
+              </Box>
+            </Surface>
+            <Surface
+              component="aside"
+              aria-label="Related work"
+              sx={{ p: { xs: 2, sm: 3 }, border: 1, borderColor: "divider" }}
+            >
               <DetailSection
-                title="Current investigation"
+                title="Related work"
                 action={
                   related.length > 1 ? (
                     <Button onClick={() => changeTab("investigations")}>
-                      View all {related.length}
+                      View all ({related.length})
                     </Button>
                   ) : undefined
                 }
@@ -859,151 +772,39 @@ export function WorkItemDetails({ id }: { id: string }) {
                 ) : tasks.isPending ? (
                   <CircularProgress size={24} aria-label="Loading investigations" />
                 ) : current ? (
-                  <>
-                    <SourceTaskRow task={current} item={source} />
-                    {currentReport.isError && (
-                      <Alert severity="error" sx={{ mt: 2 }}>
-                        {currentReport.error.message}
-                      </Alert>
-                    )}
-                  </>
+                  <SourceTaskRow task={current} item={source} />
                 ) : (
-                  <Stack direction="row" spacing={2} sx={{ py: 2 }}>
-                    <SearchRounded color="action" />
-                    <Box>
-                      <Typography variant="subtitle1">
-                        No investigation for this source revision
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                        Start an investigation to turn this source into findings and a clear next
-                        step.
-                        {related.length
-                          ? " Earlier and linked work remains in Investigations."
-                          : ""}
-                      </Typography>
-                    </Box>
-                  </Stack>
+                  <Typography variant="body2" color="text.secondary">
+                    No investigation for this revision.
+                  </Typography>
+                )}
+                {currentReport.isError && !sourceAccessDenied(tasks.error) && (
+                  <Alert severity="error" sx={{ mt: 2 }}>
+                    {currentReport.error.message}
+                  </Alert>
+                )}
+                <Box sx={{ mt: 2 }}>
+                  <StartInvestigationButton
+                    workItem={source}
+                    variant="outlined"
+                    disabled={!fresh}
+                  />
+                </Box>
+                {!canCreate && (
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ display: "block", mt: 1 }}
+                  >
+                    Create tasks permission and repository access required.
+                  </Typography>
                 )}
               </DetailSection>
-              <Accordion
-                disableGutters
-                elevation={0}
-                sx={{
-                  bgcolor: "transparent",
-                  "&:before": { display: "none" },
-                  borderTop: 1,
-                  borderColor: "divider",
-                }}
-              >
-                <AccordionSummary
-                  id={`${sourceActionsId}-summary`}
-                  aria-controls={`${sourceActionsId}-region`}
-                  expandIcon={<ExpandMoreRounded />}
-                >
-                  <Typography variant="subtitle2">Available source actions</Typography>
-                </AccordionSummary>
-                <AccordionDetails>
-                  <Button onClick={() => openActions()} disabled={!fresh}>
-                    Choose an action
-                  </Button>
-                </AccordionDetails>
-              </Accordion>
-            </Stack>
-            <Surface
-              component="aside"
-              aria-label="Source snapshot"
-              sx={{ p: 3, bgcolor: "action.hover" }}
-            >
-              <Stack direction="row" spacing={1} sx={{ mb: 2, alignItems: "center" }}>
-                <HistoryRounded color="action" />
-                <Typography component="h2" variant="subtitle1">
-                  Source snapshot
-                </Typography>
-              </Stack>
-              <Typography variant="body2" color="text.secondary">
-                Investigations record their source so the evidence stays traceable.
-              </Typography>
-              <Box
-                component="dl"
-                sx={{
-                  display: "grid",
-                  gap: 2.5,
-                  my: 3,
-                  "& dt": { typography: "caption", color: "text.secondary", mb: 0.5 },
-                  "& dd": { m: 0, typography: "body2", overflowWrap: "anywhere" },
-                }}
-              >
-                <Box>
-                  <Box component="dt">Repository</Box>
-                  <Box component="dd">{repository?.fullName ?? source.repositoryId}</Box>
-                </Box>
-                <Box>
-                  <Box component="dt">Source type</Box>
-                  <Box component="dd">
-                    {source.kind === "pull_request"
-                      ? "Pull request and discussion"
-                      : "Issue and discussion"}
-                  </Box>
-                </Box>
-                <Box>
-                  <Box component="dt">Saved discussion</Box>
-                  <Box component="dd">
-                    {snapshot.isPending
-                      ? "Loading…"
-                      : snapshot.isError
-                        ? "Unavailable"
-                        : snapshot.data.availability === "available"
-                          ? `${snapshot.data.inputSnapshot?.comments.length ?? 0} imported comments`
-                          : "Not retained for this revision"}
-                  </Box>
-                </Box>
-              </Box>
-              <Box
-                component="details"
-                sx={{
-                  borderTop: 1,
-                  borderColor: "divider",
-                  pt: 1.5,
-                  "& summary": {
-                    cursor: "pointer",
-                    typography: "body2",
-                    color: "text.secondary",
-                    minHeight: 40,
-                  },
-                }}
-              >
-                <summary>Revision details</summary>
-                <Typography variant="caption" component="p" color="text.secondary">
-                  {source.subject.kind === "original_pr" ? "Pinned commit" : "Snapshot revision"}
-                </Typography>
-                <Typography component="code" sx={{ fontSize: 12, overflowWrap: "anywhere" }}>
-                  {source.subject.kind === "original_pr"
-                    ? source.subject.headSha
-                    : source.subject.revisionKey}
-                </Typography>
-              </Box>
-              <Button sx={{ mt: 2 }} onClick={() => setSourceOpen(true)}>
-                View source snapshot
-              </Button>
-              {sourceUrl && (
-                <Button
-                  href={sourceUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  endIcon={<OpenInNewRounded />}
-                  size="small"
-                >
-                  Open on GitHub
-                </Button>
-              )}
             </Surface>
           </Box>
         )}
         {tab === "investigations" && (
-          <DetailSection
-            title="Investigations and linked work"
-            description="Each investigation keeps its source, budget, and report together."
-          >
+          <DetailSection title="Investigations and linked work">
             {tasks.isPending ? (
               <CircularProgress size={24} aria-label="Loading investigations" />
             ) : tasks.isError ? (
@@ -1011,20 +812,13 @@ export function WorkItemDetails({ id }: { id: string }) {
             ) : related.length ? (
               related.map((task) => <SourceTaskRow key={task.id} task={task} item={source} />)
             ) : (
-              <EmptyState
-                title="No investigations yet"
-                description="Create an investigation from this snapshot to collect findings and evidence."
-                icon={<SearchRounded />}
-              />
+              <EmptyState title="No investigations yet" icon={<SearchRounded />} />
             )}
           </DetailSection>
         )}
         {tab === "discussion" && (
           <Stack spacing={4} sx={{ maxWidth: 900 }}>
-            <DetailSection
-              title="Discussion and updates"
-              description="The saved opening post and imported discussion for this source revision."
-            >
+            <DetailSection title="Discussion">
               {snapshot.isPending ? (
                 <CircularProgress size={24} aria-label="Loading saved discussion" />
               ) : snapshot.isError ? (
@@ -1081,11 +875,11 @@ export function WorkItemDetails({ id }: { id: string }) {
         <DialogTitle id="source-snapshot-title">Recorded source snapshot</DialogTitle>
         <DialogContent>
           <Stack spacing={3}>
-            <Typography variant="body2" color="text.secondary">
-              {sourceAccessDenied(snapshot.error)
-                ? "Saved snapshot access is unavailable. Only the registered source description is shown."
-                : "A saved reference for investigations and reports."}
-            </Typography>
+            {sourceAccessDenied(snapshot.error) && (
+              <Typography variant="body2" color="text.secondary">
+                Saved snapshot access is unavailable. Showing the registered description.
+              </Typography>
+            )}
             <Typography variant="h6">
               {snapshotData?.inputSnapshot?.title ?? source.title}
             </Typography>

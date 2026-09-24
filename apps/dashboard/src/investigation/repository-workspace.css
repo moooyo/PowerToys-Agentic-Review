@@ -15,7 +15,7 @@
   display: flex;
   justify-content: flex-start;
   gap: 20px;
-  padding: 26px 28px;
+  padding: 18px 24px;
   text-align: left;
   border-bottom: 1px solid var(--app-line);
 }
@@ -30,8 +30,8 @@
   outline-offset: -3px;
 }
 .repository-directory-icon {
-  flex: 0 0 48px;
-  height: 48px;
+  flex: 0 0 40px;
+  height: 40px;
   display: grid;
   place-items: center;
   border-radius: 16px;
@@ -64,7 +64,7 @@
 .repository-shortcut.MuiButton-root {
   justify-content: space-between;
   text-align: left;
-  min-height: 80px;
+  min-height: 48px;
   padding: 12px;
 }
 .repository-shortcut span:not(.MuiButton-endIcon) {
@@ -123,13 +123,8 @@
   max-width: 640px;
 }
 .repository-form-actions {
-  position: sticky;
-  bottom: 16px;
-  z-index: 1;
-  padding: 16px;
-  border: 1px solid var(--app-line);
-  border-radius: 16px;
-  background: var(--app-surface);
+  padding-top: 20px;
+  border-top: 1px solid var(--app-line);
 }
 .repository-template-preview {
   border: 1px solid var(--app-line);

@@ -109,7 +109,7 @@ describe("worker admission and repository permissions", () => {
     });
     client.setQueryData(["investigation-repositories"], { items: [repository] });
     const html = renderPage(client, "/workers?workerId=sample-static-worker");
-    expect(html).toContain("Allow E2E task admission");
+    expect(html).toContain("Allow E2E work");
     expect(html).toContain("private-task");
     expect(html).not.toContain("example/PowerToys");
     expect(html).not.toContain("taskId=private-task");
@@ -143,16 +143,35 @@ describe("worker admission and repository permissions", () => {
     );
     expect(html).toContain("unmapped-task");
     expect(html).not.toContain("taskId=unmapped-task");
-    expect(html).toContain("does not establish repository access to task details");
+    expect(html).toContain("Owned E2E tasks");
   });
 
-  it("shows one admission switch and keeps capabilities inside the disclosure", () => {
+  it("shows one admission action and keeps capabilities inside the disclosure", () => {
     const html = renderWorker({}, { expanded: false });
-    expect(html.match(/aria-label="Allow E2E task admission on /gu)).toHaveLength(1);
+    expect(html.match(/>Allow E2E work<\/button>/gu)).toHaveLength(1);
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("Advertised task types");
     expect(html).not.toContain("Saved policy record");
     expect(html).not.toContain("Cleanup complete");
+  });
+
+  it("omits the collapse control on the dedicated worker detail route", () => {
+    const html = renderWorker({}, { expanded: true, onExpandedChange: vi.fn() });
+    expect(html).toContain("Advertised task types");
+    expect(html).not.toContain("Hide details");
+    expect(html).not.toContain("workers-detail-toggle");
+  });
+
+  it("keeps stopping available while admission is on and prevents enabling during cleanup", () => {
+    const active = renderWorker({
+      e2eEnabled: true,
+      activeE2eTaskIds: ["owned-task"],
+      cleanupPendingAttemptIds: ["owned-attempt"],
+    });
+    expect(active).toMatch(/<button[^>]*>Stop E2E work<\/button>/u);
+    const paused = renderWorker({ e2eEnabled: false, cleanupPendingAttemptIds: ["owned-attempt"] });
+    expect(paused).toMatch(/<button[^>]*disabled=""[^>]*>Allow E2E work<\/button>/u);
+    expect(paused).toContain("owned-attempt");
   });
 
   it("shows static admission without restricting local capture", () => {
@@ -168,7 +187,7 @@ describe("worker admission and repository permissions", () => {
   it("distinguishes enabled policy from a worker advertising only static tasks", () => {
     const html = renderWorker({ e2eEnabled: true });
     expect(html).toContain("No E2E task types");
-    expect(html).toContain("must also advertise the required task type");
+    expect(html).toContain("Waiting for the worker to report E2E support");
     expect(html).not.toContain(">Admission on<");
   });
 });
@@ -186,7 +205,7 @@ describe("worker ownership and observed contact", () => {
     expect(html).toContain("being cancelled and cleaned up");
     expect(html).toContain("task-with-resources");
     expect(html).toContain("attempt-pending-cleanup");
-    expect(html).toContain("refreshing this page does not release it");
+    expect(html).toContain("Resources stay reserved until the worker confirms cleanup");
     expect(html).not.toContain("taskId=task-with-resources");
     expect(html).not.toContain("taskId=attempt-pending-cleanup");
   });
@@ -228,7 +247,7 @@ describe("worker ownership and observed contact", () => {
     expect(html).toContain("owned-attempt");
     expect(html).toContain("Resources stay occupied until the worker confirms release");
     expect(html).toContain("All repositories assigned to this worker");
-    expect(html).toContain("Local screenshots and the model shell are unaffected");
+    expect(html).not.toContain("Local screenshots");
   });
 });
 
@@ -420,11 +439,13 @@ describe("worker directory", () => {
     expect(value.activeE2eTaskIds).toEqual(["retained-task"]);
   });
 
-  it("opens a worker disclosure from its stable workerId link", () => {
+  it("opens worker details from its stable workerId link", () => {
     const client = queryClient();
     client.setQueryData(workersQueryKey, { items: [worker()] });
     const html = renderPage(client, "/workers?workerId=sample-static-worker");
-    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain("Back to workers");
+    expect(html).not.toContain("Hide details");
+    expect(html).not.toContain("workers-detail-toggle");
     expect(html).toContain("Saved policy record");
     expect(html).toContain("Policy version");
   });

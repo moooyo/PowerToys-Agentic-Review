@@ -5,6 +5,7 @@ import {
   type ReviewQueue,
   type ReviewRecord,
   readReviewNavigationMarker,
+  relatedReviewTarget,
   reviewOpenerId,
   reviewQueueIndex,
   reviewQueueScopeChanged,
@@ -56,6 +57,44 @@ function memberKey(saved: ReviewQueue, index = 0) {
 }
 
 describe("frozen review result queues", () => {
+  it("retains the source origin after creation removes it from a live filtered list", () => {
+    const source = record("source-one", "source-one", "work-item");
+    const live = [source];
+    const saved = queue(live, {
+      originHref: "/pull-requests?repositoryId=repo-a&investigation=not_started",
+      openerId: `${reviewOpenerId(source)}-next`,
+      label: "Pull requests",
+    });
+    live.pop();
+    const selection = { queue: saved, originMemberId: reviewRecordKey(source) };
+    const created = record("created-task", "source-one");
+    expect(relatedReviewTarget(source, created)).toBe(true);
+    expect(bindReviewRecord(selection, created, saved.identity)).toBe(selection);
+    expect(saved.originHref).toContain("investigation=not_started");
+    expect(saved.openerId).toBe(`${reviewOpenerId(source)}-next`);
+    expect(saved.scrollTop).toBe(640);
+    expect(saved.members).toHaveLength(1);
+  });
+
+  it("only binds list shortcuts to related records with valid local detail routes", () => {
+    const source = record("source-one", "source-one", "work-item");
+    const task = record("task-one", "source-one");
+    const report = record("report-one", "source-one", "report");
+    expect(relatedReviewTarget(source, task)).toBe(true);
+    expect(relatedReviewTarget(source, { ...task, href: `${task.href}&tab=details` })).toBe(true);
+    expect(relatedReviewTarget(source, report)).toBe(true);
+    expect(relatedReviewTarget(source, record("task-two", "source-two"))).toBe(false);
+    expect(relatedReviewTarget(source, record("task-one", "source-one", "task", "repo-b"))).toBe(
+      false,
+    );
+    expect(relatedReviewTarget(source, { ...task, href: "/tasks?taskId=another-task" })).toBe(
+      false,
+    );
+    expect(
+      relatedReviewTarget(source, { ...task, href: "https://example.com/tasks?taskId=task-one" }),
+    ).toBe(false);
+  });
+
   it("captures the clicked result order and list location independently of later live data", () => {
     const first = record("task-one", "source-one");
     const second = record("task-two", "source-two");

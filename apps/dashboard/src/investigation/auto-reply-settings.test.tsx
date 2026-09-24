@@ -162,31 +162,26 @@ describe("repository automatic reply configuration", () => {
     expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
   });
 
-  it("shows English templates, update policy, and a separate comment history entry", () => {
+  it("shows reply templates, publication consequences, and a separate history entry", () => {
     const queryClient = client();
     queryClient.setQueryData(autoReplySettingsQueryKey(repository.id), settings);
     queryClient.setQueryData(autoRepliesQueryKey(repository.id), { items: [] });
     queryClient.setQueryData(progressRepliesQueryKey(repository.id), { items: [] });
     const html = renderPanel(queryClient);
     expect(html).toContain(repository.fullName);
-    expect(html).toContain("No per-report");
+    expect(html).toContain("without per-report confirmation");
     expect(html).toContain("confirmation");
-    expect(html).toContain("completed PR and Issue investigations");
-    expect(html).toContain(
-      "Template changes apply to the next update, including active investigations",
-    );
-    expect(html).toContain("does not rewrite existing comments");
-    expect(html).toContain("English reply templates");
-    expect(html).toContain("Conclusion templates");
-    expect(html).toContain("Progress templates");
+    expect(html).toContain("Publishes conclusion comments");
+    expect(html).toContain("Changes apply to future updates");
+    expect(html).toContain("Existing comments remain unchanged");
+    expect(html).toContain("Reply templates");
     expect(html).toContain("Edit templates");
     expect(html).not.toContain("<textarea");
-    expect(html).toContain("Publish assignment task progress");
-    expect(html).toContain("updates that same comment when work starts, stops, or completes");
-    expect(html).toContain("also authorizes these comment updates");
+    expect(html).toContain("Post assignment progress");
+    expect(html).toContain("updates it as work progresses");
     expect(html).not.toContain("Received progress template</textarea>");
-    expect(html).toContain("publisher is not configured yet");
-    expect(html).toContain("Save automatic reply settings");
+    expect(html).toContain("publisher is not configured");
+    expect(html).toContain("Save settings");
     expect(html).toContain("View comment deliveries");
     expect(html).toContain("/comments?repositoryId=repo-selected");
     expect(html).not.toContain("Recent automatic replies");
@@ -213,21 +208,21 @@ describe("repository automatic reply configuration", () => {
           />
         </QueryClientProvider>,
       );
-    expect(renderForm(true, true)).toContain("Save automatic reply settings");
+    expect(renderForm(true, true)).toContain("Save settings");
     expect(renderForm(true, true)).toMatch(
-      /<button\b[^>]*disabled=""[^>]*>Save automatic reply settings<\/button>/u,
+      /<button\b[^>]*disabled=""[^>]*>Save settings<\/button>/u,
     );
     const renewal = renderForm(true, true).match(
-      /<button\b[^>]*>Save and renew publishing authorization<\/button>/u,
+      /<button\b[^>]*>Renew authorization<\/button>/u,
     )?.[0];
     expect(renewal).toBeDefined();
     expect(renewal).not.toContain('disabled=""');
-    expect(renderForm(true, true)).toContain("Save and renew publishing authorization");
-    expect(renderForm(true, true)).not.toContain("publisher is not configured yet");
+    expect(renderForm(true, true)).toContain("Renew authorization");
+    expect(renderForm(true, true)).not.toContain("publisher is not configured");
     const reader = renderForm(false, false);
     expect(reader).toContain("Repository management permission is required");
-    expect(reader).not.toContain("Save and authorize automatic comments");
-    expect(reader).not.toContain("Save automatic reply settings");
+    expect(reader).not.toContain("Save and authorize");
+    expect(reader).not.toContain("Save settings");
     const manager = renderForm(true, false);
     expect(manager).toContain("turn off existing automatic replies");
     expect(manager).toContain("action preparation, action execution, and comment");
@@ -251,7 +246,7 @@ describe("repository automatic reply configuration", () => {
     expect(html).toContain("<textarea");
     expect(html).toContain("{{next_steps}}");
     expect(html).not.toContain("Unsaved changes");
-    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Save automatic reply settings<\/button>/u);
+    expect(html).toMatch(/<button\b[^>]*disabled=""[^>]*>Save settings<\/button>/u);
     queryClient.clear();
   });
 
@@ -297,7 +292,7 @@ describe("repository automatic reply configuration", () => {
       expect(switches).toHaveLength(2);
       expect(switches[1]?.includes('disabled=""')).toBe(expectedDisabled);
       if (enabled && canManage && canAuthorize) {
-        expect(html).toContain("Save automatic reply settings");
+        expect(html).toContain("Save settings");
       }
     }
   });
@@ -717,7 +712,7 @@ describe("automatic reply input and authorization", () => {
       version: 4,
     });
     const notice = renderToStaticMarkup(<AutoReplySettingsConflictNotice />);
-    expect(notice).toContain("Your draft is still in this form");
+    expect(notice).toContain("Your draft is kept");
     expect(notice).toContain("replace the draft with the latest version");
   });
 });

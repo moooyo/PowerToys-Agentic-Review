@@ -13,6 +13,12 @@ The current `/workers` page provides investigation Worker task controls, while
 `/webhooks` provides current intake history and retry. Neither reactivates the
 retired pages or provides a compatibility API or migration path.
 
+The interface follows the approved V8 Material 3 prototype: an 84px navigation
+rail, group tabs, light tonal canvas, outlined white surfaces, and content-sized
+actions. Narrow screens use a single Page selector. The same controls and surface
+roles support dark appearance. See the [V8 implementation and frontend verification
+record](../../docs/design/2026-09-25-dashboard-v8-implementation.md).
+
 ## Pages and navigation
 
 | Route | Current behavior |
@@ -20,7 +26,7 @@ retired pages or provides a compatibility API or migration path.
 | `/pull-requests` | Lists registered pull requests; `workItemId` opens the item, its tasks, and available actions. |
 | `/issues` | Lists registered issues and opens their investigations, including Bug and Feature assessments. |
 | `/tasks` | Lists tasks; `taskId` opens attempts, the saved checkpoint, the latest report, and linked tasks. |
-| `/comments` | Lists scoped publications with search and exact source/Task filters; `commentId` opens its retained body, delivery attempts, and available recovery actions. |
+| `/comments` | Lists scoped publications with search, Work item type, delivery state, and exact source/Task filters; `commentId` opens its retained body, delivery attempts, and available recovery actions. |
 | `/webhooks` | Lists scoped assignment/E2E intake events; `deliveryId` opens its attempts, linked Task, and available intake retry. |
 | `/workers` | Administrator-only investigation Worker controls, effective task types, contact, and cleanup state. |
 | `/reports` | Searches the server-paginated report directory; `reportId` opens an immutable report, also reachable from its source or Task. |
@@ -52,6 +58,11 @@ directory page**, not all server-side matches. Queues do not reorder or execute
 Tasks, are not included in copied view URLs, and are invalidated when their
 identity or repository scope is no longer applicable. Direct links have a normal
 directory fallback.
+
+Source list shortcuts and newly created investigations retain the same origin
+queue and their own opener focus. An open action or creation form stays mounted
+when refreshing or filtering removes its source row. Refresh also retries the
+visible rows' report and action-availability queries.
 
 Source, Task, Report, Comment, and Webhook details offer a GitHub source link when
 their recorded repository, source kind, and number are valid. It opens the current

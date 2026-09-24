@@ -23,7 +23,7 @@ import {
   Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { investigationApi } from "./api";
 import {
@@ -42,6 +42,50 @@ import {
 } from "./comment-deliveries";
 import { useInvestigationRepositoryScope } from "./repository-scope";
 import { EmptyState, PageHeading, Surface } from "./workspace-ui";
+
+export function CommentBody({ body }: { body: string }) {
+  const blocks: ReactNode[] = [];
+  let text: string[] = [],
+    code = false;
+  const flush = () => {
+    if (!text.length) return;
+    blocks.push(
+      code ? (
+        <pre key={blocks.length}>{text.join("\n")}</pre>
+      ) : (
+        <p key={blocks.length}>{text.join("\n")}</p>
+      ),
+    );
+    text = [];
+  };
+  for (const line of body.split(/\r?\n/u)) {
+    if (/^```/u.test(line)) {
+      flush();
+      code = !code;
+      continue;
+    }
+    if (code) {
+      text.push(line);
+      continue;
+    }
+    const title = /^#{1,6}\s+(.+)$/u.exec(line);
+    if (title) {
+      flush();
+      blocks.push(<h3 key={blocks.length}>{title[1]}</h3>);
+    } else if (!line.trim()) flush();
+    else text.push(line);
+  }
+  flush();
+  return (
+    <>
+      <div className="comments-body">{blocks}</div>
+      <details className="comments-history-disclosure">
+        <summary>Source</summary>
+        <pre className="comments-retained-body">{body}</pre>
+      </details>
+    </>
+  );
+}
 
 /** Retained for existing links to the attempt-history API. */
 export function commentHistoryFilters(
@@ -62,9 +106,12 @@ export function commentHistoryFilters(
   };
 }
 
-export function commentPublicationFilters(
-  search: string,
-): Omit<InvestigationPublicationDirectoryQuery, "cursor" | "limit"> {
+export function commentPublicationFilters(search: string): Omit<
+  InvestigationPublicationDirectoryQuery,
+  "cursor" | "limit"
+> & {
+  workItemKind?: "pull_request" | "issue";
+} {
   const parameters = new URLSearchParams(search);
   const state = parameters.get("state");
   const mode = parameters.get("mode");
@@ -82,6 +129,9 @@ export function commentPublicationFilters(
       ? { state: state as InvestigationPublicationDirectoryQuery["state"] }
       : {}),
     ...(mode === "progress" || mode === "result" ? { mode } : {}),
+    ...(["pull_request", "issue"].includes(parameters.get("workItemKind") ?? "")
+      ? { workItemKind: parameters.get("workItemKind") as "pull_request" | "issue" }
+      : {}),
     ...(parameters.get("taskKind") === "pr-e2e" ? { taskKind: "pr-e2e" as const } : {}),
   };
 }
@@ -153,29 +203,26 @@ export function CommentDetails({ commentId }: { commentId: string }) {
         </Button>
       </Box>
       <PageHeading
-        title={publicationKindLabel(comment)}
+        title={comment.workItemTitle || publicationKindLabel(comment)}
         eyebrow={`${comment.repositoryFullName} · ${comment.workItemKind === "pull_request" ? "PR" : "Issue"} #${comment.workItemNumber}`}
-        subtitle={comment.workItemTitle || "Recorded publication and delivery history"}
+        subtitle={publicationKindLabel(comment)}
       >
         <CommentStatus comment={comment} />
       </PageHeading>
-      <CommentContextLinks comment={comment} />
       {query.isError && (
         <Alert severity="error">
-          {query.error.message} The last loaded publication and retained history remain visible.
-          Refresh before scheduling a new operation.
+          {query.error.message} Refresh before scheduling another operation.
           <Button onClick={() => void query.refetch()}>Refresh publication</Button>
         </Alert>
       )}
       <Box className="comments-detail-grid">
         <Stack spacing={3} sx={{ minWidth: 0 }}>
+          <Surface sx={{ p: 2 }}>
+            <CommentPublicationControls comment={comment} stale={query.isError} />
+          </Surface>
           <Surface sx={{ p: { xs: 2, sm: 3 } }}>
             <Typography variant="h6" sx={{ mb: 1 }}>
-              Last recorded comment
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              The retained body belongs to its recorded delivery attempt. A newer task update may
-              still be waiting for preparation.
+              Comment
             </Typography>
             {attempts.isPending && (
               <CircularProgress size={24} aria-label="Loading retained comment" />
@@ -190,7 +237,7 @@ export function CommentDetails({ commentId }: { commentId: string }) {
               <Alert severity="error">The retained attempt does not match this publication.</Alert>
             )}
             {latest && exactAttempt && (
-              <Box sx={{ bgcolor: "action.hover", borderRadius: 3, p: { xs: 2, sm: 3 } }}>
+              <Box>
                 <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", mb: 2 }}>
                   <Box
                     className="comments-author"
@@ -206,13 +253,11 @@ export function CommentDetails({ commentId }: { commentId: string }) {
                     </Typography>
                   </Box>
                 </Stack>
-                <Box
-                  component="pre"
-                  className="comments-retained-body"
-                  sx={{ typography: "body1" }}
-                >
-                  {latest.body ?? "No prepared comment body was retained for this delivery."}
-                </Box>
+                {latest.body ? (
+                  <CommentBody body={latest.body} />
+                ) : (
+                  <Typography color="text.secondary">No comment body recorded.</Typography>
+                )}
                 <Typography
                   variant="caption"
                   color="text.secondary"
@@ -224,33 +269,21 @@ export function CommentDetails({ commentId }: { commentId: string }) {
                 </Typography>
               </Box>
             )}
-            {attempts.data?.items.length === 0 && (
-              <EmptyState
-                title="No retained body yet"
-                description="The publication has no recorded delivery attempts. The task and report remain available."
-              />
-            )}
-          </Surface>
-          <Surface sx={{ p: { xs: 2, sm: 3 } }}>
-            <Typography variant="h6" sx={{ mb: 2 }}>
-              Delivery options
-            </Typography>
-            <CommentPublicationControls comment={comment} stale={query.isError} />
+            {attempts.data?.items.length === 0 && <EmptyState title="No retained body yet" />}
+            <CommentContextLinks comment={comment} />
           </Surface>
         </Stack>
         <Stack spacing={2} sx={{ minWidth: 0 }}>
           <Surface sx={{ p: { xs: 2, sm: 3 } }}>
-            <CommentDeliveryHistoryPanel
-              filters={{ commentId }}
-              pollInterval={commentPollingInterval([comment])}
-              showTarget={false}
-            />
+            <details className="comments-history-disclosure">
+              <summary>Delivery history</summary>
+              <CommentDeliveryHistoryPanel
+                filters={{ commentId }}
+                pollInterval={commentPollingInterval([comment])}
+                showTarget={false}
+              />
+            </details>
           </Surface>
-          <Typography variant="caption" color="text.secondary">
-            Create and update attempts retain their own bodies. Later checks are recorded as
-            observations. Publication status does not establish a successful investigation or
-            application test.
-          </Typography>
         </Stack>
       </Box>
     </Stack>
@@ -276,6 +309,9 @@ function PublicationDirectory({
   });
   const activeFilters = Object.keys(filters).filter((key) => key !== "repositoryId").length;
   const filterLabels = {
+    workItemKind: filters.workItemKind
+      ? `Work item: ${filters.workItemKind === "pull_request" ? "Pull requests" : "Issues"}`
+      : undefined,
     search: filters.search ? `Search: ${filters.search}` : undefined,
     state: filters.state ? `State: ${publicationLabels[filters.state]}` : undefined,
     mode: filters.mode
@@ -298,7 +334,15 @@ function PublicationDirectory({
     const next = new URLSearchParams();
     if (filters.repositoryId) next.set("repositoryId", filters.repositoryId);
     if (filters.workItemId) next.set("workItemId", filters.workItemId);
-    for (const key of ["search", "workItemNumber", "taskId", "state", "mode", "taskKind"]) {
+    for (const key of [
+      "search",
+      "workItemNumber",
+      "taskId",
+      "state",
+      "mode",
+      "taskKind",
+      "workItemKind",
+    ]) {
       const value = String(data.get(key) ?? "").trim();
       if (value) next.set(key, value);
     }
@@ -308,20 +352,38 @@ function PublicationDirectory({
   const fields = (
     <>
       <TextField
-        name="state"
+        name="workItemKind"
         select
-        label="Publication state"
+        label="Work item"
         size="small"
-        defaultValue={filters.state ?? ""}
+        defaultValue={filters.workItemKind ?? ""}
+        slotProps={{ select: { displayEmpty: true }, inputLabel: { shrink: true } }}
         fullWidth
       >
-        <MenuItem value="">All states</MenuItem>
+        <MenuItem value="">All work items</MenuItem>
+        <MenuItem value="pull_request">Pull requests</MenuItem>
+        <MenuItem value="issue">Issues</MenuItem>
+      </TextField>
+      <TextField
+        name="state"
+        select
+        label="Delivery"
+        size="small"
+        defaultValue={filters.state ?? ""}
+        slotProps={{ select: { displayEmpty: true }, inputLabel: { shrink: true } }}
+        fullWidth
+      >
+        <MenuItem value="">All delivery states</MenuItem>
         {Object.entries(publicationLabels).map(([value, label]) => (
           <MenuItem key={value} value={value}>
             {label}
           </MenuItem>
         ))}
       </TextField>
+    </>
+  );
+  const extraFields = (
+    <>
       <TextField
         name="mode"
         select
@@ -351,7 +413,6 @@ function PublicationDirectory({
     <Stack spacing={2.5} className="comments-page">
       <PageHeading
         title="Comments"
-        subtitle="Track published updates and resolve delivery issues."
         action={
           <Button
             startIcon={<RefreshRounded />}
@@ -362,44 +423,59 @@ function PublicationDirectory({
           </Button>
         }
       />
-      <Box component="form" onSubmit={submit} className="comments-filter-bar">
-        <TextField
-          name="search"
-          label="Search comments"
-          placeholder="Title, source number, or task ID"
-          size="small"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          className="comments-search"
-          slotProps={{
-            input: {
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchRounded fontSize="small" />
-                </InputAdornment>
-              ),
-            },
-            htmlInput: { maxLength: 200 },
-          }}
-        />
-        <Box className="comments-desktop-filters">{fields}</Box>
-        {filters.taskId && <input type="hidden" name="taskId" value={filters.taskId} />}
-        {filters.workItemNumber && (
-          <input type="hidden" name="workItemNumber" value={filters.workItemNumber} />
-        )}
-        <Button type="submit" className="comments-desktop-apply">
-          Apply
-        </Button>
-        <Button
-          startIcon={<FilterListRounded />}
-          className="comments-more-filters"
-          variant={activeFilters ? "contained" : "outlined"}
-          onClick={() => setFiltersOpen(true)}
-        >
-          More filters{activeFilters ? ` (${activeFilters})` : ""}
-        </Button>
-        {activeFilters > 0 && <Button onClick={clear}>Clear</Button>}
-      </Box>
+      <Surface sx={{ p: 3 }}>
+        <Box component="form" onSubmit={submit} className="comments-filter-bar">
+          <TextField
+            name="search"
+            label="Search publications"
+            placeholder="Title, body or number"
+            size="small"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            className="comments-search"
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchRounded fontSize="small" />
+                  </InputAdornment>
+                ),
+              },
+              htmlInput: { maxLength: 200 },
+            }}
+          />
+          <Box className="comments-desktop-filters">{fields}</Box>
+          {filters.mode && <input type="hidden" name="mode" value={filters.mode} />}
+          {filters.taskKind && <input type="hidden" name="taskKind" value={filters.taskKind} />}
+          {filters.taskId && <input type="hidden" name="taskId" value={filters.taskId} />}
+          {filters.workItemNumber && (
+            <input type="hidden" name="workItemNumber" value={filters.workItemNumber} />
+          )}
+          <Button type="submit" className="comments-desktop-apply">
+            Apply
+          </Button>
+          <Button
+            startIcon={<FilterListRounded />}
+            className="comments-more-filters"
+            variant="text"
+            onClick={() => setFiltersOpen(true)}
+          >
+            More filters{activeFilters ? ` (${activeFilters})` : ""}
+          </Button>
+          {activeFilters > 0 && <Button onClick={clear}>Clear</Button>}
+          {query.data && (
+            <Typography
+              className="comments-filter-count"
+              variant="body2"
+              color="text.secondary"
+              role="status"
+            >
+              {query.data.items.length}{" "}
+              {query.data.items.length === 1 ? "publication" : "publications"} on this page
+            </Typography>
+          )}
+        </Box>
+      </Surface>
       {activeFilters > 0 && (
         <Stack
           direction="row"
@@ -422,7 +498,7 @@ function PublicationDirectory({
                   sx={{
                     maxWidth: "100%",
                     height: "auto",
-                    minHeight: 44,
+                    minHeight: 28,
                     "@media (pointer: coarse)": { minHeight: 48 },
                     "& .MuiChip-label": {
                       whiteSpace: "normal",
@@ -435,17 +511,6 @@ function PublicationDirectory({
           )}
         </Stack>
       )}
-      {(filters.taskId || filters.workItemNumber || filters.workItemId) && (
-        <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
-          Showing{" "}
-          {filters.taskId
-            ? `task ${filters.taskId}`
-            : filters.workItemNumber
-              ? `source #${filters.workItemNumber}`
-              : `source ${filters.workItemId}`}{" "}
-          publications.
-        </Typography>
-      )}
       {query.isPending && <CircularProgress size={28} aria-label="Loading publications" />}
       {query.isError && (
         <Alert severity="error">
@@ -455,16 +520,25 @@ function PublicationDirectory({
       )}
       {query.data &&
         (query.data.items.length ? (
-          <Surface sx={{ p: 0, overflow: "hidden" }}>
-            <Stack
-              direction="row"
-              sx={{ px: { xs: 2, sm: 2.5 }, py: 1.5, justifyContent: "space-between", gap: 1 }}
-            >
-              <Typography variant="subtitle2">Publication history</Typography>
-            </Stack>
-            {query.data.items.map((comment) => (
-              <CommentPublicationRow key={comment.id} comment={comment} />
-            ))}
+          <Surface sx={{ p: { xs: 2, sm: 3 }, overflow: "hidden" }}>
+            <Box className="comments-table-wrap">
+              <table className="comments-table">
+                <thead>
+                  <tr>
+                    {["Publication", "Target", "Delivery", "Updated", "Actions"].map((label) => (
+                      <th scope="col" key={label}>
+                        {label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {query.data.items.map((comment) => (
+                    <CommentPublicationRow key={comment.id} comment={comment} tableRow />
+                  ))}
+                </tbody>
+              </table>
+            </Box>
             <Stack
               direction="row"
               spacing={1}
@@ -478,9 +552,6 @@ function PublicationDirectory({
                 borderColor: "divider",
               }}
             >
-              <Typography variant="caption" color="text.secondary" sx={{ mr: "auto" }}>
-                {query.data.items.length} publications on this page
-              </Typography>
               {(cursors.length > 1 || query.data.nextCursor) && (
                 <>
                   <Button
@@ -506,11 +577,6 @@ function PublicationDirectory({
         ) : (
           <EmptyState
             title={activeFilters ? "No comments match" : "No comments yet"}
-            description={
-              activeFilters
-                ? "Try another source number or clear the publication filters."
-                : "Comments appear here after a task prepares a progress update or report publication."
-            }
             action={
               activeFilters ? (
                 <Button variant="outlined" onClick={clear}>
@@ -520,10 +586,6 @@ function PublicationDirectory({
             }
           />
         ))}
-      <Typography variant="caption" color="text.secondary">
-        Delivery state describes the comment. Open its task to review the investigation outcome.
-        Recorded history remains available when intake or publishing is paused.
-      </Typography>
       <Dialog open={filtersOpen} onClose={() => setFiltersOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Filter comments</DialogTitle>
         <Box component="form" onSubmit={submit}>
@@ -531,13 +593,14 @@ function PublicationDirectory({
             <Stack spacing={2.5}>
               <TextField
                 name="search"
-                label="Search comments"
+                label="Search publications"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
                 fullWidth
                 slotProps={{ htmlInput: { maxLength: 200 } }}
               />
               {fields}
+              {extraFields}
               <TextField
                 name="workItemNumber"
                 label="PR or issue number"
@@ -548,15 +611,14 @@ function PublicationDirectory({
               />
               <TextField
                 name="taskId"
-                label="Exact Task ID"
+                label="Task ID"
                 defaultValue={filters.taskId ?? ""}
-                helperText="Filter by the recorded Task ID, independently of the source number."
                 fullWidth
               />
             </Stack>
           </DialogContent>
           <DialogActions sx={{ flexWrap: "wrap", gap: 1, p: 2 }}>
-            <Button onClick={clear}>Clear filters</Button>
+            {activeFilters > 0 && <Button onClick={clear}>Clear filters</Button>}
             <Button onClick={() => setFiltersOpen(false)}>Cancel</Button>
             <Button type="submit" variant="contained">
               Show comments

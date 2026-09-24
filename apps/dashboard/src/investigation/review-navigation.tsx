@@ -29,6 +29,7 @@ import {
   type ReviewQueueSelection,
   type ReviewRecord,
   readReviewNavigationMarker,
+  relatedReviewTarget,
   reviewOpenerId,
   reviewQueueIndex,
   reviewQueueScopeChanged,
@@ -39,11 +40,11 @@ import { sessionIdentity, useInvestigationSession } from "./session";
 
 export type { ReviewRecord } from "./review-navigation-state";
 
-type ReviewLinkProps = Pick<LinkProps, "to" | "onClick" | "state"> & { id: string };
+export type ReviewLinkProps = Pick<LinkProps, "to" | "onClick" | "state"> & { id: string };
 interface ReviewNavigationContextValue {
   identity: string;
   selection: ReviewQueueSelection | null;
-  start: (queue: ReviewQueue, record: ReviewRecord) => void;
+  start: (queue: ReviewQueue, record: ReviewRecord, target?: ReviewRecord) => void;
   register: (record: ReviewRecord) => void;
   move: (selection: ReviewQueueSelection, direction: -1 | 1) => void;
   back: (selection: ReviewQueueSelection) => void;
@@ -174,9 +175,13 @@ export function ReviewNavigationProvider({ children }: { children: ReactNode }) 
     [navigate, setActive],
   );
   const start = useCallback(
-    (queue: ReviewQueue, record: ReviewRecord) => {
+    (queue: ReviewQueue, record: ReviewRecord, target?: ReviewRecord) => {
       guarded(() => {
-        if (queue.identity !== identityRef.current) return;
+        if (
+          queue.identity !== identityRef.current ||
+          (target && !relatedReviewTarget(record, target))
+        )
+          return;
         const next = { queue, originMemberId: reviewRecordKey(record) };
         if (reviewQueueIndex(next) < 0) return;
         remember(queues.current, queue.id, queue);
@@ -185,7 +190,7 @@ export function ReviewNavigationProvider({ children }: { children: ReactNode }) 
           originMemberId: next.originMemberId,
           destination: "origin",
         });
-        route(next, "detail", record.href);
+        route(next, "detail", target?.href ?? record.href);
       });
     },
     [guarded, route],
@@ -294,7 +299,67 @@ export function useReviewListNavigation({
     },
     [context, location, label, records, complete],
   );
-  return { getLinkProps };
+  const getRelatedLinkProps = useCallback(
+    (origin: ReviewRecord, target: ReviewRecord): ReviewLinkProps => {
+      const id = `${reviewOpenerId(origin)}-next`;
+      if (!context || !relatedReviewTarget(origin, target)) return { to: target.href, id };
+      return {
+        to: target.href,
+        id,
+        onClick: (event) => {
+          if (!followsInCurrentTab(event)) return;
+          const queue = createReviewQueue({
+            id: crypto.randomUUID(),
+            identity: context.identity,
+            repositoryScope: new URLSearchParams(location.search).get("repositoryId") || null,
+            originHref: `${location.pathname}${location.search}${location.hash}`,
+            originKey: location.key,
+            scrollTop: document.getElementById("workspace-main")?.scrollTop ?? 0,
+            openerId: id,
+            label,
+            records,
+            complete,
+          });
+          if (!queue?.members.some((member) => reviewRecordKey(member) === reviewRecordKey(origin)))
+            return;
+          event.preventDefault();
+          context.start(queue, origin, target);
+        },
+      };
+    },
+    [context, location, label, records, complete],
+  );
+  const captureRelatedNavigation = useCallback(
+    (origin: ReviewRecord) => {
+      const queue = context
+        ? createReviewQueue({
+            id: crypto.randomUUID(),
+            identity: context.identity,
+            repositoryScope: new URLSearchParams(location.search).get("repositoryId") || null,
+            originHref: `${location.pathname}${location.search}${location.hash}`,
+            originKey: location.key,
+            scrollTop: document.getElementById("workspace-main")?.scrollTop ?? 0,
+            openerId: `${reviewOpenerId(origin)}-next`,
+            label,
+            records,
+            complete,
+          })
+        : null;
+      return (target: ReviewRecord): boolean => {
+        if (
+          !context ||
+          !queue ||
+          !relatedReviewTarget(origin, target) ||
+          !queue.members.some((member) => reviewRecordKey(member) === reviewRecordKey(origin))
+        )
+          return false;
+        context.start(queue, origin, target);
+        return true;
+      };
+    },
+    [context, location, label, records, complete],
+  );
+  return { getLinkProps, getRelatedLinkProps, captureRelatedNavigation };
 }
 
 export function ReviewQueueBar({
