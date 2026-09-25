@@ -20,6 +20,7 @@ import WorkersPage, {
   workerContactLabel,
   workerControlError,
   workerHasE2eOwnership,
+  workerPolicyReviewQueryKey,
   workersQueryKey,
 } from "./workers-page";
 
@@ -158,6 +159,10 @@ describe("worker admission and repository permissions", () => {
   it("omits the collapse control on the dedicated worker detail route", () => {
     const html = renderWorker({}, { expanded: true, onExpandedChange: vi.fn() });
     expect(html).toContain("Advertised task types");
+    expect(html).toContain("Capabilities and policy");
+    expect(html).toMatch(
+      /<button(?=[^>]*aria-expanded="false")(?=[^>]*aria-controls="[^"]*-policy")[^>]*>/u,
+    );
     expect(html).not.toContain("Hide details");
     expect(html).not.toContain("workers-detail-toggle");
   });
@@ -179,7 +184,7 @@ describe("worker admission and repository permissions", () => {
     expect(html).toContain("Admission off");
     expect(html).toContain("PR review");
     expect(html).toContain("Issue analysis");
-    expect(html).toContain("Only workspace administrators");
+    expect(html).toContain("Read-only · Administrator access required");
     expect(html).toContain("disabled");
     expect(html).not.toContain("Local screenshots are disabled");
   });
@@ -187,7 +192,7 @@ describe("worker admission and repository permissions", () => {
   it("distinguishes enabled policy from a worker advertising only static tasks", () => {
     const html = renderWorker({ e2eEnabled: true });
     expect(html).toContain("No E2E task types");
-    expect(html).toContain("Waiting for the worker to report E2E support");
+    expect(html).toContain("Capabilities and policy");
     expect(html).not.toContain(">Admission on<");
   });
 });
@@ -277,9 +282,11 @@ describe("worker policy versions and explicit review", () => {
         review: { refreshGeneration: 1 },
         refreshGeneration: 1,
         onReviewChange: vi.fn(),
+        onRefresh: vi.fn(),
       },
     );
     expect(html).toContain("The save was not confirmed");
+    expect(html).toMatch(/<button[^>]*>Refresh workers<\/button>/u);
     expect(html).toContain("disabled");
     expect(html).not.toContain("I reviewed the latest policy");
     expect(html).not.toContain("Worker admission policy saved");
@@ -301,8 +308,8 @@ describe("worker policy versions and explicit review", () => {
   });
 
   it("explains conflicts and preserves permission errors", () => {
-    expect(workerControlError(new InvestigationHttpError(409, "conflict"))).toContain(
-      "Refresh workers and review the saved policy",
+    expect(workerControlError(new InvestigationHttpError(409, "conflict"))).toBe(
+      "This worker's settings changed.",
     );
     expect(workerControlError(new InvestigationHttpError(403, "Access revoked"))).toBe(
       "Access revoked",
@@ -372,7 +379,7 @@ describe("static resource ownership from scheduler leases", () => {
       <WorkerStaticOwnership workerId={lease.workerId} leases={[]} />,
     );
     expect(html).toContain("within your repository access");
-    expect(html).toContain("This does not confirm that the worker is idle");
+    expect(html).toContain("Worker availability is unconfirmed");
     expect(html).not.toContain("worker is available");
   });
 
@@ -389,6 +396,21 @@ describe("static resource ownership from scheduler leases", () => {
     expect(html).toContain("release is unconfirmed");
     expect(html).toContain("static-attempt");
     expect(html).toContain("Retry static ownership");
+  });
+
+  it("retains ownership while disabling repeated retries during a refresh", () => {
+    const html = renderToStaticMarkup(
+      <WorkerStaticOwnership
+        workerId={lease.workerId}
+        leases={[lease]}
+        error="Scheduler unavailable."
+        loading
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(html).toContain("static-attempt");
+    expect(html).toContain("release is unconfirmed");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Refreshing ownership…<\/button>/u);
   });
 });
 
@@ -448,6 +470,21 @@ describe("worker directory", () => {
     expect(html).not.toContain("workers-detail-toggle");
     expect(html).toContain("Saved policy record");
     expect(html).toContain("Policy version");
+  });
+
+  it("restores required policy review when returning to the worker route", () => {
+    const client = queryClient();
+    client.setQueryData(workersQueryKey, { items: [worker()] });
+    client.setQueryData(workerPolicyReviewQueryKey, {
+      refreshGeneration: 2,
+      reviews: { "sample-static-worker": { refreshGeneration: 2 } },
+    });
+    renderPage(client);
+    const html = renderPage(client, "/workers?workerId=sample-static-worker");
+    expect(html).toContain("The save was not confirmed");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Allow E2E work<\/button>/u);
+    expect(html).toContain("Refresh workers and review the saved policy");
+    expect(html).not.toContain("I reviewed the latest policy");
   });
 
   it("distinguishes an empty directory from a filtered view with no matches", () => {

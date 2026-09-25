@@ -218,6 +218,25 @@ export function sourceActionReason(
   );
 }
 
+/** Read-only recommendations use report access rather than preparation permission. */
+export function sourceReportAction(context: ActionContextV1) {
+  const action = context.recommendation.action;
+  if (!action || !["view-validation", "view-changes", "view-evidence"].includes(action))
+    return undefined;
+  const saved = context.nextActions.find(
+    (candidate) => candidate.id === context.recommendedActionId && candidate.action === action,
+  );
+  const report = saved?.validationReportRef ?? context.reportRef;
+  if (!report) return undefined;
+  return {
+    action,
+    reportId: report.id,
+    allowed: saved
+      ? saved.state === "saved" && saved.allowed
+      : Boolean(context.fixedActions.find((candidate) => candidate.action === action)?.allowed),
+  };
+}
+
 /** Fetch live availability for a report-bound action, including unresolved submissions. */
 export function useSourceActionContext(
   source: WorkItem,
@@ -251,10 +270,60 @@ export function useSourceActionContext(
   return { query, context };
 }
 
-export function SourceResultLabel({ item, task }: { item: WorkItem; task?: InvestigationTaskV1 }) {
+export function SourceResultLabel({
+  item,
+  task,
+  validationOnly = false,
+}: {
+  item: WorkItem;
+  task?: InvestigationTaskV1;
+  validationOnly?: boolean;
+}) {
   const query = useSourceReport(item, task);
   const header = readableSourceReport(item, task, query.data, query.error);
   const outcome = header ? reportOutcome(header) : null;
+  if (validationOnly) {
+    const validation =
+      header?.assessment.kind === "bug"
+        ? outcome?.validation.label.replace(/^Reproduction: /u, "")
+        : header?.assessment.kind === "pr"
+          ? outcome?.validation.label
+          : undefined;
+    const label =
+      validation ??
+      (header
+        ? "—"
+        : !task?.latestReportRef
+          ? "No report"
+          : query.isError
+            ? "Unavailable"
+            : "Loading…");
+    return (
+      <Stack spacing={0.75} className="source-validation">
+        <Chip
+          size="small"
+          variant="outlined"
+          label={label}
+          aria-label={
+            header && !validation
+              ? "Validation details are in the saved report"
+              : `${header?.assessment.kind === "bug" ? "Reproduction" : "Validation"}: ${label}`
+          }
+          sx={{
+            fontSize: 12,
+            height: "auto",
+            minHeight: 24,
+            "& .MuiChip-label": { whiteSpace: "normal" },
+          }}
+        />
+        {query.isError && header && (
+          <Typography variant="caption" color="text.secondary">
+            Saved result
+          </Typography>
+        )}
+      </Stack>
+    );
+  }
   return (
     <Stack
       direction="row"

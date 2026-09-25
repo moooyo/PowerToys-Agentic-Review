@@ -260,6 +260,82 @@ function materialTheme(mode: PaletteMode) {
       MuiCardActions: { styleOverrides: { root: { padding: "8px 16px 16px", gap: 8 } } },
       MuiTextField: { defaultProps: { size: "medium", variant: "outlined" } },
       MuiFormControl: { defaultProps: { size: "medium" } },
+      MuiFormControlLabel: {
+        styleOverrides: {
+          root: { minHeight: 48, marginRight: 12 },
+          label: { overflowWrap: "anywhere" },
+        },
+      },
+      MuiCheckbox: {
+        styleOverrides: {
+          root: {
+            width: 48,
+            height: 48,
+            padding: 12,
+            flexShrink: 0,
+            color: colors.onSurfaceVariant,
+          },
+        },
+      },
+      MuiRadio: {
+        styleOverrides: {
+          root: {
+            width: 48,
+            height: 48,
+            padding: 12,
+            flexShrink: 0,
+            color: colors.onSurfaceVariant,
+          },
+        },
+      },
+      MuiSwitch: {
+        styleOverrides: {
+          root: {
+            width: 64,
+            height: 48,
+            padding: "8px 6px",
+            overflow: "visible",
+            flexShrink: 0,
+          },
+          switchBase: ({ ownerState }) => {
+            const color = ownerState.color ?? "primary";
+            const activeColor =
+              color === "default" ? colors.primary : `var(--mui-palette-${color}-main)`;
+            const onActiveColor =
+              color === "default" ? colors.onPrimary : `var(--mui-palette-${color}-contrastText)`;
+            return {
+              top: 2,
+              padding: 14,
+              color: colors.outline,
+              "&.Mui-checked": {
+                transform: "translateX(20px)",
+                padding: 10,
+                color: onActiveColor,
+                "& .MuiSwitch-thumb": { width: 24, height: 24 },
+                "& + .MuiSwitch-track": {
+                  opacity: 1,
+                  backgroundColor: activeColor,
+                  borderColor: activeColor,
+                },
+              },
+              "&.Mui-disabled": { color: alpha(colors.onSurface, 0.38) },
+              "&.Mui-disabled + .MuiSwitch-track": {
+                opacity: 0.12,
+                backgroundColor: colors.onSurface,
+                borderColor: colors.onSurface,
+              },
+            };
+          },
+          thumb: { width: 16, height: 16, boxShadow: "none" },
+          track: {
+            boxSizing: "border-box",
+            borderRadius: 16,
+            border: `2px solid ${colors.outline}`,
+            backgroundColor: colors.containerHigh,
+            opacity: 1,
+          },
+        },
+      },
       MuiInputBase: { styleOverrides: { root: { fontSize: "1rem", lineHeight: 1.5 } } },
       MuiOutlinedInput: {
         styleOverrides: {
@@ -411,6 +487,8 @@ function materialTheme(mode: PaletteMode) {
           root: {
             padding: "8px 24px 24px",
             minWidth: 0,
+            minHeight: 0,
+            overscrollBehavior: "contain",
             overflowWrap: "anywhere",
             "@media (max-width: 599px)": { paddingInline: 20 },
           },
@@ -422,6 +500,7 @@ function materialTheme(mode: PaletteMode) {
             padding: "8px 24px 24px",
             gap: 8,
             flexWrap: "wrap",
+            flexShrink: 0,
             "@media (max-width: 599px)": { paddingInline: 20 },
           },
         },
@@ -432,6 +511,20 @@ function materialTheme(mode: PaletteMode) {
       MuiPopper: { defaultProps: { container: overlayContainer } },
       MuiMenu: {
         styleOverrides: { paper: { backgroundColor: colors.container, borderRadius: 12 } },
+      },
+      MuiSnackbarContent: {
+        styleOverrides: {
+          root: {
+            color: colors.canvas,
+            backgroundColor: colors.onSurface,
+            borderRadius: 4,
+            boxShadow: "0 3px 8px rgb(0 0 0 / 20%)",
+          },
+          action: {
+            color: dark ? "#345EAD" : "#B2C7FF",
+            "& .MuiButton-root, & .MuiIconButton-root": { color: "inherit" },
+          },
+        },
       },
       MuiAlert: {
         styleOverrides: {

@@ -173,6 +173,7 @@
 }
 .report-workspace .report-findings-tools-toggle {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: center;
 }
@@ -185,6 +186,14 @@
 .report-workspace .report-selection-bar {
   padding: 8px 12px;
   border-radius: 12px;
+}
+.report-workspace .report-finding-nav > .MuiButton-root {
+  border-radius: 0;
+  min-height: 44px;
+}
+.report-workspace .report-finding-nav-item:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: -3px;
 }
 .report-workspace .report-selected-review-row {
   display: flex;

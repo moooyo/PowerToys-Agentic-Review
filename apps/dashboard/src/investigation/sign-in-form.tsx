@@ -1,5 +1,5 @@
 import { normalizeInvestigationUsername } from "@agentic-review/contracts";
-import { ShieldOutlined } from "@mui/icons-material";
+import { ShieldRounded } from "@mui/icons-material";
 import { Alert, Box, Button, Stack, TextField, Typography } from "@mui/material";
 import { type FormEvent, useId, useRef, useState } from "react";
 import type { PasswordLoginInput } from "./auth-api";
@@ -79,7 +79,7 @@ export function PasswordSignInForm({
             placeItems: "center",
           }}
         >
-          <ShieldOutlined aria-hidden="true" />
+          <ShieldRounded aria-hidden="true" />
         </Box>
         <Typography sx={{ fontSize: 18, fontWeight: 500 }}>Agentic Review</Typography>
       </Stack>

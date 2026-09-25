@@ -1,6 +1,6 @@
 import ArrowBackRounded from "@mui/icons-material/ArrowBackRounded";
 import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
-import FolderOutlined from "@mui/icons-material/FolderOutlined";
+import FolderRounded from "@mui/icons-material/FolderRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import {
   Alert,
@@ -105,7 +105,7 @@ function RepositoryDirectoryEntry({
   return (
     <ButtonBase className="repository-directory-entry" onClick={onOpen}>
       <Box className="repository-directory-icon" sx={{ color: "primary.main" }}>
-        <FolderOutlined />
+        <FolderRounded />
       </Box>
       <Box className="repository-directory-name">
         <Typography component="span" variant="h6">
@@ -190,7 +190,9 @@ function RepositoryOverview({
                   : "Loading saved intake settings…"}
             </Typography>
           </Box>
-          <Button onClick={() => onTab("intake")}>Configure</Button>
+          <Button aria-label="Configure event intake" onClick={() => onTab("intake")}>
+            Configure
+          </Button>
         </Box>
         <Box className="repository-summary-row">
           <Box>
@@ -206,7 +208,9 @@ function RepositoryOverview({
                   : "Loading saved reply settings…"}
             </Typography>
           </Box>
-          <Button onClick={() => onTab("replies")}>Configure</Button>
+          <Button aria-label="Configure automatic replies" onClick={() => onTab("replies")}>
+            Configure
+          </Button>
         </Box>
         <Box className="repository-summary-row">
           <Box>
@@ -295,7 +299,7 @@ export default function RepositoriesPage() {
             Back to repositories
           </Button>
         </Box>
-        <PageHeading title={selected.fullName} subtitle={selected.id} />
+        <PageHeading title={selected.fullName} />
         <Tabs
           value={tab}
           onChange={(_, value: SettingsTab) => open(selected.id, value)}
@@ -382,7 +386,12 @@ export default function RepositoriesPage() {
         <EmptyState
           title="No repositories in your scope"
           description="Ask an administrator to register a repository and grant access."
-          icon={<FolderOutlined />}
+          icon={<FolderRounded />}
+          action={
+            <Button component={Link} to="/account">
+              My account
+            </Button>
+          }
         />
       ) : (
         repositories.length > 0 && (

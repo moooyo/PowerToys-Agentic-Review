@@ -2,9 +2,9 @@ import type {
   InvestigationArtifactMetadataV1,
   InvestigationArtifactV1,
 } from "@agentic-review/contracts";
-import DescriptionOutlined from "@mui/icons-material/DescriptionOutlined";
+import DescriptionRounded from "@mui/icons-material/DescriptionRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
-import ImageOutlined from "@mui/icons-material/ImageOutlined";
+import ImageRounded from "@mui/icons-material/ImageRounded";
 import MoreHorizRounded from "@mui/icons-material/MoreHorizRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import {
@@ -361,7 +361,7 @@ export function ArtifactDetails({
                   ) : previewKind === "video" ? (
                     <PlayArrowRounded sx={{ fontSize: 36 }} />
                   ) : (
-                    <ImageOutlined sx={{ fontSize: 32 }} />
+                    <ImageRounded sx={{ fontSize: 32 }} />
                   )}
                 </span>
               )}
@@ -387,7 +387,7 @@ export function ArtifactDetails({
       <Box className="task-artifact-caption">
         {!previewKind && (
           <Box className="task-artifact-file-icon" aria-hidden="true">
-            <DescriptionOutlined />
+            <DescriptionRounded />
           </Box>
         )}
         <Box sx={{ minWidth: 0, flex: 1 }}>

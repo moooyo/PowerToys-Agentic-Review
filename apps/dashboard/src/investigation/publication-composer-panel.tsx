@@ -12,6 +12,9 @@ import {
   FormControlLabel,
   MenuItem,
   Stack,
+  Step,
+  StepLabel,
+  Stepper,
   TextField,
   Typography,
 } from "@mui/material";
@@ -28,7 +31,28 @@ import {
   setPublicationIndependentDraft,
 } from "./publication-composer";
 
-export type PublicationStep = "select" | "compose";
+export type PublicationStep = "select" | "edit";
+
+export function publicationErrorTarget(errors: Readonly<Record<string, string>>): string {
+  const fields = Object.keys(errors);
+  return (
+    fields.find((field) => field === "summary" || field.startsWith("draft-")) ??
+    fields[0] ??
+    "selection"
+  );
+}
+
+export function PublicationSteps({ step }: { step: "select" | "preview" }) {
+  return (
+    <Stepper activeStep={step === "select" ? 0 : 1} aria-label="Publication steps">
+      {["Select findings", "Preview"].map((label, index) => (
+        <Step key={label} aria-current={index === (step === "select" ? 0 : 1) ? "step" : undefined}>
+          <StepLabel>{label}</StepLabel>
+        </Step>
+      ))}
+    </Stepper>
+  );
+}
 
 export function expandPublicationEditorsForErrors(
   expanded: ReadonlyMap<string, boolean>,
@@ -51,12 +75,14 @@ export function PublicationComposerPanel({
   reportSelection,
   editedBodies,
   summary,
+  summaryGenerated,
   step,
   disabled,
   errors,
   fieldId,
   onChange,
   onSummaryChange,
+  onUseGeneratedSummary,
   onClearError,
   onStepChange,
 }: {
@@ -67,12 +93,14 @@ export function PublicationComposerPanel({
   reportSelection: FeedbackSelectionState<InvestigationActionKind>;
   editedBodies: Record<string, string>;
   summary: string;
+  summaryGenerated: boolean;
   step: PublicationStep;
   disabled: boolean;
   errors: Record<string, string>;
   fieldId: (key: string) => string;
   onChange: (draft: PublicationComposerDraft) => void;
   onSummaryChange: (body: string) => void;
+  onUseGeneratedSummary: () => void;
   onClearError: (key: string) => void;
   onStepChange: (step: PublicationStep) => void;
 }) {
@@ -174,35 +202,11 @@ export function PublicationComposerPanel({
       spacing={2}
       sx={{ minWidth: 0, scrollMarginBlockStart: 16 }}
     >
-      <Box
-        component="ol"
-        aria-label="Publication steps"
-        sx={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 3,
-          m: 0,
-          pl: 2,
-          color: "text.secondary",
-          typography: "caption",
-        }}
-      >
-        <Box
-          component="li"
-          aria-current={step === "select" ? "step" : undefined}
-          sx={{ color: step === "select" ? "primary.main" : undefined }}
-        >
-          Select findings
-        </Box>
-        <Box
-          component="li"
-          aria-current={step === "compose" ? "step" : undefined}
-          sx={{ color: step === "compose" ? "primary.main" : undefined }}
-        >
-          Compose
-        </Box>
-        <li>Preview</li>
-      </Box>
+      {step === "select" ? (
+        <PublicationSteps step="select" />
+      ) : (
+        <Typography variant="h6">Edit feedback</Typography>
+      )}
       {selectionChanged && (
         <Alert severity="info">
           {draft.reportSelectionKey === null
@@ -225,28 +229,36 @@ export function PublicationComposerPanel({
       )}
       {step === "select" ? (
         <>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
-            <TextField
-              id={fieldId("search")}
-              label="Search findings"
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              fullWidth
-            />
-            <TextField
-              id={fieldId("show")}
-              select
-              label="Show"
-              value={show}
-              onChange={(event) => setShow(event.target.value as "all" | "selected")}
-              sx={{ minWidth: 180 }}
-            >
-              <MenuItem value="all">All findings</MenuItem>
-              <MenuItem value="selected">Selected findings</MenuItem>
-            </TextField>
-          </Stack>
-          <Typography variant="body2" role="status">
+          {findings.length > 8 && (
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+              <TextField
+                id={fieldId("search")}
+                label="Search findings"
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                fullWidth
+              />
+              <TextField
+                id={fieldId("show")}
+                select
+                label="Show"
+                value={show}
+                onChange={(event) => setShow(event.target.value as "all" | "selected")}
+                sx={{ minWidth: 180 }}
+              >
+                <MenuItem value="all">All findings</MenuItem>
+                <MenuItem value="selected">Selected findings</MenuItem>
+              </TextField>
+            </Stack>
+          )}
+          <Typography
+            id={fieldId("selection")}
+            tabIndex={-1}
+            variant="body2"
+            role="status"
+            aria-describedby={errors.selection ? `${fieldId("selection")}-error` : undefined}
+          >
             {selectedFindingCount} of {findings.length}{" "}
             {findings.length === 1 ? "finding" : "findings"} selected
             {independentCount > 0
@@ -256,7 +268,11 @@ export function PublicationComposerPanel({
           </Typography>
           <Stack direction="row" useFlexGap spacing={1} sx={{ flexWrap: "wrap" }}>
             <Button
-              disabled={disabled || visible.length === 0}
+              disabled={
+                disabled ||
+                visible.length === 0 ||
+                visible.every((finding) => draft.selectedFindingIds.includes(finding.id))
+              }
               onClick={() => {
                 let next = draft;
                 for (const finding of visible)
@@ -272,12 +288,12 @@ export function PublicationComposerPanel({
                 onClearError("selection");
               }}
             >
-              Select visible ({visible.length})
+              {findings.length > 8 ? `Select visible (${visible.length})` : "Select all"}
             </Button>
             <Button
               disabled={disabled || selectedFindingCount + draft.selectedDraftIds.length === 0}
               onClick={() => {
-                setFocusIntent({ id: fieldId("show"), alignTop: false });
+                setFocusIntent({ id: fieldId("selection"), alignTop: false });
                 onChange({ ...draft, selectedFindingIds: [], selectedDraftIds: [] });
                 onClearError("selection");
               }}
@@ -285,14 +301,6 @@ export function PublicationComposerPanel({
               Clear selection
             </Button>
           </Stack>
-          <Button
-            id={fieldId("selection")}
-            disabled={disabled || !result}
-            onClick={importReport}
-            aria-describedby={errors.selection ? `${fieldId("selection")}-error` : undefined}
-          >
-            Use report selection
-          </Button>
           {errors.selection && (
             <Typography id={`${fieldId("selection")}-error`} color="error" variant="body2">
               {errors.selection}
@@ -323,7 +331,7 @@ export function PublicationComposerPanel({
                             const neighbour = visible[index + 1] ?? visible[index - 1];
                             setFocusIntent({
                               id: fieldId(
-                                neighbour ? `include-${neighbour.feedbackDraft.id}` : "show",
+                                neighbour ? `include-${neighbour.feedbackDraft.id}` : "selection",
                               ),
                               alignTop: false,
                             });
@@ -423,16 +431,6 @@ export function PublicationComposerPanel({
               ))}
             </Box>
           )}
-          <Button
-            variant="contained"
-            disabled={disabled || nextDisabled}
-            onClick={() => {
-              setFocusIntent({ id: fieldId("step-back"), alignTop: true });
-              onStepChange("compose");
-            }}
-          >
-            Continue
-          </Button>
           {nextDisabled && (
             <Typography variant="body2" color="text.secondary">
               Select at least one finding to request changes.
@@ -451,11 +449,11 @@ export function PublicationComposerPanel({
               id={fieldId("step-back")}
               disabled={disabled}
               onClick={() => {
-                setFocusIntent({ id: fieldId("show"), alignTop: true });
+                setFocusIntent({ id: fieldId("selection"), alignTop: true });
                 onStepChange("select");
               }}
             >
-              Back
+              Back to findings
             </Button>
             <Typography variant="body2">
               {selectedFindingCount} {selectedFindingCount === 1 ? "finding" : "findings"} selected
@@ -467,15 +465,14 @@ export function PublicationComposerPanel({
                 : ""}
             </Typography>
           </Stack>
+          <Stack direction="row" sx={{ justifyContent: "flex-end" }}>
+            <Button disabled={disabled || summaryGenerated} onClick={onUseGeneratedSummary}>
+              Use generated summary
+            </Button>
+          </Stack>
           <TextField
             id={fieldId("summary")}
-            label={
-              action === "comment"
-                ? entries.length
-                  ? "Introduction · optional"
-                  : "Comment"
-                : "Review summary · optional"
-            }
+            label={action === "comment" ? "Comment introduction" : "Review summary"}
             multiline
             minRows={3}
             fullWidth
@@ -493,7 +490,7 @@ export function PublicationComposerPanel({
               <Button
                 id={fieldId("selection")}
                 onClick={() => {
-                  setFocusIntent({ id: fieldId("show"), alignTop: false });
+                  setFocusIntent({ id: fieldId("selection"), alignTop: false });
                   onStepChange("select");
                 }}
               >

@@ -3,10 +3,14 @@ import type {
   InvestigationPublicationDirectoryQuery,
 } from "@agentic-review/contracts";
 import ArrowBackRounded from "@mui/icons-material/ArrowBackRounded";
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import FilterListRounded from "@mui/icons-material/FilterListRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -23,7 +27,7 @@ import {
   Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { investigationApi } from "./api";
 import {
@@ -44,6 +48,7 @@ import { useInvestigationRepositoryScope } from "./repository-scope";
 import { EmptyState, PageHeading, Surface } from "./workspace-ui";
 
 export function CommentBody({ body }: { body: string }) {
+  const sourceId = useId();
   const blocks: ReactNode[] = [];
   let text: string[] = [],
     code = false;
@@ -79,10 +84,18 @@ export function CommentBody({ body }: { body: string }) {
   return (
     <>
       <div className="comments-body">{blocks}</div>
-      <details className="comments-history-disclosure">
-        <summary>Source</summary>
-        <pre className="comments-retained-body">{body}</pre>
-      </details>
+      <Accordion variant="outlined" disableGutters className="comments-disclosure">
+        <AccordionSummary
+          id={`${sourceId}-summary`}
+          aria-controls={`${sourceId}-source`}
+          expandIcon={<ExpandMoreRounded />}
+        >
+          <Typography>Original Markdown</Typography>
+        </AccordionSummary>
+        <AccordionDetails>
+          <pre className="comments-retained-body">{body}</pre>
+        </AccordionDetails>
+      </Accordion>
     </>
   );
 }
@@ -148,6 +161,7 @@ export function commentPublicationFilterUrl(
 }
 
 export function CommentDetails({ commentId }: { commentId: string }) {
+  const historyId = useId();
   const scope = useInvestigationRepositoryScope();
   const query = useQuery({
     queryKey: commentQueryKey(commentId),
@@ -183,7 +197,19 @@ export function CommentDetails({ commentId }: { commentId: string }) {
   const comment = query.data;
   if (scope.repositoryId && comment.repositoryId !== scope.repositoryId)
     return (
-      <Alert severity="warning">This comment does not belong to the selected repository.</Alert>
+      <Alert
+        severity="warning"
+        action={
+          <Button
+            component={Link}
+            to={`/comments?repositoryId=${encodeURIComponent(scope.repositoryId)}`}
+          >
+            Back to comments
+          </Button>
+        }
+      >
+        This comment does not belong to the selected repository.
+      </Alert>
     );
   const latest = attempts.data?.items[0];
   const exactAttempt =
@@ -274,16 +300,23 @@ export function CommentDetails({ commentId }: { commentId: string }) {
           </Surface>
         </Stack>
         <Stack spacing={2} sx={{ minWidth: 0 }}>
-          <Surface sx={{ p: { xs: 2, sm: 3 } }}>
-            <details className="comments-history-disclosure">
-              <summary>Delivery history</summary>
+          <Accordion variant="outlined" disableGutters className="comments-disclosure">
+            <AccordionSummary
+              id={`${historyId}-summary`}
+              aria-controls={`${historyId}-history`}
+              expandIcon={<ExpandMoreRounded />}
+            >
+              <Typography>Delivery history</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
               <CommentDeliveryHistoryPanel
                 filters={{ commentId }}
                 pollInterval={commentPollingInterval([comment])}
                 showTarget={false}
+                showHeading={false}
               />
-            </details>
-          </Surface>
+            </AccordionDetails>
+          </Accordion>
         </Stack>
       </Box>
     </Stack>
@@ -324,10 +357,13 @@ function PublicationDirectory({
   };
   const removeFilter = (key: keyof typeof filterLabels) =>
     navigate(commentPublicationFilterUrl(filters, key));
-  const clear = () =>
+  const clear = () => {
+    setSearch("");
+    setFiltersOpen(false);
     navigate(
       `/comments${filters.repositoryId ? `?repositoryId=${encodeURIComponent(filters.repositoryId)}` : ""}`,
     );
+  };
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -578,10 +614,30 @@ function PublicationDirectory({
           <EmptyState
             title={activeFilters ? "No comments match" : "No comments yet"}
             action={
-              activeFilters ? (
-                <Button variant="outlined" onClick={clear}>
-                  Clear filters
-                </Button>
+              activeFilters > 0 || filters.repositoryId ? (
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  useFlexGap
+                  sx={{ justifyContent: "center", flexWrap: "wrap" }}
+                >
+                  {activeFilters > 0 && (
+                    <Button variant="outlined" onClick={clear}>
+                      Clear filters
+                    </Button>
+                  )}
+                  {filters.repositoryId && (
+                    <Button
+                      onClick={() =>
+                        navigate(
+                          commentPublicationFilterUrl({ ...filters, repositoryId: undefined }),
+                        )
+                      }
+                    >
+                      Show all repositories
+                    </Button>
+                  )}
+                </Stack>
               ) : undefined
             }
           />
@@ -644,7 +700,6 @@ export default function CommentsPage() {
       <Stack spacing={3} className="comments-page">
         <PageHeading
           title="Comment delivery attempts"
-          subtitle="Recorded create and update attempts, with their original bodies and outcomes."
           action={
             <Button
               component={Link}

@@ -1,3 +1,4 @@
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import {
   Accordion,
   AccordionDetails,
@@ -206,6 +207,8 @@ export function AutoReplySettingsForm({
   canManage: boolean;
   canAuthorize: boolean;
 } & AutoReplyTemplateView) {
+  const templateHelpId = useId();
+  const authorizationDetailsId = useId();
   const queryClient = useQueryClient();
   const guardedAction = useGuardedAction();
   const [saved, setSaved] = useState(settings);
@@ -222,6 +225,7 @@ export function AutoReplySettingsForm({
   };
   const [editingTemplates, setEditingTemplates] = useState(Boolean(selectedTemplate));
   const [preview, setPreview] = useState(false);
+  const [templateHelpOpen, setTemplateHelpOpen] = useState(false);
   const [authorization, setAuthorization] = useState<AutoReplyAuthorization | null>(null);
   const [fieldErrors, setFieldErrors] = useState<ReturnType<typeof autoReplySettingsFieldErrors>>(
     {},
@@ -337,6 +341,7 @@ export function AutoReplySettingsForm({
     const invalid = templateKeys.find((key) => errors[key]);
     if (invalid) {
       setEditingTemplates(true);
+      setTemplateHelpOpen(true);
       setTemplate(invalid);
       setPendingFocus(invalid);
       return;
@@ -469,7 +474,7 @@ export function AutoReplySettingsForm({
             sx={{ width: "100%", justifyContent: "space-between" }}
           />
           <Typography variant="body2" color="text.secondary">
-            Creates a comment when an assignment is accepted and updates it as work progresses.
+            Updates one comment as assignment work progresses.
           </Typography>
           {fieldErrors.progressEnabled && (
             <Alert severity="error">{fieldErrors.progressEnabled}</Alert>
@@ -516,27 +521,6 @@ export function AutoReplySettingsForm({
                 </MenuItem>
               ))}
             </TextField>
-            <Stack spacing={1}>
-              <Typography variant="body2" color="text.secondary">
-                Required placeholders, once each and in this order:
-              </Typography>
-              <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-                {tokens.map((token) => (
-                  <Box
-                    component="code"
-                    key={token}
-                    sx={{ px: 1, py: 0.5, bgcolor: "action.hover", borderRadius: 1, fontSize: 12 }}
-                  >
-                    {"{{" + token + "}}"}
-                  </Box>
-                ))}
-              </Stack>
-              <Typography variant="body2" color="text.secondary">
-                {progressTemplate
-                  ? "Optional: {{status}} once before {{trigger}}."
-                  : "Begin with {{identity}} and end with {{details}}."}
-              </Typography>
-            </Stack>
             <TextField
               label={templateLabels[template]}
               value={currentTemplate}
@@ -564,6 +548,49 @@ export function AutoReplySettingsForm({
                 },
               }}
             />
+            <Accordion
+              variant="outlined"
+              disableGutters
+              expanded={templateHelpOpen}
+              onChange={(_, expanded) => setTemplateHelpOpen(expanded)}
+            >
+              <AccordionSummary
+                id={`${templateHelpId}-summary`}
+                aria-controls={`${templateHelpId}-details`}
+                expandIcon={<ExpandMoreRounded />}
+              >
+                <Typography>Template placeholders</Typography>
+              </AccordionSummary>
+              <AccordionDetails>
+                <Stack spacing={1}>
+                  <Typography variant="body2" color="text.secondary">
+                    Use each once, in this order:
+                  </Typography>
+                  <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+                    {tokens.map((token) => (
+                      <Box
+                        component="code"
+                        key={token}
+                        sx={{
+                          px: 1,
+                          py: 0.5,
+                          bgcolor: "action.hover",
+                          borderRadius: 1,
+                          fontSize: 12,
+                        }}
+                      >
+                        {"{{" + token + "}}"}
+                      </Box>
+                    ))}
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary">
+                    {progressTemplate
+                      ? "Optional: {{status}} once before {{trigger}}."
+                      : "Begin with {{identity}} and end with {{details}}."}
+                  </Typography>
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
             <Stack
               direction="row"
               spacing={2}
@@ -587,19 +614,25 @@ export function AutoReplySettingsForm({
             </Stack>
           </Stack>
         )}
-        <Box component="details">
-          <Typography component="summary" sx={{ fontWeight: 500, cursor: "pointer", py: 1 }}>
-            Publishing authorization
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            {saved.authorizedById
-              ? "Authorized by account " + saved.authorizedById + ". "
-              : "No publishing authorization is recorded. "}
-            Settings version {saved.version}; template format version {saved.templateVersion}.
-            {saved.updatedById && " Last edited by " + saved.updatedById + "."}
-            {saved.updatedAt && " Updated " + saved.updatedAt + "."}
-          </Typography>
-        </Box>
+        <Accordion variant="outlined" disableGutters>
+          <AccordionSummary
+            id={`${authorizationDetailsId}-summary`}
+            aria-controls={`${authorizationDetailsId}-details`}
+            expandIcon={<ExpandMoreRounded />}
+          >
+            <Typography>Publishing authorization</Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Typography variant="body2" color="text.secondary">
+              {saved.authorizedById
+                ? "Authorized by account " + saved.authorizedById + ". "
+                : "No publishing authorization is recorded. "}
+              Settings version {saved.version}; template format version {saved.templateVersion}.
+              {saved.updatedById && " Last edited by " + saved.updatedById + "."}
+              {saved.updatedAt && " Updated " + saved.updatedAt + "."}
+            </Typography>
+          </AccordionDetails>
+        </Accordion>
         {!canManage && (
           <Alert severity="info">
             Repository management permission is required to change these settings.
@@ -838,7 +871,7 @@ function ReplyDeliveryList({
                   <AccordionSummary
                     id={`${deliveryListId}-${encodeURIComponent(reply.id)}-summary`}
                     aria-controls={`${deliveryListId}-${encodeURIComponent(reply.id)}-details`}
-                    expandIcon={<span aria-hidden="true">+</span>}
+                    expandIcon={<ExpandMoreRounded />}
                   >
                     <Typography variant="body2">View saved comment</Typography>
                   </AccordionSummary>

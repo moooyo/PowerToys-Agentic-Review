@@ -382,13 +382,13 @@ export function SchedulerPanel() {
                   <Typography sx={{ fontWeight: 500 }}>
                     {`${query.data.occupiedE2e} / ${query.data.e2eConcurrency} occupied`}
                   </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                    {e2eCleanupPending
-                      ? "Waiting for worker cleanup confirmation."
-                      : query.data.occupiedE2e > 0
-                        ? "Reserved until cleanup is confirmed."
-                        : "No E2E slot is occupied."}
-                  </Typography>
+                  {(e2eCleanupPending || query.data.occupiedE2e > 0) && (
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                      {e2eCleanupPending
+                        ? "Waiting for worker cleanup confirmation."
+                        : "Reserved until cleanup is confirmed."}
+                    </Typography>
+                  )}
                 </Box>
                 <Chip
                   label={
@@ -408,9 +408,11 @@ export function SchedulerPanel() {
             </Stack>
           </Section>
           <Section title="Current resource owners">
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
-              Showing tasks within your repository access.
-            </Typography>
+            {owners.length > 0 && (
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
+                Within your repository access
+              </Typography>
+            )}
             {owners.length === 0 ? (
               <Typography variant="body2" color="text.secondary">
                 No resource owners within your repository access.

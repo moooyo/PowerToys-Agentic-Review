@@ -1,6 +1,6 @@
 .source-queue-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 210px) minmax(108px, 140px);
   align-items: center;
   gap: 16px;
   padding: 16px 24px;
@@ -19,8 +19,12 @@
   text-decoration: underline;
 }
 .source-next-action {
+  display: grid;
+  gap: 6px;
   max-width: 210px;
   justify-self: end;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .source-next-action .MuiButton-root {
   width: max-content;
@@ -32,11 +36,20 @@
   line-height: 20px;
   white-space: normal;
 }
+.source-validation {
+  justify-self: end;
+  max-width: 100%;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 600px) {
   .source-queue-row {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(90px, 140px);
     gap: 10px;
     padding: 16px;
+  }
+  .source-queue-row > :first-child {
+    grid-column: 1 / -1;
   }
   .source-next-action {
     justify-self: start;

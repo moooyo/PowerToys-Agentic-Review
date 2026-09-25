@@ -1,0 +1,342 @@
+{
+  "screens": [
+    {
+      "id": "pull-requests", "title": "Pull requests", "group": "Review", "route": "/pull-requests", "layout": "table",
+      "summary": "Illustrative source directory derived from current code. Rows are invented review examples, not live records.",
+      "tabs": ["All investigations", "Needs review", "Running", "Needs attention"], "badge": {"text": "Illustrative records", "tone": "blue"},
+      "columns": ["Pull request", "Investigation", "Saved conclusion"],
+      "rows": [
+        {"cells": ["Preserve settings during cancellation", "Completed", "Changes needed"], "target": "pr-detail", "tone": "amber"},
+        {"cells": ["Improve command navigation", "Completed", "P0 needs attention"], "target": "p0-guard", "tone": "red"},
+        {"cells": ["Retain search history", "Interrupted", "Checkpoint only"], "target": "task-interrupted", "tone": "amber"},
+        {"cells": ["Verify settings interaction", "Running", "No final conclusion"], "target": "task-detail", "tone": "blue"}
+      ],
+      "panels": [{"title": "Repository scope and filters", "lines": ["Search title or number; filter source and investigation state.", "Open a row to retain the original review queue."]}],
+      "controls": [{"label": "Open source", "target": "pr-detail", "kind": "primary"}, {"label": "Browse reports", "target": "reports", "kind": "secondary"}],
+      "checks": ["Can reviewers distinguish execution state from saved conclusion?", "Does returning restore filters, page, and row focus?", "Is repository scope clear before opening a record?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/work-items-page.tsx", "line": 246}, {"path": "apps/dashboard/src/investigation/work-item-state.ts", "line": 28}],
+      "transitions": [{"label": "Open pull request", "target": "pr-detail"}, {"label": "Read saved report", "target": "report-detail", "condition": "A readable report is bound to this source."}]
+    },
+    {
+      "id": "issues", "title": "Issues", "group": "Review", "route": "/issues", "layout": "table",
+      "summary": "Illustrative issue directory showing distinct bug and feature assessments. No issue data was fetched.",
+      "tabs": ["All investigations", "Needs review", "Running", "Needs attention"], "badge": {"text": "Illustrative records", "tone": "blue"},
+      "columns": ["Issue", "Assessment", "Suggested next step"],
+      "rows": [
+        {"cells": ["Settings does not open", "Needs verification", "Review saved plan"], "target": "bug-detail", "tone": "amber"},
+        {"cells": ["Export selected settings", "Needs decision", "Clarify requirements"], "target": "feature-detail", "tone": "blue"},
+        {"cells": ["Repeated startup report", "Saved duplicate target", "Review duplicate action"], "target": "close-duplicate", "tone": "amber"}
+      ],
+      "panels": [{"title": "Source context", "lines": ["An imported issue snapshot does not identify a code commit.", "Reproduction and implementation remain separate decisions."]}],
+      "controls": [{"label": "Open bug example", "target": "bug-detail", "kind": "primary"}, {"label": "Open feature example", "target": "feature-detail", "kind": "secondary"}],
+      "checks": ["Is Not run distinct from Not reproduced?", "Can reviewers identify pending product decisions?", "Does each entry lead to the correct source and report?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/work-items-page.tsx", "line": 246}, {"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 461}],
+      "transitions": [{"label": "Inspect bug", "target": "bug-detail"}, {"label": "Inspect feature", "target": "feature-detail"}, {"label": "Inspect saved duplicate", "target": "close-duplicate", "condition": "The saved assessment supplies a usable target."}]
+    },
+    {
+      "id": "tasks", "title": "Tasks", "group": "Tasks", "route": "/tasks", "layout": "table",
+      "summary": "Illustrative task directory. Status examples describe supported states rather than observed worker activity.",
+      "tabs": ["All tasks", "Active", "Needs attention"], "badge": {"text": "Execution and outcome", "tone": "blue"},
+      "columns": ["Task", "Execution", "Saved result"],
+      "rows": [
+        {"cells": ["PR review", "Completed", "Changes needed"], "target": "task-detail", "tone": "green"},
+        {"cells": ["PR review", "Interrupted", "Partial checkpoint"], "target": "task-interrupted", "tone": "amber"},
+        {"cells": ["E2E verification", "Running", "Not final"], "target": "task-detail", "tone": "blue"},
+        {"cells": ["Cancelled investigation", "Awaiting cleanup", "Retained report"], "target": "task-detail", "tone": "amber"}
+      ],
+      "panels": [{"title": "Active includes reserved resources", "lines": ["A terminal task can remain Active while cleanup is pending.", "Awaiting cleanup is derived from resource leases."]}],
+      "controls": [{"label": "Open task", "target": "task-detail", "kind": "primary"}, {"label": "Review recovery", "target": "task-interrupted", "kind": "secondary"}],
+      "checks": ["Can users find cancellation that is still awaiting cleanup?", "Are saved outcomes independent of current execution?", "Does a task row make its next useful action clear?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 1226}, {"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 92}],
+      "transitions": [{"label": "Inspect latest attempt", "target": "task-detail"}, {"label": "Review interrupted task", "target": "task-interrupted"}]
+    },
+    {
+      "id": "reports", "title": "Reports", "group": "Review", "route": "/reports", "layout": "table",
+      "summary": "Illustrative report directory using the current server-cursor model. The review queue covers one directory page.",
+      "tabs": [], "badge": {"text": "Current page queue", "tone": "blue"},
+      "columns": ["Source", "Saved assessment", "Delivery"],
+      "rows": [
+        {"cells": ["PR review example", "Changes needed", "Complete / Final"], "target": "report-detail", "tone": "amber"},
+        {"cells": ["Bug investigation example", "Needs verification", "Complete / Final"], "target": "bug-detail", "tone": "amber"},
+        {"cells": ["Interrupted review example", "No final conclusion", "Partial / Checkpoint"], "target": "task-interrupted", "tone": "amber"}
+      ],
+      "panels": [{"title": "Directory filters", "lines": ["Search; task kind; completeness; delivery; repository scope.", "Next cursor changes the directory page, not the report contents."]}],
+      "controls": [{"label": "Read report", "target": "report-detail", "kind": "primary"}, {"label": "Inspect checkpoint", "target": "task-interrupted", "kind": "secondary"}],
+      "checks": ["Is the queue scope visibly limited to the current page?", "Are completeness, delivery, and conclusion distinguishable?", "Do report filters preserve the selected repository?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/report-directory.tsx", "line": 238}, {"path": "apps/dashboard/src/investigation/report-directory.tsx", "line": 286}],
+      "transitions": [{"label": "Read saved report", "target": "report-detail"}, {"label": "Inspect associated task", "target": "task-detail"}]
+    },
+    {
+      "id": "pr-detail", "title": "Pull request source", "group": "Review", "route": "/pull-requests?workItemId={id}", "layout": "detail",
+      "summary": "Illustrative PR detail. The conclusion is saved report data; the source and current task can change independently.",
+      "tabs": ["Overview", "Investigations", "Discussion"], "badge": {"text": "Changes needed", "tone": "amber"},
+      "panels": [
+        {"title": "Saved conclusion", "lines": ["Illustrative assessment: source-confirmed findings need changes.", "Runtime validation: Not run. Completion does not imply approval."], "tone": "amber"},
+        {"title": "About this change", "lines": ["Description and recorded source snapshot.", "GitHub source link opens the original PR."]},
+        {"title": "Related work", "lines": ["Current investigation and earlier saved reports.", "An earlier revision is explicitly identified."]}
+      ],
+      "controls": [{"label": "Prepare request changes", "target": "publication-select", "kind": "primary"}, {"label": "Read report", "target": "report-detail", "kind": "secondary"}, {"label": "Open task", "target": "task-detail", "kind": "secondary"}, {"label": "Back to results", "target": "pull-requests", "kind": "secondary"}],
+      "checks": ["Are conclusion, validation, and current execution separated?", "Is a report for an earlier revision hard to mistake for current?", "Is the GitHub destination based on this record rather than global scope?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 461}, {"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 608}],
+      "transitions": [{"label": "Prepare feedback", "target": "publication-select", "condition": "Fresh action context and preparation permission are available."}, {"label": "Read evidence and findings", "target": "report-detail"}, {"label": "Inspect execution", "target": "task-detail"}]
+    },
+    {
+      "id": "bug-detail", "title": "Bug investigation", "group": "Review", "route": "/issues?workItemId={id}", "layout": "detail",
+      "summary": "Illustrative bug assessment. A plausible report with no accepted reproduction remains Needs verification.",
+      "tabs": ["Overview", "Investigations", "Discussion"], "badge": {"text": "Needs verification", "tone": "amber"},
+      "panels": [
+        {"title": "Reported behavior", "lines": ["Illustrative issue: settings does not open after an update.", "Reproduction: Not run. Root cause: not confirmed."], "tone": "amber"},
+        {"title": "Recommended next step", "lines": ["Read the saved reproduction plan and prerequisites.", "Choose an exact source commit when the plan needs one."]},
+        {"title": "Source and related work", "lines": ["Issue snapshot, imported discussion, and saved report.", "Parent records remain available after a linked task is created."]}
+      ],
+      "controls": [{"label": "Prepare verification", "target": "followup", "kind": "primary"}, {"label": "Read report", "target": "report-detail", "kind": "secondary"}, {"label": "Duplicate action", "target": "close-duplicate", "kind": "secondary"}, {"label": "Back to issues", "target": "issues", "kind": "secondary"}],
+      "checks": ["Does Not run avoid implying reproduction failed?", "Is the required code revision clear before follow-up?", "Can users inspect the saved plan before requesting execution?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 696}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 1974}],
+      "transitions": [{"label": "Review saved verification plan", "target": "followup"}, {"label": "Inspect duplicate management", "target": "close-duplicate", "condition": "A separate saved assessment supplies a usable duplicate target."}]
+    },
+    {
+      "id": "feature-detail", "title": "Feature assessment", "group": "Review", "route": "/issues?workItemId={id}", "layout": "detail",
+      "summary": "Illustrative feature assessment. This example presents unresolved requirements, not a ready implementation plan.",
+      "tabs": ["Overview", "Investigations", "Discussion"], "badge": {"text": "Needs decision", "tone": "blue"},
+      "panels": [
+        {"title": "Feature request", "lines": ["Illustrative request: export a selected subset of settings.", "Dependencies, defaults, and compatibility need a decision."]},
+        {"title": "Saved plan", "lines": ["Draft plan and acceptance criteria remain reviewable.", "A draft alone does not establish execution readiness."], "tone": "amber"},
+        {"title": "Later delivery path", "lines": ["Create PR becomes relevant after verified remote-branch evidence.", "The server decides which actions this report permits."]}
+      ],
+      "controls": [{"label": "Prepare clarification", "target": "publication-compose", "kind": "primary"}, {"label": "Inspect follow-up", "target": "followup", "kind": "secondary"}, {"label": "Inspect create PR flow", "target": "create-pr", "kind": "secondary"}, {"label": "Back to issues", "target": "issues", "kind": "secondary"}],
+      "checks": ["Does the page make unresolved decisions explicit?", "Is a draft plan distinct from permission to implement?", "Is Create PR tied to verified branch evidence rather than implied progress?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 696}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 1934}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2117}],
+      "transitions": [{"label": "Compose clarification comment", "target": "publication-compose"}, {"label": "Inspect a later create-PR path", "target": "create-pr", "condition": "A subsequent report contains a verified remote branch and allows the action."}]
+    },
+    {
+      "id": "task-detail", "title": "Task workspace", "group": "Tasks", "route": "/tasks?taskId={id}", "layout": "detail",
+      "summary": "Illustrative task workspace showing execution, attempts, output, and saved results without claiming a running task.",
+      "tabs": ["Output", "Files", "Details"], "badge": {"text": "Latest attempt", "tone": "blue"},
+      "panels": [
+        {"title": "Execution status", "lines": ["Current task state, scheduler progress, and reserved resources.", "Saved report and assessment appear separately."]},
+        {"title": "Output", "lines": ["Latest retained attempt by default; search and event filters.", "Historical attempt output is explicitly labeled."]},
+        {"title": "Cancellation and cleanup", "lines": ["Cancel requires confirmation and a fresh task snapshot.", "Resources stay reserved until worker cleanup is confirmed."], "tone": "amber"}
+      ],
+      "controls": [{"label": "Read report", "target": "report-detail", "kind": "primary"}, {"label": "Inspect recovery", "target": "task-interrupted", "kind": "secondary"}, {"label": "Open source", "target": "pr-detail", "kind": "secondary"}, {"label": "Back to tasks", "target": "tasks", "kind": "secondary"}],
+      "checks": ["Can users distinguish historical output from the latest attempt?", "Does cancellation explain the wait for cleanup?", "Does refreshing preserve readable output without enabling stale actions?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 372}, {"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 706}, {"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 1037}],
+      "transitions": [{"label": "Read saved report", "target": "report-detail", "condition": "The report identity matches this task."}, {"label": "Inspect recovery state", "target": "task-interrupted", "condition": "Task is recoverable and cleanup permits recovery."}]
+    },
+    {
+      "id": "task-interrupted", "title": "Interrupted task recovery", "group": "Tasks", "route": "/tasks?taskId={id}", "layout": "state",
+      "summary": "Illustrative recovery state for a saved checkpoint. Navigating this diagram does not resume or restart anything.",
+      "tabs": ["Output", "Files", "Details"], "badge": {"text": "Checkpoint / Not final", "tone": "amber"},
+      "panels": [
+        {"title": "Why the task stopped", "lines": ["Illustrative stop reason: a saved budget limit was reached.", "Existing assessment stays unchanged when work resumes."], "tone": "amber"},
+        {"title": "Resume budget", "lines": ["Rounds, duration, tokens, and report size with saved usage.", "Increase exhausted limits; do not reduce saved limits."]},
+        {"title": "Resume versus restart", "lines": ["Saved checkpoint: Resume. No checkpoint: Restart.", "Source, scope, profile, and prompt remain unchanged."]}
+      ],
+      "controls": [{"label": "Explore accepted resume", "target": "task-detail", "kind": "primary"}, {"label": "Read checkpoint", "target": "report-detail", "kind": "secondary"}, {"label": "Back to tasks", "target": "tasks", "kind": "secondary"}],
+      "checks": ["Do exhausted fields show specific correction guidance?", "Is resume distinct from restarting without a checkpoint?", "Are resource cleanup and recovery permission explained before submission?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/resume-task.tsx", "line": 93}, {"path": "apps/dashboard/src/investigation/resume-task.tsx", "line": 170}, {"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 563}],
+      "transitions": [{"label": "Resume with reviewed budget", "target": "task-detail", "condition": "Server accepts recovery; required limits increase and cleanup is complete."}, {"label": "Read retained checkpoint", "target": "report-detail"}]
+    },
+    {
+      "id": "report-detail", "title": "Report reader", "group": "Review", "route": "/reports?reportId={id}", "layout": "report",
+      "summary": "Illustrative saved report. Finding text and counts are explanatory examples, not exported report contents.",
+      "tabs": ["Findings", "Evidence", "Details"], "badge": {"text": "Saved assessment", "tone": "amber"},
+      "panels": [
+        {"title": "Conclusion and next step", "lines": ["Saved outcome first; validation and completeness stay visible.", "Recommended action uses fresh server context."]},
+        {"title": "Finding reader", "lines": ["Full-report search, priority, and assessment filters.", "Selected findings persist across pages and filters."]},
+        {"title": "Feedback draft", "lines": ["Edit current feedback; save it and continue reading.", "Review the complete selected set before publication."]}
+      ],
+      "controls": [{"label": "Publish selected", "target": "publication-select", "kind": "primary"}, {"label": "Inspect P0 case", "target": "p0-guard", "kind": "secondary"}, {"label": "Inspect follow-up", "target": "followup", "kind": "secondary"}, {"label": "Back to reports", "target": "reports", "kind": "secondary"}],
+      "checks": ["Can users locate a P0 hidden by paging or filters?", "Are private feedback edits distinct from submitted content?", "Does evidence retain its source and validation limits?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/report-workspace.tsx", "line": 188}, {"path": "apps/dashboard/src/investigation/report-findings-reader.tsx", "line": 51}, {"path": "apps/dashboard/src/investigation/report-findings-reader.tsx", "line": 168}],
+      "transitions": [{"label": "Import selection deliberately", "target": "publication-select"}, {"label": "Locate P0", "target": "p0-guard", "condition": "The complete report contains a P0 finding."}, {"label": "Review saved next action", "target": "followup", "condition": "A saved plan is available."}]
+    },
+    {
+      "id": "publication-select", "title": "Select findings", "group": "Publication", "route": "Report or source > Actions > Select findings", "layout": "compose",
+      "summary": "Illustrative publication selection. This action draft has its own selected set and does not overwrite report checkboxes.",
+      "tabs": ["Select findings", "Compose", "Server preview"], "badge": {"text": "Step 1 / Preparation", "tone": "blue"},
+      "panels": [
+        {"title": "Choose the operation", "lines": ["Comment, Approve, Suggest code, or Request changes.", "Each operation retains its own selection and text."]},
+        {"title": "Select from the complete report", "lines": ["Search findings; show all or selected; count hidden selections.", "Request changes requires at least one finding."]},
+        {"title": "Report selection changed", "lines": ["Use report selection explicitly, or keep this action draft.", "Importing selection preserves already edited publishing text."], "tone": "amber"}
+      ],
+      "controls": [{"label": "Continue to compose", "target": "publication-compose", "kind": "primary"}, {"label": "Review P0 guard", "target": "p0-guard", "kind": "secondary"}, {"label": "Back to report", "target": "report-detail", "kind": "secondary"}],
+      "checks": ["Is importing report selection explicit and understandable?", "Can users inspect every selected finding, including hidden ones?", "Does switching actions preserve separate drafts?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/publication-composer-panel.tsx", "line": 46}, {"path": "apps/dashboard/src/investigation/publication-composer-panel.tsx", "line": 226}],
+      "transitions": [{"label": "Continue with valid selection", "target": "publication-compose", "condition": "Request changes has at least one finding."}, {"label": "Approve blocked", "target": "p0-guard", "condition": "The original complete report has a confirmed unresolved P0."}]
+    },
+    {
+      "id": "publication-compose", "title": "Compose publication", "group": "Publication", "route": "Actions > Compose", "layout": "compose",
+      "summary": "Illustrative action draft. The visible fields depend on the chosen operation; navigation sends no content.",
+      "tabs": ["Select findings", "Compose", "Server preview"], "badge": {"text": "Step 2 / Private draft", "tone": "blue"},
+      "panels": [
+        {"title": "Summary and finding text", "lines": ["Write a review summary or conversation introduction.", "Edit each selected finding without duplicating it in the summary."]},
+        {"title": "Include as", "lines": ["Review comment or valid saved suggested change.", "Replacement code retains the exact source binding."]},
+        {"title": "Review changes and errors", "lines": ["Changed report feedback requires an explicit choice.", "An error summary links to stable, labeled fields."], "tone": "amber"}
+      ],
+      "controls": [{"label": "Preview action", "target": "publication-preview", "kind": "primary"}, {"label": "Back to findings", "target": "publication-select", "kind": "secondary"}, {"label": "Keep draft and return", "target": "report-detail", "kind": "secondary"}],
+      "checks": ["Are comment text and replacement code clearly separated?", "Can every field error be reached by keyboard?", "Can users keep deliberate publishing edits when report feedback changes?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/publication-composer-panel.tsx", "line": 451}, {"path": "apps/dashboard/src/investigation/publication-composer-panel.tsx", "line": 614}, {"path": "apps/dashboard/src/investigation/publication-composer-panel.tsx", "line": 684}],
+      "transitions": [{"label": "Request exact server preview", "target": "publication-preview", "condition": "Fields, source bindings, and preparation permission are valid."}, {"label": "Revise selection", "target": "publication-select"}]
+    },
+    {
+      "id": "publication-preview", "title": "Exact action preview", "group": "Publication", "route": "Actions > Server preview", "layout": "preview",
+      "summary": "Illustrative preview anatomy shared by supported actions. The actual operation supplies its exact fields and payload.",
+      "tabs": [], "badge": {"text": "Prepared / Not executed", "tone": "blue"},
+      "panels": [
+        {"title": "Target and operation", "lines": ["One repository, one source, and one explicit operation.", "Reviewed source revision or commit and report reference."]},
+        {"title": "Exact payload", "lines": ["Feedback, plan, branch, or duplicate target as applicable.", "Intent identity, version, digest, and server guards."]},
+        {"title": "Independent confirmation", "lines": ["Preparation does not grant execution permission.", "Unsatisfied guards or stale context block confirmation."], "tone": "amber"}
+      ],
+      "controls": [{"label": "Explore receipt", "target": "action-receipt", "kind": "primary"}, {"label": "Explore unknown result", "target": "unknown-outcome", "kind": "secondary"}, {"label": "Back to composition", "target": "publication-compose", "kind": "secondary"}],
+      "checks": ["Can users identify exactly what will change before confirmation?", "Are preparation and execution permission visibly distinct?", "Does repeated identical content show an intentional repeat warning?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 499}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 119}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2350}],
+      "transitions": [{"label": "Explicitly confirm the selected action", "target": "action-receipt", "condition": "Execution permission and every server guard pass; a known result is returned."}, {"label": "Outcome unconfirmed", "target": "unknown-outcome", "condition": "The existing intent remains uncertain after confirmation."}]
+    },
+    {
+      "id": "action-receipt", "title": "Action receipt", "group": "Publication", "route": "Actions > View last submission", "layout": "state",
+      "summary": "Illustrative receipt anatomy for a known result. This diagram does not assert that an action succeeded.",
+      "tabs": [], "badge": {"text": "Known result example", "tone": "green"},
+      "panels": [
+        {"title": "Recorded outcome", "lines": ["The server result states success, failure, or cancellation.", "Keep the exact submitted content separate from the new draft."]},
+        {"title": "Relevant destination", "lines": ["Open linked task only when the receipt includes its task ID.", "A follow-up preserves the parent task and saved report."]},
+        {"title": "Publish again intentionally", "lines": ["View the previous receipt while editing a fresh draft.", "Identical successful content triggers a repeat warning."], "tone": "amber"}
+      ],
+      "controls": [{"label": "Back to draft", "target": "publication-compose", "kind": "primary"}, {"label": "Explore linked task", "target": "task-detail", "kind": "secondary"}, {"label": "Back to report", "target": "report-detail", "kind": "secondary"}],
+      "checks": ["Does the receipt retain the submitted content rather than current edits?", "Is a linked task offered only when a real result identifies it?", "Does another identical submission require an intentional choice?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 1256}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2285}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2314}],
+      "transitions": [{"label": "Return to independent draft", "target": "publication-compose"}, {"label": "Open linked task", "target": "task-detail", "condition": "The authoritative result contains taskId."}]
+    },
+    {
+      "id": "p0-guard", "title": "P0 approval guard", "group": "Publication", "route": "Report findings / Actions > Approve", "layout": "state",
+      "summary": "Illustrative confirmed unresolved P0 case. The guard evaluates the complete original report, not selected findings.",
+      "tabs": ["Findings", "Evidence", "Details"], "badge": {"text": "Approve blocked", "tone": "red"},
+      "panels": [
+        {"title": "Confirmed unresolved P0", "lines": ["Approval is unavailable while the original report blocks it.", "Unchecking or filtering a finding does not resolve that guard."], "tone": "red"},
+        {"title": "Locate the finding", "lines": ["Locate P0 adjusts the finding view across pages.", "Inspect the exact evidence and saved assessment."]},
+        {"title": "Available next step", "lines": ["Prepare valid feedback or inspect a saved verification plan.", "The server remains authoritative for available actions."]}
+      ],
+      "controls": [{"label": "Review finding", "target": "report-detail", "kind": "primary"}, {"label": "Prepare request changes", "target": "publication-select", "kind": "secondary"}, {"label": "Inspect verification", "target": "followup", "kind": "secondary"}],
+      "checks": ["Is the reason approval is blocked visible before editing?", "Can hidden P0 findings be located from the warning?", "Does the interface avoid suggesting selection can bypass the guard?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 220}, {"path": "apps/dashboard/src/investigation/publication-composer.ts", "line": 309}, {"path": "apps/dashboard/src/investigation/report-findings-reader.tsx", "line": 249}],
+      "transitions": [{"label": "Locate P0 evidence", "target": "report-detail"}, {"label": "Prepare request changes", "target": "publication-select", "condition": "The action is permitted by current context."}]
+    },
+    {
+      "id": "unknown-outcome", "title": "Unconfirmed action outcome", "group": "Publication", "route": "Actions > Existing intent", "layout": "state",
+      "summary": "Illustrative unknown action result. Checking an existing intent is separate from sending a new action.",
+      "tabs": [], "badge": {"text": "Unknown / Keep intent", "tone": "amber"},
+      "panels": [
+        {"title": "Keep the existing submission", "lines": ["The outcome is unconfirmed; do not create a second intent.", "Edits to a private draft do not alter the submitted payload."], "tone": "amber"},
+        {"title": "Refresh status or check submission", "lines": ["The owner can refresh the saved intent.", "Reconciliation requires execution permission and capability."]},
+        {"title": "Possible outcomes", "lines": ["A known authoritative result becomes a receipt.", "If still unknown, preserve identity and keep this state."]}
+      ],
+      "controls": [{"label": "Explore known receipt", "target": "action-receipt", "kind": "primary"}, {"label": "Inspect original preview", "target": "publication-preview", "kind": "secondary"}, {"label": "Back to report", "target": "report-detail", "kind": "secondary"}],
+      "checks": ["Are refresh and reconciliation clearly separated from resubmission?", "Does uncertainty preserve the original intent and payload?", "Can a user who lost execution permission still understand the saved status?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2298}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2334}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 119}],
+      "transitions": [{"label": "Refresh or reconcile existing intent", "target": "action-receipt", "condition": "The authoritative intent reaches a known result."}, {"label": "Outcome remains unconfirmed", "target": "unknown-outcome", "condition": "No authoritative final result is available."}]
+    },
+    {
+      "id": "followup", "title": "Prepare saved follow-up", "group": "Publication", "route": "Actions > Start linked task / Verify PR", "layout": "compose",
+      "summary": "Illustrative plan-driven follow-up. This is a review of saved inputs and prerequisites, not an execution request.",
+      "tabs": [], "badge": {"text": "Plan and source binding", "tone": "blue"},
+      "panels": [
+        {"title": "Review the saved plan", "lines": ["Rationale, steps, expected observations, acceptance criteria.", "Plan readiness and prerequisites come from server context."]},
+        {"title": "Exact source", "lines": ["Issue snapshot: choose the full commit SHA when required.", "Frozen plan source: retain its saved commit binding."]},
+        {"title": "Execution access", "lines": ["Prepare and execute permissions are distinct.", "Task creation, action capability, and repository grant are required."], "tone": "amber"}
+      ],
+      "controls": [{"label": "Inspect exact preview", "target": "publication-preview", "kind": "primary"}, {"label": "Back to issue", "target": "bug-detail", "kind": "secondary"}, {"label": "Explore linked task", "target": "task-detail", "kind": "secondary"}],
+      "checks": ["Is the selected commit the exact source that will execute?", "Can users inspect prerequisites before confirmation?", "Does the linked task preserve parent report and source navigation?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 1955}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 1974}, {"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 718}],
+      "transitions": [{"label": "Prepare plan-bound intent", "target": "publication-preview", "condition": "Plan, source, permissions, and prerequisites satisfy preparation guards."}, {"label": "Open accepted linked task", "target": "task-detail", "condition": "After explicit confirmation, the server receipt supplies taskId."}]
+    },
+    {
+      "id": "create-pr", "title": "Create pull request", "group": "Publication", "route": "Actions > Create pull request", "layout": "compose",
+      "summary": "Illustrative current product flow for a report containing verified remote-branch evidence. No branch or PR is created.",
+      "tabs": [], "badge": {"text": "Verified branch required", "tone": "amber"},
+      "panels": [
+        {"title": "Verified remote branch", "lines": ["Choose from retained report subjects of kind remote_branch.", "The option identifies the branch and saved head SHA."]},
+        {"title": "Pull request fields", "lines": ["Title, base branch, and PR body.", "Field errors remain attached to the corresponding input."]},
+        {"title": "Exact creation preview", "lines": ["Review target, source branch, base, and submitted text.", "Creation requires separate confirmation and server guards."], "tone": "amber"}
+      ],
+      "controls": [{"label": "Inspect creation preview", "target": "publication-preview", "kind": "primary"}, {"label": "Back to feature", "target": "feature-detail", "kind": "secondary"}, {"label": "Read report", "target": "report-detail", "kind": "secondary"}],
+      "checks": ["Are only report-bound verified remote branches selectable?", "Are base branch and PR text clear before confirmation?", "Does missing branch evidence block the action with a useful reason?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2117}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2123}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2141}],
+      "transitions": [{"label": "Prepare create-PR intent", "target": "publication-preview", "condition": "Verified branch, required fields, and current action guards are valid."}]
+    },
+    {
+      "id": "close-duplicate", "title": "Close issue as duplicate", "group": "Publication", "route": "Actions > Close as duplicate", "layout": "compose",
+      "summary": "Illustrative current product flow using a saved duplicate target. This is not ordinary Close and does not alter an issue.",
+      "tabs": [], "badge": {"text": "Saved assessment required", "tone": "amber"},
+      "panels": [
+        {"title": "Saved duplicate target", "lines": ["Read-only target shows the retained identifier and issue number.", "The target comes from the saved assessment."]},
+        {"title": "Missing or unusable target", "lines": ["Show No usable saved target and field-level guidance.", "Reload the report or choose another operation."], "tone": "amber"},
+        {"title": "Review the exact effect", "lines": ["Preview the source issue and saved duplicate destination.", "Use separate confirmation before the action is executed."]}
+      ],
+      "controls": [{"label": "Inspect duplicate preview", "target": "publication-preview", "kind": "primary"}, {"label": "Back to issue", "target": "bug-detail", "kind": "secondary"}, {"label": "Read saved report", "target": "report-detail", "kind": "secondary"}],
+      "checks": ["Is the duplicate destination visibly bound to saved evidence?", "Does a missing target prevent an ambiguous closure?", "Can users distinguish duplicate closure from ordinary Close?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2041}, {"path": "apps/dashboard/src/investigation/action-panel.tsx", "line": 2048}],
+      "transitions": [{"label": "Prepare duplicate closure", "target": "publication-preview", "condition": "The saved target is usable and current guards allow the operation."}, {"label": "Reload or inspect saved assessment", "target": "report-detail", "condition": "No usable saved duplicate target exists."}]
+    }
+  ],
+  "journeys": [
+    {
+      "id": "publication", "title": "Review findings and prepare publication",
+      "summary": "Read a saved outcome, deliberately select feedback, inspect the exact payload, and review a known result. All data is illustrative.",
+      "steps": [
+        {"screen": "pull-requests", "label": "Choose source", "note": "Capture the filtered review queue."},
+        {"screen": "pr-detail", "label": "Understand outcome", "note": "Separate conclusion from validation and execution."},
+        {"screen": "report-detail", "label": "Read findings", "note": "Inspect evidence and save private feedback."},
+        {"screen": "publication-select", "label": "Select deliberately", "note": "The action draft owns its own selection."},
+        {"screen": "publication-compose", "label": "Compose", "note": "Review finding text and valid suggestions."},
+        {"screen": "publication-preview", "label": "Inspect exact action", "note": "Execution needs a separate confirmation."},
+        {"screen": "action-receipt", "label": "Read receipt", "note": "Only an authoritative result establishes an outcome."}
+      ],
+      "branches": [{"from": "publication-preview", "to": "unknown-outcome", "label": "Confirmation result remains uncertain"}, {"from": "publication-compose", "to": "publication-select", "label": "Revise the selected set"}]
+    },
+    {
+      "id": "p0-guard", "title": "Inspect an approval blocker",
+      "summary": "Review a confirmed unresolved P0 from the complete original report; selection and filtering cannot bypass the guard.",
+      "steps": [
+        {"screen": "reports", "label": "Open saved report", "note": "The directory queue covers its current page."},
+        {"screen": "report-detail", "label": "Locate P0", "note": "The warning can reach findings outside the visible page."},
+        {"screen": "p0-guard", "label": "Understand the guard", "note": "Approve remains blocked by original report content."},
+        {"screen": "publication-select", "label": "Prepare feedback", "note": "Use an available action to address the finding."}
+      ],
+      "branches": [{"from": "p0-guard", "to": "followup", "label": "Inspect an available saved verification plan"}, {"from": "p0-guard", "to": "report-detail", "label": "Read the exact evidence"}]
+    },
+    {
+      "id": "interrupted-resume", "title": "Recover an interrupted investigation",
+      "summary": "Inspect the stop reason and retained state, review the budget, and follow a new attempt only after accepted recovery.",
+      "steps": [
+        {"screen": "tasks", "label": "Find work needing attention", "note": "A saved checkpoint is not a final conclusion."},
+        {"screen": "task-interrupted", "label": "Review recovery", "note": "Raise exhausted limits and respect cleanup constraints."},
+        {"screen": "task-detail", "label": "Follow the latest attempt", "note": "This transition is conditional on server acceptance."},
+        {"screen": "report-detail", "label": "Read saved results", "note": "Resume does not rewrite the earlier assessment."}
+      ],
+      "branches": [{"from": "task-interrupted", "to": "task-interrupted", "label": "Budget invalid, permission absent, or cleanup pending"}, {"from": "task-interrupted", "to": "report-detail", "label": "Read the retained checkpoint"}]
+    },
+    {
+      "id": "issue-followup", "title": "Move from issue assessment to linked work",
+      "summary": "Review a saved plan and exact source before requesting linked work; a child task is navigable only when returned by the server.",
+      "steps": [
+        {"screen": "issues", "label": "Choose issue", "note": "Bug verification and feature decisions differ."},
+        {"screen": "bug-detail", "label": "Read assessment", "note": "Not run does not mean Not reproduced."},
+        {"screen": "followup", "label": "Review plan and source", "note": "Issue snapshot plans may require a full commit SHA."},
+        {"screen": "publication-preview", "label": "Inspect bound intent", "note": "Preparation and execution access remain separate."},
+        {"screen": "action-receipt", "label": "Read accepted result", "note": "Only a receipt with taskId offers a child-task link."},
+        {"screen": "task-detail", "label": "Inspect linked task", "note": "Retain navigation to the parent task and report."}
+      ],
+      "branches": [{"from": "followup", "to": "followup", "label": "Missing source, incomplete plan, or unmet prerequisite"}, {"from": "issues", "to": "feature-detail", "label": "Feature requires a product decision"}]
+    },
+    {
+      "id": "unknown-recovery", "title": "Recover an unconfirmed action outcome",
+      "summary": "Preserve the existing intent and distinguish status reads from permission-gated reconciliation. No new action is inferred.",
+      "steps": [
+        {"screen": "publication-preview", "label": "Inspect the prepared intent", "note": "Exact target and payload are already bound."},
+        {"screen": "unknown-outcome", "label": "Keep the uncertain submission", "note": "Do not replace uncertainty with a new submission."},
+        {"screen": "action-receipt", "label": "Review a known result", "note": "Proceed only when the authoritative intent has a known outcome."},
+        {"screen": "publication-compose", "label": "Return to private draft", "note": "The prior submitted snapshot stays unchanged."}
+      ],
+      "branches": [{"from": "unknown-outcome", "to": "unknown-outcome", "label": "Still unknown after refresh or reconciliation"}, {"from": "unknown-outcome", "to": "report-detail", "label": "Leave while preserving the pending submission"}]
+    }
+  ]
+}

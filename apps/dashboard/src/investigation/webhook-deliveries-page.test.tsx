@@ -37,7 +37,10 @@ import { unknownWebhookReasonDescription, webhookReasonDescription } from "./web
 const timestamp = "2026-09-19T02:00:00.000Z";
 
 function withoutDiagnosticDisclosures(html: string): string {
-  return html.replace(/<details\b[\s\S]*?<\/details>/gu, "");
+  return html.replace(
+    /<section\b[^>]*data-webhook-disclosure-content="true"[^>]*>[\s\S]*?<\/section>/gu,
+    "",
+  );
 }
 const operator: InvestigationSessionUser = {
   id: "operator-1",
@@ -183,7 +186,7 @@ describe("webhook event management", () => {
     const primary = withoutDiagnosticDisclosures(html);
     expect(primary).toContain("The complete source could not be read from GitHub.");
     expect(primary).toContain(unknownWebhookReasonDescription);
-    expect(primary).toContain("Current cycle attempts: 1; total recorded: 2");
+    expect(primary).toContain("Attempts: 1 this cycle · 2 total");
     for (const reason of records) {
       expect(primary).not.toContain(reason);
       expect(html).toContain(`<code>${reason}</code>`);
@@ -215,6 +218,10 @@ describe("webhook event management", () => {
     expect(primary).not.toMatch(/No task (?:was )?created|retries (?:are )?exhausted/iu);
     expect(html).toContain("Diagnostic details");
     expect(html).toContain(`<code>${reason}</code>`);
+    expect(html).not.toContain("<details");
+    expect(html).toMatch(
+      /<button\b[^>]*aria-expanded="false"[^>]*>[\s\S]*?Diagnostic details[\s\S]*?<\/button>/u,
+    );
     queryClient.clear();
   });
 
@@ -260,11 +267,12 @@ describe("webhook event management", () => {
         />
       </MemoryRouter>,
     );
-    expect(html).toContain("The complete source could not be read from GitHub.");
+    expect(html).not.toContain("The complete source could not be read from GitHub.");
     expect(html).not.toContain("source_read_failed");
     expect(html).not.toContain("No task was created");
     expect(html).not.toContain("exhausted");
     expect(html).toContain('data-label="Task"');
+    expect(html).toContain("Failed");
     expect(html).toContain("Processed");
     expect(html).toContain("taskId=task-2");
     expect(html).toContain("deliveryId=delivery-1");
@@ -310,7 +318,7 @@ describe("webhook event management", () => {
         />
       </MemoryRouter>,
     );
-    expect(html).toContain("Current cycle attempts: 1; total recorded: 4");
+    expect(html).toContain("Attempts: 1 this cycle · 4 total");
     expect(html).toContain("Attempt 3");
     expect(html).toContain("Attempt 4");
     expect(html).toContain("Task creation");
@@ -385,6 +393,8 @@ describe("webhook event management", () => {
       </MemoryRouter>,
     );
     expect(html).toContain("This event does not belong to the selected repository.");
+    expect(html).toContain('href="/webhooks?repositoryId=another-repo"');
+    expect(html).toContain("Back to webhook events");
     expect(html).not.toContain("The complete source could not be read from GitHub.");
     expect(html).not.toContain("Retry event");
     queryClient.clear();
@@ -455,6 +465,26 @@ describe("webhook event management", () => {
     queryClient.clear();
   });
 
+  it("offers all repositories when the selected repository has no events", () => {
+    const queryClient = client();
+    queryClient.setQueryData(
+      webhookDeliveriesQueryKey({ repositoryId: "repo-1", cursor: undefined, limit: 25 }),
+      { items: [], nextCursor: null },
+    );
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/webhooks?repositoryId=repo-1"]}>
+        <QueryClientProvider client={queryClient}>
+          <WebhookDeliveriesPage />
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    expect(html).toContain("No webhook events");
+    expect(html).toContain("Show all repositories");
+    expect(html).toContain('href="/webhooks"');
+    expect(html).not.toContain("Clear filters");
+    queryClient.clear();
+  });
+
   it("requires current repository grants even for administrators and rejects unavailable intake states", () => {
     expect(webhookRecoveryGrantProblem(delivery(), operator)).toBeNull();
     expect(webhookRecoveryGrantProblem(delivery(), null)).toContain("access");
@@ -519,6 +549,11 @@ describe("webhook event management", () => {
     expect(html).toContain("Refresh event status");
     expect(html).toContain("Retry saved request");
     expect(html).not.toContain(">Retry event</button>");
+    expect(html).toContain("Recovery request details");
+    expect(html).toContain("saved-command");
+    expect(html).toContain("opaque-version");
+    expect(withoutDiagnosticDisclosures(html)).not.toContain("saved-command");
+    expect(withoutDiagnosticDisclosures(html)).not.toContain("opaque-version");
     const list = renderToStaticMarkup(
       <MemoryRouter>
         <QueryClientProvider client={queryClient}>
@@ -597,7 +632,7 @@ describe("webhook event management", () => {
       state: "refreshed",
       idempotencyKey: "rejected-command",
     });
-    expect(controls()).toContain("Review its currently available recovery action");
+    expect(controls()).toContain("Review recovery before submitting another request");
     expect(send).toHaveBeenCalledTimes(1);
     queryClient.clear();
   });
@@ -793,6 +828,7 @@ describe("webhook event management", () => {
     expect(mismatched).not.toContain("Open task report");
     expect(mismatched).not.toContain("Open comment publications");
     expect(mismatched).not.toContain("Open review source");
+    expect(mismatched).toContain("Refresh task");
     queryClient.clear();
   });
 
@@ -815,7 +851,7 @@ describe("webhook event management", () => {
       </MemoryRouter>,
     );
     expect(html).toContain("Assignment intake is paused");
-    expect(html).toContain("Handling timeline");
+    expect(html).toContain("Event history");
     expect(html).toContain("taskId=existing-task");
     expect(html).toMatch(/datetime="2026-09-19T02:00:00\.000Z"/i);
     expect(html).not.toContain("Retry event");

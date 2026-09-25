@@ -2,7 +2,7 @@ import type {
   InvestigationModelInvocationReceipt,
   InvestigationUsageSummary,
 } from "@agentic-review/contracts";
-import InfoOutlined from "@mui/icons-material/InfoOutlined";
+import InfoRounded from "@mui/icons-material/InfoRounded";
 import {
   Box,
   Button,
@@ -87,7 +87,7 @@ export function AgentRuntimeMetadata({
                 aria-label="Inspect token usage and model settings"
                 onClick={() => setOpen(true)}
               >
-                <InfoOutlined fontSize="small" />
+                <InfoRounded fontSize="small" />
               </IconButton>
             </Tooltip>
           </Box>
@@ -142,7 +142,7 @@ export function AgentRuntimeMetadata({
               onClick={() => setOpen(true)}
               sx={{ alignSelf: "flex-start", flexShrink: 0, mt: 0.5 }}
             >
-              <InfoOutlined fontSize="small" />
+              <InfoRounded fontSize="small" />
             </IconButton>
           </Tooltip>
         </Box>

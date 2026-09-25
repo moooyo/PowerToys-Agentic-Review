@@ -1,0 +1,312 @@
+/* Match the dashboard MaterialTheme roles after the legacy prototype layers. */
+#ar-m3-prototype {
+  --md-info: light-dark(#365e9d, #a8c7fa);
+  --md-info-container: light-dark(#e4ecf9, #20364f);
+  --md-inverse-surface: light-dark(#2b313d, #e3e5ed);
+  --md-inverse-on-surface: light-dark(#e3e5ed, #2b313d);
+  --md-inverse-primary: light-dark(#b2c7ff, #345ead);
+  --md-disabled: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
+  --md-disabled-container: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+  font-size: 14px;
+  line-height: 20px;
+  letter-spacing: .25px;
+}
+
+/* Keep component labels on the theme's label and caption scales. */
+#ar-m3-prototype :is(.ar-btn, .ar-pills button, .ar-tabs button, .ar-group button) {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+  letter-spacing: .1px;
+}
+#ar-m3-prototype .ar-btn {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  gap: 8px;
+}
+#ar-m3-prototype .ar-prototype-bar .ar-btn { font-size: 14px; }
+#ar-m3-prototype .ar-small,
+#ar-m3-prototype .ar-source-meta,
+#ar-m3-prototype .ar-publish-meta {
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: .4px;
+}
+#ar-m3-prototype .ar-table th,
+#ar-m3-prototype .ar-table td,
+#ar-m3-prototype .ar-list-label,
+#ar-m3-prototype .ar-pager {
+  font-size: 14px;
+  line-height: 20px;
+}
+#ar-m3-prototype .ar-table th { white-space: nowrap; }
+#ar-m3-prototype .ar-table td { vertical-align: top; }
+#ar-m3-prototype .ar-pager { min-height: 64px; }
+#ar-m3-prototype .ar-outcome-summary h3 { font-size: 16px; line-height: 24px; }
+#ar-m3-prototype .ar-outcome-summary details > summary { font-size: 14px; line-height: 20px; }
+
+/* State layers preserve a filled or selected container instead of replacing it. */
+#ar-m3-prototype .ar-btn.tonal:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--md-on-secondary-container) 8%, var(--md-secondary-container));
+  box-shadow: 0 1px 3px rgb(0 0 0 / 16%);
+}
+#ar-m3-prototype .ar-btn.tonal:active:not(:disabled) {
+  background: color-mix(in srgb, var(--md-on-secondary-container) 12%, var(--md-secondary-container));
+  box-shadow: none;
+}
+#ar-m3-prototype .ar-btn.primary:active:not(:disabled),
+#ar-m3-prototype .ar-btn.danger:active:not(:disabled) { box-shadow: none; }
+#ar-m3-prototype .ar-btn:not(.primary):not(.danger):not(.tonal):hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+#ar-m3-prototype .ar-btn:not(.primary):not(.danger):not(.tonal):active:not(:disabled) {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+#ar-m3-prototype .ar-btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ar-red) 92%, light-dark(#fff, #330c0a));
+  box-shadow: 0 1px 3px rgb(0 0 0 / 16%);
+}
+#ar-m3-prototype .ar-btn.danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--ar-red) 88%, light-dark(#fff, #330c0a));
+}
+#ar-m3-prototype .ar-btn:disabled {
+  opacity: 1;
+  color: var(--md-disabled);
+  border-color: var(--md-disabled-container);
+  background: transparent;
+  box-shadow: none;
+}
+#ar-m3-prototype .ar-btn:is(.primary, .danger, .tonal):disabled {
+  border-color: transparent;
+  background: var(--md-disabled-container);
+}
+#ar-m3-prototype .ar-btn:is(.ghost, .quiet):disabled { border-color: transparent; }
+#ar-m3-prototype .ar-btn.ar-icon-button { border-radius: 50%; }
+#ar-m3-prototype .ar-avatar:hover {
+  background: color-mix(in srgb, var(--md-on-primary-container) 8%, var(--md-primary-container));
+}
+#ar-m3-prototype .ar-avatar:active {
+  background: color-mix(in srgb, var(--md-on-primary-container) 12%, var(--md-primary-container));
+}
+#ar-m3-prototype .ar-map .ar-btn { border-radius: 100px; }
+
+/* Filter chips keep a stable check slot; passive status labels remain 4px badges. */
+#ar-m3-prototype .ar-pills button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+#ar-m3-prototype .ar-pills button[aria-pressed=true]:hover:not(:disabled) {
+  background: var(--md-secondary-container);
+  box-shadow: inset 0 0 0 999px var(--md-hover);
+}
+#ar-m3-prototype .ar-pills button[aria-pressed=true]:active:not(:disabled) {
+  background: var(--md-secondary-container);
+  box-shadow: inset 0 0 0 999px var(--md-pressed);
+}
+#ar-m3-prototype .ar-pills button:not([aria-pressed=true]):active:not(:disabled) { background: var(--md-pressed); }
+#ar-m3-prototype .ar-pills button:disabled {
+  color: var(--md-disabled);
+  background: transparent;
+  border-color: var(--md-disabled-container);
+  opacity: 1;
+  box-shadow: none;
+}
+#ar-m3-prototype .ar-pills button > .ar-filter-check {
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+#ar-m3-prototype .ar-pills button:not([aria-pressed=true]) > .ar-filter-check { visibility: hidden; }
+#ar-m3-prototype .ar-pills .ar-filter-check svg { width: 18px; height: 18px; }
+#ar-m3-prototype .ar-badge { min-height: 24px; border-radius: 4px; letter-spacing: .1px; }
+#ar-m3-prototype .ar-badge.info { color: var(--md-info); background: var(--md-info-container); }
+#ar-m3-prototype .ar-notice { font-size: 14px; line-height: 20px; }
+#ar-m3-prototype .ar-notice.info { color: var(--md-info); background: var(--md-info-container); }
+
+/* Navigation remains selected under pointer and keyboard state layers. */
+#ar-m3-prototype .ar-nav button[aria-current=page]:hover .ar-nav-icon {
+  background: color-mix(in srgb, var(--md-on-secondary-container) 8%, var(--md-secondary-container));
+}
+#ar-m3-prototype .ar-nav button[aria-current=page]:active .ar-nav-icon {
+  background: color-mix(in srgb, var(--md-on-secondary-container) 12%, var(--md-secondary-container));
+}
+#ar-m3-prototype .ar-nav button:focus-visible .ar-nav-icon { box-shadow: inset 0 0 0 999px var(--md-pressed); }
+#ar-m3-prototype .ar-finding-choice {
+  min-height: 48px;
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+#ar-m3-prototype .ar-finding-choice[aria-current=true]:hover {
+  background: var(--md-secondary-container);
+  box-shadow: inset 0 0 0 999px var(--md-hover);
+}
+#ar-m3-prototype .ar-finding-choice[aria-current=true]:active {
+  background: var(--md-secondary-container);
+  box-shadow: inset 0 0 0 999px var(--md-pressed);
+}
+#ar-m3-prototype .ar-finding-choice:not([aria-current=true]):active { background: var(--md-pressed); }
+#ar-m3-prototype button.ar-source-row:focus-visible { outline-offset: -3px; }
+
+/* Scrollable secondary tabs retain the rounded 3px indicator at every width. */
+#ar-m3-prototype :is(.ar-tabs, .ar-group) {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+}
+#ar-m3-prototype :is(.ar-tabs, .ar-group) button {
+  position: relative;
+  flex-shrink: 0;
+  min-height: 48px;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  transition: background-color 160ms ease;
+}
+#ar-m3-prototype :is(.ar-tabs, .ar-group) button::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: transparent;
+}
+#ar-m3-prototype :is(.ar-tabs, .ar-group) button:is([aria-current=page], [aria-selected=true], [aria-pressed=true])::after { background: var(--md-primary); }
+#ar-m3-prototype .ar-group button[aria-current=page]::after { left: 0; right: 0; }
+#ar-m3-prototype :is(.ar-tabs, .ar-group) button:hover { background: var(--md-hover); }
+#ar-m3-prototype :is(.ar-tabs, .ar-group) button:active { background: var(--md-pressed); }
+#ar-m3-prototype :is(.ar-tabs, .ar-group) button:focus-visible { outline-offset: -3px; }
+
+/* Disclosure controls use one consistent chevron and a 56px summary row. */
+#ar-m3-prototype details:not(.ar-lab) > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding-block: 12px;
+  list-style: none;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+  border-radius: 8px;
+  transition: background-color 160ms ease;
+}
+#ar-m3-prototype details:not(.ar-lab) > summary::-webkit-details-marker { display: none; }
+#ar-m3-prototype details:not(.ar-lab) > summary::after {
+  content: "";
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin: -4px 8px 0 auto;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  transition: transform 160ms ease;
+}
+#ar-m3-prototype details:not(.ar-lab)[open] > summary::after { transform: rotate(225deg); margin-top: 4px; }
+#ar-m3-prototype details:not(.ar-lab) > summary:hover { background: var(--md-hover); }
+#ar-m3-prototype details:not(.ar-lab) > summary:active { background: var(--md-pressed); }
+#ar-m3-prototype .ar-report-context > summary::before { content: none; }
+
+/* The publication steps follow the existing MUI Stepper's circle and connector roles. */
+#ar-m3-prototype .ar-publish-stepper {
+  list-style: none;
+  counter-reset: publish-step;
+  padding: 0;
+  gap: 8px;
+  line-height: 20px;
+}
+#ar-m3-prototype .ar-publish-stepper > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 0;
+  padding: 0;
+  font-weight: 500;
+  counter-increment: publish-step;
+}
+#ar-m3-prototype .ar-publish-stepper > li::before {
+  content: counter(publish-step);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  color: var(--md-on-primary);
+  background: var(--md-on-surface-variant);
+  font-size: 12px;
+  line-height: 16px;
+}
+#ar-m3-prototype .ar-publish-stepper > li:not(:last-child)::after {
+  content: "";
+  flex: 1 1 16px;
+  min-width: 16px;
+  height: 1px;
+  background: var(--md-outline-variant);
+}
+#ar-m3-prototype .ar-publish-stepper > li[aria-current=step]::before,
+#ar-m3-prototype .ar-publish-stepper > li:has(~ [aria-current=step])::before { background: var(--md-primary); }
+#ar-m3-prototype .ar-publish-stepper > li:has(~ [aria-current=step])::before { content: "\2713"; }
+#ar-m3-prototype button.ar-publish-choice { border-radius: 16px; }
+
+/* Snackbar uses inverse surface instead of resembling another content card. */
+#ar-m3-prototype .ar-toast {
+  min-height: 48px;
+  padding: 4px 8px 4px 16px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--md-inverse-surface);
+  color: var(--md-inverse-on-surface);
+  font-size: 14px;
+  line-height: 20px;
+  box-shadow: 0 3px 5px rgb(0 0 0 / 20%), 0 1px 18px rgb(0 0 0 / 12%);
+}
+#ar-m3-prototype .ar-toast > .ar-btn {
+  width: 40px;
+  height: 40px;
+  padding: 8px;
+  border-radius: 50%;
+  color: var(--md-inverse-on-surface);
+}
+#ar-m3-prototype .ar-toast a { color: var(--md-inverse-primary); }
+#ar-m3-prototype #ar-dialog > .ar-dialog-body { padding: 8px 24px 24px; }
+#ar-m3-prototype #ar-dialog > .ar-dialog-foot { padding: 8px 24px 24px; }
+#ar-m3-prototype dialog::backdrop { background: rgb(0 0 0 / 40%); }
+#ar-m3-prototype .ar-skeleton {
+  border-radius: 4px;
+  background: var(--md-disabled-container);
+  animation: ar-skeleton-pulse 1.5s ease-in-out .5s infinite;
+}
+@keyframes ar-skeleton-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+
+@media (min-width: 621px) {
+  #ar-m3-prototype[data-nav=expanded] .ar-nav button {
+    min-height: 56px;
+    border-radius: 100px;
+    padding: 8px 12px;
+  }
+  #ar-m3-prototype[data-nav=expanded] .ar-nav button[aria-current=page] { background: var(--md-secondary-container); }
+  #ar-m3-prototype[data-nav=expanded] .ar-nav button:hover { box-shadow: inset 0 0 0 999px var(--md-hover); }
+  #ar-m3-prototype[data-nav=expanded] .ar-nav button:active { box-shadow: inset 0 0 0 999px var(--md-pressed); }
+  #ar-m3-prototype[data-nav=expanded] .ar-nav button .ar-nav-icon { background: transparent; box-shadow: none; }
+  #ar-m3-prototype[data-nav=expanded] .ar-nav button:is([aria-current=page], :hover, :active, :focus-visible) .ar-nav-icon { background: transparent; box-shadow: none; }
+}
+@media (max-width: 620px) {
+  #ar-m3-prototype #ar-dialog > .ar-dialog-head { padding: 24px 20px 16px; }
+  #ar-m3-prototype #ar-dialog > .ar-dialog-body { padding: 8px 20px 24px; }
+  #ar-m3-prototype #ar-dialog > .ar-dialog-foot { padding: 8px 20px 24px; }
+  #ar-m3-prototype .ar-table th { white-space: normal; }
+}
+@media (pointer: coarse) {
+  #ar-m3-prototype .ar-toast > .ar-btn { width: 48px; height: 48px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #ar-m3-prototype .ar-skeleton { animation: none; }
+}

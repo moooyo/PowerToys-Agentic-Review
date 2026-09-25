@@ -178,7 +178,7 @@ describe("repository automatic reply configuration", () => {
     expect(html).toContain("Edit templates");
     expect(html).not.toContain("<textarea");
     expect(html).toContain("Post assignment progress");
-    expect(html).toContain("updates it as work progresses");
+    expect(html).toContain("Updates one comment as assignment work progresses");
     expect(html).not.toContain("Received progress template</textarea>");
     expect(html).toContain("publisher is not configured");
     expect(html).toContain("Save settings");

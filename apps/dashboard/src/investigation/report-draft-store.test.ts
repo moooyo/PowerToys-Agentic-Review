@@ -20,6 +20,36 @@ import { selectionContext } from "./report-state";
 import { createSampleInvestigationApi } from "./sample-adapter";
 
 describe("private report feedback", () => {
+  it("discards text edits while keeping current selection changes unsaved", () => {
+    let record = createReportDraft({
+      reportId: "report",
+      reportVersion: 1,
+      recommendedAction: null,
+      suggestionOptions: [],
+    });
+    record = reportDraftReducer(record, { type: "edit", draftId: "saved", body: "Saved text" });
+    record = reportDraftReducer(record, { type: "save" });
+    record = reportDraftReducer(record, {
+      type: "selection",
+      event: {
+        type: "set-finding",
+        finding: { findingId: "finding", draftId: "saved", suggestionId: null },
+        selected: true,
+      },
+    });
+    record = reportDraftReducer(record, { type: "edit", draftId: "saved", body: "Changed text" });
+    record = reportDraftReducer(record, { type: "edit", draftId: "new", body: "Unsaved text" });
+    const selection = record.current.selection;
+    const discarded = reportDraftReducer(record, { type: "discard-text" });
+    expect(discarded.current.editedBodies).toEqual({ saved: "Saved text" });
+    expect(discarded.current.selection).toBe(selection);
+    expect(discarded.saved.selection.selectedFindings).toEqual([]);
+    expect(isReportDraftDirty(discarded)).toBe(true);
+    const leaving = reportDraftReducer(discarded, { type: "discard" });
+    expect(leaving.current.selection.selectedFindings).toEqual([]);
+    expect(isReportDraftDirty(leaving)).toBe(false);
+  });
+
   it("saves only the current finding text while other edits and selections remain unsaved", () => {
     let record = createReportDraft({
       reportId: "report",

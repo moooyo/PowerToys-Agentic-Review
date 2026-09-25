@@ -7,11 +7,11 @@ import type {
 import CloseRounded from "@mui/icons-material/CloseRounded";
 import CodeRounded from "@mui/icons-material/CodeRounded";
 import DownloadRounded from "@mui/icons-material/DownloadRounded";
-import InfoOutlined from "@mui/icons-material/InfoOutlined";
+import InfoRounded from "@mui/icons-material/InfoRounded";
 import PauseRounded from "@mui/icons-material/PauseRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
 import SearchRounded from "@mui/icons-material/SearchRounded";
-import SmartToyOutlined from "@mui/icons-material/SmartToyOutlined";
+import SmartToyRounded from "@mui/icons-material/SmartToyRounded";
 import {
   Alert,
   Box,
@@ -80,11 +80,11 @@ function OutputText({ text, code = false }: { text: string; code?: boolean }) {
 export function OutputEventRow({ item }: { item: OutputItem }) {
   const icon =
     item.kind === "assistant" ? (
-      <SmartToyOutlined fontSize="small" />
+      <SmartToyRounded fontSize="small" />
     ) : item.kind === "tool" ? (
       <CodeRounded fontSize="small" />
     ) : (
-      <InfoOutlined fontSize="small" />
+      <InfoRounded fontSize="small" />
     );
   const title =
     item.kind === "assistant"

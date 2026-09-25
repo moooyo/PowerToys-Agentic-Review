@@ -1,16 +1,16 @@
 import {
   ArrowForwardRounded,
-  BugReportOutlined,
+  BugReportRounded,
   CloseRounded,
-  DarkModeOutlined,
-  DescriptionOutlined,
-  FolderOutlined,
+  DarkModeRounded,
+  DescriptionRounded,
+  FolderRounded,
   ForumRounded,
   GridViewRounded,
-  LightModeOutlined,
+  LightModeRounded,
   LinkRounded,
   LogoutRounded,
-  PersonOutlineRounded,
+  PersonRounded,
   PlayCircleRounded,
   RateReviewRounded,
   SearchRounded,
@@ -21,6 +21,7 @@ import {
   Avatar,
   Box,
   Button,
+  ButtonBase,
   Dialog,
   DialogActions,
   DialogContent,
@@ -32,6 +33,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  ListSubheader,
   Menu,
   MenuItem,
   Snackbar,
@@ -236,13 +238,13 @@ function WorkspaceSearch({ open, close }: { open: boolean; close: () => void }) 
                   >
                     <ListItemIcon sx={{ minWidth: 36, mt: 0.5 }}>
                       {item.kind === "repository" ? (
-                        <FolderOutlined />
+                        <FolderRounded />
                       ) : item.kind === "task" ? (
                         <PlayCircleRounded />
                       ) : item.kind === "report" ? (
-                        <DescriptionOutlined />
+                        <DescriptionRounded />
                       ) : item.workItemKind === "issue" ? (
-                        <BugReportOutlined />
+                        <BugReportRounded />
                       ) : (
                         <RateReviewRounded />
                       )}
@@ -367,7 +369,8 @@ function ApplicationShell() {
         const Icon = group.icon;
         const destination = group.paths.find(allowed);
         return destination ? (
-          <Link
+          <ButtonBase
+            component={Link}
             key={group.id}
             to={destinationFor(destination)}
             className={`workspace-nav-link ${activeGroup?.id === group.id ? "selected" : ""}`}
@@ -377,7 +380,7 @@ function ApplicationShell() {
               <Icon />
             </span>
             <span>{group.label}</span>
-          </Link>
+          </ButtonBase>
         ) : null;
       })}
     </nav>
@@ -409,33 +412,32 @@ function ApplicationShell() {
             aria-label={mode === "light" ? "Switch to dark theme" : "Switch to light theme"}
             onClick={toggle}
           >
-            {mode === "light" ? <DarkModeOutlined /> : <LightModeOutlined />}
+            {mode === "light" ? <DarkModeRounded /> : <LightModeRounded />}
           </IconButton>
         </Tooltip>
       </aside>
       <Box className="workspace-content">
         <header className="workspace-app-bar">
           <Box className="workspace-page-picker">
-            <label>
-              <span className="workspace-visually-hidden">Page</span>
-              <select
-                aria-label="Page"
-                value={selectedPage}
-                onChange={(event) => navigate(destinationFor(event.target.value))}
-              >
-                {!selectedPage && <option value="">Choose page</option>}
-                {groups.map((group) => (
-                  <optgroup key={group.id} label={group.label}>
-                    {group.paths.filter(allowed).map((path) => (
-                      <option key={path} value={path}>
-                        {labels[path]}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-                <option value="/account">My account</option>
-              </select>
-            </label>
+            <TextField
+              select
+              fullWidth
+              size="small"
+              label="Page"
+              value={selectedPage}
+              onChange={(event) => navigate(destinationFor(event.target.value))}
+            >
+              {!selectedPage && <MenuItem value="">Choose page</MenuItem>}
+              {groups.flatMap((group) => [
+                <ListSubheader key={group.id}>{group.label}</ListSubheader>,
+                ...group.paths.filter(allowed).map((path) => (
+                  <MenuItem key={path} value={path}>
+                    {labels[path]}
+                  </MenuItem>
+                )),
+              ])}
+              <MenuItem value="/account">My account</MenuItem>
+            </TextField>
           </Box>
           <Link to={destinationFor(home)} className="workspace-brand">
             Agentic Review
@@ -531,6 +533,11 @@ function ApplicationShell() {
                           <EmptyState
                             title="Administrator access required"
                             description="Your account does not have access to this management page."
+                            action={
+                              <Button component={Link} to="/account">
+                                My account
+                              </Button>
+                            }
                           />
                         ) : Page ? (
                           <Page />
@@ -589,7 +596,7 @@ function ApplicationShell() {
           }}
         >
           <ListItemIcon>
-            {mode === "light" ? <DarkModeOutlined /> : <LightModeOutlined />}
+            {mode === "light" ? <DarkModeRounded /> : <LightModeRounded />}
           </ListItemIcon>
           {mode === "light" ? "Dark theme" : "Light theme"}
         </MenuItem>
@@ -600,7 +607,7 @@ function ApplicationShell() {
           }}
         >
           <ListItemIcon>
-            <PersonOutlineRounded />
+            <PersonRounded />
           </ListItemIcon>
           My account
         </MenuItem>

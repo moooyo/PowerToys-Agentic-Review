@@ -4,8 +4,17 @@ import type {
   InvestigationWorkerControl,
   InvestigationWorkerControlUpdate,
 } from "@agentic-review/contracts";
-import { ComputerOutlined, ExpandLess, ExpandMore, Refresh, Search } from "@mui/icons-material";
 import {
+  ComputerRounded,
+  ExpandLessRounded,
+  ExpandMoreRounded,
+  RefreshRounded,
+  SearchRounded,
+} from "@mui/icons-material";
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -33,6 +42,7 @@ import { EmptyState, PageHeading, Surface } from "./workspace-ui";
 import "./workers-page.css";
 
 export const workersQueryKey = ["investigation-workers"] as const;
+export const workerPolicyReviewQueryKey = ["investigation-worker-policy-reviews"] as const;
 
 const taskLabels: Record<InvestigationTaskKind, string> = {
   "pr-review": "PR review",
@@ -47,6 +57,14 @@ const taskLabels: Record<InvestigationTaskKind, string> = {
 
 export type WorkerDirectoryFilter = "all" | "recent" | "not-recent" | "never" | "cleanup";
 type PolicyReview = { refreshGeneration: number };
+type WorkerPolicyReviewState = {
+  refreshGeneration: number;
+  reviews: Record<string, PolicyReview | undefined>;
+};
+const emptyWorkerPolicyReviewState: WorkerPolicyReviewState = {
+  refreshGeneration: 0,
+  reviews: {},
+};
 
 export function workerContactLabel(worker: InvestigationWorkerControl, now = Date.now()): string {
   if (worker.lastSeenAt === null) return "Never contacted";
@@ -108,7 +126,7 @@ export function filterWorkers(
 
 export function workerControlError(cause: unknown): string {
   return cause instanceof InvestigationHttpError && cause.status === 409
-    ? "This worker's settings changed. Refresh workers and review the saved policy before changing the switch again."
+    ? "This worker's settings changed."
     : cause instanceof Error
       ? cause.message
       : "The worker setting could not be saved.";
@@ -185,12 +203,14 @@ export function WorkerStaticOwnership({
   workerId,
   leases,
   loading = false,
+  retryDisabled = false,
   error,
   onRetry,
 }: {
   workerId: string;
   leases?: InvestigationResourceLease[];
   loading?: boolean;
+  retryDisabled?: boolean;
   error?: string;
   onRetry?: () => void;
 }) {
@@ -202,10 +222,11 @@ export function WorkerStaticOwnership({
       <Typography component="h3" variant="subtitle2">
         Static resource ownership
       </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-        Scheduler records include only owners within your repository access. They do not establish
-        total worker capacity.
-      </Typography>
+      {!!owners?.length && (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          Only ownership within your repository access is shown. Total capacity is unconfirmed.
+        </Typography>
+      )}
       {loading && leases === undefined && (
         <CircularProgress size={20} aria-label="Loading static ownership" sx={{ mt: 2 }} />
       )}
@@ -213,7 +234,11 @@ export function WorkerStaticOwnership({
         <Alert severity="warning" sx={{ mt: 2 }}>
           {error}
           {leases && " Last received ownership remains visible; release is unconfirmed."}
-          {onRetry && <Button onClick={onRetry}>Retry static ownership</Button>}
+          {onRetry && (
+            <Button disabled={loading || retryDisabled} onClick={onRetry}>
+              {loading ? "Refreshing ownership…" : "Retry static ownership"}
+            </Button>
+          )}
         </Alert>
       )}
       {owners?.length ? (
@@ -248,8 +273,8 @@ export function WorkerStaticOwnership({
         ))
       ) : leases !== undefined ? (
         <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-          No static resource owners are visible for this worker within your repository access. This
-          does not confirm that the worker is idle.
+          No static owners visible within your repository access. Worker availability is
+          unconfirmed.
         </Typography>
       ) : !loading && !error ? (
         <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
@@ -279,6 +304,7 @@ export function WorkerControlCard({
   staticOwnershipLoading,
   staticOwnershipError,
   onRetryStaticOwnership,
+  onRefresh,
 }: {
   worker: InvestigationWorkerControl;
   repositories?: Repository[];
@@ -298,6 +324,7 @@ export function WorkerControlCard({
   staticOwnershipLoading?: boolean;
   staticOwnershipError?: string;
   onRetryStaticOwnership?: () => void;
+  onRefresh?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -363,24 +390,20 @@ export function WorkerControlCard({
             className="workers-avatar"
             sx={{ bgcolor: "var(--app-surface-container)", color: "text.secondary" }}
           >
-            <ComputerOutlined aria-hidden="true" />
+            <ComputerRounded aria-hidden="true" />
           </Box>
           <div className="workers-name">
             <Typography component="h2" variant="subtitle1">
-              {worker.id}
+              {onExpandedChange ? "Worker status" : worker.id}
             </Typography>
             <Typography variant="body2" color="text.secondary">
               {workerContactLabel(worker, now)}
             </Typography>
-            <Typography variant="caption" color="text.secondary" component="div">
-              {worker.lastSeenAt ? (
-                <>
-                  Last contact: <WorkerTimestamp value={worker.lastSeenAt} />
-                </>
-              ) : (
-                "No worker contact recorded."
-              )}
-            </Typography>
+            {worker.lastSeenAt && (
+              <Typography variant="caption" color="text.secondary" component="div">
+                <WorkerTimestamp value={worker.lastSeenAt} />
+              </Typography>
+            )}
           </div>
         </div>
         <div className="workers-policy">
@@ -407,8 +430,7 @@ export function WorkerControlCard({
       <div className="workers-summary-line">
         <Typography variant="body2" color="text.secondary">
           {worker.repositoryIds.length}{" "}
-          {worker.repositoryIds.length === 1 ? "repository" : "repositories"} ·{" "}
-          {worker.effectiveKinds.length} effective task types
+          {worker.repositoryIds.length === 1 ? "repository" : "repositories"}
           {worker.activeE2eTaskIds.length > 0 &&
             ` · ${worker.activeE2eTaskIds.length} owned E2E ${worker.activeE2eTaskIds.length === 1 ? "task" : "tasks"}`}
           {worker.cleanupPendingAttemptIds.length > 0 &&
@@ -417,40 +439,47 @@ export function WorkerControlCard({
       </div>
       {!canEdit && (
         <Typography variant="body2" color="text.secondary">
-          Only workspace administrators can change this setting.
+          Read-only · Administrator access required to change E2E admission.
         </Typography>
       )}
       {pendingCleanup && (
         <Alert severity="warning" className="workers-notice">
           {worker.status === "disabling"
-            ? "New E2E assignments are stopped. Running E2E tasks are being cancelled and cleaned up. "
-            : "The worker has not confirmed cleanup of its owned E2E resources. "}
+            ? "E2E admission is off. Owned E2E tasks are being cancelled and cleaned up. "
+            : "E2E cleanup is unconfirmed. "}
           Resources stay reserved until the worker confirms cleanup.
         </Alert>
       )}
       {worker.status === "awaiting_confirmation" && !pendingCleanup && (
         <Alert severity="info" className="workers-notice">
-          Waiting for the worker to contact the server. Its availability is not confirmed.
+          Availability is unconfirmed until the worker contacts the server.
         </Alert>
       )}
-      {worker.e2eEnabled &&
-        !pendingCleanup &&
-        !worker.effectiveKinds.some(
-          (kind) => kind !== "pr-review" && kind !== "issue-investigate",
-        ) && (
-          <Typography variant="body2" color="text.secondary" className="workers-notice">
-            Waiting for the worker to report E2E support.
-          </Typography>
-        )}
-      {error && (
+      {error && !reviewRequired && (
         <Alert severity="error" className="workers-notice">
           {error}
         </Alert>
       )}
       {reviewRequired && (
         <Alert severity="warning" className="workers-notice">
-          The save was not confirmed. Refresh workers, then review the latest saved policy before
-          trying again.
+          {error && <Typography variant="body2">{error}</Typography>}
+          <Typography variant="body2">The save was not confirmed.</Typography>
+          {refreshGeneration <= reviewRequired.refreshGeneration && (
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              <Typography variant="body2">
+                Refresh workers and review the saved policy before trying again.
+              </Typography>
+              {onRefresh && (
+                <Button
+                  disabled={busy || disabled}
+                  sx={{ alignSelf: "flex-start" }}
+                  onClick={onRefresh}
+                >
+                  Refresh workers
+                </Button>
+              )}
+            </Stack>
+          )}
           {refreshGeneration > reviewRequired.refreshGeneration && (
             <Stack spacing={1} sx={{ mt: 1 }}>
               <Typography variant="body2">
@@ -482,7 +511,7 @@ export function WorkerControlCard({
           disabled={busy || disabled}
           aria-expanded={detailsOpen}
           aria-controls={contentId}
-          endIcon={detailsOpen ? <ExpandLess /> : <ExpandMore />}
+          endIcon={detailsOpen ? <ExpandLessRounded /> : <ExpandMoreRounded />}
           onClick={() => {
             setLocalExpanded(!detailsOpen);
           }}
@@ -492,30 +521,6 @@ export function WorkerControlCard({
       )}
       {detailsOpen && (
         <div id={contentId} className="workers-details">
-          <section aria-label="Task capabilities">
-            <Typography component="h3" variant="subtitle2">
-              Task capabilities
-            </Typography>
-            <dl className="workers-definition">
-              <div>
-                <dt>Effective task types</dt>
-                <dd>
-                  {worker.effectiveKinds.length
-                    ? worker.effectiveKinds.map((kind) => taskLabels[kind]).join(" · ")
-                    : "No confirmed task capabilities."}
-                </dd>
-              </div>
-              <div>
-                <dt>Advertised task types</dt>
-                <dd>
-                  {worker.advertisedKinds === null
-                    ? "Not reported"
-                    : worker.advertisedKinds.map((kind) => taskLabels[kind]).join(" · ") ||
-                      "None reported"}
-                </dd>
-              </div>
-            </dl>
-          </section>
           <section aria-label="Repository assignments">
             <Typography component="h3" variant="subtitle2">
               Repository assignments
@@ -567,39 +572,79 @@ export function WorkerControlCard({
             workerId={worker.id}
             leases={staticLeases}
             loading={staticOwnershipLoading}
+            retryDisabled={busy || disabled}
             error={staticOwnershipError}
             onRetry={onRetryStaticOwnership}
           />
-          <section aria-label="Saved policy record">
-            <Typography component="h3" variant="subtitle2">
-              Saved policy record
-            </Typography>
-            <dl className="workers-definition">
-              <div>
-                <dt>E2E admission</dt>
-                <dd>
-                  {worker.e2eEnabled ? "Allowed by the server" : "Off · static task admission only"}
-                </dd>
-              </div>
-              <div>
-                <dt>Last changed</dt>
-                <dd>
-                  <WorkerTimestamp value={worker.updatedAt} />
-                  {worker.updatedBy ? ` by ${worker.updatedBy}` : " · Default policy"}
-                </dd>
-              </div>
-              <div>
-                <dt>Policy version</dt>
-                <dd>{worker.version}</dd>
-              </div>
-              <div>
-                <dt>Server status</dt>
-                <dd>
-                  <code>{worker.status}</code>
-                </dd>
-              </div>
-            </dl>
-          </section>
+          <Accordion className="workers-policy-details" disableGutters elevation={0}>
+            <AccordionSummary
+              expandIcon={<ExpandMoreRounded />}
+              id={`${contentId}-policy-summary`}
+              aria-controls={`${contentId}-policy`}
+            >
+              <Typography component="span" variant="subtitle2">
+                Capabilities and policy
+              </Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <section aria-label="Task capabilities">
+                <Typography component="h3" variant="subtitle2">
+                  Task capabilities
+                </Typography>
+                <dl className="workers-definition">
+                  <div>
+                    <dt>Effective task types</dt>
+                    <dd>
+                      {worker.effectiveKinds.length
+                        ? worker.effectiveKinds.map((kind) => taskLabels[kind]).join(" · ")
+                        : "No confirmed task capabilities."}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Advertised task types</dt>
+                    <dd>
+                      {worker.advertisedKinds === null
+                        ? "Not reported"
+                        : worker.advertisedKinds.map((kind) => taskLabels[kind]).join(" · ") ||
+                          "None reported"}
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+              <section aria-label="Saved policy record">
+                <Typography component="h3" variant="subtitle2">
+                  Saved policy record
+                </Typography>
+                <dl className="workers-definition">
+                  <div>
+                    <dt>E2E admission</dt>
+                    <dd>
+                      {worker.e2eEnabled
+                        ? "Allowed by the server"
+                        : "Off · static task admission only"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Last changed</dt>
+                    <dd>
+                      <WorkerTimestamp value={worker.updatedAt} />
+                      {worker.updatedBy ? ` by ${worker.updatedBy}` : " · Default policy"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Policy version</dt>
+                    <dd>{worker.version}</dd>
+                  </div>
+                  <div>
+                    <dt>Server status</dt>
+                    <dd>
+                      <code>{worker.status}</code>
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+            </AccordionDetails>
+          </Accordion>
         </div>
       )}
       <Dialog
@@ -615,8 +660,7 @@ export function WorkerControlCard({
           <WorkerDisableSummary worker={worker} />
           {confirmationVersion !== undefined && confirmationVersion !== worker.version && (
             <Alert severity="warning" sx={{ mt: 2 }}>
-              The saved policy changed while this dialog was open. Close this dialog and review the
-              current policy before trying again.
+              The policy changed. Close this dialog and review the current policy before retrying.
             </Alert>
           )}
         </DialogContent>
@@ -645,9 +689,18 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
   const [parameters, setParameters] = useSearchParams();
   const [mutationBusy, setMutationBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [refreshMessage, setRefreshMessage] = useState<string>();
-  const [reviews, setReviews] = useState<Record<string, PolicyReview | undefined>>({});
+  const policyReview = useQuery<WorkerPolicyReviewState>({
+    queryKey: workerPolicyReviewQueryKey,
+    queryFn: () =>
+      client.getQueryData<WorkerPolicyReviewState>(workerPolicyReviewQueryKey) ??
+      emptyWorkerPolicyReviewState,
+    initialData: emptyWorkerPolicyReviewState,
+    enabled: false,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const { refreshGeneration, reviews } = policyReview.data ?? emptyWorkerPolicyReviewState;
   const selectedWorkerId = parameters.get("workerId");
   const mounted = useRef(true);
   const guardAction = useGuardedAction();
@@ -714,10 +767,14 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
     const [result] = await Promise.all([
       query.refetch(),
       selectedWorkerId ? scheduler.refetch() : Promise.resolve(undefined),
+      readableRepositoryIds.length > 0 ? repositories.refetch() : Promise.resolve(undefined),
     ]);
     if (!mounted.current) return;
     if (result.isSuccess) {
-      setRefreshGeneration((value) => value + 1);
+      client.setQueryData<WorkerPolicyReviewState>(workerPolicyReviewQueryKey, (current) => ({
+        reviews: current?.reviews ?? {},
+        refreshGeneration: (current?.refreshGeneration ?? 0) + 1,
+      }));
       setRefreshMessage("Worker status updated.");
     }
     setRefreshing(false);
@@ -736,7 +793,7 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
         action={
           <Button
             variant="outlined"
-            startIcon={<Refresh />}
+            startIcon={<RefreshRounded />}
             disabled={busy || query.isFetching}
             onClick={() => void refresh()}
           >
@@ -746,15 +803,32 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
       />
       {query.isPending && <CircularProgress size={28} aria-label="Loading workers" />}
       {query.isError && (
-        <Alert severity="error">
+        <Alert
+          severity="error"
+          action={
+            <Button disabled={busy || query.isFetching} onClick={() => void refresh()}>
+              Retry
+            </Button>
+          }
+        >
           {query.error.message}
           {query.data &&
             " Showing the last loaded worker records; their current state is unconfirmed."}
         </Alert>
       )}
       {repositories.isError && readableRepositoryIds.length > 0 && (
-        <Alert severity="warning">
-          Repository names could not be loaded. Assigned repository IDs are still available.
+        <Alert
+          severity="warning"
+          action={
+            <Button
+              disabled={busy || repositories.isFetching}
+              onClick={() => void repositories.refetch()}
+            >
+              {repositories.isFetching ? "Retrying…" : "Retry names"}
+            </Button>
+          }
+        >
+          Repository names could not be refreshed.
         </Alert>
       )}
       {refreshMessage && (
@@ -776,7 +850,7 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
                   input: {
                     startAdornment: (
                       <InputAdornment position="start">
-                        <Search aria-hidden="true" />
+                        <SearchRounded aria-hidden="true" />
                       </InputAdornment>
                     ),
                   },
@@ -799,7 +873,9 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
                 {visible.length} {visible.length === 1 ? "worker" : "workers"}
               </Typography>
               {(search || filter !== "all") && (
-                <Button onClick={resetFilters}>Clear filters</Button>
+                <Button disabled={busy} onClick={resetFilters}>
+                  Clear filters
+                </Button>
               )}
             </Surface>
           )}
@@ -808,12 +884,12 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
               <Alert severity="info">This worker is not in the current directory.</Alert>
             )}
           {query.data.items.length === 0 ? (
-            <EmptyState title="No workers registered" icon={<ComputerOutlined />} />
+            <EmptyState title="No workers registered" icon={<ComputerRounded />} />
           ) : !selectedWorkerId && visible.length === 0 ? (
             <EmptyState
               title="No workers match this view"
               action={<Button onClick={resetFilters}>Show all workers</Button>}
-              icon={<Search />}
+              icon={<SearchRounded />}
             />
           ) : !selectedWorkerId ? (
             <Surface sx={{ overflow: "hidden" }}>
@@ -890,18 +966,25 @@ function AdminWorkersPage({ readableRepositoryIds }: { readableRepositoryIds: st
                     refreshGeneration={refreshGeneration}
                     expanded={selectedWorkerId === worker.id}
                     staticLeases={scheduler.data?.leases}
-                    staticOwnershipLoading={scheduler.isPending}
+                    staticOwnershipLoading={scheduler.isFetching}
                     staticOwnershipError={scheduler.isError ? scheduler.error.message : undefined}
                     onRetryStaticOwnership={() => {
-                      if (!busy) void scheduler.refetch();
+                      if (!busy && !scheduler.isFetching) void scheduler.refetch();
                     }}
+                    onRefresh={() => void refresh()}
                     onExpandedChange={(open) => setParameter("workerId", open ? worker.id : "")}
                     onBusyChange={(value) => {
                       if (mounted.current) setMutationBusy(value);
                     }}
                     review={reviews[worker.id]}
                     onReviewChange={(review) =>
-                      setReviews((current) => ({ ...current, [worker.id]: review }))
+                      client.setQueryData<WorkerPolicyReviewState>(
+                        workerPolicyReviewQueryKey,
+                        (current) => ({
+                          refreshGeneration: current?.refreshGeneration ?? 0,
+                          reviews: { ...current?.reviews, [worker.id]: review },
+                        }),
+                      )
                     }
                     onSave={async (input) => {
                       await client.cancelQueries({ queryKey: workersQueryKey });

@@ -119,7 +119,7 @@ function ReportFilterFields({
         select
         fullWidth
         className={className}
-        label="Status"
+        label="Completeness"
         value={values.completeness}
         onChange={(event) => onChange("completeness", event.target.value)}
       >
@@ -380,7 +380,7 @@ export function ReportDirectory() {
                 {reports.data.items.length} report{reports.data.items.length === 1 ? "" : "s"}
                 {reports.data.nextCursor || cursor ? " on this page" : ""}
               </Typography>
-              <Typography variant="caption">Next action</Typography>
+              <Typography variant="caption">Action</Typography>
             </Box>
             {reports.data.items.map((header) => {
               const record = directoryRecord(header, params);

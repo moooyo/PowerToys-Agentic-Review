@@ -5,7 +5,7 @@ import type {
   InvestigationTaskArtifactsPage,
   InvestigationTaskV1,
 } from "@agentic-review/contracts";
-import FolderOpenOutlined from "@mui/icons-material/FolderOpenOutlined";
+import FolderOpenRounded from "@mui/icons-material/FolderOpenRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import { Alert, Box, Button, CircularProgress, Stack, Typography } from "@mui/material";
 import { type InfiniteData, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
@@ -270,7 +270,7 @@ function ScopedTaskEvidencePanel({
         </Stack>
       ) : records.length === 0 ? (
         <Box className="task-evidence-empty">
-          <FolderOpenOutlined aria-hidden="true" sx={{ fontSize: 36, color: "text.secondary" }} />
+          <FolderOpenRounded aria-hidden="true" sx={{ fontSize: 36, color: "text.secondary" }} />
           <Box>
             <Typography component="h3" variant="h6">
               No stored files{active ? " yet" : ""}

@@ -1,8 +1,8 @@
 import type { InvestigationTaskV1 } from "@agentic-review/contracts";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
-import LockOutlined from "@mui/icons-material/LockOutlined";
+import LockRounded from "@mui/icons-material/LockRounded";
 import PlayArrowRounded from "@mui/icons-material/PlayArrowRounded";
-import ShieldOutlined from "@mui/icons-material/ShieldOutlined";
+import ShieldRounded from "@mui/icons-material/ShieldRounded";
 import {
   Accordion,
   AccordionDetails,
@@ -427,7 +427,7 @@ export function StartInvestigationButton({
               )}
               {inputs.mode === "source_read" && source.subject.kind === "original_pr" && (
                 <Stack direction="row" spacing={1} sx={{ alignItems: "flex-start" }}>
-                  <LockOutlined sx={{ fontSize: 16, color: "text.secondary" }} />
+                  <LockRounded sx={{ fontSize: 16, color: "text.secondary" }} />
                   <Typography
                     variant="caption"
                     color="text.secondary"
@@ -532,7 +532,7 @@ export function StartInvestigationButton({
                 spacing={1.5}
                 sx={{ p: 2, borderRadius: 4, bgcolor: "action.hover", color: "text.secondary" }}
               >
-                <ShieldOutlined />
+                <ShieldRounded />
                 <Typography variant="body2">
                   Static analysis reads the chosen source. Builds, tests, and desktop execution
                   belong to a separate verification task.

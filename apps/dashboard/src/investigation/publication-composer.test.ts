@@ -45,6 +45,19 @@ async function fixture() {
 }
 
 describe("publication composer", () => {
+  it("routes an empty custom summary to the optional editor for every feedback operation", async () => {
+    const { result, context, selection } = await fixture();
+    const draft = importPublicationSelection(createPublicationComposer(), selection, result);
+    for (const action of ["comment", "approve", "request-changes", "suggestion-comment"] as const) {
+      expect(validatePublication(draft, result, context, action, " ").summary).toContain(
+        "Use generated summary",
+      );
+      expect(() => materializePublication(draft, result, context, action, " ")).toThrow(
+        "Use generated summary",
+      );
+    }
+  });
+
   it("starts independently and imports only explicit report selections", async () => {
     const { result, suggestion, plain, selection } = await fixture();
     const approve = createPublicationComposer();
@@ -129,7 +142,14 @@ describe("publication composer", () => {
       initialSource,
     );
     expect(
-      validatePublication(draft, result, context, "request-changes", "", initialSource),
+      validatePublication(
+        draft,
+        result,
+        context,
+        "request-changes",
+        "Review summary",
+        initialSource,
+      ),
     ).toEqual({});
     const authored = {
       ...draft,
@@ -142,9 +162,14 @@ describe("publication composer", () => {
     const imported = importPublicationSelection(authored, selection, result, changedSource);
     expect(imported.entries[draftId]?.body).toBe("Text for publication");
     expect(
-      validatePublication(imported, result, context, "request-changes", "", changedSource)[
-        `draft-${draftId}-body`
-      ],
+      validatePublication(
+        imported,
+        result,
+        context,
+        "request-changes",
+        "Review summary",
+        changedSource,
+      )[`draft-${draftId}-body`],
     ).toContain("Report feedback changed");
     const entry = imported.entries[draftId]!;
     const kept = {
@@ -158,11 +183,18 @@ describe("publication composer", () => {
       },
     };
     expect(
-      validatePublication(kept, result, context, "request-changes", "", changedSource),
+      validatePublication(
+        kept,
+        result,
+        context,
+        "request-changes",
+        "Review summary",
+        changedSource,
+      ),
     ).toEqual({});
     expect(kept.entries[draftId]?.body).toBe("Text for publication");
     expect(
-      validatePublication(kept, result, context, "request-changes", "", {
+      validatePublication(kept, result, context, "request-changes", "Review summary", {
         [draftId]: "Third revision",
       })[`draft-${draftId}-body`],
     ).toContain("Report feedback changed");
@@ -208,11 +240,13 @@ describe("publication composer", () => {
       reason: "Saved lines moved outside the diff.",
     });
     expect(
-      validatePublication(draft, result, stale, "request-changes", "")[`draft-${draftId}-mode`],
+      validatePublication(draft, result, stale, "request-changes", "Review summary")[
+        `draft-${draftId}-mode`
+      ],
     ).toContain("outside the diff");
-    expect(() => materializePublication(draft, result, stale, "request-changes", "")).toThrow(
-      "outside the diff",
-    );
+    expect(() =>
+      materializePublication(draft, result, stale, "request-changes", "Review summary"),
+    ).toThrow("outside the diff");
     expect(draft.entries[draftId]?.mode).toBe("suggestion");
     const textOnly = {
       ...draft,
@@ -222,7 +256,8 @@ describe("publication composer", () => {
       },
     };
     expect(
-      materializePublication(textOnly, result, stale, "request-changes", "").drafts[0]?.suggestion,
+      materializePublication(textOnly, result, stale, "request-changes", "Review summary").drafts[0]
+        ?.suggestion,
     ).toBeNull();
   });
 
@@ -235,7 +270,8 @@ describe("publication composer", () => {
       reportRef: { ...context.reportRef!, digest: "f".repeat(64) },
     };
     expect(
-      validatePublication(draft, result, differentReport, "request-changes", "").selection,
+      validatePublication(draft, result, differentReport, "request-changes", "Review summary")
+        .selection,
     ).toContain("not bound");
     expect(
       publicationSuggestionStatus(entry, result, {
@@ -262,7 +298,7 @@ describe("publication composer", () => {
     const draft = importPublicationSelection(createPublicationComposer(), normalized, result);
     expect(draft.entries[suggestion.feedbackDraft.id]?.mode).toBe("suggestion");
     expect(
-      validatePublication(draft, result, stale, "request-changes", "")[
+      validatePublication(draft, result, stale, "request-changes", "Review summary")[
         `draft-${suggestion.feedbackDraft.id}-mode`
       ],
     ).toContain("Saved anchor must be reviewed");
@@ -274,25 +310,36 @@ describe("publication composer", () => {
     expect(
       validatePublication(empty, result, context, "request-changes", "Summary only").selection,
     ).toContain("at least one finding");
-    expect(validatePublication(empty, result, context, "approve", "")).toEqual({});
+    expect(
+      validatePublication(empty, result, context, "approve", "Approving the reviewed revision."),
+    ).toEqual({});
     const full = importPublicationSelection(empty, selection, result);
     expect(
-      validatePublication(full, result, context, "comment", "")[
+      validatePublication(full, result, context, "comment", "Review feedback")[
         `draft-${suggestion.feedbackDraft.id}-mode`
       ],
     ).toContain("Comments contain text only");
     const conversation = importPublicationSelection(empty, selection, result, {}, "comment");
     expect(
-      materializePublication(conversation, result, context, "comment", "").drafts.every(
-        (item) => item.suggestion === null,
-      ),
+      materializePublication(
+        conversation,
+        result,
+        context,
+        "comment",
+        "Review feedback",
+      ).drafts.every((item) => item.suggestion === null),
     ).toBe(true);
     expect(
-      validatePublication(conversation, result, context, "suggestion-comment", "").selection,
+      validatePublication(conversation, result, context, "suggestion-comment", "Suggested updates")[
+        `draft-${suggestion.feedbackDraft.id}-mode`
+      ],
     ).toContain("at least one valid code suggestion");
-    expect(validatePublication(full, result, context, "suggestion-comment", "")).toEqual({});
     expect(
-      materializePublication(full, result, context, "approve", "").drafts[0]?.suggestion,
+      validatePublication(full, result, context, "suggestion-comment", "Suggested updates"),
+    ).toEqual({});
+    expect(
+      materializePublication(full, result, context, "approve", "Approving the reviewed revision.")
+        .drafts[0]?.suggestion,
     ).not.toBeNull();
   });
 
@@ -310,7 +357,13 @@ describe("publication composer", () => {
       ],
     };
     expect(
-      validatePublication(createPublicationComposer(), result, blocked, "approve", "").selection,
+      validatePublication(
+        createPublicationComposer(),
+        result,
+        blocked,
+        "approve",
+        "Approving the reviewed revision.",
+      ).selection,
     ).toContain("complete original report");
   });
 
@@ -342,9 +395,13 @@ describe("publication composer", () => {
     expect(payload.drafts[2]?.suggestion).toBeNull();
     const removed = setPublicationFinding(withExtra, suggestion.id, false, result);
     expect(
-      materializePublication(removed, result, context, "request-changes", "").drafts.map(
-        (item) => item.id,
-      ),
+      materializePublication(
+        removed,
+        result,
+        context,
+        "request-changes",
+        "Review summary",
+      ).drafts.map((item) => item.id),
     ).toEqual([plain.feedbackDraft.id, independent.id]);
     expect(withExtra.selectedFindingIds).toContain(suggestion.id);
     const extraOnly = setPublicationIndependentDraft(
@@ -354,7 +411,8 @@ describe("publication composer", () => {
       result,
     );
     expect(
-      validatePublication(extraOnly, result, context, "request-changes", "").selection,
+      validatePublication(extraOnly, result, context, "request-changes", "Review summary")
+        .selection,
     ).toContain("at least one finding");
   });
 
@@ -380,13 +438,14 @@ describe("publication composer", () => {
       },
     };
     expect(
-      validatePublication(invented, result, context, "request-changes", "")[
+      validatePublication(invented, result, context, "request-changes", "Review summary")[
         `draft-${plain.feedbackDraft.id}-mode`
       ],
     ).toContain("no saved code suggestion");
     const unavailable = setPublicationFinding(draft, "missing-finding", true, result);
     expect(
-      validatePublication(unavailable, result, context, "request-changes", "").selection,
+      validatePublication(unavailable, result, context, "request-changes", "Review summary")
+        .selection,
     ).toContain("unavailable");
   });
 
@@ -400,13 +459,19 @@ describe("publication composer", () => {
       result,
     );
     const both = setPublicationFinding(independent, plain.id, true, result, {}, "request-changes");
-    const payload = materializePublication(both, result, context, "request-changes", "");
+    const payload = materializePublication(
+      both,
+      result,
+      context,
+      "request-changes",
+      "Review summary",
+    );
     expect(payload.findingIds).toEqual([plain.id]);
     expect(payload.drafts).toHaveLength(1);
     expect(payload.drafts[0]?.id).toBe(plain.feedbackDraft.id);
     const onlyIndependent = setPublicationFinding(both, plain.id, false, result);
     expect(
-      materializePublication(onlyIndependent, result, context, "comment", "").drafts,
+      materializePublication(onlyIndependent, result, context, "comment", "Review feedback").drafts,
     ).toHaveLength(1);
     expect(onlyIndependent.entries[plain.feedbackDraft.id]?.findingId).toBeNull();
   });
@@ -419,8 +484,10 @@ describe("publication composer", () => {
       result.feedbackDrafts.push(saved);
       draft = setPublicationIndependentDraft(draft, saved.id, true, result);
     }
-    expect(validatePublication(draft, result, context, "comment", "")).toEqual({});
-    expect(materializePublication(draft, result, context, "comment", "").drafts).toHaveLength(101);
+    expect(validatePublication(draft, result, context, "comment", "Review feedback")).toEqual({});
+    expect(
+      materializePublication(draft, result, context, "comment", "Review feedback").drafts,
+    ).toHaveLength(101);
   });
 
   it("validates UTF-8 transport limits and complete inline bodies without truncating text", async () => {
@@ -443,7 +510,7 @@ describe("publication composer", () => {
       },
     };
     expect(
-      validatePublication(oversized, result, context, "request-changes", "")[
+      validatePublication(oversized, result, context, "request-changes", "Review summary")[
         `draft-${draftId}-replacement`
       ],
     ).toContain("60,000-byte");
@@ -455,7 +522,13 @@ describe("publication composer", () => {
         [draftId]: { ...draft.entries[draftId]!, body: "  ", replacement: "```js\nunsafe fence" },
       },
     };
-    const errors = validatePublication(fenced, result, context, "request-changes", "");
+    const errors = validatePublication(
+      fenced,
+      result,
+      context,
+      "request-changes",
+      "Review summary",
+    );
     expect(errors[`draft-${draftId}-body`]).toContain("Add a comment");
     expect(errors[`draft-${draftId}-replacement`]).toContain("triple-backtick");
   });
@@ -475,7 +548,13 @@ describe("publication composer", () => {
     });
     const first = importPublicationSelection(createPublicationComposer(), selection, result);
     const both = setPublicationFinding(first, duplicate.id, true, result, {}, "request-changes");
-    const overlapErrors = validatePublication(both, result, context, "request-changes", "");
+    const overlapErrors = validatePublication(
+      both,
+      result,
+      context,
+      "request-changes",
+      "Review summary",
+    );
     expect(overlapErrors[`draft-${suggestion.feedbackDraft.id}-mode`]).toContain("overlaps");
     expect(overlapErrors[`draft-${duplicate.feedbackDraft.id}-mode`]).toContain("overlaps");
     let many = first;
@@ -494,8 +573,8 @@ describe("publication composer", () => {
       });
       many = setPublicationFinding(many, additional.id, true, result, {}, "request-changes");
     }
-    expect(validatePublication(many, result, context, "request-changes", "").selection).toContain(
-      "at most 100 code suggestions",
-    );
+    expect(
+      validatePublication(many, result, context, "request-changes", "Review summary").selection,
+    ).toContain("at most 100 code suggestions");
   });
 });

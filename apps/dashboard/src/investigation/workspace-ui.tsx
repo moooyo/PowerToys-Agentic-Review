@@ -1,4 +1,4 @@
-import InboxOutlined from "@mui/icons-material/InboxOutlined";
+import InboxRounded from "@mui/icons-material/InboxRounded";
 import { Box, type BoxProps, Stack, Typography } from "@mui/material";
 import type { ReactNode } from "react";
 
@@ -90,7 +90,7 @@ export function EmptyState({
       }}
     >
       <Box aria-hidden="true" sx={{ color: "text.secondary", display: "flex", mb: 0.5 }}>
-        {icon ?? <InboxOutlined sx={{ fontSize: 32 }} />}
+        {icon ?? <InboxRounded sx={{ fontSize: 32 }} />}
       </Box>
       <Typography component="h2" variant="h6" sx={{ overflowWrap: "anywhere" }}>
         {title}

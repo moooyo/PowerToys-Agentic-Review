@@ -422,6 +422,14 @@ describe("task workspace runtime information", () => {
       `taskId=cleaning-task&amp;repositoryId=${cleaning.repository.id}&amp;tab=details`,
     );
     expect(html).toContain(`reportId=${detail.task.latestReportRef?.id}`);
+    const shortcuts = html
+      .match(/<a\b[^>]*>/gu)
+      ?.filter((link) => link.includes("production-task-next"));
+    expect(shortcuts).toHaveLength(3);
+    for (const shortcut of shortcuts ?? [])
+      expect(shortcut).toMatch(/id="review-result-[^"]+-next"/u);
+    const openerIds = [...html.matchAll(/id="(review-result-[^"]+)"/gu)].map((match) => match[1]);
+    expect(new Set(openerIds).size).toBe(openerIds.length);
     expect(html).not.toContain("Task pages");
   });
 });

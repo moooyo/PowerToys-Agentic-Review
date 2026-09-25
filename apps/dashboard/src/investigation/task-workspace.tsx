@@ -208,7 +208,7 @@ export function TaskList({
           {tasks.length} {tasks.length === 1 ? "task" : "tasks"}
         </Typography>
         <Typography variant="caption" color="text.secondary">
-          Next action
+          Action
         </Typography>
       </Box>
       <Box component="ul" aria-label="Investigation tasks" sx={{ listStyle: "none", p: 0, m: 0 }}>
@@ -218,10 +218,6 @@ export function TaskList({
             .filter((item) => item.taskId === task.id || item.associatedTaskIds?.includes(task.id))
             .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
           const record = taskReviewRecord(task);
-          const { id: _rowLinkId, ...secondaryLinkProps } = listNavigation.getLinkProps({
-            ...record,
-            href: `${record.href}${cleanupPending ? "&tab=details" : ""}`,
-          });
           const tone = cleanupPending
             ? "warning"
             : task.state === "failed"
@@ -240,6 +236,14 @@ export function TaskList({
             : reportAction
               ? "Review report"
               : "View output";
+          const nextRecord: ReviewRecord = reportAction
+            ? {
+                ...record,
+                kind: "report",
+                id: reportAction.id,
+                href: `/reports?reportId=${encodeURIComponent(reportAction.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`,
+              }
+            : { ...record, href: `${record.href}${cleanupPending ? "&tab=details" : ""}` };
           return (
             <Box
               component="li"
@@ -262,8 +266,8 @@ export function TaskList({
                     color="text.secondary"
                     sx={{ overflowWrap: "anywhere" }}
                   >
-                    {task.id} · {task.workItem.kind === "issue" ? "Issue" : "PR"} #
-                    {task.workItem.number} · {taskMode(task.kind)} · {task.repository.fullName}
+                    {task.workItem.kind === "issue" ? "Issue" : "PR"} #{task.workItem.number} ·{" "}
+                    {taskMode(task.kind)} · {task.repository.fullName}
                   </Typography>
                   <Chip
                     size="small"
@@ -301,11 +305,7 @@ export function TaskList({
                 variant="outlined"
                 size="small"
                 component={Link}
-                {...(reportAction
-                  ? {
-                      to: `/reports?reportId=${encodeURIComponent(reportAction.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`,
-                    }
-                  : secondaryLinkProps)}
+                {...listNavigation.getRelatedLinkProps(record, nextRecord)}
                 endIcon={<ChevronRightRounded />}
                 aria-label={`${nextAction}: ${task.workItem.title}`}
               >
@@ -602,9 +602,6 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           <Typography variant="body2" color="text.secondary">
             {taskKindLabels[task.kind]} · {task.repository.fullName}
           </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
-            {task.id}
-          </Typography>
           <GithubSourceLink
             repositoryFullName={task.repository.fullName}
             kind={task.workItem.kind}
@@ -621,8 +618,7 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
             </Button>
           }
         >
-          Refresh failed. Showing the last successful task snapshot; cancellation and recovery
-          require a successful refresh.
+          Refresh failed. Showing saved task data; refresh before cancelling or resuming.
         </Alert>
       )}
       <Box className="production-task-statusline" aria-label="Task status and saved report">
@@ -667,6 +663,7 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
             </Typography>
             <Button
               size="small"
+              variant={task.state === "completed" && !cleanup ? "contained" : "text"}
               component={Link}
               to={`/reports?reportId=${encodeURIComponent(latestReport.report.id)}&repositoryId=${encodeURIComponent(task.repository.id)}`}
             >
@@ -984,9 +981,6 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
           </Section>
           {checkpoint && (
             <Section title={`Saved state v${checkpoint.version}`}>
-              <Typography variant="body2" color="text.secondary">
-                {usage?.invocationCount ?? "Unknown"} model calls
-              </Typography>
               <Typography variant="body2" sx={{ mt: 1 }}>
                 {checkpoint.round} accepted analysis rounds · Stop reason:{" "}
                 {checkpoint.stopReason ?? "Not stopped"}
@@ -1002,7 +996,11 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
               </Typography>
             </Section>
           )}
-          <Box className="production-task-full-span">
+          <Box
+            component="details"
+            className="production-task-full-span production-task-source-disclosure"
+          >
+            <Typography component="summary">Source snapshots</Typography>
             <SubjectPanel subjects={task.subjects} />
           </Box>
           <Box className="production-task-full-span">

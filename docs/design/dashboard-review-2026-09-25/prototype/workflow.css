@@ -1,0 +1,66 @@
+/* Revision 03: preserve working context and prioritize the review content. */
+#ar-m3-prototype .ar-review-queue { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:0 0 16px; padding:0 0 12px; border-bottom:1px solid var(--ar-line); }
+#ar-m3-prototype .ar-review-queue>.ar-row { margin-left:auto; gap:8px; }
+#ar-m3-prototype .ar-review-queue .ar-queue-short { display:none; }
+#ar-m3-prototype .ar-report-identity { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:4px 20px; margin:0 0 12px; }
+#ar-m3-prototype .ar-report-identity>.ar-kicker,#ar-m3-prototype .ar-report-identity>h1 { grid-column:1; margin:0; }
+#ar-m3-prototype .ar-report-identity>.ar-row { grid-column:2; grid-row:1 / span 2; justify-content:flex-end; }
+#ar-m3-prototype .ar-report-identity>p { grid-column:1 / -1; }
+#ar-m3-prototype .ar-report-identity h1 { font-size:24px; line-height:32px; }
+#ar-m3-prototype details.ar-report-context { margin:8px 0 16px; padding:0; border-top:0; border-bottom:1px solid var(--ar-line); }
+#ar-m3-prototype .ar-report-context>summary { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px 0; min-height:40px; color:var(--ar-blue); }
+#ar-m3-prototype .ar-report-context>summary::before { content:"+"; font-size:18px; width:16px; text-align:center; }
+#ar-m3-prototype .ar-report-context[open]>summary::before { content:"−"; }
+#ar-m3-prototype .ar-report-context>summary::-webkit-details-marker { display:none; }
+#ar-m3-prototype .ar-report-context[open] { padding-bottom:16px; }
+#ar-m3-prototype .ar-report-context[open]>summary { margin-bottom:12px; }
+#ar-m3-prototype .ar-report-context .ar-facts { margin:12px 0; }
+#ar-m3-prototype .ar-finding-footer { display:flex; align-items:center; flex-wrap:wrap; justify-content:space-between; gap:8px; border-top:1px solid var(--ar-line); padding-top:16px; }
+#ar-m3-prototype .ar-finding-body { scroll-margin-top:12px; }
+#ar-m3-prototype .ar-finding-heading { display:flex; align-items:flex-start; gap:12px; }
+#ar-m3-prototype .ar-finding-heading>h2 { flex:1; min-width:0; }
+#ar-m3-prototype .ar-finding-heading>.ar-btn { flex-shrink:0; }
+#ar-m3-prototype .ar-selected-list { display:grid; gap:0; }
+#ar-m3-prototype .ar-selected-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 0; border-bottom:1px solid var(--ar-line); }
+#ar-m3-prototype .ar-selected-row:last-child { border-bottom:0; }
+#ar-m3-prototype .ar-selected-row>div { min-width:0; }
+#ar-m3-prototype .ar-selected-row .ar-btn { flex-shrink:0; }
+#ar-m3-prototype .ar-selection-review { list-style:none; margin:0; padding:0; display:grid; }
+#ar-m3-prototype .ar-selection-review>li { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:16px; align-items:center; padding:16px 0; border-bottom:1px solid var(--ar-line); }
+#ar-m3-prototype .ar-selection-review>li:last-child { border-bottom:0; }
+#ar-m3-prototype .ar-selection-review>li>div { min-width:0; overflow-wrap:anywhere; }
+#ar-m3-prototype .ar-selection-review .ar-badge { margin-right:6px; }
+#ar-m3-prototype .ar-changebar { background:var(--md-surface-container); border:0; padding:12px 16px; }
+#ar-m3-prototype .ar-changebar .ar-toolbar { margin:0; align-items:center; }
+#ar-m3-prototype .ar-changebar [data-ops-dirty] { margin-right:auto; }
+#ar-m3-prototype .ar-changebar .ar-row { margin-left:auto; }
+#ar-m3-prototype .ar-view-link { width:100%; min-height:92px; overflow-wrap:anywhere; word-break:break-all; }
+@media(max-width:900px) {
+  #ar-m3-prototype .ar-report-identity { gap:8px; }
+  #ar-m3-prototype .ar-finding-footer { gap:8px; }
+  #ar-m3-prototype .ar-mobile-findings>.ar-row { display:none; }
+}
+@media(max-width:620px) {
+  #ar-m3-prototype .ar-review-queue { flex-wrap:nowrap; gap:8px; margin-bottom:12px; padding-bottom:8px; }
+  #ar-m3-prototype .ar-review-queue .ar-queue-long { display:none; }
+  #ar-m3-prototype .ar-review-queue .ar-queue-short { display:inline; }
+  #ar-m3-prototype .ar-review-queue>.ar-btn { padding-inline:8px; gap:4px; }
+  #ar-m3-prototype .ar-review-queue>.ar-row { margin-left:auto; flex-wrap:nowrap; gap:4px; }
+  #ar-m3-prototype .ar-review-queue>.ar-small { font-size:12px; line-height:16px; }
+  #ar-m3-prototype .ar-review-queue .ar-row>.ar-btn { width:40px; padding:8px; }
+  #ar-m3-prototype .ar-report-identity { margin-bottom:8px; grid-template-columns:minmax(0,1fr); gap:8px; }
+  #ar-m3-prototype .ar-report-identity>.ar-row { grid-column:1; grid-row:auto; justify-content:space-between; }
+  #ar-m3-prototype .ar-report-context>summary { font-size:14px; }
+  #ar-m3-prototype .ar-report-context .ar-definition { margin-top:12px; }
+  #ar-m3-prototype .ar-finding-footer>.ar-btn { flex:1 1 auto; }
+  #ar-m3-prototype .ar-selected-row { align-items:flex-start; gap:8px; }
+  #ar-m3-prototype .ar-selected-row>.ar-btn { padding-inline:12px; }
+  #ar-m3-prototype .ar-selection-review>li { gap:8px; }
+  #ar-m3-prototype .ar-changebar .ar-toolbar { align-items:stretch; }
+  #ar-m3-prototype .ar-changebar [data-ops-dirty] { flex-basis:100%; }
+}
+@media(pointer:coarse) {
+  #ar-m3-prototype .ar-review-queue .ar-row>.ar-btn { min-width:48px; min-height:48px; }
+  #ar-m3-prototype .ar-report-context>summary { min-height:48px; }
+  #ar-m3-prototype .ar-finding-heading>.ar-btn { min-width:48px; min-height:48px; }
+}

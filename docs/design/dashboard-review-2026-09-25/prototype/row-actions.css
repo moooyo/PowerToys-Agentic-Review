@@ -1,0 +1,40 @@
+/* Separate source navigation from direct operations; never nest buttons. */
+#ar-m3-prototype .ar-source-actions { grid-template-columns:minmax(0,1fr) 208px 112px 40px; }
+#ar-m3-prototype .ar-source-open {
+  position:relative; min-width:0; min-height:56px; display:block; width:100%; padding:4px 0;
+  border:0; border-radius:4px; background:transparent; color:var(--ar-text);
+  text-align:start; font:inherit; cursor:pointer;
+}
+#ar-m3-prototype .ar-source-open .ar-source-title { font-weight:500; }
+#ar-m3-prototype .ar-row-action-cell { justify-items:start; }
+#ar-m3-prototype .ar-row-action { width:auto; max-width:100%; }
+#ar-m3-prototype .ar-source-chevron {
+  position:relative; width:40px; height:40px; min-height:40px; padding:8px; display:grid; place-items:center;
+  border:0; border-radius:50%; background:transparent; color:var(--ar-muted); cursor:pointer;
+}
+#ar-m3-prototype .ar-source-chevron:hover { background:var(--md-hover); }
+#ar-m3-prototype .ar-source-chevron:active { background:var(--md-pressed); }
+#ar-m3-prototype .ar-source-actions:has(.ar-source-open:hover) { background:var(--md-hover); }
+#ar-m3-prototype .ar-source-open:focus-visible { outline-offset:3px; }
+@media(max-width:900px) {
+  #ar-m3-prototype .ar-source-actions { grid-template-columns:minmax(0,1fr) 184px 40px; }
+  #ar-m3-prototype .ar-source-actions>.ar-validation { grid-column:2; }
+  #ar-m3-prototype .ar-source-actions>.ar-source-chevron { grid-column:3; grid-row:1; }
+}
+@media(max-width:620px) {
+  #ar-m3-prototype .ar-source-actions { grid-template-columns:minmax(0,1fr) 40px; gap:12px; }
+  #ar-m3-prototype .ar-source-actions>.ar-source-open { grid-column:1; }
+  #ar-m3-prototype .ar-source-actions>.ar-row-action-cell,
+  #ar-m3-prototype .ar-source-actions>.ar-validation { grid-column:1; }
+  #ar-m3-prototype .ar-source-actions>.ar-source-chevron { grid-column:2; grid-row:1; }
+}
+@media(pointer:coarse) {
+  #ar-m3-prototype .ar-source-actions>.ar-source-chevron { width:48px; height:48px; }
+  #ar-m3-prototype .ar-source-actions { grid-template-columns:minmax(0,1fr) 208px 112px 48px; }
+}
+@media(pointer:coarse) and (max-width:900px) {
+  #ar-m3-prototype .ar-source-actions { grid-template-columns:minmax(0,1fr) 184px 48px; }
+}
+@media(pointer:coarse) and (max-width:620px) {
+  #ar-m3-prototype .ar-source-actions { grid-template-columns:minmax(0,1fr) 48px; }
+}

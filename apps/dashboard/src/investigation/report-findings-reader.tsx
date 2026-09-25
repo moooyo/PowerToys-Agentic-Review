@@ -24,6 +24,7 @@ import {
   DialogTitle,
   FormControlLabel,
   MenuItem,
+  Snackbar,
   Stack,
   TextField,
   Typography,
@@ -59,6 +60,7 @@ export function ReportFindingsReader({
   canEdit,
   canPublish,
   onPublish,
+  notificationsPaused = false,
 }: {
   header: InvestigationReportHeaderV1;
   result?: InvestigationResultV1;
@@ -70,10 +72,12 @@ export function ReportFindingsReader({
   canEdit: boolean;
   canPublish: boolean;
   onPublish: () => void;
+  notificationsPaused?: boolean;
 }) {
   const [params, setParams] = useSearchParams();
   const [toolsOpen, setToolsOpen] = useState(false);
   const [indexOpen, setIndexOpen] = useState(false);
+  const [directoryExpanded, setDirectoryExpanded] = useState(false);
   const [selectedOpen, setSelectedOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
   const [copyFallback, setCopyFallback] = useState("");
@@ -107,8 +111,17 @@ export function ReportFindingsReader({
   );
   const finding = view.finding;
   const findingId = finding?.id;
+  const directoryPosition = view.visible.findIndex((entry) => entry.id === findingId);
+  const directoryOffset = directoryExpanded
+    ? 0
+    : Math.floor(Math.max(0, directoryPosition) / 5) * 5;
+  const directoryFindings = directoryExpanded
+    ? view.visible
+    : view.visible.slice(directoryOffset, directoryOffset + 5);
   const firstFinding = result?.findings[0];
   const dirty = isReportDraftDirty(draft);
+  const textDirty =
+    JSON.stringify(draft.current.editedBodies) !== JSON.stringify(draft.saved.editedBodies);
   const currentEdited = finding
     ? (editedBodies[finding.feedbackDraft.id] ?? finding.feedbackDraft.body) !==
       (draft.saved.editedBodies[finding.feedbackDraft.id] ?? finding.feedbackDraft.body)
@@ -119,12 +132,17 @@ export function ReportFindingsReader({
   ).length;
 
   useEffect(() => {
+    if (notificationsPaused || selectedOpen || discardOpen || copyFallback) setMessage("");
+  }, [notificationsPaused, selectedOpen, discardOpen, copyFallback]);
+
+  useEffect(() => {
     if (!focusRequested.current || !finding) return;
     focusRequested.current = false;
     detailRef.current?.scrollIntoView({ block: "start" });
     detailRef.current?.focus({ preventScroll: true });
   }, [finding]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Filtering and expansion change the measured DOM layout without changing the current finding ID.
   useEffect(() => {
     const directory = directoryRef.current;
     if (!directory || directory.dataset.findingPage !== String(view.page)) return;
@@ -136,7 +154,7 @@ export function ReportFindingsReader({
     const entry = selected.getBoundingClientRect();
     if (entry.top < bounds.top) directory.scrollTop += entry.top - bounds.top;
     else if (entry.bottom > bounds.bottom) directory.scrollTop += entry.bottom - bounds.bottom;
-  }, [findingId, view.page]);
+  }, [findingId, view.page, view.visible, directoryExpanded]);
 
   const selectFinding = (id: string) => {
     const next = new URLSearchParams(params);
@@ -155,7 +173,7 @@ export function ReportFindingsReader({
     const next = new URLSearchParams(params);
     if (value && value !== "all") next.set(name, value);
     else next.delete(name);
-    next.delete("findingId");
+    if (finding) next.set("findingId", finding.id);
     next.delete("findingPage");
     setParams(next, { replace: true });
   };
@@ -265,7 +283,12 @@ export function ReportFindingsReader({
           </Button>
           <Typography variant="body2" color="text.secondary">
             {view.matching.length} finding{view.matching.length === 1 ? "" : "s"}
+            {(filters.search || filters.priority !== "all" || filters.assessment !== "all") &&
+              " matching"}
           </Typography>
+          {(filters.search || filters.priority !== "all" || filters.assessment !== "all") && (
+            <Button onClick={clearFilters}>Clear filters</Button>
+          )}
         </Box>
       )}
       {!singleFinding && result.findings.length > 0 && (
@@ -321,6 +344,7 @@ export function ReportFindingsReader({
         >
           <Typography variant="body2" sx={{ fontWeight: 600 }}>
             {totalSelected} selected
+            {hiddenSelected > 0 && ` · ${hiddenSelected} hidden by filters`}
           </Typography>
           <Button onClick={() => setSelectedOpen(true)}>Review selection</Button>
           <Button
@@ -354,9 +378,11 @@ export function ReportFindingsReader({
           <Typography variant="caption" color="text.secondary" sx={{ mr: "auto" }}>
             Unsaved feedback
           </Typography>
-          <Button disabled={!canEdit} onClick={() => setDiscardOpen(true)}>
-            Discard
-          </Button>
+          {textDirty && (
+            <Button disabled={!canEdit} onClick={() => setDiscardOpen(true)}>
+              Discard text edits
+            </Button>
+          )}
           <Button
             disabled={!canEdit}
             onClick={() => {
@@ -367,11 +393,6 @@ export function ReportFindingsReader({
             Save draft{singleFinding ? "" : "s"}
           </Button>
         </Stack>
-      )}
-      {message && (
-        <Typography role="status" aria-live="polite" variant="body2" color="text.secondary">
-          {message}
-        </Typography>
       )}
       {result.findings.length === 0 ? (
         <EmptyState
@@ -445,12 +466,13 @@ export function ReportFindingsReader({
                 >
                   <Typography variant="caption" color="text.secondary">
                     {view.matching.length
-                      ? `${view.offset + 1}–${view.offset + view.visible.length}`
+                      ? `${view.offset + directoryOffset + 1}–${view.offset + directoryOffset + directoryFindings.length}`
                       : "0"}{" "}
                     of {view.matching.length}
                   </Typography>
                   <Button
                     size="small"
+                    aria-label={`Select all ${view.visible.length} findings on this page`}
                     disabled={!canEdit || !view.visible.length}
                     onClick={() => {
                       for (const entry of view.visible) setFindingSelected(entry, true);
@@ -460,11 +482,12 @@ export function ReportFindingsReader({
                   </Button>
                 </Stack>
                 <Box
+                  id="report-finding-directory-items"
                   className="report-finding-directory-items"
                   ref={directoryRef}
                   data-finding-page={view.page}
                 >
-                  {view.visible.map((entry) => (
+                  {directoryFindings.map((entry) => (
                     <ButtonBase
                       key={entry.id}
                       data-finding-id={entry.id}
@@ -474,7 +497,9 @@ export function ReportFindingsReader({
                       onClick={() => selectFinding(entry.id)}
                       sx={{
                         bgcolor: finding?.id === entry.id ? "action.selected" : "transparent",
-                        "&:hover": { bgcolor: "action.hover" },
+                        "&:hover": {
+                          bgcolor: finding?.id === entry.id ? "action.selected" : "action.hover",
+                        },
                         borderRadius: 0,
                       }}
                     >
@@ -517,6 +542,17 @@ export function ReportFindingsReader({
                     </ButtonBase>
                   ))}
                 </Box>
+                {view.visible.length > 5 && (
+                  <Button
+                    onClick={() => setDirectoryExpanded((expanded) => !expanded)}
+                    aria-expanded={directoryExpanded}
+                    aria-controls="report-finding-directory-items"
+                  >
+                    {directoryExpanded
+                      ? "Collapse directory"
+                      : `Show all ${view.visible.length} on this page`}
+                  </Button>
+                )}
                 {view.pageCount > 1 && (
                   <>
                     <Stack direction="row" sx={{ justifyContent: "space-between" }}>
@@ -804,19 +840,21 @@ export function ReportFindingsReader({
         onClose={() => setDiscardOpen(false)}
         aria-labelledby="discard-report-feedback-title"
       >
-        <DialogTitle id="discard-report-feedback-title">Discard feedback changes?</DialogTitle>
-        <DialogContent>Unsaved text and selection changes will be lost.</DialogContent>
+        <DialogTitle id="discard-report-feedback-title">Discard text edits?</DialogTitle>
+        <DialogContent>
+          Restore the saved feedback text. Your current selection will be kept.
+        </DialogContent>
         <DialogActions>
           <Button onClick={() => setDiscardOpen(false)}>Keep editing</Button>
           <Button
             color="error"
             onClick={() => {
-              onDraft({ type: "discard" });
+              onDraft({ type: "discard-text" });
               setDiscardOpen(false);
-              setMessage("Changes discarded.");
+              setMessage("Text edits discarded. Selection kept.");
             }}
           >
-            Discard
+            Discard text edits
           </Button>
         </DialogActions>
       </Dialog>
@@ -851,6 +889,20 @@ export function ReportFindingsReader({
           <Button onClick={() => setCopyFallback("")}>Done</Button>
         </DialogActions>
       </Dialog>
+      <Snackbar
+        open={
+          Boolean(message) && !notificationsPaused && !selectedOpen && !discardOpen && !copyFallback
+        }
+        autoHideDuration={6000}
+        onClose={(_event, reason) => {
+          if (reason !== "clickaway") setMessage("");
+        }}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+      >
+        <Alert severity="info" role="status" onClose={() => setMessage("")}>
+          {message}
+        </Alert>
+      </Snackbar>
     </Stack>
   );
 }

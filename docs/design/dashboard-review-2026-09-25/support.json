@@ -1,0 +1,672 @@
+{
+  "screens": [
+    {
+      "id": "sign-in",
+      "title": "Sign in",
+      "group": "Access",
+      "route": "/ (signed out)",
+      "summary": "Password authentication gates the workspace. This wireframe uses synthetic values and does not establish a session.",
+      "layout": "form",
+      "tabs": [],
+      "badge": { "text": "Signed out", "tone": "blue" },
+      "panels": [
+        { "title": "Credentials", "lines": ["Username: demo.reviewer", "Password: hidden; show or hide control", "Sign in is disabled while the request is pending."] },
+        { "title": "Field feedback", "lines": ["Required fields retain stable labels.", "A failed sign-in shows an error above the form.", "Retry connection appears when a connection notice is present."], "tone": "amber" },
+        { "title": "Prototype navigation", "lines": ["Sign in opens the signed-in wireframe only.", "No credential is sent and no account is changed."] }
+      ],
+      "controls": [
+        { "label": "Sign in", "target": "pull-requests", "kind": "primary" },
+        { "label": "Retry connection", "target": "sign-in", "kind": "secondary" },
+        { "label": "Review session expiry", "target": "session-expired", "kind": "secondary" }
+      ],
+      "checks": [
+        "Are field errors understandable and associated with the correct inputs?",
+        "Can a user distinguish incorrect credentials from an unavailable connection?",
+        "Does the pending state prevent duplicate submissions without losing the entered username?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/sign-in-form.tsx", "line": 8 },
+        { "path": "apps/dashboard/src/investigation/session.tsx", "line": 70 }
+      ],
+      "transitions": [
+        { "label": "Sign-in path", "target": "pull-requests", "condition": "Prototype navigation; the product requires successful authentication." },
+        { "label": "Connection retry", "target": "sign-in", "condition": "A connection error or session-verification notice is visible." },
+        { "label": "Expired session example", "target": "session-expired" }
+      ]
+    },
+    {
+      "id": "comments",
+      "title": "Comments",
+      "group": "Activity",
+      "route": "/comments?repositoryId=repo-demo",
+      "summary": "Browse retained publications independently from their delivery attempts and the investigation result.",
+      "layout": "table",
+      "tabs": ["Comments", "Webhook events"],
+      "badge": { "text": "Repository scope", "tone": "blue" },
+      "columns": ["Publication", "Target", "Delivery", "Updated"],
+      "rows": [
+        { "cells": ["Review result", "Sample pull request", "Unconfirmed", "Latest retained snapshot"], "target": "comment-detail", "tone": "amber" },
+        { "cells": ["Progress update", "Sample pull request", "Delivered", "Earlier snapshot"], "target": "comment-detail", "tone": "green" },
+        { "cells": ["Investigation result", "Sample issue", "Needs attention", "Earlier snapshot"], "target": "comment-detail", "tone": "red" }
+      ],
+      "panels": [
+        { "title": "Search and filters", "lines": ["Search publications: title, body, or number", "Work item, delivery state, publication type, producer", "More filters: exact Task ID and PR or issue number"] },
+        { "title": "Directory behavior", "lines": ["Apply updates the view; active filters can be removed individually.", "Cursor pagination preserves the current query.", "No comments and no matching comments are distinct states."] },
+        { "title": "Independent status", "lines": ["A completed task does not establish successful comment delivery.", "A publication can retain its previous body while delivery needs attention."], "tone": "amber" }
+      ],
+      "controls": [
+        { "label": "Apply filters", "target": "comments", "kind": "primary" },
+        { "label": "View publication", "target": "comment-detail", "kind": "secondary" },
+        { "label": "Refresh", "target": "comments", "kind": "secondary" },
+        { "label": "Webhook events", "target": "webhooks", "kind": "secondary" }
+      ],
+      "checks": [
+        "Can a reviewer distinguish publication state from an individual delivery outcome?",
+        "Are exact Task ID filters visible, removable, and retained when returning from details?",
+        "Do loading, empty, filtered-empty, and refresh-error states explain the next useful action?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/comments-page.tsx", "line": 293 },
+        { "path": "apps/dashboard/src/investigation/comment-deliveries.tsx", "line": 112 }
+      ],
+      "transitions": [
+        { "label": "Open retained publication", "target": "comment-detail" },
+        { "label": "Switch activity view", "target": "webhooks" },
+        { "label": "Refresh current directory", "target": "comments", "condition": "No new delivery is submitted." }
+      ]
+    },
+    {
+      "id": "comment-detail",
+      "title": "Comment publication",
+      "group": "Activity",
+      "route": "/comments?repositoryId=repo-demo&commentId=comment-demo",
+      "summary": "Inspect the retained body, related work, and delivery history. The illustrated acknowledgement remains unconfirmed.",
+      "layout": "detail",
+      "tabs": [],
+      "badge": { "text": "Unconfirmed", "tone": "amber" },
+      "panels": [
+        { "title": "Retained publication", "lines": ["Type: review result for a sample pull request", "Body: saved review summary and findings", "Source, task, report, and GitHub links use the retained context."] },
+        { "title": "Delivery history", "lines": ["Each attempt retains its original body and outcome.", "Sending, succeeded, failed, cancelled, and unknown remain distinct.", "An earlier delivered body can coexist with a newer uncertain request."] },
+        { "title": "Acknowledgement unknown", "lines": ["Refresh publication reads the current object; it does not clear Unknown.", "A new synchronization requires the exact preview and a separate confirmation.", "This wireframe does not send, retry, or reconcile a real comment."], "tone": "amber" }
+      ],
+      "controls": [
+        { "label": "Back to comments", "target": "comments", "kind": "secondary" },
+        { "label": "Refresh publication", "target": "comment-detail", "kind": "secondary" },
+        { "label": "Open task", "target": "task-detail", "kind": "primary" },
+        { "label": "Open report", "target": "report-detail", "kind": "secondary" }
+      ],
+      "checks": [
+        "Does the retained body make clear which content belongs to each attempt?",
+        "Does the unknown state avoid implying that refresh confirms or retries a submission?",
+        "Can the reviewer move to the exact source, task, and report without losing publication context?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/comments-page.tsx", "line": 150 },
+        { "path": "apps/dashboard/src/investigation/comment-deliveries.tsx", "line": 326 },
+        { "path": "apps/dashboard/src/investigation/comment-deliveries.tsx", "line": 579 }
+      ],
+      "transitions": [
+        { "label": "Return to publication directory", "target": "comments" },
+        { "label": "Read current publication", "target": "comment-detail", "condition": "Unknown acknowledgement is retained." },
+        { "label": "Inspect producer task", "target": "task-detail" },
+        { "label": "Inspect report", "target": "report-detail" },
+        { "label": "Inspect source", "target": "pr-detail" }
+      ]
+    },
+    {
+      "id": "webhooks",
+      "title": "Webhook events",
+      "group": "Activity",
+      "route": "/webhooks?repositoryId=repo-demo",
+      "summary": "Trace incoming events through authorization, source import, task creation, and recovery.",
+      "layout": "table",
+      "tabs": ["Comments", "Webhook events"],
+      "badge": { "text": "Incoming activity", "tone": "blue" },
+      "columns": ["Event", "Handling", "Task", "Received"],
+      "rows": [
+        { "cells": ["PR assignment", "Failed: source import", "No task created", "Latest event"], "target": "webhook-detail", "tone": "red" },
+        { "cells": ["Issue assignment", "Processed", "Linked investigation", "Earlier event"], "target": "webhook-detail", "tone": "green" },
+        { "cells": ["Trusted E2E command", "Source ready", "Creation pending", "Earlier event"], "target": "webhook-detail", "tone": "blue" },
+        { "cells": ["Unmatched trigger", "Ignored", "Not applicable", "Earlier event"], "target": "webhook-detail" }
+      ],
+      "panels": [
+        { "title": "Filters", "lines": ["Work item: all targets, pull requests, or issues", "Handling state: accepted, source ready, processed, ignored, or failed", "More filters: PR or issue number and static or E2E mode"] },
+        { "title": "State meaning", "lines": ["Processed describes event handling, not task completion.", "Ignored is a recorded outcome with its own reason.", "A failed event can have partial source or task context."] },
+        { "title": "Directory states", "lines": ["Loading, no events, no matching events, and failed refresh need distinct feedback.", "Additional filters remain visible as removable chips."] }
+      ],
+      "controls": [
+        { "label": "Apply filters", "target": "webhooks", "kind": "primary" },
+        { "label": "View event", "target": "webhook-detail", "kind": "secondary" },
+        { "label": "Refresh", "target": "webhooks", "kind": "secondary" },
+        { "label": "Comments", "target": "comments", "kind": "secondary" }
+      ],
+      "checks": [
+        "Can the reviewer distinguish event handling from the linked task's execution state?",
+        "Are ignored events explained without presenting them as failures?",
+        "Are source number and task mode filters easy to discover on a narrow screen?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/webhook-deliveries-page.tsx", "line": 1313 },
+        { "path": "apps/dashboard/src/investigation/webhook-deliveries-page.tsx", "line": 394 }
+      ],
+      "transitions": [
+        { "label": "Inspect event handling", "target": "webhook-detail" },
+        { "label": "Switch to outgoing activity", "target": "comments" },
+        { "label": "Refresh current directory", "target": "webhooks" }
+      ]
+    },
+    {
+      "id": "webhook-detail",
+      "title": "Webhook event details",
+      "group": "Activity",
+      "route": "/webhooks?repositoryId=repo-demo&deliveryId=event-demo",
+      "summary": "Keep the event outcome, failed phase, retained attempts, and related work visible before considering a recovery request.",
+      "layout": "detail",
+      "tabs": [],
+      "badge": { "text": "Failed handling example", "tone": "red" },
+      "panels": [
+        { "title": "Recorded outcome", "lines": ["Target: sample pull request; mode: static review", "Failed phase: source import", "A specific failure reason is shown independently from any task status."], "tone": "red" },
+        { "title": "Handling timeline", "lines": ["Authorization, source import, task creation, and recovery retain separate entries.", "Retry scheduled, failed, ignored, and interrupted are distinct outcomes.", "Event details retain delivery, repository, trigger, and receipt context."] },
+        { "title": "Recovery boundary", "lines": ["Retry event opens a preview of the current event before confirmation.", "Repository management and task-creation grants are required; E2E also requires execution access.", "Refresh does not clear an unknown recovery acknowledgement."], "tone": "amber" }
+      ],
+      "controls": [
+        { "label": "Back to events", "target": "webhooks", "kind": "secondary" },
+        { "label": "Refresh event", "target": "webhook-detail", "kind": "secondary" },
+        { "label": "Inspect related task", "target": "task-detail", "kind": "primary" },
+        { "label": "Review intake settings", "target": "repository-intake", "kind": "secondary" }
+      ],
+      "checks": [
+        "Does the failure explanation identify the exact phase and the next useful action?",
+        "Does recovery preview preserve the exact event and its current version?",
+        "Are related-work links shown only when their retained identities match this event?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/webhook-deliveries-page.tsx", "line": 944 },
+        { "path": "apps/dashboard/src/investigation/webhook-deliveries-page.tsx", "line": 472 },
+        { "path": "apps/dashboard/src/investigation/webhook-deliveries-page.tsx", "line": 573 }
+      ],
+      "transitions": [
+        { "label": "Return to event directory", "target": "webhooks" },
+        { "label": "Read current event", "target": "webhook-detail", "condition": "This is not a recovery submission or an acknowledgement resolution." },
+        { "label": "Inspect linked task", "target": "task-detail", "condition": "A task exists and matches this event's retained context." },
+        { "label": "Inspect linked report", "target": "report-detail", "condition": "A matching report is available." },
+        { "label": "Review repository intake", "target": "repository-intake" }
+      ]
+    },
+    {
+      "id": "workers",
+      "title": "Workers",
+      "group": "Workspace",
+      "route": "/workers",
+      "summary": "Administrators inspect contact, capabilities, E2E admission, and resource ownership as separate signals.",
+      "layout": "table",
+      "tabs": ["Repositories", "Workers", "Accounts"],
+      "badge": { "text": "Administrator access", "tone": "blue" },
+      "columns": ["Worker", "Contact", "E2E work", "Resources"],
+      "rows": [
+        { "cells": ["worker-demo-a", "Recent contact", "Stopping", "Cleanup pending"], "target": "workers", "tone": "amber" },
+        { "cells": ["worker-demo-b", "No recent contact", "Awaiting confirmation", "No confirmed availability"], "target": "workers", "tone": "amber" },
+        { "cells": ["worker-demo-c", "Never contacted", "Disabled", "No reported ownership"], "target": "workers" }
+      ],
+      "panels": [
+        { "title": "Worker detail", "lines": ["Advertised and effective task capabilities remain distinct.", "Repository assignments and static resource ownership have their own links.", "Current E2E tasks and cleanup-pending attempts remain visible."] },
+        { "title": "Stop E2E work", "lines": ["The product asks for confirmation before stopping E2E work.", "New assignments stop; running work is cancelled and cleaned up.", "Resources remain reserved until the worker confirms cleanup."], "tone": "amber" },
+        { "title": "Unconfirmed policy save", "lines": ["Refresh workers, then review the latest saved policy before trying again.", "No recent contact does not prove that owned resources are released.", "This wireframe cannot confirm cleanup or resolve an unknown operation."], "tone": "amber" }
+      ],
+      "controls": [
+        { "label": "Refresh workers", "target": "workers", "kind": "secondary" },
+        { "label": "Inspect owned task", "target": "task-detail", "kind": "primary" },
+        { "label": "Workspace scheduling", "target": "scheduling", "kind": "secondary" },
+        { "label": "Repositories", "target": "repositories", "kind": "secondary" }
+      ],
+      "checks": [
+        "Can an administrator distinguish admission policy, recent contact, and confirmed availability?",
+        "Does stopping E2E work explain cancellation and cleanup without implying immediate resource release?",
+        "Does an unconfirmed save require review of the latest policy instead of silently clearing uncertainty?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/workers-page.tsx", "line": 263 },
+        { "path": "apps/dashboard/src/investigation/workers-page.tsx", "line": 613 },
+        { "path": "apps/dashboard/src/investigation/workers-page.tsx", "line": 643 }
+      ],
+      "transitions": [
+        { "label": "Read current worker snapshots", "target": "workers", "condition": "No cleanup proof or operation result is synthesized." },
+        { "label": "Inspect owned task", "target": "task-detail" },
+        { "label": "Inspect workspace capacity", "target": "scheduling" },
+        { "label": "Inspect assigned repositories", "target": "repositories" }
+      ]
+    },
+    {
+      "id": "repositories",
+      "title": "Repositories",
+      "group": "Workspace",
+      "route": "/repositories",
+      "summary": "The directory shows repositories in the signed-in user's scope and opens each repository's review and automation settings.",
+      "layout": "table",
+      "tabs": ["Repositories", "Workers", "Accounts"],
+      "badge": { "text": "Scoped directory", "tone": "blue" },
+      "columns": ["Repository", "Intake", "Automatic replies", "Access"],
+      "rows": [
+        { "cells": ["example/PowerToys", "On", "On", "Manage"], "target": "repository-intake" },
+        { "cells": ["example/PowerToys-fork", "Off", "Unavailable", "Read"], "target": "repository-replies", "tone": "amber" }
+      ],
+      "panels": [
+        { "title": "Repository overview", "lines": ["Review work: pull requests, issues, tasks, comments, and webhook events", "Automation: event intake and automatic reply summaries", "Import work item and Open on GitHub are separate entry points."] },
+        { "title": "Directory search", "lines": ["Find a repository by name or ID.", "No scope, no matching repositories, and unavailable repository links have distinct states.", "Intake and reply summaries can fail independently."] },
+        { "title": "Workspace scheduling", "lines": ["Scheduling applies to all repositories.", "It opens a separate workspace-level view rather than a repository-specific limit."] }
+      ],
+      "controls": [
+        { "label": "Configure intake", "target": "repository-intake", "kind": "primary" },
+        { "label": "Configure replies", "target": "repository-replies", "kind": "secondary" },
+        { "label": "Workspace scheduling", "target": "scheduling", "kind": "secondary" },
+        { "label": "Review pull requests", "target": "pull-requests", "kind": "secondary" }
+      ],
+      "checks": [
+        "Is the difference between repository settings and workspace scheduling apparent?",
+        "Can users with read-only scope understand why management controls are unavailable?",
+        "Do partial summary failures preserve access to the repository's remaining information?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/repositories-page.tsx", "line": 83 },
+        { "path": "apps/dashboard/src/investigation/repositories-page.tsx", "line": 135 },
+        { "path": "apps/dashboard/src/investigation/repositories-page.tsx", "line": 238 }
+      ],
+      "transitions": [
+        { "label": "Configure assignment and E2E intake", "target": "repository-intake" },
+        { "label": "Configure future automatic replies", "target": "repository-replies" },
+        { "label": "Inspect all-repository scheduling", "target": "scheduling" },
+        { "label": "Open scoped review work", "target": "pull-requests" },
+        { "label": "Open scoped activity", "target": "webhooks" }
+      ]
+    },
+    {
+      "id": "repository-intake",
+      "title": "Repository intake",
+      "group": "Workspace",
+      "route": "/repositories?repositoryId=repo-demo&tab=intake",
+      "summary": "Configure assignment and trusted E2E command intake. The illustrated local draft has unsaved changes.",
+      "layout": "form",
+      "tabs": ["Overview", "Intake", "Replies"],
+      "badge": { "text": "Unsaved changes", "tone": "amber" },
+      "panels": [
+        { "title": "Event intake", "lines": ["Listen for assignments: on", "Allow trusted E2E commands: off", "Assignment recipient ID: sample GitHub user ID"] },
+        { "title": "Trusted actors and endpoint", "lines": ["Trusted GitHub user IDs: sample allowlist", "Webhook endpoint: read-only value with copy control", "Field errors identify the precise invalid value."] },
+        { "title": "Save behavior", "lines": ["Save settings requires repository management access and a net change.", "Busy or conflicting settings disable editing and submission.", "Discard, Download draft, and Reload have different effects."], "tone": "amber" }
+      ],
+      "controls": [
+        { "label": "Save settings: conflict example", "target": "repository-conflict", "kind": "primary" },
+        { "label": "Leave this draft", "target": "unsaved-changes", "kind": "secondary" },
+        { "label": "Review replies", "target": "repository-replies", "kind": "secondary" },
+        { "label": "Back to repositories", "target": "repositories", "kind": "secondary" }
+      ],
+      "checks": [
+        "Are assignment intake and trusted E2E command intake explained as independent controls?",
+        "Are invalid IDs and missing permissions explained next to the relevant fields?",
+        "Can a reviewer distinguish saving, discarding, downloading, and reloading a draft?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/webhook-settings.tsx", "line": 45 },
+        { "path": "apps/dashboard/src/investigation/webhook-settings.tsx", "line": 222 },
+        { "path": "apps/dashboard/src/investigation/webhook-settings.tsx", "line": 334 }
+      ],
+      "transitions": [
+        { "label": "Inspect a conflicting save response", "target": "repository-conflict", "condition": "Scenario navigation only; no setting is submitted." },
+        { "label": "Attempt to leave a dirty form", "target": "unsaved-changes" },
+        { "label": "Open reply settings", "target": "repository-replies", "condition": "The product invokes the unsaved-change guard when the intake draft is dirty." },
+        { "label": "Return to directory", "target": "repositories", "condition": "The product invokes the unsaved-change guard when the intake draft is dirty." }
+      ]
+    },
+    {
+      "id": "repository-replies",
+      "title": "Repository replies",
+      "group": "Workspace",
+      "route": "/repositories?repositoryId=repo-demo&tab=replies&replyTemplate=pullRequest",
+      "summary": "Edit future automatic replies using required placeholders and a template preview before saving.",
+      "layout": "form",
+      "tabs": ["Overview", "Intake", "Replies"],
+      "badge": { "text": "Template draft", "tone": "blue" },
+      "panels": [
+        { "title": "Automatic replies", "lines": ["Automatic investigation replies: on", "Assignment progress comments: on", "Enabling replies can require a separate authorization confirmation."] },
+        { "title": "Template editor", "lines": ["Template: PR result", "Required placeholders: identity, conclusion, summary, findings, details", "Other templates: issue result, received, started, failed, and completed"] },
+        { "title": "Preview and activity", "lines": ["Preview renders the selected template without posting a comment.", "Save affects future replies; existing delivery state stays separate.", "Recent reply activity links to retained publications and tasks."] }
+      ],
+      "controls": [
+        { "label": "Review template preview", "target": "repository-replies", "kind": "primary" },
+        { "label": "Review conflicting save", "target": "repository-conflict", "kind": "secondary" },
+        { "label": "View comments", "target": "comments", "kind": "secondary" },
+        { "label": "Back to repositories", "target": "repositories", "kind": "secondary" }
+      ],
+      "checks": [
+        "Are required placeholders and their ordering understandable before an invalid save?",
+        "Is preview clearly separated from authorizing or publishing future automatic comments?",
+        "Can users distinguish the current template configuration from earlier delivery outcomes?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/auto-reply-settings.tsx", "line": 663 },
+        { "path": "apps/dashboard/src/investigation/auto-reply-settings.tsx", "line": 678 },
+        { "path": "apps/dashboard/src/investigation/auto-reply-settings.tsx", "line": 879 }
+      ],
+      "transitions": [
+        { "label": "Inspect preview boundary", "target": "repository-replies", "condition": "This static wireframe does not render or submit a template." },
+        { "label": "Inspect version conflict", "target": "repository-conflict" },
+        { "label": "Inspect existing publications", "target": "comments" },
+        { "label": "Return to directory", "target": "repositories", "condition": "Dirty template edits invoke the navigation guard in the product." }
+      ]
+    },
+    {
+      "id": "scheduling",
+      "title": "Workspace scheduling",
+      "group": "Workspace",
+      "route": "/repositories?tab=scheduling",
+      "summary": "Inspect global static concurrency, E2E capacity, and resource owners across all repositories.",
+      "layout": "form",
+      "tabs": [],
+      "badge": { "text": "All repositories", "tone": "blue" },
+      "panels": [
+        { "title": "Static concurrency", "lines": ["Occupied static slots: illustrated usage of the saved limit", "Maximum concurrent static investigations: editable numeric field", "Save requires administrator access, valid input, and a net change."] },
+        { "title": "E2E capacity", "lines": ["Worker availability and effective task support determine capacity.", "Pending cleanup remains visible independently of admission policy.", "Stopping or unresponsive workers do not imply released resources."], "tone": "amber" },
+        { "title": "Current resource owners", "lines": ["Task, attempt, worker, lease state, and acquisition time", "Held and needs-cleanup leases remain listed.", "Task links open the corresponding investigation context."] }
+      ],
+      "controls": [
+        { "label": "Review resource owner", "target": "task-detail", "kind": "primary" },
+        { "label": "Workers", "target": "workers", "kind": "secondary" },
+        { "label": "Leave a scheduling draft", "target": "unsaved-changes", "kind": "secondary" },
+        { "label": "Back to repositories", "target": "repositories", "kind": "secondary" }
+      ],
+      "checks": [
+        "Is the workspace-wide scope visible before changing static concurrency?",
+        "Can operators explain why a resource remains occupied after cancellation?",
+        "Are save errors, stale configuration, and unchanged values represented separately?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/scheduler-panel.tsx", "line": 76 },
+        { "path": "apps/dashboard/src/investigation/scheduler-panel.tsx", "line": 324 },
+        { "path": "apps/dashboard/src/investigation/scheduler-panel.tsx", "line": 410 }
+      ],
+      "transitions": [
+        { "label": "Inspect a resource owner", "target": "task-detail" },
+        { "label": "Inspect worker policy and contact", "target": "workers" },
+        { "label": "Review unsaved-change behavior", "target": "unsaved-changes", "condition": "A local concurrency draft differs from the saved value." },
+        { "label": "Return to repositories", "target": "repositories" }
+      ]
+    },
+    {
+      "id": "accounts",
+      "title": "Accounts",
+      "group": "Workspace",
+      "route": "/accounts",
+      "summary": "Administrators manage account identity, repository scope, permissions, and action capabilities.",
+      "layout": "table",
+      "tabs": ["Repositories", "Workers", "Accounts"],
+      "badge": { "text": "Administrator access", "tone": "blue" },
+      "columns": ["Account", "Role", "Repository scope", "Status"],
+      "rows": [
+        { "cells": ["Demo administrator", "Administrator", "Configured repositories", "Enabled"], "target": "account-editor" },
+        { "cells": ["Demo reviewer", "Custom grants", "example/PowerToys", "Enabled"], "target": "account-editor" },
+        { "cells": ["Demo reader", "Read access", "example/PowerToys", "Enabled"], "target": "account-editor" },
+        { "cells": ["Demo inactive", "Custom grants", "No repositories", "Disabled"], "target": "account-editor", "tone": "amber" }
+      ],
+      "panels": [
+        { "title": "Directory controls", "lines": ["Search by name or username.", "Filter All, Enabled, or Disabled.", "Create account and account editing open dialogs."] },
+        { "title": "Access model", "lines": ["Administrator status and repository scope are separate.", "Permissions, action capabilities, and repository execution access remain explicit.", "An enabled account does not automatically have every action grant."] },
+        { "title": "Directory states", "lines": ["Non-administrators see an access-required state.", "Loading, no accounts, no matching accounts, and refresh errors are distinct."] }
+      ],
+      "controls": [
+        { "label": "Create account", "target": "account-editor", "kind": "primary" },
+        { "label": "Open account", "target": "account-editor", "kind": "secondary" },
+        { "label": "Refresh accounts", "target": "accounts", "kind": "secondary" },
+        { "label": "My account", "target": "account", "kind": "secondary" }
+      ],
+      "checks": [
+        "Does the directory communicate effective access without conflating enabled and administrator status?",
+        "Are repository scope and action grants discoverable before opening an account?",
+        "Is the difference between managing another account and changing one's own password clear?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/accounts-page.tsx", "line": 778 },
+        { "path": "apps/dashboard/src/investigation/accounts-page.tsx", "line": 95 },
+        { "path": "apps/dashboard/src/investigation/accounts-page.tsx", "line": 1102 }
+      ],
+      "transitions": [
+        { "label": "Open create or edit dialog", "target": "account-editor" },
+        { "label": "Inspect signed-in account", "target": "account" },
+        { "label": "Read current account directory", "target": "accounts" }
+      ]
+    },
+    {
+      "id": "account-editor",
+      "title": "Account editor dialog",
+      "group": "Workspace",
+      "route": "/accounts (create or edit dialog)",
+      "summary": "A modal editor separates identity, repository access, capabilities, and credential reset. This wireframe changes no account.",
+      "layout": "form",
+      "tabs": [],
+      "badge": { "text": "Local access draft", "tone": "blue" },
+      "panels": [
+        { "title": "Identity", "lines": ["Username: demo.reviewer; display name: Demo reviewer", "Initial password is present only when creating an account.", "Administrator and Account enabled are separate switches."] },
+        { "title": "Repository access", "lines": ["Repository IDs define the allowed scope.", "Permissions include management, task creation, cancellation, preparation, and execution.", "Action capabilities and repository code execution are separate grants."] },
+        { "title": "Conflict and reset", "lines": ["A conflicting version requires reading and reviewing the latest account.", "Reset password uses its own dialog and confirms sign-out everywhere.", "Closing a dirty editor invokes the unsaved-change guard."], "tone": "amber" }
+      ],
+      "controls": [
+        { "label": "Review account directory", "target": "accounts", "kind": "secondary" },
+        { "label": "Review unsaved changes", "target": "unsaved-changes", "kind": "primary" },
+        { "label": "Review sign-in after reset", "target": "sign-in", "kind": "secondary" },
+        { "label": "My account", "target": "account", "kind": "secondary" }
+      ],
+      "checks": [
+        "Can an administrator distinguish preparing an action from executing it?",
+        "Does the version-conflict flow preserve the local draft until the latest access is reviewed?",
+        "Does a password reset explain session invalidation and require explicit acknowledgement?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/accounts-page.tsx", "line": 387 },
+        { "path": "apps/dashboard/src/investigation/accounts-page.tsx", "line": 161 },
+        { "path": "apps/dashboard/src/investigation/accounts-page.tsx", "line": 606 }
+      ],
+      "transitions": [
+        { "label": "Return to account directory", "target": "accounts", "condition": "Dirty edits are guarded in the product; this link only changes the wireframe." },
+        { "label": "Inspect discard confirmation", "target": "unsaved-changes" },
+        { "label": "Inspect post-reset sign-in", "target": "sign-in", "condition": "Scenario navigation only; no password reset is performed." },
+        { "label": "Inspect own account", "target": "account" }
+      ]
+    },
+    {
+      "id": "account",
+      "title": "My account",
+      "group": "Access",
+      "route": "/account",
+      "summary": "Inspect the current identity and grants, or change the account password using a dedicated form.",
+      "layout": "form",
+      "tabs": [],
+      "badge": { "text": "Current session", "tone": "blue" },
+      "panels": [
+        { "title": "Current account", "lines": ["Display name: Demo reviewer; username: demo.reviewer", "Repository scope and effective permissions are shown read-only.", "Administrator status is shown only when granted."] },
+        { "title": "Change password", "lines": ["Current password: hidden", "New password: hidden; confirm new password: hidden", "Each password field supports show or hide and field-specific feedback."] },
+        { "title": "Session behavior", "lines": ["Changing a password ends existing sessions and requires sign-in again.", "Unsaved password fields invoke the navigation guard.", "This prototype uses no real credentials and changes no password."], "tone": "amber" }
+      ],
+      "controls": [
+        { "label": "Review sign-in after change", "target": "sign-in", "kind": "primary" },
+        { "label": "Review unsaved password draft", "target": "unsaved-changes", "kind": "secondary" },
+        { "label": "Return to review workspace", "target": "pull-requests", "kind": "secondary" },
+        { "label": "Review session expiry", "target": "session-expired", "kind": "secondary" }
+      ],
+      "checks": [
+        "Are current, new, and confirmation password fields unambiguous?",
+        "Does the form explain that a successful change requires signing in again?",
+        "Are password validation errors and unsaved-field protection understandable without exposing values?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/my-account.tsx", "line": 40 },
+        { "path": "apps/dashboard/src/investigation/my-account.tsx", "line": 130 },
+        { "path": "apps/dashboard/src/investigation/session.tsx", "line": 70 }
+      ],
+      "transitions": [
+        { "label": "Inspect post-change sign-in", "target": "sign-in", "condition": "Scenario navigation only; no password change is performed." },
+        { "label": "Attempt to leave entered password fields", "target": "unsaved-changes" },
+        { "label": "Return to the workspace", "target": "pull-requests", "condition": "The product guards any dirty password form." },
+        { "label": "Inspect session-expiry state", "target": "session-expired" }
+      ]
+    },
+    {
+      "id": "session-expired",
+      "title": "Session expired",
+      "group": "Access",
+      "route": "Current route (authentication gate)",
+      "summary": "An expired or unverifiable session replaces the workspace with sign-in and clears identity-bound cached data.",
+      "layout": "state",
+      "tabs": [],
+      "badge": { "text": "Sign-in required", "tone": "amber" },
+      "panels": [
+        { "title": "Session notice", "lines": ["Your session expired. Sign in again.", "An unavailable session check offers connection retry or a new sign-in."] , "tone": "amber" },
+        { "title": "Identity boundary", "lines": ["Investigation requests are suspended while access is unverified.", "Queries and cached private data are cleared when identity or grants change.", "Access is resumed only after a valid authenticated session is established."] },
+        { "title": "Return path", "lines": ["The sign-in form is displayed over the current route.", "A valid new identity must still be authorized for the requested view.", "The prototype does not restore or impersonate a real session."] }
+      ],
+      "controls": [
+        { "label": "Sign in again", "target": "sign-in", "kind": "primary" },
+        { "label": "Retry connection", "target": "session-expired", "kind": "secondary" }
+      ],
+      "checks": [
+        "Does the notice distinguish expiry from failure to verify the current connection?",
+        "Is private workspace content removed while the session is unverified?",
+        "Does re-entry respect the new identity's scope instead of restoring unauthorized cached content?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/session.tsx", "line": 70 },
+        { "path": "apps/dashboard/src/investigation/session.tsx", "line": 113 }
+      ],
+      "transitions": [
+        { "label": "Re-enter credentials", "target": "sign-in" },
+        { "label": "Retry session verification", "target": "session-expired", "condition": "The wireframe makes no success claim and leaves the gate visible." }
+      ]
+    },
+    {
+      "id": "unsaved-changes",
+      "title": "Discard unsaved changes?",
+      "group": "Access",
+      "route": "Current route (navigation guard dialog)",
+      "summary": "Leaving a dirty form requires a choice. An in-progress operation instead keeps navigation blocked until its result is available.",
+      "layout": "state",
+      "tabs": [],
+      "badge": { "text": "Local draft guard", "tone": "amber" },
+      "panels": [
+        { "title": "Dirty draft", "lines": ["Your unsaved edits will be lost.", "Submitted requests and their saved outcomes remain available.", "Keep editing preserves the current local form."], "tone": "amber" },
+        { "title": "Busy variant", "lines": ["Title: An operation is still in progress", "Wait for its result before leaving this view.", "Discard is unavailable while an active operation is busy."] },
+        { "title": "Prototype example", "lines": ["This example starts in Repository intake.", "Discard changes opens the repository directory wireframe.", "No actual draft, request, or server operation is removed."] }
+      ],
+      "controls": [
+        { "label": "Keep editing", "target": "repository-intake", "kind": "primary" },
+        { "label": "Discard changes", "target": "repositories", "kind": "danger" }
+      ],
+      "checks": [
+        "Does the dialog identify the affected draft and the consequence of leaving?",
+        "Is discarding local text clearly separated from cancelling or undoing a submitted request?",
+        "Does the busy variant prevent navigation without suggesting the operation has failed?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/navigation-guard.tsx", "line": 43 },
+        { "path": "apps/dashboard/src/investigation/navigation-guard.tsx", "line": 181 }
+      ],
+      "transitions": [
+        { "label": "Keep the intake draft", "target": "repository-intake", "condition": "The example's originating view is Repository intake." },
+        { "label": "Continue to the chosen destination", "target": "repositories", "condition": "Discard affects local draft state only and is unavailable while busy." }
+      ]
+    },
+    {
+      "id": "repository-conflict",
+      "title": "Repository settings changed",
+      "group": "Workspace",
+      "route": "/repositories?repositoryId=repo-demo&tab=intake (conflict state)",
+      "summary": "A version conflict keeps the local settings draft visible and disables saving until the latest saved settings are loaded.",
+      "layout": "state",
+      "tabs": ["Overview", "Intake", "Replies"],
+      "badge": { "text": "Version conflict", "tone": "amber" },
+      "panels": [
+        { "title": "Conflict notice", "lines": ["Settings changed. Your draft is kept.", "Reload saved settings to replace the draft with the latest version.", "Make the intended changes again after reviewing the new values."], "tone": "amber" },
+        { "title": "Available choices", "lines": ["Download draft preserves a local reference to the current edits.", "Reload uses the navigation guard before replacing dirty values.", "There is no silent overwrite or automatic field merge."] },
+        { "title": "Review boundary", "lines": ["This screen illustrates a possible response to a save attempt.", "The wireframe has not submitted a save or detected a live conflict.", "Account conflicts use a separate latest-version review flow."] }
+      ],
+      "controls": [
+        { "label": "Review reload warning", "target": "unsaved-changes", "kind": "primary" },
+        { "label": "Inspect intake draft", "target": "repository-intake", "kind": "secondary" },
+        { "label": "Inspect reply settings", "target": "repository-replies", "kind": "secondary" },
+        { "label": "Back to repositories", "target": "repositories", "kind": "secondary" }
+      ],
+      "checks": [
+        "Is it clear that the current local draft is retained but cannot overwrite a newer version?",
+        "Does Reload explain that it replaces the local draft instead of merging changes?",
+        "Can the reviewer preserve the draft before choosing to load the latest settings?"
+      ],
+      "sources": [
+        { "path": "apps/dashboard/src/investigation/webhook-settings.tsx", "line": 36 },
+        { "path": "apps/dashboard/src/investigation/webhook-settings.tsx", "line": 323 },
+        { "path": "apps/dashboard/src/investigation/auto-reply-settings.tsx", "line": 614 }
+      ],
+      "transitions": [
+        { "label": "Review draft-replacement guard", "target": "unsaved-changes", "condition": "This generic guard example does not complete Reload." },
+        { "label": "Inspect the intake form", "target": "repository-intake", "condition": "Scene navigation does not resolve the illustrated conflict." },
+        { "label": "Inspect the reply form", "target": "repository-replies" },
+        { "label": "Inspect repository directory", "target": "repositories" }
+      ]
+    }
+  ],
+  "journeys": [
+    {
+      "id": "auth",
+      "title": "Enter the workspace and recover an expired session",
+      "summary": "Review the authentication gate, signed-in navigation, account controls, and identity boundaries without using real credentials.",
+      "steps": [
+        { "screen": "sign-in", "label": "Sign in", "note": "Inspect required fields, password visibility, pending feedback, and connection retry." },
+        { "screen": "pull-requests", "label": "Enter review work", "note": "A successful product login reveals only the repository scope and actions granted to that identity." },
+        { "screen": "account", "label": "Inspect current account", "note": "Review access and the separate password-change flow." },
+        { "screen": "session-expired", "label": "Handle expiry", "note": "Suspend requests, clear identity-bound cached data, and show the sign-in gate." },
+        { "screen": "sign-in", "label": "Re-enter", "note": "A new valid session must re-establish its own permissions; this prototype does not authenticate." }
+      ],
+      "branches": [
+        { "from": "sign-in", "to": "sign-in", "label": "Invalid fields or unavailable connection retain the sign-in form." },
+        { "from": "account", "to": "unsaved-changes", "label": "Entered password values are protected when leaving." },
+        { "from": "account", "to": "sign-in", "label": "A successful password change requires signing in again in the product." },
+        { "from": "session-expired", "to": "session-expired", "label": "An unverified connection keeps the authentication gate visible." }
+      ]
+    },
+    {
+      "id": "repository-settings",
+      "title": "Review repository settings, local drafts, and version conflicts",
+      "summary": "Trace repository configuration separately from all-repository scheduling and inspect the consequences of leaving or reloading a local draft.",
+      "steps": [
+        { "screen": "repositories", "label": "Choose repository scope", "note": "Locate a configured repository and inspect independent intake and reply summaries." },
+        { "screen": "repository-intake", "label": "Edit intake", "note": "Review assignment intake, trusted E2E commands, actor IDs, and permission-gated saving." },
+        { "screen": "unsaved-changes", "label": "Attempt to leave", "note": "Keep editing or discard local changes; busy requests have a separate guarded state." },
+        { "screen": "repository-intake", "label": "Keep editing", "note": "The illustrated intake draft remains the review context." },
+        { "screen": "repository-conflict", "label": "Inspect a conflicting save", "note": "The draft is kept, save is blocked, and Reload replaces local values after the guard." },
+        { "screen": "repository-replies", "label": "Review automatic replies", "note": "Inspect template validation, preview, authorization, and links to existing publications." }
+      ],
+      "branches": [
+        { "from": "unsaved-changes", "to": "repositories", "label": "Discard the illustrated local draft and continue to the directory." },
+        { "from": "repository-conflict", "to": "unsaved-changes", "label": "Reload of dirty settings requires draft-replacement confirmation." },
+        { "from": "repositories", "to": "scheduling", "label": "Open global capacity configuration for all repositories." },
+        { "from": "scheduling", "to": "workers", "label": "Inspect worker contact, admission, and pending cleanup." },
+        { "from": "repository-replies", "to": "comments", "label": "Review existing delivery activity separately from future templates." }
+      ]
+    },
+    {
+      "id": "activity-linkage",
+      "title": "Trace an event through investigation and publication activity",
+      "summary": "Keep webhook handling, task execution, report content, and comment delivery as separate outcomes with explicit context links.",
+      "steps": [
+        { "screen": "webhooks", "label": "Find an incoming event", "note": "Filter by target, handling state, number, or task mode." },
+        { "screen": "webhook-detail", "label": "Inspect handling", "note": "Read the exact phase, retained timeline, and related work; a failed import may have no task." },
+        { "screen": "task-detail", "label": "Follow matching task context", "note": "This branch applies only when a task exists and matches the event identity." },
+        { "screen": "report-detail", "label": "Read saved conclusions", "note": "Task completion and report findings do not establish publication success." },
+        { "screen": "comments", "label": "Find outgoing publication", "note": "Use exact Task ID filtering to locate the producer's retained publication." },
+        { "screen": "comment-detail", "label": "Inspect delivery and retained body", "note": "Unknown acknowledgement stays unresolved; refreshing is not a resend or confirmation." }
+      ],
+      "branches": [
+        { "from": "webhook-detail", "to": "repository-intake", "label": "Review intake settings when handling was prevented by configuration." },
+        { "from": "webhook-detail", "to": "webhook-detail", "label": "Refresh reads the event without resolving an unknown recovery request." },
+        { "from": "comment-detail", "to": "comment-detail", "label": "Refresh retains the illustrated unconfirmed acknowledgement." },
+        { "from": "comment-detail", "to": "pr-detail", "label": "Open the retained source context." },
+        { "from": "comment-detail", "to": "task-detail", "label": "Return to the producer task without changing delivery state." }
+      ]
+    }
+  ]
+}

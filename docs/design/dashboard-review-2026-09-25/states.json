@@ -1,0 +1,69 @@
+{
+  "screens": [
+    {
+      "id": "initial-loading", "title": "Initial loading", "group": "Shared states", "route": "Tasks / Reports / Accounts > First load", "layout": "state",
+      "summary": "Illustrative pending state. No records, counts, or saved outcomes are known yet.",
+      "tabs": [], "badge": {"text": "Loading", "tone": "blue"},
+      "panels": [
+        {"title": "Loading tasks...", "lines": ["A labeled progress indicator identifies the pending view.", "Do not present a pending request as an empty result."]},
+        {"title": "Available context", "lines": ["Keep page identity and repository scope understandable.", "Dependent actions wait for their required data."]}
+      ],
+      "controls": [{"label": "Explore loaded tasks", "target": "tasks", "kind": "primary"}, {"label": "Explore loaded reports", "target": "reports", "kind": "secondary"}],
+      "checks": ["Can users tell which view is loading?", "Is loading distinguishable from zero results?", "Are actions dependent on unavailable data withheld?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 1422}, {"path": "apps/dashboard/src/investigation/report-workspace.tsx", "line": 200}, {"path": "apps/dashboard/src/investigation/accounts-page.tsx", "line": 914}],
+      "transitions": [{"label": "Read succeeds", "target": "tasks", "condition": "The current scope returns readable task data."}, {"label": "Read fails without cached data", "target": "initial-error"}]
+    },
+    {
+      "id": "empty-results", "title": "No matching results", "group": "Shared states", "route": "/tasks?q={query}&status={filter}", "layout": "state",
+      "summary": "Illustrative filtered empty state after a successful read. It does not imply the workspace has no records.",
+      "tabs": [], "badge": {"text": "No matching tasks", "tone": "blue"},
+      "panels": [
+        {"title": "No matching tasks", "lines": ["Try a different title, source number, or status.", "Clear filters restores the broader task view."]},
+        {"title": "First-use empty state", "lines": ["No records yet uses different guidance from no matches.", "Unavailable cleanup data is not treated as zero Active tasks."]}
+      ],
+      "controls": [{"label": "Clear filters", "target": "tasks", "kind": "primary"}, {"label": "Browse sources", "target": "pull-requests", "kind": "secondary"}],
+      "checks": ["Does the message distinguish no matches from no records yet?", "Is there a direct way to clear the active filters?", "Are unavailable resource data and empty Active results kept distinct?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 1434}, {"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 1428}, {"path": "apps/dashboard/src/investigation/workspace-ui.tsx", "line": 68}],
+      "transitions": [{"label": "Clear search and status filters", "target": "tasks", "condition": "A successful read contains records outside the prior filters."}, {"label": "Inspect source records", "target": "pull-requests"}]
+    },
+    {
+      "id": "refresh-failed", "title": "Refresh failed", "group": "Shared states", "route": "Task / Source / Report > Refresh", "layout": "state",
+      "summary": "Illustrative refresh failure with retained readable data. This differs from an initial failure with no saved snapshot.",
+      "tabs": [], "badge": {"text": "Last successful snapshot", "tone": "amber"},
+      "panels": [
+        {"title": "Retain readable context", "lines": ["Show the last successful snapshot with a visible warning.", "Retry refresh without implying the data is current."], "tone": "amber"},
+        {"title": "Constrain stale actions", "lines": ["Task cancellation and recovery require a successful refresh.", "If access is denied, protected cached content is hidden."]}
+      ],
+      "controls": [{"label": "Explore refreshed tasks", "target": "tasks", "kind": "primary"}, {"label": "Inspect retained reports", "target": "reports", "kind": "secondary"}, {"label": "Browse sources", "target": "pull-requests", "kind": "secondary"}],
+      "checks": ["Is retained data clearly labeled as the last successful snapshot?", "Does a failed refresh preserve useful reading context?", "Are stale mutations and access-denied caches handled differently?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 624}, {"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 605}, {"path": "apps/dashboard/src/investigation/report-workspace.tsx", "line": 218}],
+      "transitions": [{"label": "Retry refresh succeeds", "target": "tasks", "condition": "The refreshed snapshot passes identity and access checks."}, {"label": "Access was revoked", "target": "permission-denied", "condition": "The read is denied rather than temporarily unavailable."}]
+    },
+    {
+      "id": "permission-denied", "title": "Permission required", "group": "Shared states", "route": "/accounts or a protected record", "layout": "state",
+      "summary": "Illustrative restricted view. This diagram neither changes access nor establishes the current user's permissions.",
+      "tabs": [], "badge": {"text": "Access unavailable", "tone": "amber"},
+      "panels": [
+        {"title": "Administrator access required", "lines": ["Account management explains its permission requirement.", "My account remains the place to inspect personal access."], "tone": "amber"},
+        {"title": "Protected record access", "lines": ["A denied source or task read hides protected cached data.", "Explain which access is missing before offering a retry."]}
+      ],
+      "controls": [{"label": "Inspect account management", "target": "accounts", "kind": "primary"}, {"label": "Return to sources", "target": "pull-requests", "kind": "secondary"}, {"label": "Return to tasks", "target": "tasks", "kind": "secondary"}],
+      "checks": ["Does the message identify the specific permission boundary?", "Is protected cached content hidden after access is denied?", "Does returning to another view avoid implying access was granted?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/accounts-page.tsx", "line": 1107}, {"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 521}, {"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 627}],
+      "transitions": [{"label": "Open permitted account management", "target": "accounts", "condition": "The session has the required administrator access."}, {"label": "Return to accessible records", "target": "pull-requests", "condition": "The session can read the selected repository."}]
+    },
+    {
+      "id": "initial-error", "title": "Initial load failed", "group": "Shared states", "route": "Task / Source / Report > First load", "layout": "state",
+      "summary": "Illustrative first-load failure with no readable snapshot. Do not substitute an empty list or a saved result.",
+      "tabs": [], "badge": {"text": "No readable snapshot", "tone": "red"},
+      "panels": [
+        {"title": "The report could not be loaded", "lines": ["Show the request error and a scoped Retry action.", "Do not invent counts, conclusions, or report contents."], "tone": "red"},
+        {"title": "Different from refresh failure", "lines": ["No retained content is available to keep reading.", "A successful retry is required before dependent actions."]}
+      ],
+      "controls": [{"label": "Explore loaded reports", "target": "reports", "kind": "primary"}, {"label": "Return to tasks", "target": "tasks", "kind": "secondary"}],
+      "checks": ["Is a request failure distinct from a successful empty result?", "Does Retry apply to the failed request?", "Are unavailable records kept out of action previews?"],
+      "sources": [{"path": "apps/dashboard/src/investigation/report-workspace.tsx", "line": 207}, {"path": "apps/dashboard/src/investigation/task-workspace.tsx", "line": 407}, {"path": "apps/dashboard/src/investigation/work-item-details.tsx", "line": 521}],
+      "transitions": [{"label": "Retry report read succeeds", "target": "reports", "condition": "Readable report data is returned for the current identity."}, {"label": "Read is denied", "target": "permission-denied", "condition": "The response identifies an access restriction."}]
+    }
+  ]
+}

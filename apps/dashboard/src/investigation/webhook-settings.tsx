@@ -1,3 +1,4 @@
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import {
   Accordion,
   AccordionDetails,
@@ -251,8 +252,7 @@ export function WebhookSettingsForm({
             sx={{ width: "100%", justifyContent: "space-between" }}
           />
           <Typography variant="body2" color="text.secondary">
-            Uses the trusted users below. E2E may run repository code, operate the desktop and
-            publish screenshots or videos.
+            E2E may run repository code, use the desktop and publish screenshots or videos.
           </Typography>
         </Box>
         <Stack spacing={3} className="repository-form-width">
@@ -288,7 +288,7 @@ export function WebhookSettingsForm({
           <AccordionSummary
             id={`${receiverDetailsId}-summary`}
             aria-controls={`${receiverDetailsId}-details`}
-            expandIcon={<span aria-hidden="true">+</span>}
+            expandIcon={<ExpandMoreRounded />}
           >
             <Typography>Receiver details</Typography>
           </AccordionSummary>

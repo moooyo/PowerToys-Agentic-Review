@@ -75,6 +75,49 @@ summary {
   cursor: pointer;
   overflow-wrap: anywhere;
 }
+details:not(:where(.task-artifact-provenance, .task-evidence-results, .task-e2e-feature))
+  > summary {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-block: 12px;
+  color: var(--app-accent);
+  font-weight: 500;
+  list-style: none;
+  border-radius: 4px;
+}
+details:not(:where(.task-artifact-provenance, .task-evidence-results, .task-e2e-feature))
+  > summary::marker {
+  content: "";
+}
+details:not(:where(.task-artifact-provenance, .task-evidence-results, .task-e2e-feature))
+  > summary::-webkit-details-marker {
+  display: none;
+}
+details:not(:where(.task-artifact-provenance, .task-evidence-results, .task-e2e-feature))
+  > summary::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  margin-inline: auto 12px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+details[open]:not(:where(.task-artifact-provenance, .task-evidence-results, .task-e2e-feature))
+  > summary::after {
+  transform: rotate(225deg);
+}
+details:not(:where(.task-artifact-provenance, .task-evidence-results, .task-e2e-feature))
+  > summary:hover {
+  background: var(--app-hover);
+}
+details:not(:where(.task-artifact-provenance, .task-evidence-results, .task-e2e-feature))
+  > summary:active {
+  background: var(--app-pressed);
+}
 pre {
   font-size: 0.875rem;
   line-height: 1.5;

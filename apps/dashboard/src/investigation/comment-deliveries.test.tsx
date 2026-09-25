@@ -151,7 +151,7 @@ describe("comment delivery history", () => {
     expect(html).toContain("<h3>Review</h3>");
     expect(html).toContain("&lt;script&gt;unsafe()&lt;/script&gt;");
     expect(html).not.toContain("<script>");
-    expect(html).toContain("Source</summary>");
+    expect(html).toContain("Original Markdown");
     expect(html).toContain("## Review");
   });
   it("retains each create and update body with its own status and safe failure explanation", () => {
@@ -291,7 +291,7 @@ describe("comment delivery history", () => {
         />
       </QueryClientProvider>,
     );
-    expect(html).toContain("No delivery check is currently available");
+    expect(html).toContain("The earlier write may have reached GitHub");
     expect(html).not.toMatch(/<button[^>]*>Check delivery<\/button>/u);
     expect(html).not.toContain("Sync latest progress");
     expect(html).toContain("View GitHub comment");

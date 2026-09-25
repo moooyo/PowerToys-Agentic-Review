@@ -172,7 +172,7 @@ export function OutcomeSummary({
             typography: "body2",
             color: "text.secondary",
             py: 1,
-            minHeight: 36,
+            minHeight: 44,
           },
         }}
       >

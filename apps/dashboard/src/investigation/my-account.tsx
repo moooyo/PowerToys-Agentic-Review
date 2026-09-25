@@ -3,8 +3,19 @@ import {
   INVESTIGATION_PASSWORD_MIN_LENGTH,
   InvestigationNewPasswordSchema,
 } from "@agentic-review/contracts";
-import { LockOutlined } from "@mui/icons-material";
-import { Alert, Box, Button, Chip, Stack, Typography } from "@mui/material";
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
+import LockRounded from "@mui/icons-material/LockRounded";
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Stack,
+  Typography,
+} from "@mui/material";
 import { Value } from "@sinclair/typebox/value";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { permissionOptions } from "./account-form";
@@ -42,7 +53,7 @@ export default function MyAccountPage() {
   const formId = useId();
   const securityTitleId = useId();
   const accessTitleId = useId();
-  const actionsTitleId = useId();
+  const accessDetailsId = useId();
   const pending = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -115,7 +126,7 @@ export default function MyAccountPage() {
           sx={{ p: { xs: 2, sm: 3 }, bgcolor: "background.paper" }}
         >
           <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 1 }}>
-            <LockOutlined color="primary" aria-hidden="true" />
+            <LockRounded color="primary" aria-hidden="true" />
             <Typography id={securityTitleId} component="h2" variant="h6">
               Change password
             </Typography>
@@ -215,99 +226,108 @@ export default function MyAccountPage() {
             </Stack>
           </Box>
         </Surface>
-        <Stack spacing={3} sx={{ minWidth: 0 }}>
-          <Surface
-            component="section"
-            aria-labelledby={accessTitleId}
-            sx={{ p: { xs: 2, sm: 3 }, bgcolor: "background.paper" }}
+        <Surface
+          component="section"
+          aria-labelledby={accessTitleId}
+          sx={{ p: { xs: 2, sm: 3 }, bgcolor: "background.paper" }}
+        >
+          <Typography id={accessTitleId} component="h2" variant="h6" sx={{ mb: 2 }}>
+            Your access
+          </Typography>
+          {user.isAdmin && <Chip label="Administrator" size="small" sx={{ mb: 2 }} />}
+          <Box
+            component="dl"
+            sx={{
+              m: 0,
+              display: "grid",
+              gap: 2.5,
+              "& dt": { fontSize: 12, color: "text.secondary", mb: 0.5 },
+              "& dd": { m: 0, fontSize: 14, lineHeight: 1.6, overflowWrap: "anywhere" },
+            }}
           >
-            <Typography id={accessTitleId} component="h2" variant="h6" sx={{ mb: 2 }}>
-              Your access
-            </Typography>
-            {user.isAdmin && <Chip label="Administrator" size="small" sx={{ mb: 2 }} />}
-            <Box
-              component="dl"
-              sx={{
-                m: 0,
-                display: "grid",
-                gap: 2.5,
-                "& dt": { fontSize: 12, color: "text.secondary", mb: 0.5 },
-                "& dd": { m: 0, fontSize: 14, lineHeight: 1.6, overflowWrap: "anywhere" },
-              }}
-            >
-              <Box>
-                <Typography component="dt">Account ID</Typography>
-                <Typography component="dd">{user.id}</Typography>
-              </Box>
-              <Box>
-                <Typography component="dt">Repository access</Typography>
-                <Box component="dd">
-                  {user.repositoryIds.length ? user.repositoryIds.join(", ") : "No repositories"}
-                </Box>
-              </Box>
-              <Box>
-                <Typography component="dt">Operations</Typography>
-                <Box component="dd">
-                  {user.permissions.length
-                    ? user.permissions
-                        .map(
-                          (permission) =>
-                            permissionOptions.find((option) => option.value === permission)
-                              ?.label ?? permission,
-                        )
-                        .join(", ")
-                    : "Read-only"}
-                </Box>
-              </Box>
-              <Box>
-                <Typography component="dt">Repository code execution</Typography>
-                <Box component="dd">
-                  {user.allowRepositoryExecution ? "Allowed" : "Not allowed"}
-                </Box>
+            <Box>
+              <Typography component="dt">Repository access</Typography>
+              <Box component="dd">
+                {user.repositoryIds.length ? user.repositoryIds.join(", ") : "No repositories"}
               </Box>
             </Box>
-          </Surface>
-          <Surface
-            component="section"
-            aria-labelledby={actionsTitleId}
-            sx={{ p: { xs: 2, sm: 3 }, bgcolor: "background.paper" }}
+            <Box>
+              <Typography component="dt">Repository code execution</Typography>
+              <Box component="dd">{user.allowRepositoryExecution ? "Allowed" : "Not allowed"}</Box>
+            </Box>
+          </Box>
+          <Accordion
+            disableGutters
+            elevation={0}
+            sx={{ mt: 2.5, bgcolor: "transparent", "&::before": { display: "none" } }}
           >
-            <Typography id={actionsTitleId} component="h2" variant="h6" sx={{ mb: 1 }}>
-              Allowed actions
-            </Typography>
-            {user.actionCapabilities.length ? (
+            <AccordionSummary
+              id={`${accessDetailsId}-summary`}
+              aria-controls={accessDetailsId}
+              expandIcon={<ExpandMoreRounded aria-hidden="true" />}
+              sx={{ px: 0 }}
+            >
+              <Typography variant="body2">Access details</Typography>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 0, pb: 0 }}>
               <Box
-                component="ul"
+                component="dl"
                 sx={{
                   m: 0,
-                  p: 0,
-                  listStyle: "none",
                   display: "grid",
-                  gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
-                  gap: 1.5,
+                  gap: 2.5,
+                  "& dt": { fontSize: 12, color: "text.secondary", mb: 0.5 },
+                  "& dd": { m: 0, fontSize: 14, lineHeight: 1.6, overflowWrap: "anywhere" },
                 }}
               >
-                {user.actionCapabilities.map((action) => (
-                  <Stack
-                    key={action}
-                    component="li"
-                    direction="row"
-                    spacing={1.25}
-                    sx={{ alignItems: "center", minWidth: 0 }}
-                  >
-                    <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
-                      {actionLabels[action]}
-                    </Typography>
-                  </Stack>
-                ))}
+                <Box>
+                  <Typography component="dt">Operations</Typography>
+                  <Box component="dd">
+                    {user.permissions.length
+                      ? user.permissions
+                          .map(
+                            (permission) =>
+                              permissionOptions.find((option) => option.value === permission)
+                                ?.label ?? permission,
+                          )
+                          .join(", ")
+                      : "Read-only"}
+                  </Box>
+                </Box>
+                <Box>
+                  <Typography component="dt">Allowed actions</Typography>
+                  <Box component="dd">
+                    {user.actionCapabilities.length ? (
+                      <Box
+                        component="ul"
+                        sx={{
+                          m: 0,
+                          p: 0,
+                          listStyle: "none",
+                          display: "grid",
+                          gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                          gap: 1.5,
+                        }}
+                      >
+                        {user.actionCapabilities.map((action) => (
+                          <Typography key={action} component="li" variant="body2">
+                            {actionLabels[action]}
+                          </Typography>
+                        ))}
+                      </Box>
+                    ) : (
+                      "No actions are granted to this account."
+                    )}
+                  </Box>
+                </Box>
+                <Box>
+                  <Typography component="dt">Account ID</Typography>
+                  <Typography component="dd">{user.id}</Typography>
+                </Box>
               </Box>
-            ) : (
-              <Typography variant="body2" color="text.secondary">
-                No actions are granted to this account.
-              </Typography>
-            )}
-          </Surface>
-        </Stack>
+            </AccordionDetails>
+          </Accordion>
+        </Surface>
       </Box>
     </Stack>
   );

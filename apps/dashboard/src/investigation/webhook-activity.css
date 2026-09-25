@@ -120,16 +120,17 @@
   height: 9px;
   border-radius: 50%;
 }
-.webhook-disclosure {
-  font-size: 14px;
-  margin-top: 8px;
+.webhook-disclosure.MuiAccordion-root {
+  min-width: 0;
+  margin-top: 12px;
 }
-.webhook-disclosure > summary {
-  min-height: 36px;
-  padding: 8px 0;
-  cursor: pointer;
-  box-sizing: border-box;
-  border-radius: 4px;
+.webhook-disclosure .MuiAccordionSummary-content {
+  min-width: 0;
+}
+.webhook-disclosure .MuiAccordionSummary-root.Mui-focusVisible {
+  outline: 3px solid var(--mui-palette-primary-main);
+  outline-offset: -3px;
+  border-radius: inherit;
 }
 .webhook-filter-form {
   padding: 16px;
@@ -174,12 +175,6 @@
 .webhook-table .MuiChip-root {
   margin-bottom: 4px;
 }
-.webhook-history {
-  padding: 8px 20px;
-  margin-top: 0;
-  background: var(--mui-palette-background-paper);
-  border-radius: 16px;
-}
 @media (max-width: 600px) {
   .webhook-table,
   .webhook-table tbody,
@@ -223,14 +218,9 @@
   }
 }
 @media (pointer: coarse) {
-  .webhook-page .MuiButton-root,
-  .webhook-disclosure > summary {
+  .webhook-page .MuiButton-root {
     min-height: 44px;
   }
-}
-.webhook-disclosure > summary:focus-visible {
-  outline: 3px solid currentColor;
-  outline-offset: 3px;
 }
 .webhook-metadata {
   display: flex;

@@ -1,5 +1,7 @@
 import { InvestigationActionKindSchema } from "@agentic-review/contracts";
-import { AddOutlined, AdminPanelSettingsOutlined, SearchOutlined } from "@mui/icons-material";
+import AddRounded from "@mui/icons-material/AddRounded";
+import AdminPanelSettingsRounded from "@mui/icons-material/AdminPanelSettingsRounded";
+import SearchRounded from "@mui/icons-material/SearchRounded";
 import {
   Alert,
   Avatar,
@@ -23,7 +25,7 @@ import {
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useId, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link as RouterLink, useSearchParams } from "react-router-dom";
 import {
   type AccountDirectoryFilter,
   AccountFormError,
@@ -251,12 +253,9 @@ function AccountAccessFields({
                   />
                 }
                 label={
-                  <Box sx={{ py: 1 }}>
-                    <Typography variant="body2">{repository.fullName}</Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      {repository.id}
-                    </Typography>
-                  </Box>
+                  <Typography variant="body2" sx={{ py: 1 }}>
+                    {repository.fullName}
+                  </Typography>
                 }
               />
             ))}
@@ -689,8 +688,8 @@ function ResetPasswordDialog({
         <Box component="form" id={formId} noValidate onSubmit={(event) => void submit(event)}>
           <Stack spacing={2}>
             <Alert severity="warning">
-              This ends every session for this account. Share the new password with the account
-              owner through a secure channel. They will need it to sign in again.
+              This ends every session for this account. Share the new password securely with the
+              account owner.
             </Alert>
             <TextField
               label="Username"
@@ -840,7 +839,7 @@ function AdminAccountsPage() {
         action={
           <Button
             variant="contained"
-            startIcon={<AddOutlined />}
+            startIcon={<AddRounded />}
             onClick={() => guardedAction(() => setEditor({}))}
           >
             Create account
@@ -870,7 +869,7 @@ function AdminAccountsPage() {
             input: {
               startAdornment: (
                 <InputAdornment position="start">
-                  <SearchOutlined />
+                  <SearchRounded />
                 </InputAdornment>
               ),
             },
@@ -1104,12 +1103,17 @@ export default function AccountsPage() {
   if (!session.authenticated || !session.user?.isAdmin) {
     return (
       <Stack spacing={3.5}>
-        <PageHeading title="Accounts" subtitle="Give each person the access they need." />
+        <PageHeading title="Accounts" />
         <Surface>
           <EmptyState
             title="Administrator access is required to manage accounts."
-            description="You can review your own access and change your password in My account. Ask a workspace administrator to change your permissions."
-            icon={<AdminPanelSettingsOutlined sx={{ fontSize: 32 }} />}
+            description="Ask an administrator to change your permissions."
+            icon={<AdminPanelSettingsRounded sx={{ fontSize: 32 }} />}
+            action={
+              <Button component={RouterLink} to="/account" variant="outlined">
+                My account
+              </Button>
+            }
           />
         </Surface>
       </Stack>

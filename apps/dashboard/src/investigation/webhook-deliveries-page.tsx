@@ -5,10 +5,14 @@ import type {
   InvestigationWebhookDelivery,
   InvestigationWebhookDeliveryQuery,
 } from "@agentic-review/contracts";
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import FilterListRounded from "@mui/icons-material/FilterListRounded";
 import RefreshRounded from "@mui/icons-material/RefreshRounded";
 import WebhookRounded from "@mui/icons-material/WebhookRounded";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -24,7 +28,7 @@ import {
   Typography,
 } from "@mui/material";
 import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useId, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { investigationApi } from "./api";
 import { GithubSourceLink as GitHubSourceLink } from "./github-source-link";
@@ -250,8 +254,7 @@ export async function submitWebhookRecoveryRequest(
     queryClient.setQueryData(key, {
       ...current,
       state: "accepted",
-      message:
-        "The server confirmed this recovery request. Task execution and comment delivery have separate outcomes.",
+      message: "Recovery accepted. Task execution and comment delivery have separate outcomes.",
     } satisfies WebhookRecoveryRequest);
     void queryClient.invalidateQueries({ queryKey: ["investigation-webhook-deliveries"] });
     void queryClient.invalidateQueries({ queryKey: webhookDeliveryQueryKey(request.deliveryId) });
@@ -264,10 +267,10 @@ export async function submitWebhookRecoveryRequest(
       ...current,
       state: conflict ? "conflict" : rejected ? "rejected" : "unknown",
       message: conflict
-        ? "The receipt changed or the command was rejected. Load the latest status, then review recovery again."
+        ? "The event changed or recovery was rejected. Load the latest status before retrying."
         : rejected
           ? webhookRetryErrorMessage(cause)
-          : "The recovery response was not confirmed. The request may have been accepted. Check the event or resend the same saved request.",
+          : "The request may have been accepted. Refresh its status or retry the saved request.",
     } satisfies WebhookRecoveryRequest);
   }
 }
@@ -301,14 +304,13 @@ export async function refreshWebhookRecoveryRequest(
     queryClient.setQueryData(key, {
       ...request,
       state: "refreshed",
-      message:
-        "The latest receipt is loaded. Review its currently available recovery action before submitting a new request.",
+      message: "Latest status loaded. Review recovery before submitting another request.",
     } satisfies WebhookRecoveryRequest);
   } else if (request?.state === "unknown") {
     queryClient.setQueryData(key, {
       ...request,
       message:
-        "The latest event status is loaded. Reading the event cannot confirm this saved command; its version and request identity are preserved for resending.",
+        "Event status refreshed. The saved request is still unconfirmed; retry it with the same identity.",
     } satisfies WebhookRecoveryRequest);
   }
   void queryClient.invalidateQueries({ queryKey: ["investigation-webhook-deliveries"] });
@@ -353,27 +355,34 @@ function WebhookStatus({ delivery }: { delivery: InvestigationWebhookDelivery })
   );
 }
 
-function EventSection({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description?: string;
-  children: ReactNode;
-}) {
+function EventSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <Surface sx={{ p: { xs: 2, sm: 3 }, minWidth: 0 }}>
-      <Typography variant="h6" component="h2" sx={{ mb: description ? 0.5 : 2 }}>
+      <Typography variant="h6" component="h2" sx={{ mb: 2 }}>
         {title}
       </Typography>
-      {description && (
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          {description}
-        </Typography>
-      )}
       {children}
     </Surface>
+  );
+}
+
+function EventDisclosure({ title, children }: { title: string; children: ReactNode }) {
+  const id = useId();
+  return (
+    <Accordion variant="outlined" disableGutters className="webhook-disclosure">
+      <AccordionSummary
+        id={`${id}-summary`}
+        aria-controls={`${id}-content`}
+        expandIcon={<ExpandMoreRounded />}
+      >
+        <Typography variant="subtitle2">{title}</Typography>
+      </AccordionSummary>
+      <AccordionDetails>
+        <Box component="section" data-webhook-disclosure-content="true">
+          {children}
+        </Box>
+      </AccordionDetails>
+    </Accordion>
   );
 }
 
@@ -394,14 +403,16 @@ function WebhookRecoveryFlag({ deliveryId }: { deliveryId: string }) {
 export function WebhookDeliveryHistory({
   items,
   emptyAction,
+  emptyTitle = "No events match",
   showRecoveryRequests = false,
 }: {
   items: InvestigationWebhookDelivery[];
   emptyAction?: ReactNode;
+  emptyTitle?: string;
   showRecoveryRequests?: boolean;
 }) {
   if (items.length === 0)
-    return <EmptyState title="No events match" icon={<WebhookRounded />} action={emptyAction} />;
+    return <EmptyState title={emptyTitle} icon={<WebhookRounded />} action={emptyAction} />;
   return (
     <Box className="webhook-table-wrap">
       <table className="webhook-table">
@@ -439,11 +450,6 @@ export function WebhookDeliveryHistory({
               </td>
               <td data-label="Handling">
                 <WebhookStatus delivery={delivery} />
-                {delivery.reason && (
-                  <Typography variant="body2" color="text.secondary">
-                    {webhookReasonDescription(delivery.reason)}
-                  </Typography>
-                )}
                 {showRecoveryRequests && <WebhookRecoveryFlag deliveryId={delivery.deliveryId} />}
                 {delivery.nextAttemptAt && (
                   <Typography variant="caption" component="div">
@@ -472,10 +478,10 @@ export function WebhookDeliveryHistory({
 export function WebhookAttemptHistory({ delivery }: { delivery: InvestigationWebhookDelivery }) {
   const history = [...delivery.attemptHistory].sort((left, right) => right.number - left.number);
   return (
-    <EventSection
-      title="Handling timeline"
-      description={`Current cycle attempts: ${delivery.attempts}; total recorded: ${delivery.totalAttempts}. Latest first.`}
-    >
+    <Stack spacing={2}>
+      <Typography variant="body2" color="text.secondary">
+        Attempts: {delivery.attempts} this cycle · {delivery.totalAttempts} total
+      </Typography>
       {history.length === 0 ? (
         <Typography color="text.secondary">No handling attempts recorded yet.</Typography>
       ) : (
@@ -514,10 +520,7 @@ export function WebhookAttemptHistory({ delivery }: { delivery: InvestigationWeb
                   {webhookReasonDescription(attempt.reason)}
                 </Typography>
               )}
-              <Box component="details" className="webhook-disclosure">
-                <Box component="summary" sx={{ color: "primary.main" }}>
-                  Attempt details
-                </Box>
+              <EventDisclosure title="Attempt details">
                 <Box component="dl" className="webhook-metadata">
                   {attempt.reason && (
                     <div>
@@ -561,12 +564,12 @@ export function WebhookAttemptHistory({ delivery }: { delivery: InvestigationWeb
                     Open this attempt's task
                   </TaskLink>
                 )}
-              </Box>
+              </EventDisclosure>
             </Box>
           ))}
         </Box>
       )}
-    </EventSection>
+    </Stack>
   );
 }
 
@@ -624,23 +627,12 @@ export function WebhookRetryControls({
     setError(undefined);
     void submitWebhookRecoveryRequest(queryClient, saved ?? createWebhookRecoveryRequest(delivery));
   };
-  const nextStep =
-    delivery.canonicalDeliveryId !== delivery.deliveryId
-      ? "This duplicate has no independent recovery action. Continue from the canonical event."
-      : delivery.state === "completed"
-        ? "Event intake is complete. If the linked task needs attention, use that task's recovery options. Publication status is tracked separately."
-        : delivery.nextAttemptAt
-          ? "An automatic attempt is already scheduled. Manual recovery is unavailable while intake is pending."
-          : delivery.state === "ignored"
-            ? "Read the recorded reason before changing intake settings. This event remains in history."
-            : retryOffered
-              ? "Recovery checks for a committed task first. If one exists, it restores the association and keeps the task's execution state."
-              : "No recovery action is currently available for this receipt.";
   return (
     <Stack spacing={2}>
       <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
         <Button
           startIcon={<RefreshRounded />}
+          variant={unknown || stale ? "contained" : "text"}
           disabled={busy || refreshing}
           onClick={() => void refresh()}
         >
@@ -692,16 +684,15 @@ export function WebhookRetryControls({
           {request.message}
         </Alert>
       )}
-      {unknown && (
-        <Typography variant="body2" color="text.secondary">
-          The last request is unconfirmed. Retry the saved request before starting another.
-        </Typography>
-      )}
-      {!retryOffered && !unknown && (
-        <Typography variant="body2" color="text.secondary">
-          {nextStep}
-        </Typography>
-      )}
+      {!retryOffered &&
+        !unknown &&
+        !delivery.nextAttemptAt &&
+        delivery.state === "failed" &&
+        delivery.canonicalDeliveryId === delivery.deliveryId && (
+          <Typography variant="body2" color="text.secondary">
+            No retry is currently available.
+          </Typography>
+        )}
       {(retryOffered || unknown) && grantProblem && (
         <Alert severity="warning">{grantProblem}</Alert>
       )}
@@ -712,11 +703,16 @@ export function WebhookRetryControls({
       )}
       {error && <Alert severity="error">{error}</Alert>}
       {request && (
-        <Box component="details" className="webhook-disclosure">
-          <Box component="summary" sx={{ color: "primary.main" }}>
-            Recovery request details
-          </Box>
+        <EventDisclosure title="Recovery request details">
           <Box component="dl" className="webhook-metadata">
+            <div>
+              <dt>Request ID</dt>
+              <dd>{request.idempotencyKey}</dd>
+            </div>
+            <div>
+              <dt>Receipt version</dt>
+              <dd>{request.version}</dd>
+            </div>
             <div>
               <dt>Requested</dt>
               <dd>
@@ -744,7 +740,7 @@ export function WebhookRetryControls({
               </dd>
             </div>
           </Box>
-        </Box>
+        </EventDisclosure>
       )}
       <Dialog
         open={previewVersion !== null}
@@ -770,13 +766,20 @@ export function WebhookRetryControls({
           </Box>
           <Alert severity="warning">
             {delivery.taskId
-              ? "Keeps the existing task. Configured replies may be posted."
-              : "May create an investigation and post configured replies."}
+              ? "Keeps the existing task without restarting it. Configured replies may be posted."
+              : "May create a task and post configured replies. Existing tasks are not restarted."}
           </Alert>
           {previewVersion !== null && previewVersion !== delivery.version && (
-            <Alert severity="error" sx={{ mt: 2 }}>
-              This receipt changed while the preview was open. Refresh its status and review it
-              again.
+            <Alert
+              severity="error"
+              sx={{ mt: 2 }}
+              action={
+                <Button disabled={busy || refreshing} onClick={() => void refresh()}>
+                  Load latest status
+                </Button>
+              }
+            >
+              This event changed. Load its latest status and review recovery again.
             </Alert>
           )}
         </DialogContent>
@@ -852,9 +855,6 @@ function WebhookLinkedContext({ delivery }: { delivery: InvestigationWebhookDeli
       : undefined;
   return (
     <Stack spacing={1}>
-      <Typography variant="body2" color="text.secondary">
-        Source and associated work
-      </Typography>
       <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", alignItems: "center" }}>
         <GitHubSourceLink
           repositoryFullName={delivery.repositoryFullName}
@@ -899,19 +899,21 @@ function WebhookLinkedContext({ delivery }: { delivery: InvestigationWebhookDeli
         ["failed", "blocked", "interrupted", "cancelled"].includes(task.state) &&
         delivery.state === "completed" && (
           <Alert severity="warning">
-            Intake is complete; the linked task needs attention. Review its own recovery options.
+            The linked task needs attention. Open it to review recovery options.
           </Alert>
         )}
-      {query.isError && (
-        <Typography variant="body2" color="text.secondary">
-          The linked task's current outcome could not be loaded. The recorded task association is
-          retained.
-        </Typography>
-      )}
-      {query.data && !task && (
-        <Alert severity="warning">
-          The loaded task does not match this event's source. Its source and report links are
-          unavailable.
+      {(query.isError || (query.data && !task)) && (
+        <Alert
+          severity="warning"
+          action={
+            <Button disabled={query.isFetching} onClick={() => void query.refetch()}>
+              Refresh task
+            </Button>
+          }
+        >
+          {query.isError
+            ? "The linked task's current status could not be loaded."
+            : "The loaded task does not match this event's source."}
         </Alert>
       )}
     </Stack>
@@ -934,10 +936,7 @@ function WebhookIntakeNotice({
     retry: false,
   });
   return query.data?.repositoryId === repositoryId && !query.data.enabled ? (
-    <Alert severity="info">
-      Assignment intake is paused. Previously received events, handling history, and task
-      associations remain available.
-    </Alert>
+    <Alert severity="info">Assignment intake is paused.</Alert>
   ) : null;
 }
 
@@ -952,20 +951,45 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
+  const listUrl = `/webhooks${scope.repositoryId ? `?repositoryId=${encodeURIComponent(scope.repositoryId)}` : ""}`;
   if (query.isPending) return <CircularProgress size={28} aria-label="Loading webhook event" />;
   if (!query.data)
     return (
-      <Alert severity="error">
-        {query.error?.message ?? "The webhook event could not be loaded."}
-        <Button onClick={() => void query.refetch()}>Refresh event</Button>
-      </Alert>
+      <Stack spacing={2} className="webhook-page">
+        <Box>
+          <Button component={Link} to={listUrl}>
+            Back to webhook events
+          </Button>
+        </Box>
+        <Alert
+          severity="error"
+          action={
+            <Button disabled={query.isFetching} onClick={() => void query.refetch()}>
+              Refresh event
+            </Button>
+          }
+        >
+          {query.error?.message ?? "The webhook event could not be loaded."}
+        </Alert>
+      </Stack>
     );
   const delivery = query.data;
   if (
     delivery.deliveryId !== deliveryId ||
     (scope.repositoryId && delivery.repositoryId !== scope.repositoryId)
   )
-    return <Alert severity="warning">This event does not belong to the selected repository.</Alert>;
+    return (
+      <Alert
+        severity="warning"
+        action={
+          <Button component={Link} to={listUrl}>
+            Back to webhook events
+          </Button>
+        }
+      >
+        This event does not belong to the selected repository.
+      </Alert>
+    );
   const duplicate = delivery.canonicalDeliveryId !== delivery.deliveryId;
   const latestAttempt = [...delivery.attemptHistory].sort(
     (left, right) => right.number - left.number,
@@ -1009,9 +1033,15 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
         </Stack>
       </PageHeading>
       {query.isError && (
-        <Alert severity="error">
+        <Alert
+          severity="error"
+          action={
+            <Button disabled={query.isFetching} onClick={() => void query.refetch()}>
+              Refresh event
+            </Button>
+          }
+        >
           {query.error.message} Refresh before retrying.
-          <Button onClick={() => void query.refetch()}>Refresh event</Button>
         </Alert>
       )}
       <WebhookIntakeNotice repositoryId={delivery.repositoryId} user={session.user} />
@@ -1027,8 +1057,7 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
             </Button>
           }
         >
-          Duplicate delivery. The canonical event holds the task association and available recovery
-          action.
+          Use the canonical event to review or retry handling.
         </Alert>
       )}
       <Box className="webhook-detail-grid">
@@ -1043,11 +1072,14 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
                 {webhookReasonDescription(delivery.reason)}
               </Typography>
             )}
+            <WebhookRetryControls
+              key={delivery.deliveryId}
+              delivery={delivery}
+              user={session.user}
+              snapshotStale={query.isError}
+            />
             {delivery.reason && (
-              <Box component="details" className="webhook-disclosure" sx={{ mb: 2 }}>
-                <Box component="summary" sx={{ color: "primary.main" }}>
-                  Diagnostic details
-                </Box>
+              <EventDisclosure title="Diagnostic details">
                 <Box component="dl" className="webhook-metadata">
                   <div>
                     <dt>Recorded reason</dt>
@@ -1056,82 +1088,47 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
                     </dd>
                   </div>
                 </Box>
-              </Box>
+              </EventDisclosure>
             )}
-            <WebhookRetryControls
-              key={delivery.deliveryId}
-              delivery={delivery}
-              user={session.user}
-              snapshotStale={query.isError}
-            />
           </EventSection>
           <EventSection title="Related work">
             <WebhookLinkedContext delivery={delivery} />
           </EventSection>
-          <details className="webhook-disclosure webhook-history">
-            <summary>Event history</summary>
+          <EventDisclosure title="Event history">
             <WebhookAttemptHistory delivery={delivery} />
-          </details>
+          </EventDisclosure>
         </Stack>
         <Stack spacing={2} sx={{ minWidth: 0 }}>
-          <details className="webhook-disclosure webhook-history">
-            <summary>Event details</summary>
-            <EventSection title="Event details">
-              <Box component="dl" className="webhook-metadata">
+          <EventDisclosure title="Event details">
+            <Box component="dl" className="webhook-metadata">
+              <div>
+                <dt>Receipt identity</dt>
+                <dd>{duplicate ? "Duplicate event" : "Canonical event"}</dd>
+              </div>
+              <div>
+                <dt>Delivery</dt>
+                <dd>{delivery.deliveryId}</dd>
+              </div>
+              <div>
+                <dt>Actor GitHub ID</dt>
+                <dd>{delivery.actorUserId}</dd>
+              </div>
+              <div>
+                <dt>Assigned reviewer GitHub ID</dt>
+                <dd>{delivery.assigneeUserId}</dd>
+              </div>
+              <div>
+                <dt>Source snapshot ID</dt>
+                <dd>{delivery.snapshotRef?.id ?? "Not recorded"}</dd>
+              </div>
+              {delivery.snapshotRef && (
                 <div>
-                  <dt>Received</dt>
-                  <dd>
-                    <RecordedTime value={delivery.receivedAt} />
-                  </dd>
+                  <dt>Snapshot digest</dt>
+                  <dd>{delivery.snapshotRef.digest}</dd>
                 </div>
-                <div>
-                  <dt>Task mode</dt>
-                  <dd>{delivery.mode === "e2e" ? "E2E verification" : "Static review"}</dd>
-                </div>
-                <div>
-                  <dt>Receipt identity</dt>
-                  <dd>{duplicate ? "Duplicate event" : "Canonical event"}</dd>
-                </div>
-                <div>
-                  <dt>Source snapshot</dt>
-                  <dd>{delivery.snapshotRef ? "Recorded" : "Not recorded"}</dd>
-                </div>
-              </Box>
-              <Box component="details" className="webhook-disclosure">
-                <Box component="summary" sx={{ color: "primary.main" }}>
-                  Identity and provenance
-                </Box>
-                <Box component="dl" className="webhook-metadata">
-                  <div>
-                    <dt>Event</dt>
-                    <dd>{delivery.eventName}</dd>
-                  </div>
-                  <div>
-                    <dt>Delivery</dt>
-                    <dd>{delivery.deliveryId}</dd>
-                  </div>
-                  <div>
-                    <dt>Actor GitHub ID</dt>
-                    <dd>{delivery.actorUserId}</dd>
-                  </div>
-                  <div>
-                    <dt>Assigned reviewer GitHub ID</dt>
-                    <dd>{delivery.assigneeUserId}</dd>
-                  </div>
-                  <div>
-                    <dt>Source snapshot ID</dt>
-                    <dd>{delivery.snapshotRef?.id ?? "Not recorded"}</dd>
-                  </div>
-                  {delivery.snapshotRef && (
-                    <div>
-                      <dt>Snapshot digest</dt>
-                      <dd>{delivery.snapshotRef.digest}</dd>
-                    </div>
-                  )}
-                </Box>
-              </Box>
-            </EventSection>
-          </details>
+              )}
+            </Box>
+          </EventDisclosure>
         </Stack>
       </Box>
     </Stack>
@@ -1146,6 +1143,9 @@ export function WebhookDeliveryHistoryPanel({
   clearUrl?: string;
 }) {
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
+  const hasFilters = [filters.kind, filters.number, filters.state, filters.mode].some(
+    (value) => value !== undefined,
+  );
   const queryInput = { ...filters, cursor: cursors.at(-1), limit: 25 };
   const query = useQuery({
     queryKey: webhookDeliveriesQueryKey(queryInput),
@@ -1183,7 +1183,15 @@ export function WebhookDeliveryHistoryPanel({
         </Box>
       )}
       {query.isError && (
-        <Alert severity="error" sx={{ m: 2 }}>
+        <Alert
+          severity="error"
+          sx={{ m: 2 }}
+          action={
+            <Button disabled={query.isFetching} onClick={() => void query.refetch()}>
+              Retry
+            </Button>
+          }
+        >
           {query.error.message}
         </Alert>
       )}
@@ -1191,10 +1199,15 @@ export function WebhookDeliveryHistoryPanel({
         <WebhookDeliveryHistory
           items={query.data.items}
           showRecoveryRequests
+          emptyTitle={hasFilters ? "No events match" : "No webhook events"}
           emptyAction={
-            clearUrl ? (
-              <Button component={Link} to={clearUrl}>
+            hasFilters && clearUrl ? (
+              <Button component={Link} to={clearUrl} variant="outlined">
                 Clear filters
+              </Button>
+            ) : filters.repositoryId ? (
+              <Button component={Link} to="/webhooks" variant="outlined">
+                Show all repositories
               </Button>
             ) : undefined
           }
@@ -1265,7 +1278,7 @@ function WebhookFilterFields({
           size="small"
           defaultValue={filters.number ?? ""}
           type="number"
-          slotProps={{ htmlInput: { min: 1, step: 1 } }}
+          slotProps={{ htmlInput: { min: 1, max: Number.MAX_SAFE_INTEGER, step: 1 } }}
         />
       )}
       <TextField

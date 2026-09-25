@@ -4,8 +4,9 @@ import type {
   InvestigationCommentPublicationSummary,
   InvestigationPublicationDirectoryQuery,
 } from "@agentic-review/contracts";
-import ChatBubbleOutlineRounded from "@mui/icons-material/ChatBubbleOutlineRounded";
+import ChatBubbleRounded from "@mui/icons-material/ChatBubbleRounded";
 import ChevronRightRounded from "@mui/icons-material/ChevronRightRounded";
+import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import {
   Accordion,
   AccordionDetails,
@@ -287,7 +288,7 @@ export function CommentPublicationRow({
         className="comments-record-symbol"
         sx={{ bgcolor: "action.hover", color: "text.secondary" }}
       >
-        <ChatBubbleOutlineRounded fontSize="small" />
+        <ChatBubbleRounded fontSize="small" />
       </Box>
       <Box className="comments-record-main">
         <Typography variant="caption" color="text.secondary">
@@ -418,7 +419,7 @@ export function CommentDeliveryHistory({
                 <AccordionSummary
                   id={`${detailsId}-summary`}
                   aria-controls={detailsId}
-                  expandIcon={<span aria-hidden="true">+</span>}
+                  expandIcon={<ExpandMoreRounded />}
                 >
                   <Typography variant="body2">View delivery details</Typography>
                 </AccordionSummary>
@@ -494,10 +495,12 @@ export function CommentDeliveryHistoryPanel({
   filters,
   pollInterval = false,
   showTarget = true,
+  showHeading = true,
 }: {
   filters: Omit<InvestigationCommentDeliveryQuery, "cursor" | "limit">;
   pollInterval?: number | false;
   showTarget?: boolean;
+  showHeading?: boolean;
 }) {
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const cursor = cursors.at(-1);
@@ -532,7 +535,7 @@ export function CommentDeliveryHistoryPanel({
         useFlexGap
         sx={{ justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1 }}
       >
-        <Typography variant="h6">Delivery timeline</Typography>
+        {showHeading && <Typography variant="h6">Delivery timeline</Typography>}
         <Button disabled={query.isFetching} onClick={() => void query.refetch()}>
           Refresh history
         </Button>
@@ -583,6 +586,7 @@ export function CommentPublicationControls({
   comment: InvestigationCommentPublicationSummary;
   stale?: boolean;
 }) {
+  const requestDetailsId = useId();
   const queryClient = useQueryClient();
   const { session } = useInvestigationSession();
   const requestKey = commentCommandQueryKey(comment.id);
@@ -728,9 +732,6 @@ export function CommentPublicationControls({
               className="comments-actions"
               sx={{ mt: 1 }}
             >
-              <Button disabled={busy} onClick={() => void refresh()}>
-                Refresh status
-              </Button>
               <Button
                 disabled={busy || !hasCommentActionGrant(comment, session.user, request.action)}
                 onClick={() =>
@@ -741,52 +742,66 @@ export function CommentPublicationControls({
               </Button>
             </Stack>
           )}
-          <Box component="details" sx={{ mt: 1 }}>
-            <Box component="summary" sx={{ cursor: "pointer", py: 1 }}>
-              Saved request
-            </Box>
-            <Typography variant="body2">
-              {request.action === "sync" ? "Publication" : "Delivery check"} ·{" "}
-              <RecordedTime value={request.requestedAt} />
-            </Typography>
-            <Typography variant="caption" component="div" sx={{ overflowWrap: "anywhere" }}>
-              Version: {request.version}
-            </Typography>
-            <Typography variant="caption" component="div" sx={{ overflowWrap: "anywhere" }}>
-              Request: {request.idempotencyKey}
-            </Typography>
-          </Box>
+          <Accordion
+            disableGutters
+            sx={{
+              mt: 1,
+              bgcolor: "transparent",
+              boxShadow: "none",
+              "&::before": { display: "none" },
+            }}
+          >
+            <AccordionSummary
+              id={`${requestDetailsId}-summary`}
+              aria-controls={`${requestDetailsId}-details`}
+              expandIcon={<ExpandMoreRounded />}
+              sx={{ px: 0 }}
+            >
+              <Typography>Saved request</Typography>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 0 }}>
+              <Typography variant="body2">
+                {request.action === "sync" ? "Publication" : "Delivery check"} ·{" "}
+                <RecordedTime value={request.requestedAt} />
+              </Typography>
+              <Typography variant="caption" component="div" sx={{ overflowWrap: "anywhere" }}>
+                Version: {request.version}
+              </Typography>
+              <Typography variant="caption" component="div" sx={{ overflowWrap: "anywhere" }}>
+                Request: {request.idempotencyKey}
+              </Typography>
+            </AccordionDetails>
+          </Accordion>
         </Alert>
       )}
-      <Box className="comments-command-actions">
-        {comment.availableActions.includes("sync") ? (
-          <Button
-            variant="contained"
-            disabled={busy || !canSchedule("sync")}
-            onClick={() =>
-              setPreview({ action: "sync", version: comment.version, commentId: comment.id })
-            }
-          >
-            {syncLabel}
-          </Button>
-        ) : (
-          <Typography variant="caption" color="text.secondary">
-            {comment.mode === "result"
-              ? "Open the report to review publication actions."
-              : comment.state === "synced"
-                ? "Delivered."
-                : "Publication unavailable."}
-          </Typography>
-        )}
-        {comment.availableActions.includes("sync") &&
-          !hasCommentActionGrant(comment, session.user, "sync") && (
-            <Typography variant="caption" component="p" color="text.secondary">
-              Requires repository access, Prepare actions, Confirm actions, and the Comment action.
+      {(comment.availableActions.includes("sync") || comment.mode === "result") && (
+        <Box className="comments-command-actions">
+          {comment.availableActions.includes("sync") ? (
+            <Button
+              variant="contained"
+              disabled={busy || !canSchedule("sync")}
+              onClick={() =>
+                setPreview({ action: "sync", version: comment.version, commentId: comment.id })
+              }
+            >
+              {syncLabel}
+            </Button>
+          ) : (
+            <Typography variant="caption" color="text.secondary">
+              Open the report to review publication actions.
             </Typography>
           )}
-      </Box>
-      <Box className="comments-command-actions">
-        {comment.availableActions.includes("reconcile") ? (
+          {comment.availableActions.includes("sync") &&
+            !hasCommentActionGrant(comment, session.user, "sync") && (
+              <Typography variant="caption" component="p" color="text.secondary">
+                Requires repository access, Prepare actions, Confirm actions, and the Comment
+                action.
+              </Typography>
+            )}
+        </Box>
+      )}
+      {comment.availableActions.includes("reconcile") && (
+        <Box className="comments-command-actions">
           <Button
             variant="outlined"
             disabled={busy || !canSchedule("reconcile")}
@@ -796,18 +811,13 @@ export function CommentPublicationControls({
           >
             Check delivery
           </Button>
-        ) : (
-          <Typography variant="caption" color="text.secondary">
-            No delivery check is currently available.
-          </Typography>
-        )}
-        {comment.availableActions.includes("reconcile") &&
-          !hasCommentActionGrant(comment, session.user, "reconcile") && (
+          {!hasCommentActionGrant(comment, session.user, "reconcile") && (
             <Typography variant="caption" component="p" color="text.secondary">
               Requires repository access, Prepare actions, and the Comment action.
             </Typography>
           )}
-      </Box>
+        </Box>
+      )}
       {error && <Alert severity="error">{error}</Alert>}
       <Dialog open={Boolean(preview)} onClose={() => setPreview(undefined)} fullWidth maxWidth="sm">
         <DialogTitle>

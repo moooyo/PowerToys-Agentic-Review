@@ -129,10 +129,12 @@ export function TaskProgressPanel({
             ? "Awaiting worker cleanup"
             : queueReason
               ? queueReason
-              : progress?.stage
-                ? stage
-                : task.state === "completed"
+              : !active
+                ? task.state === "completed"
                   ? "Execution finished"
+                  : "Execution stopped"
+                : progress?.stage
+                  ? stage
                   : "Stage not reported"}
         </Typography>
         {progress?.stageStartedAt && (
@@ -146,7 +148,7 @@ export function TaskProgressPanel({
     <Stack spacing={2}>
       {queueReason && <Alert severity="info">{queueReason}</Alert>}
       <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", alignItems: "center" }}>
-        <Chip label={`Stage: ${stage}`} variant="outlined" />
+        <Chip label={active ? stage : `Last stage · ${stage}`} variant="outlined" />
         {progress?.stageStartedAt && (
           <Typography variant="body2">
             {active ? "Current stage elapsed" : "Stage duration at stop"}:{" "}

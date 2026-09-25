@@ -36,7 +36,7 @@
   width: 100%;
   gap: 12px;
 }
-.workspace-nav-link {
+.workspace-nav-link.MuiButtonBase-root {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -50,6 +50,9 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 16px;
+}
+.workspace-nav-link.Mui-focusVisible {
+  outline-offset: -3px;
 }
 .workspace-nav-symbol {
   width: 56px;
@@ -278,23 +281,8 @@
     min-width: 0;
     flex: 0 1 180px;
   }
-  .workspace-page-picker select {
-    display: block;
-    width: 100%;
-    max-width: 180px;
-    min-height: 40px;
-    padding: 8px 12px;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    color: var(--app-on-secondary-container);
-    background: var(--app-secondary-container);
-    font: inherit;
+  .workspace-page-picker .MuiOutlinedInput-root {
     font-size: 14px;
-  }
-  .workspace-page-picker optgroup,
-  .workspace-page-picker option {
-    background: var(--app-surface);
-    color: var(--app-text);
   }
   .workspace-main {
     padding: 16px 24px max(28px, env(safe-area-inset-bottom));
@@ -332,7 +320,7 @@
   .workspace-page-picker {
     flex: 1;
   }
-  .workspace-page-picker select {
+  .workspace-page-picker .MuiOutlinedInput-root {
     font-size: 16px;
   }
   .workspace-page-title-row {

@@ -33,6 +33,55 @@ describe("task progress and resource waiting", () => {
     expect(html).not.toContain("Model call running");
   });
 
+  it.each([
+    ["completed", "model", "Execution finished"],
+    ["completed", "cleanup", "Execution finished"],
+    ["cancelled", "model", "Execution stopped"],
+    ["failed", "model", "Execution stopped"],
+    ["blocked", "prepare_source", "Execution stopped"],
+    ["interrupted", "model", "Execution stopped"],
+  ] as const)(
+    "shows the %s execution outcome instead of the retained %s stage after resource release",
+    (state, stage, outcome) => {
+      const html = renderToStaticMarkup(
+        <TaskProgressPanel
+          compact
+          task={{ id: "task", kind: "pr-e2e", state, updatedAt: "2026-09-19T01:02:00Z" }}
+          progress={{
+            stage,
+            stageStartedAt: "2026-09-19T01:00:00Z",
+            lastActivityAt: "2026-09-19T01:01:00Z",
+            lastMeaningfulProgressAt: null,
+            lastHeartbeatAt: null,
+          }}
+          resourceLeases={[
+            {
+              attemptId: "attempt",
+              taskId: "task",
+              workerId: "desktop",
+              fence: 1,
+              pool: "e2e",
+              state: "released",
+              acquiredAt: "2026-09-19T00:59:00Z",
+              updatedAt: "2026-09-19T01:02:00Z",
+              releasedAt: "2026-09-19T01:02:00Z",
+              reason: state,
+            },
+          ]}
+          now={Date.parse("2026-09-19T02:00:00Z")}
+        />,
+      );
+      expect(html).toContain(outcome);
+      expect(html).toContain("At stop: 2m 0s");
+      expect(html).not.toContain("Preparing source");
+      expect(html).not.toContain("Model analysis");
+      expect(html).not.toContain("Cleaning up");
+      expect(html).not.toContain("Awaiting worker cleanup");
+      expect(html).not.toContain("Elapsed");
+      expect(html).not.toContain("1h");
+    },
+  );
+
   it("distinguishes static capacity from the exclusive desktop", () => {
     expect(taskQueueReason({ kind: "pr-review", state: "queued" }, scheduler)).toContain(
       "Waiting for static task capacity",
@@ -207,6 +256,8 @@ describe("task progress and resource waiting", () => {
     );
     expect(compact).toContain("Awaiting worker cleanup");
     expect(compact).toContain("Elapsed");
+    expect(compact).not.toContain("Execution finished");
+    expect(compact).not.toContain("Execution stopped");
     expect(compact).not.toContain("Task complete");
   });
 });

@@ -218,24 +218,14 @@
   margin-top: 0;
 }
 .comments-body pre,
-.comments-history-disclosure pre {
+.comments-disclosure pre {
   font-size: 13px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.comments-history-disclosure > summary {
-  cursor: pointer;
-  min-height: 36px;
-  padding: 8px 0;
-  font-size: 14px;
-}
-.comments-history-disclosure > summary:focus-visible {
-  outline: 3px solid var(--mui-palette-primary-main);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-.comments-history-disclosure[open] > summary {
-  margin-bottom: 12px;
+.comments-disclosure {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .comments-command-actions {
   display: flex;
@@ -299,8 +289,8 @@
 @media (pointer: coarse) {
   .comments-page .MuiButton-root,
   .comments-publication-controls .MuiButton-root,
-  .comments-history-disclosure > summary {
-    min-height: 44px;
+  .comments-disclosure .MuiAccordionSummary-root {
+    min-height: 48px;
   }
 }
 @media (max-width: 599px) {

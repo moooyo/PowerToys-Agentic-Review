@@ -25,7 +25,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useId, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { type ActionPanelRequest, isActionAllowed } from "./action-panel";
+import { type ActionPanelRequest, isActionAllowed, reportNavigation } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
 import { ImportWorkItemButton } from "./import-work-item";
 import { useGuardedAction } from "./navigation-guard";
@@ -36,7 +36,7 @@ import {
   type ReviewRecord,
   useReviewListNavigation,
 } from "./review-navigation";
-import { useInvestigationSession } from "./session";
+import { sessionIdentity, useInvestigationSession } from "./session";
 import {
   activeSourceReportTask,
   readableSourceData,
@@ -44,6 +44,7 @@ import {
   SourceResultLabel,
   sourceActionLabel,
   sourceActionReason,
+  sourceReportAction,
   sourceTaskReviewRecord,
   useSourceActionContext,
   useSourceReport,
@@ -109,13 +110,14 @@ function SourceNextAction({
     linked ?? (current && ["queued", "running"].includes(current.state) ? current : undefined);
   const action = context?.recommendation.action;
   const savedAction = context?.nextActions.find((next) => next.id === context?.recommendedActionId);
+  const reportAction = context ? sourceReportAction(context) : undefined;
   const allowed = Boolean(
     fresh &&
       !report.isError &&
       !query.isError &&
       context &&
       action &&
-      isActionAllowed(context, action, savedAction?.id),
+      (reportAction?.allowed ?? isActionAllowed(context, action, savedAction?.id)),
   );
   const openAction = () =>
     onAction(item, header, pending || !action ? {} : { action, nextActionId: savedAction?.id });
@@ -138,31 +140,85 @@ function SourceNextAction({
     session.user?.permissions.includes("task:create") &&
       session.user.repositoryIds.includes(item.repositoryId),
   );
+  const subject = `${item.kind === "pull_request" ? "PR" : "Issue"} #${item.number}`;
+  const reasonId = `${actionId}-reason`;
   return (
-    <>
-      <Box className="source-next-action">
-        {pending ? (
+    <Box className="source-next-action">
+      {pending ? (
+        <Button
+          id={actionId}
+          variant="outlined"
+          size="small"
+          disabled={query.isError}
+          onClick={openAction}
+          aria-haspopup="dialog"
+          aria-label={`Check submission for ${subject}`}
+        >
+          Check submission
+        </Button>
+      ) : active ? (
+        <Button
+          component={Link}
+          {...taskLink(active)}
+          variant="outlined"
+          size="small"
+          endIcon={<ChevronRightRounded />}
+          aria-label={`View progress for ${subject}`}
+        >
+          View progress
+        </Button>
+      ) : savedTask?.latestReportRef && !header ? (
+        <Button
+          id={actionId}
+          variant="outlined"
+          size="small"
+          disabled={!report.isError || report.isFetching}
+          onClick={() => void report.refetch()}
+          aria-label={`${report.isError ? "Retry result" : "Loading result"} for ${subject}`}
+        >
+          {report.isError ? "Retry result" : "Loading result…"}
+        </Button>
+      ) : header && !context ? (
+        <Stack spacing={0.75}>
           <Button
             id={actionId}
             variant="outlined"
             size="small"
-            disabled={query.isError}
-            onClick={openAction}
+            disabled={query.isPending || query.isFetching}
+            onClick={() => void query.refetch()}
+            aria-describedby={query.isError ? reasonId : undefined}
+            aria-label={`${query.isPending ? "Loading actions" : "Refresh actions"} for ${subject}`}
           >
-            Check submission
+            {query.isPending ? "Loading actions…" : "Refresh actions"}
           </Button>
-        ) : active ? (
-          <Button
-            component={Link}
-            {...taskLink(active)}
-            variant="outlined"
-            size="small"
-            endIcon={<ChevronRightRounded />}
-          >
-            View progress
-          </Button>
-        ) : header && context && action ? (
-          <Stack spacing={0.75} sx={{ alignItems: { xs: "flex-start", sm: "flex-end" } }}>
+          {query.isError && (
+            <Typography id={reasonId} variant="caption" color="text.secondary">
+              {query.error.message}
+            </Typography>
+          )}
+        </Stack>
+      ) : header && context && action ? (
+        <Stack spacing={0.75} sx={{ alignItems: { xs: "flex-start", sm: "flex-end" } }}>
+          {reportAction ? (
+            <Button
+              component={Link}
+              {...relatedLink({
+                kind: "report",
+                id: reportAction.reportId,
+                workItemId: item.id,
+                repositoryId: item.repositoryId,
+                href: reportNavigation(action, reportAction.reportId, item.repositoryId),
+              })}
+              variant="outlined"
+              size="small"
+              disabled={!allowed}
+              endIcon={<ChevronRightRounded />}
+              aria-label={`${sourceActionLabel(action)} for ${subject}`}
+              aria-describedby={!allowed ? reasonId : undefined}
+            >
+              {sourceActionLabel(action)}
+            </Button>
+          ) : (
             <Button
               variant="outlined"
               size="small"
@@ -170,81 +226,101 @@ function SourceNextAction({
               disabled={!allowed}
               onClick={openAction}
               endIcon={<ChevronRightRounded />}
+              aria-haspopup="dialog"
+              aria-label={`${sourceActionLabel(action, savedAction?.taskKind)} for ${subject}`}
+              aria-describedby={!allowed ? reasonId : undefined}
             >
               {sourceActionLabel(action, savedAction?.taskKind)}
             </Button>
-            {!allowed && (
-              <Typography variant="caption" color="text.secondary">
-                {!fresh || report.isError || query.isError
-                  ? "Refresh to check action availability."
-                  : sourceActionReason(context, action)}
-              </Typography>
-            )}
-          </Stack>
-        ) : current && ["blocked", "failed", "interrupted", "cancelled"].includes(current.state) ? (
+          )}
+          {!allowed && (
+            <Typography id={reasonId} variant="caption" color="text.secondary">
+              {!fresh || report.isError || query.isError
+                ? "Refresh to check action availability."
+                : sourceActionReason(context, action)}
+            </Typography>
+          )}
+        </Stack>
+      ) : current && ["blocked", "failed", "interrupted", "cancelled"].includes(current.state) ? (
+        <Button
+          component={Link}
+          {...taskLink(
+            current,
+            current.state === "blocked" ? `${taskUrl(current)}&tab=details` : taskUrl(current),
+          )}
+          variant="outlined"
+          size="small"
+          endIcon={<ChevronRightRounded />}
+        >
+          {current.state === "blocked" ? "View prerequisites" : "View task"}
+        </Button>
+      ) : !current && !savedTask ? (
+        <Stack spacing={0.75}>
           <Button
-            component={Link}
-            {...taskLink(
-              current,
-              current.state === "blocked" ? `${taskUrl(current)}&tab=details` : taskUrl(current),
-            )}
+            id={actionId}
             variant="outlined"
             size="small"
-            endIcon={<ChevronRightRounded />}
+            disabled={!fresh || !canCreate}
+            onClick={() => onCreate(item)}
+            aria-haspopup="dialog"
+            aria-label={`${item.kind === "pull_request" ? "Start review" : "Investigate issue"} for ${subject}`}
+            aria-describedby={!canCreate ? reasonId : undefined}
           >
-            {current.state === "blocked" ? "View prerequisites" : "View task"}
+            {item.kind === "pull_request" ? "Start review" : "Investigate issue"}
           </Button>
-        ) : !current && !savedTask ? (
-          <Stack spacing={0.75}>
-            <Button
-              id={actionId}
-              variant="outlined"
-              size="small"
-              disabled={!fresh || !canCreate}
-              onClick={() => onCreate(item)}
-            >
-              {item.kind === "pull_request" ? "Start review" : "Investigate issue"}
-            </Button>
-            {!canCreate && (
-              <Typography variant="caption" color="text.secondary">
-                Create tasks permission required.
-              </Typography>
-            )}
-          </Stack>
-        ) : (
-          <Button
-            component={Link}
-            {...relatedLink(
-              header
-                ? {
-                    kind: "report",
-                    id: header.report.id,
-                    workItemId: item.id,
-                    repositoryId: item.repositoryId,
-                    href: `/reports?${new URLSearchParams({ reportId: header.report.id, repositoryId: item.repositoryId })}`,
-                  }
-                : {
-                    kind: "work-item",
-                    id: item.id,
-                    workItemId: item.id,
-                    repositoryId: item.repositoryId,
-                    href: workItemUrl(item),
-                  },
-            )}
-            variant="outlined"
-            size="small"
-            endIcon={<ChevronRightRounded />}
-          >
-            {header ? "Review report" : "View source"}
-          </Button>
-        )}
-      </Box>
-    </>
+          {!canCreate && (
+            <Typography id={reasonId} variant="caption" color="text.secondary">
+              Create tasks permission required.
+            </Typography>
+          )}
+        </Stack>
+      ) : (
+        <Button
+          component={Link}
+          {...relatedLink(
+            header
+              ? {
+                  kind: "report",
+                  id: header.report.id,
+                  workItemId: item.id,
+                  repositoryId: item.repositoryId,
+                  href: `/reports?${new URLSearchParams({ reportId: header.report.id, repositoryId: item.repositoryId })}`,
+                }
+              : {
+                  kind: "work-item",
+                  id: item.id,
+                  workItemId: item.id,
+                  repositoryId: item.repositoryId,
+                  href: workItemUrl(item),
+                },
+          )}
+          variant="outlined"
+          size="small"
+          endIcon={<ChevronRightRounded />}
+        >
+          {header ? "Review report" : "View source"}
+        </Button>
+      )}
+      {((report.isError && header) || (query.isError && context)) && (
+        <Button
+          size="small"
+          disabled={report.isFetching || query.isFetching}
+          onClick={() => {
+            if (report.isError) void report.refetch();
+            if (query.isError) void query.refetch();
+          }}
+        >
+          Retry refresh
+        </Button>
+      )}
+    </Box>
   );
 }
 
 export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
   const queryClient = useQueryClient();
+  const { session } = useInvestigationSession();
+  const identity = sessionIdentity(session);
   const scope = useInvestigationRepositoryScope();
   const location = useLocation();
   const navigate = useNavigate();
@@ -273,6 +349,8 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
     item: WorkItem;
     reportId?: string;
     request: ActionPanelRequest;
+    openedAt: number;
+    onRelatedNavigate?: (target: ReviewRecord) => boolean;
   }>();
   const [actionBusy, setActionBusy] = useState(false);
   const [createTarget, setCreateTarget] = useState<{
@@ -280,6 +358,7 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
     onCompleted: (task: InvestigationTaskV1) => boolean;
   }>();
   const actionSerial = useRef(0);
+  const actionOpener = useRef<string>(undefined);
   const actionTitleId = useId();
   const guardScope = `source-list-actions:${actionTarget?.item.id ?? "none"}`;
   const guardedAction = useGuardedAction(guardScope);
@@ -288,12 +367,40 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
     header: InvestigationReportHeaderV1 | undefined,
     request: Omit<ActionPanelRequest, "id">,
   ) => {
+    const record = queueRecords.find(
+      (candidate) => candidate.id === item.id && candidate.repositoryId === item.repositoryId,
+    );
+    actionOpener.current = record ? queue.getRelatedLinkProps(record, record).id : undefined;
     setActionTarget({
       item,
       reportId: header?.report.id,
       request: { id: `source-list-${++actionSerial.current}`, ...request },
+      openedAt: Date.now(),
+      onRelatedNavigate: record ? queue.captureRelatedNavigation(record) : undefined,
     });
   };
+  // Observe source updates accepted by the dialog's existing refresh guard.
+  const actionSource = useQuery({
+    queryKey: [
+      "investigation-work-item",
+      identity,
+      actionTarget?.item.id,
+      actionTarget?.item.repositoryId,
+    ],
+    queryFn: () => investigationApi.workItem(actionTarget!.item.id),
+    initialData: actionTarget?.item,
+    enabled: false,
+  });
+  const actionItem =
+    actionTarget &&
+    actionSource.data &&
+    actionSource.dataUpdatedAt >= actionTarget.openedAt &&
+    actionSource.data.id === actionTarget.item.id &&
+    actionSource.data.repositoryId === actionTarget.item.repositoryId &&
+    actionSource.data.kind === actionTarget.item.kind &&
+    actionSource.data.number === actionTarget.item.number
+      ? actionSource.data
+      : actionTarget?.item;
   const query = useQuery({
     queryKey: ["investigation-work-items", scope.repositoryId, kind],
     queryFn: () => investigationApi.workItems(scope.repositoryId, kind),
@@ -464,9 +571,19 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
             />
           ))}
         </Stack>
-        <Typography variant="caption" color="text.secondary" aria-live="polite">
-          {refreshing && !query.isPending ? "Refreshing…" : refreshed ? "Updated just now" : ""}
-        </Typography>
+        <Stack direction="row" sx={{ alignItems: "center", justifyContent: "space-between" }}>
+          <Typography variant="caption" color="text.secondary" aria-live="polite">
+            {refreshing && !query.isPending ? "Refreshing…" : refreshed ? "Updated just now" : ""}
+          </Typography>
+          {activeFilters && (
+            <Button
+              size="small"
+              onClick={() => updateFilters({ q: "", state: "all", investigation: "all" })}
+            >
+              Clear filters
+            </Button>
+          )}
+        </Stack>
       </Stack>
       {query.isError && (
         <Alert
@@ -502,7 +619,7 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
                 color="text.secondary"
                 sx={{ display: { xs: "none", sm: "block" } }}
               >
-                Next action
+                Action · Validation
               </Typography>
             </Stack>
             {visible.map((item) => {
@@ -515,7 +632,12 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
                   );
               const record = queueRecords.find((record) => record.id === item.id)!;
               return (
-                <Box component="article" className="source-queue-row" key={item.id}>
+                <Box
+                  component="article"
+                  className="source-queue-row"
+                  key={item.id}
+                  aria-labelledby={queue.getLinkProps(record).id}
+                >
                   <Box sx={{ minWidth: 0 }}>
                     <Typography
                       component={Link}
@@ -553,7 +675,6 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
                         }
                         sx={{ height: 24, fontSize: 12 }}
                       />
-                      {savedTask && <SourceResultLabel item={item} task={savedTask} />}
                     </Stack>
                   </Box>
                   <SourceNextAction
@@ -575,6 +696,7 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
                     }}
                     relatedLink={(target) => queue.getRelatedLinkProps(record, target)}
                   />
+                  <SourceResultLabel item={item} task={savedTask} validationOnly />
                 </Box>
               );
             })}
@@ -665,16 +787,34 @@ export function WorkItemsPage({ kind }: { kind: WorkItem["kind"] }) {
         fullWidth
         maxWidth="md"
         aria-labelledby={actionTitleId}
+        slotProps={{
+          transition: {
+            onExited: () => {
+              const opener = actionOpener.current
+                ? document.getElementById(actionOpener.current)
+                : null;
+              if (opener && opener.getClientRects().length > 0 && !opener.hasAttribute("disabled"))
+                opener.focus({ preventScroll: true });
+            },
+          },
+        }}
       >
         <DialogTitle id={actionTitleId}>
-          {actionTarget?.item.kind === "issue" ? "Issue" : "PR"} #{actionTarget?.item.number}
+          {actionItem?.kind === "issue" ? "Issue" : "PR"} #{actionItem?.number}
+          {actionItem && (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+              {actionItem.title}
+            </Typography>
+          )}
         </DialogTitle>
         <DialogContent>
-          {actionTarget && (
+          {actionTarget && actionItem && (
             <StandaloneActions
-              workItem={actionTarget.item}
+              key={actionTarget.request.id}
+              workItem={actionItem}
               reportId={actionTarget.reportId}
               request={actionTarget.request}
+              onRelatedNavigate={actionTarget.onRelatedNavigate}
               onBusyChange={setActionBusy}
               guardScope={guardScope}
             />

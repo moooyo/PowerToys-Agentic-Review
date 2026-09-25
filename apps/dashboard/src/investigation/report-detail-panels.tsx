@@ -1,6 +1,7 @@
 import type { InvestigationReportHeaderV1, InvestigationResultV1 } from "@agentic-review/contracts";
 import { Alert, Box, Button, Chip, CircularProgress, Stack, Typography } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { investigationApi } from "./api";
 import { ArtifactPanel } from "./artifact-panel";
@@ -56,9 +57,6 @@ export function ReportEvidence({
                 <Typography variant="subtitle2">{evidence.summary}</Typography>
                 <Typography variant="body2" color="text.secondary">
                   {evidence.source} · {evidence.authority}
-                </Typography>
-                <Typography variant="caption">
-                  Subject {evidence.subjectRef} · Attempt {evidence.provenance.attemptId}
                 </Typography>
                 <ExactRecord label="Provenance" value={evidence} />
               </Box>
@@ -147,9 +145,11 @@ function ReportMediaPublication({
 export function ReportDetails({
   value,
   result,
+  actions,
 }: {
   value: InvestigationReportHeaderV1;
   result: InvestigationResultV1;
+  actions?: ReactNode;
 }) {
   return (
     <Box className="report-details-layout">
@@ -265,6 +265,7 @@ export function ReportDetails({
             <Typography component="summary">Digest</Typography>
             <Typography variant="caption">{value.report.logicalContentDigest}</Typography>
           </Box>
+          {actions && <Box sx={{ mt: 2 }}>{actions}</Box>}
         </Section>
         <Box component="details" className="report-detail-disclosure">
           <Typography component="summary">Coverage</Typography>

@@ -10,6 +10,7 @@ import { createPublicationComposer, type PublicationComposerDraft } from "./publ
 export interface ActionDraftFields {
   nextActionId: string | undefined;
   body: string;
+  summaryMode: "generated" | "custom";
   mergeMethod: "merge" | "squash" | "rebase";
   commitTitle: string;
   closeReason: "completed" | "not_planned";
@@ -68,6 +69,7 @@ export function createActionDraft(): ActionDraftRecord {
   const fields: ActionDraftFields = {
     nextActionId: undefined,
     body: "",
+    summaryMode: "generated",
     mergeMethod: "squash",
     commitTitle: "",
     closeReason: "completed",
@@ -145,6 +147,14 @@ export function saveActionDraft(record: ActionDraftRecord): ActionDraftRecord {
     savedFields: { ...record.fields },
     savedPublication: structuredClone(record.publication),
   };
+}
+
+export function editActionSummary(record: ActionDraftRecord, body: string): ActionDraftRecord {
+  return { ...record, fields: { ...record.fields, body, summaryMode: "custom" } };
+}
+
+export function resetActionSummary(record: ActionDraftRecord): ActionDraftRecord {
+  return { ...record, fields: { ...record.fields, body: "", summaryMode: "generated" } };
 }
 
 export function discardActionDraft(record: ActionDraftRecord): ActionDraftRecord {

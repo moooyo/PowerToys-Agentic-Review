@@ -14,9 +14,11 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  IconButton,
   Stack,
   Tab,
   Tabs,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -46,7 +48,7 @@ import {
 import { findingViewParameters } from "./report-findings";
 import { ReportFindingsReader } from "./report-findings-reader";
 import { assertActionContext, assertReportBindings, selectionContext } from "./report-state";
-import { ReviewQueueBar } from "./review-navigation";
+import { ReviewQueueBar, type ReviewRecord } from "./review-navigation";
 import { sessionIdentity, useInvestigationSession } from "./session";
 import { sourceActionLabel } from "./source-result";
 import { PageHeading } from "./workspace-ui";
@@ -58,12 +60,14 @@ export function StandaloneActions({
   request,
   onBusyChange,
   guardScope,
+  onRelatedNavigate,
 }: {
   workItem: WorkItem;
   reportId?: string;
   request?: ActionPanelRequest;
   onBusyChange?: (busy: boolean) => void;
   guardScope?: string;
+  onRelatedNavigate?: (target: ReviewRecord) => boolean;
 }) {
   const { session } = useInvestigationSession();
   const query = useQuery({
@@ -98,6 +102,7 @@ export function StandaloneActions({
       request={request}
       onBusyChange={onBusyChange}
       guardScope={guardScope}
+      onRelatedNavigate={onRelatedNavigate}
     />
   );
 }
@@ -108,12 +113,14 @@ function ActionsWithState({
   request,
   onBusyChange,
   guardScope,
+  onRelatedNavigate,
 }: {
   workItem: WorkItem;
   context: ActionContextV1;
   request?: ActionPanelRequest;
   onBusyChange?: (busy: boolean) => void;
   guardScope?: string;
+  onRelatedNavigate?: (target: ReviewRecord) => boolean;
 }) {
   const { session } = useInvestigationSession();
   const [selection, dispatch] = useReducer(
@@ -158,6 +165,7 @@ function ActionsWithState({
         request={request}
         onBusyChange={onBusyChange}
         guardScope={guardScope}
+        onRelatedNavigate={onRelatedNavigate}
       />
     </Stack>
   );
@@ -506,20 +514,23 @@ function BoundReportWorkspace({
               </Typography>
             )}
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-              <Button onClick={() => setSection("evidence")}>View evidence</Button>
               <Button disabled={!canOpenActions} onClick={() => openActions()}>
                 Other actions
               </Button>
-              <Button
-                startIcon={<RefreshRounded />}
-                disabled={context.isFetching || workItem.isFetching}
-                onClick={() => {
-                  void context.refetch();
-                  void workItem.refetch();
-                }}
-              >
-                Refresh actions
-              </Button>
+              <Tooltip title="Refresh available actions">
+                <span>
+                  <IconButton
+                    aria-label="Refresh available actions"
+                    disabled={context.isFetching || workItem.isFetching}
+                    onClick={() => {
+                      void context.refetch();
+                      void workItem.refetch();
+                    }}
+                  >
+                    <RefreshRounded />
+                  </IconButton>
+                </span>
+              </Tooltip>
             </Stack>
           </Stack>
         }
@@ -586,14 +597,6 @@ function BoundReportWorkspace({
             label="Details"
           />
         </Tabs>
-        <Button
-          startIcon={<DownloadRounded />}
-          disabled={exporting}
-          onClick={() => void download()}
-          aria-label="Export complete JSON"
-        >
-          Export JSON
-        </Button>
       </Box>
       <Box role="tabpanel" id={`report-panel-${tab}`} aria-labelledby={`report-tab-${tab}`}>
         {tab === "findings" && (
@@ -608,13 +611,29 @@ function BoundReportWorkspace({
             canEdit={canEdit}
             canPublish={canEdit && canOpenActions}
             onPublish={() => openActions({ importReportSelection: true })}
+            notificationsPaused={actionOpen}
           />
         )}
         {tab !== "findings" && full.isPending && (
           <CircularProgress size={24} aria-label="Loading complete report details" />
         )}
         {tab === "evidence" && result && <ReportEvidence result={result} identity={identity} />}
-        {tab === "details" && result && <ReportDetails value={value} result={result} />}
+        {tab === "details" && result && (
+          <ReportDetails
+            value={value}
+            result={result}
+            actions={
+              <Button
+                startIcon={<DownloadRounded />}
+                disabled={exporting}
+                onClick={() => void download()}
+                aria-label="Export complete JSON"
+              >
+                {exporting ? "Exporting…" : "Export JSON"}
+              </Button>
+            }
+          />
+        )}
       </Box>
       <Dialog
         open={actionOpen}

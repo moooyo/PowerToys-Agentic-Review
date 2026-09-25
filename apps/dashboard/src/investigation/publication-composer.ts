@@ -201,7 +201,7 @@ export function publicationEntrySourceBody(
   return editedBodies[entry.draftId] ?? savedDraft(entry, result)?.body ?? entry.sourceBody;
 }
 
-function reportMatchesContext(result: Report, context: ActionContextV1): boolean {
+export function publicationReportMatchesContext(result: Report, context: ActionContextV1): boolean {
   return Boolean(
     result &&
       context.repositoryId === result.context.repository.id &&
@@ -223,7 +223,7 @@ export function publicationSuggestionStatus(
       valid: false,
       reason: "This draft has no saved code suggestion. Publish it as summary text.",
     };
-  if (!reportMatchesContext(result, context))
+  if (!publicationReportMatchesContext(result, context))
     return {
       valid: false,
       reason: "Refresh the exact report and action context before using this suggestion.",
@@ -324,7 +324,7 @@ export function validatePublication(
     );
   if (
     (draft.selectedFindingIds.length > 0 || draft.selectedDraftIds.length > 0) &&
-    !reportMatchesContext(result, context)
+    !publicationReportMatchesContext(result, context)
   )
     add(
       "selection",
@@ -332,8 +332,7 @@ export function validatePublication(
     );
   if (new Set(rows.map(({ entry }) => entry.draftId)).size !== rows.length)
     add("selection", "The selected feedback contains a duplicate draft.");
-  if (action !== "approve" && !summary.trim() && rows.length === 0)
-    add("selection", "Add a message or select feedback to publish.");
+  if (!summary.trim()) add("summary", "Enter a summary or choose Use generated summary.");
 
   const ranges = new Map<string, Array<{ start: number; end: number; draftId: string }>>();
   let suggestions = 0;
@@ -380,8 +379,15 @@ export function validatePublication(
   }
   if (suggestions > 100)
     add("selection", "A review can include at most 100 code suggestions. Remove some suggestions.");
-  if (action === "suggestion-comment" && suggestions === 0)
-    add("selection", "Select at least one valid code suggestion for a comment review.");
+  if (action === "suggestion-comment" && suggestions === 0) {
+    const editableSuggestion = rows.find(
+      ({ entry, saved }) => entry.findingId !== null && saved.suggestion,
+    );
+    add(
+      editableSuggestion ? `draft-${editableSuggestion.entry.draftId}-mode` : "selection",
+      "Select at least one valid code suggestion for a comment review.",
+    );
+  }
   const transportSummary = [
     summary,
     ...rows.filter(({ entry }) => entry.mode === "summary").map(({ entry }) => entry.body),

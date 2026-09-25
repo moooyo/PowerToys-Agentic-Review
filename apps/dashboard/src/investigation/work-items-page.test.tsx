@@ -43,14 +43,15 @@ function render(queryClient: QueryClient, entry = "/pull-requests") {
 }
 
 describe("source list presentation", () => {
-  it("presents the saved conclusion and validation independently of completed execution", async () => {
+  it("keeps validation separate from completed execution without repeating the conclusion", async () => {
     const { queryClient, source, task } = await fixture();
     const header = await createSampleInvestigationApi().report("sample-pr-p1-report");
     queryClient.setQueryData(["investigation-tasks", "source-list"], { items: [task] });
     queryClient.setQueryData(sourceReportKey("source-list-test", source.id, task), header);
     const html = render(queryClient);
-    expect(html).toContain("Changes needed");
+    expect(html).not.toContain("Changes needed");
     expect(html).toContain("E2E required");
+    expect(html).toContain('aria-label="Validation: E2E required"');
     expect(html).toContain("Completed");
     expect(html).toContain(task.repository.fullName);
     expect(html).not.toContain("Loading conclusion");
@@ -85,9 +86,83 @@ describe("source list presentation", () => {
     const html = render(queryClient);
     expect(html).toContain("source-queue-row");
     expect(html).toContain("source-queue-title");
-    expect(html).toContain("Next action");
+    expect(html).toContain("Action · Validation");
     expect(html).toContain("Request changes");
     expect(html).not.toContain("Prepare request changes");
+    const actionButton = html.match(
+      new RegExp(`<button\\b[^>]*aria-label="Request changes for PR #${source.number}"[^>]*>`, "u"),
+    )?.[0];
+    expect(actionButton).toContain('aria-haspopup="dialog"');
+    expect(html).not.toContain("Next action");
+  });
+
+  it("opens a recommended validation report directly without preparation permission", async () => {
+    const { queryClient, source, task } = await fixture();
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-pr-p1-report");
+    const context = await api.actionContext(source.id, header.report.id);
+    const candidate = context.nextActions[0];
+    if (!candidate || !context.reportRef) throw new Error("A report action fixture is required.");
+    queryClient.setQueryData(["investigation-tasks", "source-list"], { items: [task] });
+    queryClient.setQueryData(sourceReportKey("source-list-test", source.id, task), header);
+    queryClient.setQueryData(sourceActionKey("source-list-test", source, header), {
+      ...context,
+      actor: { ...context.actor, id: "reader" },
+      recommendation: { action: "view-validation", reason: "Read the linked validation report." },
+      recommendedActionId: "linked-validation-action",
+      nextActions: [
+        {
+          ...candidate,
+          id: "linked-validation-action",
+          action: "view-validation",
+          allowed: true,
+          canPrepare: false,
+          state: "saved",
+          validationReportRef: { ...context.reportRef, id: "linked-validation-report" },
+        },
+      ],
+    });
+    const html = render(queryClient);
+    const validationLink = html.match(
+      /<a\b[^>]*aria-label="View validation for PR #[^"]+"[^>]*>/u,
+    )?.[0];
+    expect(validationLink).toContain("reportId=linked-validation-report");
+    expect(validationLink).toContain("section=validation");
+    expect(validationLink).not.toContain('aria-disabled="true"');
+    expect(validationLink).not.toContain('aria-haspopup="dialog"');
+  });
+
+  it("shows a local recovery control when action availability cannot load", async () => {
+    const { queryClient, source, task } = await fixture();
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-pr-p1-report");
+    queryClient.setQueryData(["investigation-tasks", "source-list"], { items: [task] });
+    queryClient.setQueryData(sourceReportKey("source-list-test", source.id, task), header);
+    const key = sourceActionKey("source-list-test", source, header);
+    queryClient.setQueryData(key, await api.actionContext(source.id, header.report.id));
+    const query = queryClient.getQueryCache().find({ queryKey: key, exact: true });
+    if (!query) throw new Error("The action query fixture is required.");
+    query.setState({
+      data: undefined,
+      status: "error",
+      error: new Error("Action availability is temporarily unavailable."),
+      errorUpdatedAt: Date.now(),
+      fetchStatus: "idle",
+    });
+
+    const html = render(queryClient);
+    expect(html).toContain("Refresh actions");
+    expect(html).toContain("Action availability is temporarily unavailable.");
+    expect(html).not.toContain('aria-label="Request changes for PR');
+  });
+
+  it("keeps clear filters available while matching sources remain visible", async () => {
+    const { queryClient, source } = await fixture();
+    queryClient.setQueryData(["investigation-tasks", "source-list"], { items: [] });
+    const html = render(queryClient, `/pull-requests?q=${source.number}`);
+    expect(html).toContain(source.title);
+    expect(html).toContain("Clear filters");
+    expect(html).not.toContain("No matching sources");
   });
 
   it("keeps sources visible while investigation status required by a filter is loading", async () => {

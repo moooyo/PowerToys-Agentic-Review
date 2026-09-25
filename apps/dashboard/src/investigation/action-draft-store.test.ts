@@ -13,9 +13,11 @@ import {
   beginActionPreparation,
   createActionDraft,
   discardActionDraft,
+  editActionSummary,
   hasUnresolvedActionPreparation,
   hasUnresolvedActionSubmission,
   inspectActionIntent,
+  resetActionSummary,
   retainActionIntent,
   saveActionDraft,
   switchActionDraft,
@@ -52,6 +54,39 @@ function intent(input = request()): InvestigationActionIntentV1 {
 }
 
 describe("private action drafts", () => {
+  it("preserves a custom summary across selection changes and restores generation explicitly", () => {
+    let record = switchActionDraft(createActionDraft(), "request-changes");
+    expect(record.fields.summaryMode).toBe("generated");
+    record = saveActionDraft(
+      editActionSummary(record, "The saved configuration must survive cancellation."),
+    );
+    record = {
+      ...record,
+      publication: { ...record.publication, selectedFindingIds: ["finding-2"] },
+    };
+    record = switchActionDraft(record, "approve");
+    expect(record.fields.summaryMode).toBe("generated");
+    record = switchActionDraft(record, "request-changes");
+    expect(record.fields.body).toBe("The saved configuration must survive cancellation.");
+    expect(record.fields.summaryMode).toBe("custom");
+    const generated = resetActionSummary(record);
+    expect(generated.fields.summaryMode).toBe("generated");
+    expect(generated.fields.body).toBe("");
+    expect(generated.publication).toEqual(record.publication);
+    expect(discardActionDraft(generated).fields).toEqual(record.savedFields);
+  });
+
+  it("keeps the prepared summary frozen while subsequent editing returns to automatic mode", () => {
+    const prepared = acceptPreparedAction(
+      beginActionPreparation(editActionSummary(createActionDraft(), "Original draft"), request()),
+      intent(),
+    );
+    const changed = resetActionSummary(editActionSummary(prepared, "Later editing"));
+    expect(changed.intent?.payload).toMatchObject({ body: "Exact original body" });
+    expect(changed.prepareRequest?.payload).toMatchObject({ body: "Exact original body" });
+    expect(beginActionConfirmation(changed, intent()).confirmationUncertain).toBe(true);
+  });
+
   it("keeps selection, summary and execution fields independent for each action", () => {
     let record = switchActionDraft(createActionDraft(), "request-changes");
     record = {

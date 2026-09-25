@@ -111,6 +111,22 @@
   gap: 16px;
   padding: 12px 0 20px;
 }
+.workers-policy-details.MuiAccordion-root {
+  border-top: 1px solid var(--mui-palette-divider);
+  background: transparent;
+}
+.workers-policy-details.MuiAccordion-root::before {
+  display: none;
+}
+.workers-policy-details .MuiAccordionSummary-root {
+  min-height: 48px;
+  padding: 0;
+}
+.workers-policy-details .MuiAccordionDetails-root {
+  display: grid;
+  gap: 24px;
+  padding: 0 0 8px;
+}
 .workers-table-wrap {
   overflow-x: auto;
 }
@@ -141,6 +157,10 @@
   min-height: 28px;
   font-weight: 600;
   justify-content: flex-start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  max-width: 100%;
 }
 .workers-table .MuiChip-root {
   height: 28px;
@@ -148,7 +168,7 @@
 .workers-table .MuiChip-label {
   white-space: nowrap;
 }
-.workers-table .MuiButton-root {
+.workers-table .MuiButton-root:not(.workers-table-link) {
   white-space: nowrap;
 }
 .workers-policy > .MuiButton-root {

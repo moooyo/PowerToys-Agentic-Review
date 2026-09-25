@@ -41,6 +41,118 @@ describe("complete report reader", () => {
     expect(html).not.toContain("Private feedback saved for this session");
   });
 
+  it.each([true, false])(
+    "keeps the sixth finding in its directory window with a selected checkbox when canEdit is %s",
+    async (canEdit) => {
+      const api = createSampleInvestigationApi();
+      const header = await api.report("sample-pr-p0-report");
+      const result = await api.exportReport(header.report.id);
+      const finding = result.findings[5];
+      if (!finding) throw new Error("The sample must contain a sixth finding.");
+      const draft = createReportDraft({
+        reportId: header.report.id,
+        reportVersion: header.report.version,
+        recommendedAction: null,
+        suggestionOptions: [],
+      });
+      draft.current = {
+        ...draft.current,
+        selection: {
+          ...draft.current.selection,
+          selectedFindings: [
+            { findingId: finding.id, draftId: finding.feedbackDraft.id, suggestionId: null },
+          ],
+        },
+      };
+      const html = renderToStaticMarkup(
+        <MemoryRouter
+          initialEntries={[`/reports?reportId=${header.report.id}&findingId=${finding.id}`]}
+        >
+          <ReportFindingsReader
+            header={header}
+            result={result}
+            loading={false}
+            draft={draft}
+            onDraft={() => {}}
+            dispatch={() => {}}
+            canEdit={canEdit}
+            canPublish={canEdit}
+            onPublish={() => {}}
+          />
+        </MemoryRouter>,
+      );
+      const directoryEntries = [...html.matchAll(/data-finding-id="([^"]+)"/gu)];
+      expect(directoryEntries.map((entry) => entry[1])).toEqual(
+        result.findings.slice(5, 10).map((entry) => entry.id),
+      );
+      const currentEntry = html
+        .match(/<button\b[^>]*>/gu)
+        ?.find((entry) => entry.includes(`data-finding-id="${finding.id}"`));
+      expect(currentEntry).toContain('aria-current="true"');
+      expect(html).toContain(`aria-label="Finding 6: ${finding.title}"`);
+      expect(html).toContain("6–10 of 26");
+      expect(html).toContain("Show all 25 on this page");
+      const choice = html
+        .match(/<label\b[^>]*>[\s\S]*?<\/label>/gu)
+        ?.find((label) => label.includes(`aria-label="Include ${finding.title} in feedback"`));
+      const checkbox = choice?.match(/<input\b[^>]*>/u)?.[0];
+      expect(choice).toContain("Include in feedback");
+      expect(checkbox).toContain('type="checkbox"');
+      expect(checkbox).toContain('checked=""');
+      expect(checkbox?.includes('disabled=""')).toBe(!canEdit);
+    },
+  );
+
+  it("keeps a selected edited finding readable when the retained filters exclude it", async () => {
+    const api = createSampleInvestigationApi();
+    const header = await api.report("sample-pr-p0-report");
+    const result = await api.exportReport(header.report.id);
+    const finding = result.findings[5];
+    if (!finding) throw new Error("The sample must contain a sixth finding.");
+    const draft = createReportDraft({
+      reportId: header.report.id,
+      reportVersion: header.report.version,
+      recommendedAction: null,
+      suggestionOptions: [],
+    });
+    draft.current = {
+      ...draft.current,
+      editedBodies: { [finding.feedbackDraft.id]: "Retained feedback outside the P0 filter" },
+      selection: {
+        ...draft.current.selection,
+        selectedFindings: [
+          { findingId: finding.id, draftId: finding.feedbackDraft.id, suggestionId: null },
+        ],
+      },
+    };
+    const html = renderToStaticMarkup(
+      <MemoryRouter
+        initialEntries={[
+          `/reports?reportId=${header.report.id}&findingId=${finding.id}&findingPriority=P0`,
+        ]}
+      >
+        <ReportFindingsReader
+          header={header}
+          result={result}
+          loading={false}
+          draft={draft}
+          onDraft={() => {}}
+          dispatch={() => {}}
+          canEdit
+          canPublish
+          onPublish={() => {}}
+        />
+      </MemoryRouter>,
+    );
+    expect(html).toContain(`aria-label="Finding 6: ${finding.title}"`);
+    expect(html).toContain("This finding is hidden by the current filters.");
+    expect(html).toContain("Clear filters");
+    expect(html).toContain("1 selected");
+    expect(html).toContain("Retained feedback outside the P0 filter");
+    expect(html).toContain("Publish selected");
+    expect(html).not.toContain("Finding unavailable");
+  });
+
   it("does not silently replace an unavailable deep-linked finding", async () => {
     const api = createSampleInvestigationApi();
     const header = await api.report("sample-pr-p1-report");

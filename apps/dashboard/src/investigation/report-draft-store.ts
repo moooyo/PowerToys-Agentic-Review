@@ -43,6 +43,7 @@ export type ReportDraftEvent =
   | { type: "edit"; draftId: string; body: string }
   | { type: "save-finding"; draftId: string }
   | { type: "save" }
+  | { type: "discard-text" }
   | { type: "discard" };
 
 export function reportDraftReducer(
@@ -83,6 +84,11 @@ export function reportDraftReducer(
     }
     case "save":
       return { current: record.current, saved: record.current };
+    case "discard-text":
+      return {
+        ...record,
+        current: { ...record.current, editedBodies: record.saved.editedBodies },
+      };
     case "discard":
       return { current: record.saved, saved: record.saved };
   }

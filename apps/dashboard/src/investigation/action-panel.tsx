@@ -50,9 +50,11 @@ import {
   beginActionPreparation,
   createActionDraft,
   discardActionDraft,
+  editActionSummary,
   hasUnresolvedActionPreparation,
   hasUnresolvedActionSubmission,
   inspectActionIntent,
+  resetActionSummary,
   retainActionIntent,
   saveActionDraft,
   switchActionDraft,
@@ -64,12 +66,20 @@ import {
   importPublicationSelection,
   materializePublication,
   type PublicationComposerDraft,
+  publicationReportMatchesContext,
   setPublicationFinding,
   setPublicationIndependentDraft,
   validatePublication,
 } from "./publication-composer";
-import { PublicationComposerPanel, type PublicationStep } from "./publication-composer-panel";
+import {
+  PublicationComposerPanel,
+  type PublicationStep,
+  PublicationSteps,
+  publicationErrorTarget,
+} from "./publication-composer-panel";
+import { generatePublicationSummary } from "./publication-summary";
 import { TextList } from "./report-sections";
+import type { ReviewRecord } from "./review-navigation";
 import { sessionIdentity, useInvestigationSession } from "./session";
 import { sourceActionLabel } from "./source-result";
 import { InvestigationHttpError } from "./transport";
@@ -791,6 +801,7 @@ export function ActionPanel({
   onBusyChange,
   guardScope,
   request,
+  onRelatedNavigate,
 }: {
   workItem: WorkItem;
   context: ActionContextV1;
@@ -802,6 +813,7 @@ export function ActionPanel({
   onSaveDraft?: () => void;
   guardScope?: string;
   request?: ActionPanelRequest;
+  onRelatedNavigate?: (target: ReviewRecord) => boolean;
 }) {
   const queryClient = useQueryClient();
   const { session } = useInvestigationSession();
@@ -831,7 +843,7 @@ export function ActionPanel({
   });
   const {
     nextActionId,
-    body,
+    body: customBody,
     mergeMethod,
     commitTitle,
     closeReason,
@@ -843,6 +855,21 @@ export function ActionPanel({
     baseBranch,
     sourceCommit,
   } = draft.fields;
+  const action = draft.activeAction;
+  const feedbackAction =
+    action !== null &&
+    ["comment", "approve", "suggestion-comment", "request-changes"].includes(action);
+  const summaryGenerated =
+    draft.fields.summaryMode === "generated" ||
+    (draft.fields.summaryMode === undefined && !customBody.trim());
+  const body =
+    feedbackAction && summaryGenerated
+      ? generatePublicationSummary(
+          action,
+          draft.publication,
+          publicationReportMatchesContext(result, context) ? result : undefined,
+        )
+      : customBody;
   const intent = draft.intent;
   const repositoryName =
     result?.context.repository.id === workItem.repositoryId
@@ -854,6 +881,7 @@ export function ActionPanel({
   const [choosingAction, setChoosingAction] = useState(draft.activeAction === null);
   const [importOnChoice, setImportOnChoice] = useState(false);
   const [publicationStep, setPublicationStep] = useState<PublicationStep>("select");
+  const previewReturnField = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -889,6 +917,7 @@ export function ActionPanel({
     setReceiptId(null);
     setChoosingAction(currentDraft.current.activeAction === null);
     setPublicationStep("select");
+    previewReturnField.current = null;
     setImportOnChoice(false);
     setError(undefined);
     setFieldErrors({});
@@ -916,7 +945,11 @@ export function ActionPanel({
     field: Field,
     value: ActionDraftFields[Field],
   ) => {
-    updateDraft((record) => ({ ...record, fields: { ...record.fields, [field]: value } }));
+    updateDraft((record) =>
+      field === "body"
+        ? editActionSummary(record, value as string)
+        : { ...record, fields: { ...record.fields, [field]: value } },
+    );
     clearFieldError(field === "body" ? "summary" : field);
   };
   const discard = () => {
@@ -965,15 +998,11 @@ export function ActionPanel({
   const needsSourceSelection = workItem.kind === "issue" && planSubject?.kind === "issue_snapshot";
   const duplicateTarget = savedDuplicateTarget(result, workItem);
   const canPrepareActions = session.user?.permissions.includes("action:prepare") === true;
-  const action = draft.activeAction;
   const allowed = action !== null && isActionAllowed(context, action, proposal?.id);
-  const feedbackAction =
-    action !== null &&
-    ["comment", "approve", "suggestion-comment", "request-changes"].includes(action);
   const feedbackReady =
     !feedbackAction ||
-    (publicationStep === "compose" &&
-      (action !== "request-changes" || draft.publication.selectedFindingIds.length > 0));
+    action !== "request-changes" ||
+    draft.publication.selectedFindingIds.length > 0;
 
   const feedbackKinds = new Set<InvestigationActionKind>([
     "comment",
@@ -1067,17 +1096,13 @@ export function ActionPanel({
     });
     setChoosingAction(false);
     setImportOnChoice(false);
-    const composeFirst =
-      options.importSelection || (feedbackKinds.has(selected) && !result?.findings.length);
-    setPublicationStep(composeFirst ? "compose" : "select");
+    setPublicationStep("select");
     setError(undefined);
     setFieldErrors({});
     if (feedbackKinds.has(selected))
       requestAnimationFrame(() => {
         document.getElementById(fieldId("publication-step"))?.scrollIntoView({ block: "start" });
-        document
-          .getElementById(fieldId(composeFirst ? "summary" : "show"))
-          ?.focus({ preventScroll: true });
+        document.getElementById(fieldId("selection"))?.focus({ preventScroll: true });
       });
   };
   const selectAction = (selected: InvestigationActionKind, proposalId?: string) => {
@@ -1234,13 +1259,14 @@ export function ActionPanel({
   const focusField = (name: string) => {
     if (name === "operation") setChoosingAction(true);
     else if (name === "selection") setPublicationStep("select");
-    else if (name.startsWith("draft-") || name === "summary") setPublicationStep("compose");
+    else if (name.startsWith("draft-") || name === "summary") setPublicationStep("edit");
     requestAnimationFrame(() => {
       const target = document.getElementById(fieldId(name));
       for (let parent = target?.parentElement; parent; parent = parent.parentElement)
         if (parent instanceof HTMLDetailsElement) parent.open = true;
       target?.focus({ preventScroll: true });
       target?.scrollIntoView({ block: "nearest" });
+      if (!target) summaryFocus.current?.focus();
     });
   };
   let currentPayload: InvestigationActionPayload | null = null;
@@ -1273,6 +1299,13 @@ export function ActionPanel({
     receiptCandidate.workItemId === workItem.id
       ? receiptCandidate
       : null;
+  const editableFeedbackPreview = Boolean(
+    !receiptId &&
+      previewIntent?.state === "prepared" &&
+      previewIntent.payload.kind === "feedback" &&
+      previewIntent.action === action &&
+      !draft.confirmationUncertain,
+  );
   const lastReceipt = [...draft.receipts]
     .reverse()
     .find(
@@ -1304,10 +1337,7 @@ export function ActionPanel({
       if (Object.keys(errors).length) {
         setFieldErrors(errors);
         setError(undefined);
-        requestAnimationFrame(() => {
-          summaryFocus.current?.focus();
-          summaryFocus.current?.scrollIntoView({ block: "nearest" });
-        });
+        focusField(publicationErrorTarget(errors));
         return;
       }
     }
@@ -1461,6 +1491,7 @@ export function ActionPanel({
       );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["investigation-action-context"] }),
+        queryClient.invalidateQueries({ queryKey: ["investigation-source-actions"] }),
         queryClient.invalidateQueries({ queryKey: ["investigation-work-item"] }),
         queryClient.invalidateQueries({ queryKey: ["investigation-work-items"] }),
       ]);
@@ -1562,6 +1593,7 @@ export function ActionPanel({
       // pending marker must not keep this composer blocked after an authoritative read.
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["investigation-action-context"] }),
+        queryClient.invalidateQueries({ queryKey: ["investigation-source-actions"] }),
         queryClient.invalidateQueries({ queryKey: ["investigation-work-item"] }),
         queryClient.invalidateQueries({ queryKey: ["investigation-work-items"] }),
         queryClient.invalidateQueries({ queryKey: ["investigation-tasks"] }),
@@ -1946,14 +1978,21 @@ export function ActionPanel({
             />
           </Alert>
         )}
-        {action && !choosingAction && navigationActions.has(action) && context.reportRef && (
-          <Button
-            component={Link}
-            to={reportNavigation(action, context.reportRef.id, workItem.repositoryId)}
-          >
-            {actionLabels[action]}
-          </Button>
-        )}
+        {action &&
+          !choosingAction &&
+          navigationActions.has(action) &&
+          (proposal?.validationReportRef ?? context.reportRef) && (
+            <Button
+              component={Link}
+              to={reportNavigation(
+                action,
+                (proposal?.validationReportRef ?? context.reportRef)!.id,
+                workItem.repositoryId,
+              )}
+            >
+              {actionLabels[action]}
+            </Button>
+          )}
         {plan && !choosingAction && (
           <Box sx={{ mb: 2 }}>
             <Typography variant="subtitle2">{plan.title}</Typography>
@@ -2003,12 +2042,18 @@ export function ActionPanel({
             reportSelection={selection}
             editedBodies={editedBodies}
             summary={body}
+            summaryGenerated={summaryGenerated}
             step={publicationStep}
             disabled={busy || submissionUnresolved || !canPrepareActions}
             errors={fieldErrors}
             fieldId={fieldId}
             onChange={updatePublication}
             onSummaryChange={(value) => setField("body", value)}
+            onUseGeneratedSummary={() => {
+              updateDraft(resetActionSummary);
+              clearFieldError("summary");
+              focusField("summary");
+            }}
             onClearError={clearFieldError}
             onStepChange={setPublicationStep}
           />
@@ -2206,11 +2251,13 @@ export function ActionPanel({
             Discard edits
           </Button>
           <Box sx={{ flex: 1 }} />
-          {(!feedbackAction || publicationStep === "compose") && !navigationActions.has(action) && (
+          {!navigationActions.has(action) && (
             <Button
+              id={fieldId("preview")}
               variant="contained"
               disabled={
                 choosingAction ||
+                !canPrepareActions ||
                 !allowed ||
                 !feedbackReady ||
                 busy ||
@@ -2238,6 +2285,15 @@ export function ActionPanel({
         fullWidth
         maxWidth="md"
         aria-labelledby={fieldId("preview-title")}
+        slotProps={{
+          transition: {
+            onExited: () => {
+              const target = previewReturnField.current;
+              previewReturnField.current = null;
+              if (mounted.current && target) focusField(target);
+            },
+          },
+        }}
       >
         <DialogTitle id={fieldId("preview-title")}>
           {previewIntent
@@ -2247,6 +2303,9 @@ export function ActionPanel({
         <DialogContent dividers>
           {previewIntent && (
             <Stack spacing={2}>
+              {!receiptId &&
+                previewIntent.state === "prepared" &&
+                previewIntent.payload.kind === "feedback" && <PublicationSteps step="preview" />}
               <ExactActionPreview
                 intent={previewIntent}
                 destination={destination}
@@ -2314,6 +2373,28 @@ export function ActionPanel({
                 <Button
                   component={Link}
                   to={`/tasks?taskId=${encodeURIComponent(previewIntent.result.taskId)}&repositoryId=${encodeURIComponent(previewIntent.repositoryId)}`}
+                  onClick={(event) => {
+                    if (
+                      event.button !== 0 ||
+                      event.ctrlKey ||
+                      event.metaKey ||
+                      event.shiftKey ||
+                      event.altKey
+                    )
+                      return;
+                    const taskId = previewIntent.result?.taskId;
+                    if (
+                      taskId &&
+                      onRelatedNavigate?.({
+                        kind: "task",
+                        id: taskId,
+                        workItemId: previewIntent.workItemId,
+                        repositoryId: previewIntent.repositoryId,
+                        href: `/tasks?taskId=${encodeURIComponent(taskId)}&repositoryId=${encodeURIComponent(previewIntent.repositoryId)}`,
+                      })
+                    )
+                      event.preventDefault();
+                  }}
                 >
                   Open linked task
                 </Button>
@@ -2327,10 +2408,27 @@ export function ActionPanel({
             onClick={() => {
               setPreviewOpen(false);
               setReceiptId(null);
+              if (editableFeedbackPreview) {
+                setPublicationStep("select");
+                previewReturnField.current = "selection";
+              }
             }}
           >
-            {receiptId ? "Back to draft" : "Close"}
+            {receiptId ? "Back to draft" : editableFeedbackPreview ? "Back to findings" : "Close"}
           </Button>
+          {editableFeedbackPreview && (
+            <Button
+              disabled={busy || !canPrepareActions || submissionUnresolved}
+              onClick={() => {
+                setPreviewOpen(false);
+                setReceiptId(null);
+                setPublicationStep("edit");
+                previewReturnField.current = "summary";
+              }}
+            >
+              Edit feedback
+            </Button>
+          )}
           {!receiptId && intent && ["unknown", "executing"].includes(intent.state) && (
             <Button
               disabled={busy || !hasExecutionPermission}

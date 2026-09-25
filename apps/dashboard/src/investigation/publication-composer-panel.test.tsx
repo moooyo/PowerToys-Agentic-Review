@@ -5,11 +5,64 @@ import { createPublicationComposer, setPublicationFinding } from "./publication-
 import {
   expandPublicationEditorsForErrors,
   PublicationComposerPanel,
+  publicationErrorTarget,
 } from "./publication-composer-panel";
 import { selectionContext } from "./report-state";
 import { createSampleInvestigationApi } from "./sample-adapter";
 
 describe("publication editor accessibility", () => {
+  it("routes direct-preview errors to an editable field before selection-wide errors", () => {
+    expect(
+      publicationErrorTarget({
+        selection: "Choose a suggestion.",
+        "draft-second-mode": "The source anchor changed.",
+      }),
+    ).toBe("draft-second-mode");
+    expect(publicationErrorTarget({ summary: "Restore the generated summary." })).toBe("summary");
+    expect(publicationErrorTarget({ selection: "Select a finding." })).toBe("selection");
+  });
+
+  it("presents two publication steps and native labelled selection controls without a compose gate", async () => {
+    const api = createSampleInvestigationApi();
+    const original = await api.exportReport("sample-pr-p1-report");
+    const result = { ...original, findings: original.findings.slice(0, 2) };
+    const context = await api.actionContext(result.context.workItem.id, result.id);
+    const fieldId = (name: string) => `publication-${encodeURIComponent(name)}`;
+    const html = renderToStaticMarkup(
+      <PublicationComposerPanel
+        action="request-changes"
+        context={context}
+        result={result}
+        draft={createPublicationComposer()}
+        reportSelection={createFeedbackSelection(selectionContext(context))}
+        editedBodies={{}}
+        summary="Requesting changes for the selected findings."
+        summaryGenerated={true}
+        step="select"
+        disabled={false}
+        errors={{}}
+        fieldId={fieldId}
+        onChange={() => {}}
+        onSummaryChange={() => {}}
+        onUseGeneratedSummary={() => {}}
+        onClearError={() => {}}
+        onStepChange={() => {}}
+      />,
+    );
+    expect(html).toContain("Select findings");
+    expect(html).toContain("Preview");
+    expect(html).toContain("Select all");
+    expect(html).toContain("Clear selection");
+    expect(html).not.toContain("Compose");
+    expect(html).not.toContain(">Continue<");
+    expect(html).not.toContain('id="publication-summary"');
+    for (const finding of result.findings) {
+      expect(html).toContain(`id="${fieldId(`include-${finding.feedbackDraft.id}`)}"`);
+      expect(html).toContain(finding.title);
+    }
+    expect(html.match(/type="checkbox"/g)?.length).toBeGreaterThanOrEqual(result.findings.length);
+  });
+
   it("keeps the second editor open while its last error is corrected", () => {
     const initial = new Map([
       ["first-draft", true],
@@ -59,13 +112,15 @@ describe("publication editor accessibility", () => {
         draft={draft}
         reportSelection={createFeedbackSelection(selectionContext(context))}
         editedBodies={{}}
-        summary=""
-        step="compose"
+        summary="Generated review summary."
+        summaryGenerated={true}
+        step="edit"
         disabled={false}
         errors={errors}
         fieldId={fieldId}
         onChange={() => {}}
         onSummaryChange={() => {}}
+        onUseGeneratedSummary={() => {}}
         onClearError={() => {}}
         onStepChange={() => {}}
       />,
@@ -100,13 +155,15 @@ describe("publication editor accessibility", () => {
           draft={draft}
           reportSelection={createFeedbackSelection(selectionContext(context))}
           editedBodies={{}}
-          summary=""
-          step="compose"
+          summary="Generated review summary."
+          summaryGenerated={true}
+          step="edit"
           disabled={false}
           errors={errors}
           fieldId={fieldId}
           onChange={() => {}}
           onSummaryChange={() => {}}
+          onUseGeneratedSummary={() => {}}
           onClearError={() => {}}
           onStepChange={() => {}}
         />,

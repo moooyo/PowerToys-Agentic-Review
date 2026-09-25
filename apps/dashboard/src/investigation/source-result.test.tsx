@@ -11,6 +11,7 @@ import {
   sourceActionContextMatches,
   sourceActionKey,
   sourceActionLabel,
+  sourceReportAction,
   sourceReportKey,
   sourceTaskReviewRecord,
 } from "./source-result";
@@ -234,6 +235,59 @@ describe("source result and current action binding", () => {
         new InvestigationHttpError(503, "Network unavailable"),
       ),
     ).toBe(header);
+  });
+
+  it("retains the saved assessment and exposes recovery after its refresh fails", async () => {
+    const { source, detail, identity, client } = await fixture();
+    const query = client.getQueryCache().find({
+      queryKey: sourceReportKey(identity, source.id, detail.task),
+      exact: true,
+    });
+    if (!query) throw new Error("A report cache fixture is required.");
+    query.setState({
+      status: "error",
+      error: new InvestigationHttpError(503, "Report refresh unavailable"),
+      errorUpdatedAt: Date.now(),
+      fetchStatus: "idle",
+    });
+    const html = renderSource(client, source);
+    expect(html).toContain("Changes needed");
+    expect(html).toContain("Report refresh failed. Showing the saved result.");
+    expect(html).toContain("Retry report");
+    expect(html).toContain("Read report");
+  });
+
+  it("uses the saved navigation target and its read permission independently of canPrepare", async () => {
+    const { context } = await fixture();
+    const candidate = context.nextActions[0];
+    if (!candidate || !context.reportRef) throw new Error("A saved action fixture is required.");
+    const navigation = {
+      ...candidate,
+      id: "read-validation",
+      action: "view-validation" as const,
+      state: "saved" as const,
+      validationReportRef: { ...context.reportRef, id: "linked-validation" },
+      allowed: true,
+      canPrepare: false,
+    };
+    const readContext = {
+      ...context,
+      recommendation: { action: "view-validation" as const, reason: "Read validation." },
+      recommendedActionId: navigation.id,
+      nextActions: [navigation],
+    };
+    expect(sourceReportAction(readContext)).toEqual({
+      action: "view-validation",
+      reportId: "linked-validation",
+      allowed: true,
+    });
+    expect(
+      sourceReportAction({
+        ...readContext,
+        nextActions: [{ ...navigation, allowed: false }],
+      })?.allowed,
+    ).toBe(false);
+    expect(sourceReportAction(context)).toBeUndefined();
   });
 
   it("does not derive visible task or report links from a forbidden tasks cache", async () => {

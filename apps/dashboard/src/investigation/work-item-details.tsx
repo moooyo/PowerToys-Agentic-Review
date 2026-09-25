@@ -24,7 +24,7 @@ import {
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { type ActionPanelRequest, isActionAllowed } from "./action-panel";
+import { type ActionPanelRequest, isActionAllowed, reportNavigation } from "./action-panel";
 import { investigationApi, type WorkItem } from "./api";
 import { CommentStatus, commentDetailsUrl, commentPollingInterval } from "./comment-deliveries";
 import { GithubSourceLink } from "./github-source-link";
@@ -41,6 +41,7 @@ import {
   sourceAccessDenied,
   sourceActionLabel,
   sourceActionReason,
+  sourceReportAction,
   useSourceActionContext,
   useSourceReport,
 } from "./source-result";
@@ -130,7 +131,6 @@ export function SourceTaskRow({ task, item }: { task: InvestigationTaskV1; item:
           color="text.secondary"
           sx={{ mt: 0.75, mb: 0, overflowWrap: "anywhere" }}
         >
-          {task.id} ·{" "}
           {task.executionPolicy.mode === "snapshot_only"
             ? "Snapshot only"
             : task.executionPolicy.mode === "source_read"
@@ -138,6 +138,25 @@ export function SourceTaskRow({ task, item }: { task: InvestigationTaskV1; item:
               : "Execution"}{" "}
           · {currentSource ? "Current revision" : "Earlier or linked revision"}
         </Typography>
+        <Box
+          component="details"
+          sx={{
+            mt: 0.5,
+            overflowWrap: "anywhere",
+            "& summary": {
+              cursor: "pointer",
+              typography: "caption",
+              color: "text.secondary",
+              minHeight: 44,
+              py: 1,
+            },
+          }}
+        >
+          <summary>Task ID</summary>
+          <Typography component="code" variant="caption">
+            {task.id}
+          </Typography>
+        </Box>
       </Box>
       <Stack
         direction={{ xs: "row", sm: "column" }}
@@ -358,12 +377,13 @@ function SourceDecision({
   const saved = currentContext?.nextActions.find(
     (value) => value.id === currentContext?.recommendedActionId,
   );
+  const reportAction = currentContext ? sourceReportAction(currentContext) : undefined;
   const allowed = Boolean(
     fresh &&
       !context.isError &&
       currentContext &&
       action &&
-      isActionAllowed(currentContext, action, saved?.id),
+      (reportAction?.allowed ?? isActionAllowed(currentContext, action, saved?.id)),
   );
   return (
     <OutcomeSummary
@@ -380,12 +400,26 @@ function SourceDecision({
               <Button component={Link} to={taskUrl(activeTask)} variant="contained">
                 View follow-up
               </Button>
+            ) : reportAction && !currentContext?.pendingSubmission ? (
+              <Button
+                component={Link}
+                to={reportNavigation(
+                  reportAction.action,
+                  reportAction.reportId,
+                  source.repositoryId,
+                )}
+                variant="contained"
+                disabled={!allowed}
+              >
+                {sourceActionLabel(reportAction.action)}
+              </Button>
             ) : (
               <>
                 {(action || currentContext?.pendingSubmission) && (
                   <Button
                     variant="contained"
                     disabled={currentContext?.pendingSubmission ? context.isError : !allowed}
+                    aria-haspopup="dialog"
                     onClick={() =>
                       openActions(
                         currentContext?.pendingSubmission || !action
@@ -406,7 +440,7 @@ function SourceDecision({
             <Button component={Link} to={reportUrl}>
               Read report
             </Button>
-            <Button disabled={!fresh} onClick={() => openActions()}>
+            <Button disabled={!fresh} onClick={() => openActions()} aria-haspopup="dialog">
               Other actions
             </Button>
           </Stack>
@@ -536,7 +570,7 @@ export function WorkItemDetails({ id }: { id: string }) {
   const source = itemData;
   if (!source)
     return <EmptyState title="Source unavailable" description="Refresh to load this source." />;
-  const fresh = !item.isError && !tasks.isError;
+  const fresh = item.isSuccess && tasks.isSuccess;
   const header = readableSourceReport(
     source,
     latestSavedTask,
@@ -607,6 +641,21 @@ export function WorkItemDetails({ id }: { id: string }) {
       )}
       {header ? (
         <>
+          {currentReport.isError && (
+            <Alert
+              severity="warning"
+              action={
+                <Button
+                  disabled={currentReport.isFetching}
+                  onClick={() => void currentReport.refetch()}
+                >
+                  Retry report
+                </Button>
+              }
+            >
+              Report refresh failed. Showing the saved result.
+            </Alert>
+          )}
           {latestSavedTask && !taskUsesCurrentSource(source, latestSavedTask) && (
             <Alert severity="warning">
               This report covers an earlier saved source. Recheck the current revision.
@@ -716,7 +765,7 @@ export function WorkItemDetails({ id }: { id: string }) {
                   pt: 1.5,
                   "& summary": {
                     cursor: "pointer",
-                    minHeight: 40,
+                    minHeight: 44,
                     typography: "body2",
                     color: "text.secondary",
                   },
@@ -778,11 +827,6 @@ export function WorkItemDetails({ id }: { id: string }) {
                     No investigation for this revision.
                   </Typography>
                 )}
-                {currentReport.isError && !sourceAccessDenied(tasks.error) && (
-                  <Alert severity="error" sx={{ mt: 2 }}>
-                    {currentReport.error.message}
-                  </Alert>
-                )}
                 <Box sx={{ mt: 2 }}>
                   <StartInvestigationButton
                     workItem={source}
@@ -808,7 +852,12 @@ export function WorkItemDetails({ id }: { id: string }) {
             {tasks.isPending ? (
               <CircularProgress size={24} aria-label="Loading investigations" />
             ) : tasks.isError ? (
-              <Alert severity="error">{tasks.error.message}</Alert>
+              <Alert
+                severity="error"
+                action={<Button onClick={() => void tasks.refetch()}>Retry</Button>}
+              >
+                {tasks.error.message}
+              </Alert>
             ) : related.length ? (
               related.map((task) => <SourceTaskRow key={task.id} task={task} item={source} />)
             ) : (

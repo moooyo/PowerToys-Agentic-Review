@@ -378,14 +378,17 @@ export function ValidationPanel({ validation }: { validation: InvestigationValid
               />
               <Typography variant="subtitle2">{check.description}</Typography>
             </Stack>
-            <Typography variant="caption" component="div" sx={{ mt: 0.5 }}>
-              Subject: {check.subjectRef} · Scenario: {check.scenarioId}
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              {check.executor ? `Executor: ${check.executor}` : "No execution recorded"}
-              {check.authoritativeAttemptId ? ` · Attempt: ${check.authoritativeAttemptId}` : ""}
-            </Typography>
-            <TextList items={check.evidenceRefs.map((ref) => `Evidence: ${ref}`)} />
+            <Box component="details" sx={{ mt: 1, overflowWrap: "anywhere" }}>
+              <Typography component="summary">Check details</Typography>
+              <Typography variant="caption" component="div" sx={{ mt: 0.5 }}>
+                Subject: {check.subjectRef} · Scenario: {check.scenarioId}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {check.executor ? `Executor: ${check.executor}` : "No execution recorded"}
+                {check.authoritativeAttemptId ? ` · Attempt: ${check.authoritativeAttemptId}` : ""}
+              </Typography>
+              <TextList items={check.evidenceRefs.map((ref) => `Evidence: ${ref}`)} />
+            </Box>
           </Box>
         ))}
       </Stack>

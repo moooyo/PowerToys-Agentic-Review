@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Agentic Review - UI / UX review atlas</title>
+  <style>
+    :root{--canvas:#faf9fd;--paper:#fff;--low:#f3f4fa;--ink:#1b1d24;--muted:#505966;--line:#d4dae5;--accent:#345ead;--on-accent:#173d79;--soft:#dce6ff;--green:#25634e;--green-bg:#e6f1ea;--amber:#775000;--amber-bg:#fff0d4;--red:#b3261e;--display:"Segoe UI Variable Display","Segoe UI",sans-serif;--body:"Segoe UI",Arial,sans-serif;--mono:"Cascadia Code",Consolas,monospace}
+    *{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.55 var(--body)}button,input,select,textarea{font:inherit}button,a,summary{touch-action:manipulation}button,summary{cursor:pointer}a{color:var(--accent);text-underline-offset:3px}a:hover{color:var(--on-accent)}:focus-visible{outline:3px solid var(--accent);outline-offset:4px}button:disabled{opacity:.5;cursor:default}h1,h2,h3,p{margin:0}h1,h2,h3{font-family:var(--display)}h1{font-size:29px;font-weight:600;letter-spacing:-.7px;line-height:1.2}h2{font-size:23px;line-height:1.3;font-weight:600;letter-spacing:-.35px}h3{font-size:16px;line-height:1.4;font-weight:600}small{font-size:12px}svg{display:block}button{border:1px solid var(--line);border-radius:24px;padding:9px 16px;min-height:44px;background:var(--paper);color:var(--accent);font-weight:600}button:hover{background:var(--low)}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.primary:hover{background:#2b519c}.muted{color:var(--muted)}.mono{font-family:var(--mono);font-size:12px}.eyebrow{text-transform:uppercase;letter-spacing:1.1px;font-size:11px;font-weight:700;color:var(--accent)}.skip{position:absolute;left:12px;top:-100px;z-index:30;background:white;padding:10px}.skip:focus{top:12px}.top{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:22px 32px;background:var(--paper);border-bottom:1px solid var(--line)}.brand{display:flex;gap:14px;align-items:center}.mark{width:46px;height:46px;display:grid;place-items:center;background:var(--accent);border-radius:16px;color:#fff;font-size:16px;font-weight:650}.brand-title{display:flex;align-items:center;gap:14px}.version{font-size:12px;border:1px solid var(--line);padding:2px 8px;border-radius:6px;color:var(--muted)}.brand p{font-size:12px;color:var(--muted);margin-top:5px}.top-actions{display:flex;align-items:center;gap:10px}.navigation{padding:0 32px;display:flex;justify-content:space-between;align-items:center;gap:20px;border-bottom:1px solid var(--line);background:var(--paper)}.tabs{display:flex;gap:24px}.tabs a{min-height:54px;display:flex;align-items:center;text-decoration:none;color:var(--muted);border-bottom:3px solid transparent;font-weight:600;white-space:nowrap}.tabs a[aria-current=page]{color:var(--accent);border-color:var(--accent)}.progress{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)}.track{width:86px;height:5px;overflow:hidden;background:var(--low);border-radius:5px}.track span{display:block;height:100%;background:var(--green)}.scope{padding:9px 32px;font-size:12px;color:var(--muted);display:flex;gap:10px;align-items:baseline;border-bottom:1px solid var(--line)}.scope strong{font-size:11px;font-weight:700;color:var(--on-accent);white-space:nowrap}.layout{display:grid;grid-template-columns:250px minmax(0,1fr);min-height:calc(100vh - 190px)}.index{background:var(--paper);border-right:1px solid var(--line);padding:18px 16px;min-width:0}.index>summary{list-style:none;font-size:13px;font-weight:650;display:flex;align-items:center;justify-content:space-between;min-height:30px}.index>summary::-webkit-details-marker{display:none}.count{font-size:11px;color:var(--muted);background:var(--low);border-radius:10px;padding:2px 7px}.search-label{display:block;margin-top:18px;font-size:12px;font-weight:600}.search-label input{display:block;margin-top:7px;width:100%;padding:10px 11px;border:1px solid var(--line);border-radius:10px;background:var(--canvas);min-height:44px}.status-label{display:flex;align-items:center;gap:8px;margin:12px 0 18px;font-size:12px;color:var(--muted)}.status-label select{min-width:0;flex:1;background:white;border:1px solid var(--line);border-radius:8px;padding:7px 5px;min-height:40px;font-size:12px}.index-group{margin-top:16px}.index-group h2{font-size:11px;letter-spacing:.9px;text-transform:uppercase;color:var(--muted);margin:0 10px 5px}.index-link{display:flex;align-items:center;gap:8px;min-height:40px;padding:8px 10px;text-decoration:none;color:var(--muted);border-radius:10px;font-size:13px;line-height:1.35}.index-link:hover{background:var(--low)}.index-link[aria-current=page]{background:var(--soft);color:var(--on-accent);font-weight:600}.state-dot{display:inline-grid;place-items:center;width:16px;height:16px;border:1px solid #aab2bf;border-radius:50%;font-size:10px;flex:0 0 16px}.state-dot.reviewed{background:var(--green-bg);color:var(--green);border-color:var(--green)}.state-dot.discuss{background:var(--amber-bg);color:var(--amber);border-color:var(--amber)}.empty-index{padding:16px 8px;color:var(--muted);font-size:13px}.main{padding:28px 30px 60px;min-width:0}.page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:22px}.page-head p{color:var(--muted);margin-top:8px;max-width:78ch;font-size:14px}.page-head .eyebrow{margin-bottom:8px}.head-actions{display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0}.head-actions a,.small-link{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:22px;min-height:40px;padding:7px 14px;text-decoration:none;font-size:13px;background:var(--paper)}.map-stage{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:white}.map-stage svg{width:100%;height:auto}.section-title{margin:28px 0 14px;display:flex;align-items:center;justify-content:space-between}.section-title p{font-size:13px;color:var(--muted)}.journey-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.journey-card{display:flex;flex-direction:column;padding:19px;border:1px solid var(--line);border-radius:14px;background:white;text-decoration:none;color:var(--ink);min-height:160px;transition:border-color .15s,background-color .15s}.journey-card:hover{border-color:var(--accent);background:#f7f9ff;color:var(--ink)}.journey-card p{font-size:13px;color:var(--muted);margin-top:8px}.journey-card .meta{margin-top:auto;padding-top:15px;color:var(--accent);font-size:12px;font-weight:600}.boundary-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.boundary{border-left:3px solid var(--accent);padding:12px 16px;background:var(--low);border-radius:0 8px 8px 0}.boundary p{font-size:13px;color:var(--muted);margin-top:5px}.screen-layout{display:grid;grid-template-columns:minmax(0,1fr) 285px;gap:20px;align-items:start}.canvas-card{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--paper)}.canvas-tools{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}.canvas-tools button{font-size:12px;min-height:36px;padding:5px 11px}.canvas-tools label{display:flex;align-items:center;gap:5px}.drawing{overflow:auto;max-height:78vh;overscroll-behavior:contain;background:#fff}.drawing svg{width:100%;height:auto;min-width:0}.drawing.actual svg{width:1200px;max-width:none}.diagram-caption{font-size:12px;color:var(--muted);padding:11px 15px;border-top:1px solid var(--line)}.inspector{display:grid;gap:14px}.inspector section{padding:17px;background:var(--paper);border:1px solid var(--line);border-radius:14px}.inspector h3{font-size:14px;margin-bottom:10px}.inspector p{font-size:13px;color:var(--muted)}.review-options{display:flex;gap:5px;flex-wrap:wrap;margin:10px 0}.review-options button{font-size:11px;min-height:36px;padding:6px 9px}.review-options button[aria-pressed=true]{background:var(--soft);border-color:var(--accent);color:var(--on-accent)}.notes-label{display:block;font-size:12px;color:var(--muted);margin-top:14px}.notes-label textarea{display:block;width:100%;margin-top:6px;resize:vertical;min-height:132px;border:1px solid var(--line);border-radius:8px;padding:10px;color:var(--ink);background:var(--canvas);font-size:13px}.notes-help{margin-top:7px;font-size:11px!important}.checks{padding-left:18px;margin:0}.checks li{font-size:13px;color:var(--muted);margin:8px 0}.source-link{font-family:var(--mono);font-size:11px;display:block;overflow-wrap:anywhere;margin:9px 0;min-height:24px}.transitions{display:grid;gap:8px}.transition{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border:1px solid var(--line);border-radius:10px;text-decoration:none;background:white;color:var(--accent);font-size:13px;min-height:48px}.transition span{display:block}.transition small{display:block;font-size:11px;color:var(--muted);margin-top:3px}.transition:hover{border-color:var(--accent);background:#f7f9ff}.scene-next{display:flex;justify-content:space-between;gap:12px;margin-top:20px}.scene-next a{font-size:13px;max-width:48%;text-decoration:none}.journey-steps{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:22px}.journey-step{display:flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:24px;padding:8px 13px;text-decoration:none;font-size:12px;background:white;min-height:40px}.journey-step span{color:var(--muted);font-family:var(--mono);font-size:11px}.journey-step[aria-current=step]{background:var(--soft);border-color:var(--accent)}.journey-context{border:1px solid var(--line);border-radius:12px;background:white;padding:14px 17px;margin-bottom:18px;display:flex;justify-content:space-between;gap:15px;align-items:center}.journey-context p{font-size:13px;color:var(--muted)}.review-list{display:grid;gap:14px}.review-item{padding:20px;border:1px solid var(--line);background:white;border-radius:14px}.review-item header{display:flex;justify-content:space-between;align-items:center;gap:12px}.review-item h3 a{text-decoration:none}.review-item p{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);font-size:14px;margin-top:12px}.pill{padding:3px 9px;border-radius:15px;font-size:11px;white-space:nowrap}.pill.reviewed{color:var(--green);background:var(--green-bg)}.pill.discuss{color:var(--amber);background:var(--amber-bg)}.pill.open{color:var(--muted);background:var(--low)}.notice{border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--low);font-size:13px;color:var(--muted)}.notice a{font-weight:600}.toolbar-note{font-size:12px;color:var(--muted);margin:12px 0}.storage-warning{padding:12px 32px;background:var(--amber-bg);color:var(--amber);font-size:13px}.storage-warning[hidden]{display:none}.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:12px 20px;border-radius:12px;background:#263348;color:white;max-width:calc(100vw - 32px);font-size:13px;box-shadow:0 8px 24px #1b1d2420;z-index:20}.toast[hidden]{display:none}.footer{margin-top:30px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.footer a{margin-right:14px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.no-results{padding:30px;border:1px dashed var(--line);border-radius:12px;background:white}.no-results p{margin:8px 0 16px;color:var(--muted)}
+    @media(min-width:1900px){.main{padding:32px 44px}.screen-layout{grid-template-columns:minmax(0,1fr) 330px}.index{padding-left:20px;padding-right:20px}}
+    @media(max-width:1350px){.screen-layout{grid-template-columns:minmax(0,1fr)}.inspector{grid-template-columns:repeat(3,minmax(0,1fr))}.journey-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.page-head{flex-wrap:wrap}.layout{grid-template-columns:225px minmax(0,1fr)}.main{padding:24px}.brand-title h1{font-size:24px}}
+    @media(max-width:850px){.top{padding:18px 20px;align-items:flex-start}.top-actions{flex-wrap:wrap;justify-content:flex-end}.top-actions button{font-size:12px;padding:7px 12px}.top-actions button.print{display:none}.brand-title{gap:8px;flex-wrap:wrap}.brand-title h1{font-size:21px}.brand p{max-width:32ch}.navigation{padding:0 20px;gap:10px}.tabs{gap:18px}.tabs a{font-size:13px}.progress .track{display:none}.scope{padding:9px 20px}.layout{grid-template-columns:1fr}.index{border-right:0;border-bottom:1px solid var(--line);padding:12px 20px}.index>summary{cursor:pointer}.index>summary::after{content:"Open index";font-size:11px;color:var(--accent)}.index[open]>summary::after{content:"Close index"}.index-group{display:inline-block;width:48%;vertical-align:top;padding-right:10px}.main{padding:22px 20px}.inspector{grid-template-columns:1fr 1fr}.inspector section:first-child{grid-column:1/-1}.drawing svg{min-width:720px}.map-stage{overflow-x:auto}.map-stage svg{min-width:950px}.boundary-grid{grid-template-columns:1fr}.journey-context{align-items:flex-start;flex-direction:column}}
+    @media(max-width:520px){.top{padding:16px;gap:12px}.mark{width:36px;height:36px;border-radius:12px;font-size:13px;flex-shrink:0}.brand{gap:9px;align-items:flex-start}.brand-title h1{font-size:18px}.brand-title .version{display:none}.brand p{font-size:11px}.top-actions button{font-size:11px;padding:7px 10px;min-height:38px}.navigation{padding:0 16px}.tabs{gap:17px}.tabs a{font-size:12px}.progress{display:none}.scope{padding:9px 16px;display:block}.scope strong{margin-right:8px}.main{padding:20px 14px}.index{padding:12px 16px}.index-group{width:100%;padding:0}.page-head h2{font-size:22px}.page-head p{font-size:13px}.journey-grid,.inspector{grid-template-columns:1fr}.journey-card{min-height:130px}.section-title{align-items:flex-start;gap:8px;flex-direction:column}.section-title h2{font-size:20px}.canvas-tools{flex-wrap:wrap}.head-actions a{font-size:12px}.scope{font-size:11px}.review-item header{align-items:flex-start}.storage-warning{padding:10px 16px}}
+    @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+    @media print{.top-actions,.navigation,.scope,.index,.head-actions,.canvas-tools,.review-options,.scene-next,.skip,.toast,.footer,.journey-steps,.storage-warning{display:none!important}.layout{display:block}.top{padding:10px 0}.main{padding:20px 0}.screen-layout{display:block}.drawing{max-height:none;overflow:visible}.drawing svg,.drawing.actual svg{min-width:0!important;width:100%!important;height:auto}.canvas-card{break-inside:avoid}.map-stage{overflow:visible}.map-stage svg{min-width:0!important}.inspector{display:block;margin-top:16px}.inspector section{break-inside:avoid;margin:12px 0}.notes-label textarea{display:none}.notes-label::after{content:attr(data-print);white-space:pre-wrap;display:block;color:#000;margin-top:10px}.journey-grid{grid-template-columns:1fr 1fr}.journey-card{break-inside:avoid}.page-head{margin-bottom:14px}.boundary-grid{grid-template-columns:1fr 1fr}.drawing{background:white}body{background:white}}
+  </style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to review content</a>
+<header class="top">
+  <div class="brand"><div class="mark" aria-hidden="true">AR</div><div><div class="brand-title"><h1>UI / UX review atlas</h1><span class="version">V8 / 91021df</span></div><p>Agentic Review &middot; Current frontend &middot; 25 Sep 2026</p></div></div>
+  <div class="top-actions"><button class="print" id="print">Print view</button><button class="primary" id="export">Export review</button></div>
+</header>
+<nav class="navigation" aria-label="Review views"><div class="tabs"><a href="#view=map" data-view="map">Flow map</a><a href="#screen=pull-requests" data-view="screens">Screens</a><a href="#view=journeys" data-view="journeys">Journeys</a><a href="#view=review" data-view="review">Review notes</a></div><div class="progress"><div class="track" aria-hidden="true"><span id="progress-bar"></span></div><span id="progress-label"></span></div></nav>
+<div class="scope"><strong>SOURCE-DERIVED PROTOTYPE</strong><span>Illustrative wireframes. Linked controls navigate review states. Browser verification is pending.</span></div>
+<div class="storage-warning" id="storage-warning" hidden>Browser storage is unavailable. Notes remain in this open page; export them before closing.</div>
+<div class="layout">
+  <details class="index" id="index" open><summary>Screen index <span class="count" id="screen-count"></span></summary><label class="search-label" for="search">Find a screen<input id="search" type="search" placeholder="Report, permissions, feedback..." autocomplete="off"></label><label class="status-label" for="status-filter">Review<select id="status-filter"><option value="all">All screens</option><option value="open">Not reviewed</option><option value="discuss">Needs discussion</option><option value="reviewed">Reviewed</option></select></label><nav id="screen-index" aria-label="Screen index"></nav></details>
+  <main class="main" id="main" tabindex="-1"><div id="stage"></div><footer class="footer"><a href="index.html">Interactive UI prototype</a><a href="ATLAS.md">Atlas scope</a><a href="CATALOG.md">Screen catalog</a><a href="overview.svg" download>Download flow map</a><span>Local review notes &middot; No application API connection</span></footer></main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script>
+"use strict";
+const DATA = /*__REVIEW_DATA__*/;
+const SCREENS = new Map(DATA.screens.map(screen => [screen.id, screen]));
+const JOURNEYS = new Map(DATA.journeys.map(journey => [journey.id, journey]));
+const KEY = "agentic-review-atlas:" + DATA.baseline + ":2026-09-25";
+const $ = selector => document.querySelector(selector);
+const E = value => String(value ?? "").replace(/[&<>"']/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[character]);
+const labels = {open:"Not reviewed",reviewed:"Reviewed",discuss:"Needs discussion"};
+let notes = {};
+let selected = null;
+let fit = true;
+let storageAvailable = true;
+let toastTimer;
+try {
+  for (const screen of DATA.screens) {
+    const note = JSON.parse(localStorage.getItem(KEY + ":" + screen.id) || "null");
+    if (note && labels[note.status] && typeof note.text === "string") notes[screen.id] = note;
+  }
+} catch { storageAvailable = false; }
+function noteFor(id) { return notes[id] || {status:"open",text:"",updatedAt:null}; }
+function announce(message) {
+  const element = $("#toast"); element.textContent = message; element.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => {element.hidden = true;}, 3500);
+}
+function save(id, patch) {
+  notes[id] = {...noteFor(id),...patch,updatedAt:new Date().toISOString()};
+  try { localStorage.setItem(KEY + ":" + id, JSON.stringify(notes[id])); storageAvailable = true; }
+  catch { storageAvailable = false; }
+  $("#storage-warning").hidden = storageAvailable;
+  updateProgress(); renderIndex();
+}
+function updateProgress() {
+  const reviewed = DATA.screens.filter(screen => noteFor(screen.id).status === "reviewed").length;
+  $("#progress-label").textContent = `${reviewed} / ${DATA.screens.length} reviewed`;
+  $("#progress-bar").style.width = (reviewed / DATA.screens.length * 100) + "%";
+  $("#screen-count").textContent = DATA.screens.length;
+}
+function dot(status) { return `<span class="state-dot ${status}" aria-label="${labels[status]}">${status === "reviewed" ? "&#10003;" : status === "discuss" ? "!" : ""}</span>`; }
+function renderIndex() {
+  const query = $("#search").value.trim().toLowerCase();
+  const status = $("#status-filter").value;
+  const groups = ["Access","Review","Tasks","Publication","Activity","Workspace","Shared states"];
+  const results = DATA.screens.filter(screen => (status === "all" || noteFor(screen.id).status === status) &&
+    `${screen.title} ${screen.group} ${screen.summary} ${screen.id}`.toLowerCase().includes(query));
+  $("#screen-index").innerHTML = groups.map(group => {
+    const screens = results.filter(screen => screen.group === group);
+    if (!screens.length) return "";
+    return `<section class="index-group"><h2>${E(group)}</h2>${screens.map(screen => `<a class="index-link" href="#screen=${screen.id}" ${screen.id === selected ? 'aria-current="page"' : ""}>${dot(noteFor(screen.id).status)}<span>${E(screen.title)}</span></a>`).join("")}</section>`;
+  }).join("") || '<p class="empty-index">No matching screens. Try a different search or review filter.</p>';
+}
+function heading(eyebrow, title, description, actions="") {
+  return `<div class="page-head"><div><div class="eyebrow">${E(eyebrow)}</div><h2 id="view-title" tabindex="-1">${E(title)}</h2><p>${E(description)}</p></div>${actions ? `<div class="head-actions">${actions}</div>` : ""}</div>`;
+}
+function journeyCards() {
+  return `<div class="journey-grid">${DATA.journeys.map(journey => `<a class="journey-card" href="#journey=${journey.id}"><h3>${E(journey.title)}</h3><p>${E(journey.summary)}</p><div class="meta">${journey.steps.length} steps &nbsp; / &nbsp; Open journey &#8594;</div></a>`).join("")}</div>`;
+}
+function mapView() {
+  return heading("THE REVIEW WORKSPACE", "One map. Every important handoff.",
+    `Explore ${DATA.screens.length} source-derived screen and state diagrams, then follow ${DATA.journeys.length} guided journeys. Use the linked controls or the transition list below each screen.`,
+    '<a href="#journey=publication">Start with feedback &#8594;</a>') +
+    `<div class="map-stage">${DATA.overview}</div><div class="section-title"><h2>Follow a journey</h2><p>Happy paths and the decisions that interrupt them</p></div>${journeyCards()}` +
+    `<div class="section-title"><h2>Keep these boundaries visible</h2></div><div class="boundary-grid">
+      <div class="boundary"><h3>Selection is not publication</h3><p>Report selection, private drafts and action selection remain independent. Importing feedback is an explicit choice.</p></div>
+      <div class="boundary"><h3>Preview is not execution</h3><p>Preparation and execution use separate permissions. Confirmation binds the exact target, source and saved payload.</p></div>
+      <div class="boundary"><h3>Unknown is not a failed request</h3><p>Keep the original submission identity. Status refresh is not permission to dispatch a replacement request.</p></div>
+      <div class="boundary"><h3>Completion is not a passing result</h3><p>Read the saved assessment, validation evidence and resource cleanup separately from the task's execution status.</p></div>
+    </div><p class="toolbar-note">The Operate lane is a directory of peer pages. Source and investigation lanes show a review narrative; actual allowed transitions appear on each screen.</p>`;
+}
+function inspector(screen) {
+  const note = noteFor(screen.id);
+  return `<aside class="inspector" aria-label="Review this screen"><section><h3>Your review</h3><p>Record the decision for this screen.</p><div class="review-options" aria-label="Review status">${Object.entries(labels).map(([value,label]) => `<button data-status="${value}" aria-pressed="${note.status === value}">${label}</button>`).join("")}</div><label class="notes-label" data-print="${E(note.text)}" for="review-note">Review notes<textarea id="review-note" placeholder="What should change? What needs a decision?">${E(note.text)}</textarea></label><p class="notes-help" id="note-status">${storageAvailable ? "Saved in this browser. Export to share or back up." : "Stored in this open page only. Export before closing."}</p></section><section><h3>Questions for review</h3><ul class="checks">${screen.checks.map(check => `<li>${E(check)}</li>`).join("")}</ul></section><section><h3>Source references</h3><p class="mono">Baseline ${DATA.baseline}</p>${screen.sources.map(source => `<a class="source-link" href="../../../${E(source.path)}" title="Open source file; referenced line ${source.line}">${E(source.path)}:${source.line}</a>`).join("")}<p>Diagrams group controls for clarity. These are not pixel-accurate screenshots or runtime acceptance evidence.</p></section></aside>`;
+}
+function screenView(screen, journey, journeyIndex = 0) {
+  const index = DATA.screens.indexOf(screen);
+  const actions = `<a href="screens/${screen.id}.svg" download>Download SVG</a><button id="copy-link">Copy link</button>`;
+  let context = "";
+  if (journey) {
+    const active = journeyIndex;
+    const step = journey.steps[active];
+    const next = journey.steps[active + 1];
+    context = `<div class="journey-context"><div><div class="eyebrow">${E(journey.title)} / Step ${active + 1} of ${journey.steps.length}</div><p>${E(step.note)}</p></div><a class="small-link" href="${next ? `#journey=${journey.id}&step=${active + 2}` : `#journey=${journey.id}`}">${next ? "Next step" : "Journey overview"} &#8594;</a></div>`;
+  }
+  const transitions = screen.transitions || [];
+  return heading(`${screen.group} / Screen ${String(index + 1).padStart(2,"0")}`,screen.title,screen.summary,actions) + context +
+    `<div class="screen-layout"><div><div class="canvas-card"><div class="canvas-tools"><span class="mono">${E(screen.route)}</span><button id="zoom" aria-pressed="${!fit}">${fit ? "View at 100%" : "Fit diagram"}</button></div><div class="drawing ${fit ? "" : "actual"}" id="drawing" role="region" aria-label="${E(screen.title)} wireframe; horizontally scrollable at full size" tabindex="0">${DATA.diagrams[screen.id]}</div><div class="diagram-caption">Click linked rows or buttons to open another state. Other fields are schematic. Use the transition list for complete navigation.</div></div><div class="section-title"><h3>Where this interaction goes</h3><span class="muted" style="font-size:12px">${transitions.length} transitions</span></div><div class="transitions">${transitions.map(item => `<a class="transition" href="#screen=${item.target}"><span>${E(item.label)}${item.condition ? `<small>${E(item.condition)}</small>` : ""}</span><span aria-hidden="true">&#8594;</span></a>`).join("") || '<p class="notice">Return to the screen index to continue reviewing.</p>'}</div><div class="scene-next">${index > 0 ? `<a href="#screen=${DATA.screens[index-1].id}">&#8592; ${E(DATA.screens[index-1].title)}</a>` : "<span></span>"}${index < DATA.screens.length - 1 ? `<a href="#screen=${DATA.screens[index+1].id}">${E(DATA.screens[index+1].title)} &#8594;</a>` : ""}</div></div>${inspector(screen)}</div>`;
+}
+function journeyView(journey) {
+  return heading("GUIDED REVIEW",journey.title,journey.summary,`<a href="#journey=${journey.id}&step=1">Start journey &#8594;</a><a href="flows/${journey.id}.svg" download>Download SVG</a>`) +
+    `<div class="journey-steps">${journey.steps.map((step,index) => `<a class="journey-step" href="#journey=${journey.id}&step=${index+1}"><span>${String(index+1).padStart(2,"0")}</span>${E(step.label)}</a>`).join("")}</div><div class="map-stage">${DATA.flows[journey.id]}</div>`;
+}
+function reviewView() {
+  const entries = DATA.screens.filter(screen => noteFor(screen.id).status !== "open" || noteFor(screen.id).text.trim());
+  return heading("REVIEW LOG", "Decisions worth keeping.", "Review status and notes stay in this browser and are included in the JSON export. They are never sent to the application or GitHub.") +
+    `<p class="toolbar-note">${entries.length} screens have notes or review decisions. Export before moving to another browser.</p>` +
+    (entries.length ? `<div class="review-list">${entries.map(screen => {
+      const note = noteFor(screen.id);
+      return `<article class="review-item"><header><h3><a href="#screen=${screen.id}">${E(screen.title)}</a></h3><span class="pill ${note.status}">${labels[note.status]}</span></header><p>${E(note.text || "No written note.")}</p></article>`;
+    }).join("")}</div>` : '<div class="no-results"><h3>Your review starts with a screen.</h3><p>Open a screen, mark its review status and write a note. Use Export review to save the review as JSON.</p><a class="small-link" href="#screen=pull-requests">Open Pull requests &#8594;</a></div>');
+}
+async function copyLink() {
+  try { await navigator.clipboard.writeText(location.href); announce("Review link copied."); }
+  catch { window.prompt("Copy this review link. It works for someone with the same artifact folder.",location.href); }
+}
+function bindScreen(screen) {
+  $("#zoom").addEventListener("click", () => {fit = !fit; $("#drawing").classList.toggle("actual",!fit); $("#zoom").textContent = fit ? "View at 100%" : "Fit diagram"; $("#zoom").setAttribute("aria-pressed",String(!fit));});
+  $("#copy-link").addEventListener("click",copyLink);
+  document.querySelectorAll("[data-status]").forEach(button => button.addEventListener("click",() => {
+    save(screen.id,{status:button.dataset.status});
+    document.querySelectorAll("[data-status]").forEach(candidate => candidate.setAttribute("aria-pressed",String(candidate === button)));
+    announce(screen.title + ": " + labels[button.dataset.status] + ".");
+  }));
+  $("#review-note").addEventListener("input",event => {
+    save(screen.id,{text:event.target.value});
+    event.target.parentElement.dataset.print = event.target.value;
+    $("#note-status").textContent = storageAvailable ? "Saved in this browser. Export to share or back up." : "Stored in this open page only. Export before closing.";
+  });
+}
+function render(moveFocus=false) {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const requestedScreen = hash.get("screen");
+  const journey = JOURNEYS.get(hash.get("journey"));
+  const requestedStep = Number(hash.get("step"));
+  const step = Math.max(1, Math.min(journey?.steps.length || 1, Number.isFinite(requestedStep) ? Math.floor(requestedStep) || 1 : 1));
+  let screen = SCREENS.get(requestedScreen);
+  let view = hash.get("view") || "map";
+  selected = screen?.id || null;
+  if (journey && hash.has("step")) {screen = SCREENS.get(journey.steps[step-1].screen); selected = screen.id; view = "journeys";}
+  else if (journey) view = "journeys";
+  else if (screen) view = "screens";
+  let content;
+  if (screen) content = screenView(screen,journey && hash.has("step") ? journey : null,step - 1);
+  else if (journey) content = journeyView(journey);
+  else if (requestedScreen || hash.has("journey")) content = heading("LINK NOT FOUND","This review state is unavailable.","The saved link does not match this source snapshot.") + '<a class="small-link" href="#view=map">Return to the flow map</a>';
+  else if (view === "journeys") content = heading("GUIDED REVIEW","Review the flow, then the exceptions.","Open a journey to follow its screens in order. Branch links expose the decisions that need special attention.") + journeyCards();
+  else if (view === "review") content = reviewView();
+  else { view = "map"; content = mapView(); }
+  $("#stage").innerHTML = content;
+  document.querySelectorAll("[data-view]").forEach(tab => {if(tab.dataset.view === view) tab.setAttribute("aria-current","page"); else tab.removeAttribute("aria-current");});
+  renderIndex();
+  if(screen) bindScreen(screen);
+  document.title = `${screen?.title || journey?.title || "UI / UX review atlas"} - Agentic Review`;
+  if(moveFocus) {$("#view-title")?.focus({preventScroll:true});window.scrollTo(0,0);}
+}
+$("#search").addEventListener("input",renderIndex);
+$("#status-filter").addEventListener("change",renderIndex);
+$(".skip").addEventListener("click",event => {event.preventDefault(); $("#main").focus(); $("#main").scrollIntoView();});
+$("#print").addEventListener("click",() => window.print());
+$("#export").addEventListener("click",() => {
+  try {
+    for (const screen of DATA.screens) {
+      const stored = JSON.parse(localStorage.getItem(KEY + ":" + screen.id) || "null");
+      if (stored && labels[stored.status] && typeof stored.text === "string" &&
+          String(stored.updatedAt || "") > String(noteFor(screen.id).updatedAt || "")) notes[screen.id] = stored;
+    }
+  } catch { /* In-memory notes remain exportable when browser storage is unavailable. */ }
+  const payload = {schemaVersion:1,baseline:DATA.baseline,artifactDate:DATA.date,exportedAt:new Date().toISOString(),
+    scope:"Source-derived UI/UX prototype review; no runtime acceptance claims.",
+    screens:DATA.screens.map(screen => ({id:screen.id,title:screen.title,...noteFor(screen.id)}))};
+  const url = URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:"application/json"}));
+  const anchor = document.createElement("a"); anchor.href = url; anchor.download = `agentic-review-${DATA.baseline}-${new Date().toISOString().slice(0,10)}.json`; anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url),5000); announce("Review exported as JSON.");
+});
+window.addEventListener("hashchange",() => render(true));
+window.addEventListener("storage",event => {
+  if (!event.key?.startsWith(KEY + ":") || !event.newValue) return;
+  const id = event.key.slice(KEY.length + 1);
+  if (!SCREENS.has(id)) return;
+  try {
+    const note = JSON.parse(event.newValue);
+    if (!note || !labels[note.status] || typeof note.text !== "string") return;
+    notes[id] = note; updateProgress(); renderIndex();
+    if (selected === id && document.activeElement !== $("#review-note")) {
+      $("#review-note").value = note.text;
+      $("#review-note").parentElement.dataset.print = note.text;
+      document.querySelectorAll("[data-status]").forEach(button => button.setAttribute("aria-pressed",String(button.dataset.status === note.status)));
+    }
+  } catch { /* Ignore malformed data from another browser context. */ }
+});
+const narrow = matchMedia("(max-width: 850px)");
+$("#index").open = !narrow.matches;
+$("#screen-index").addEventListener("click",event => {if(event.target.closest("a") && narrow.matches) $("#index").open = false;});
+$("#storage-warning").hidden = storageAvailable;
+updateProgress(); render();
+</script>
+</body>
+</html>
