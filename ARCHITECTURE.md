@@ -466,7 +466,7 @@ The existing all-changed-path coverage gate remains in force. The earlier mixed 
 owned-fork PR #13, is superseded, unexecuted, and closed; neither fixture changes the older
 Peek/Launcher outcomes.
 
-The operations baseline is published on `main` at `b690dd9`. Its
+The operations baseline was published on `main` at `b690dd9`. Its
 [September 27 workflow handoff](./docs/handoff/2026-09-27-four-gib-workflow-acceptance.md) records
 149 distinct targeted tests, a 30-test Windows repeat, 10 native lifecycle checks, and 11 compiled
 Dashboard/native HTTP/SQLite browser steps. Actual isolated Scheduled Task Server hosting in
@@ -475,12 +475,28 @@ shutdown, populated backup/restore and application reopening, bounded Server ret
 Worker's same-boot recovery gate passed. Targeted webhook tests separately observe relay cache
 hits and native Server receiver re-entry across restart. These are completed scoped checks.
 
-Production cutover remains pending its deployment receipt. VM reboot/power-loss and cross-boot
-recovery, current-release real-model and PowerToys execution, live publication, and unrecorded
-Windows hosting matrix cases retain separate acceptance. The short two-task capacity observation
-and sampled 4 GiB serial workflow do not establish sustained workload, concurrent capacity, physical
-SQLite/WAL growth limits, or disk reclamation. Historical Peek/Launcher outcomes and the original
-external HTTP 401 remain unresolved within their original scope.
+The subsequent [production cutover](./docs/handoff/2026-09-27-ci-and-production-cutover.md) deployed
+release `a6ae2995407037683e5be120f76e928aad212c4b` after Node Linux, Windows Worker, and ProcessHost
+Linux CI jobs all passed. The Server runs in Session 0, the static Worker runs in the intended
+interactive session, and the Dashboard relay is active. Original account identity/version/password,
+four Tasks, four report exports, and 47 evidence records were preserved. Server and Worker static
+concurrency are both one. Native readback confirmed no active leases or newly created Tasks.
+The original trusted execution mappings, plan environment, PATH, and MSBuild compiler selection
+were restored and checked after a cooperative Worker restart without invoking a model.
+
+Read-only production browser acceptance passed six steps with three independently inspected
+screenshots. The action-availability capture still showed loading, so it does not establish that
+panel's readiness; video playback and new E2E execution were not exercised. Outbound writes, media
+uploads, webhook intake, and E2E remain held. The VM retains a 4 GiB ceiling and the existing 2 GiB
+subprocess guard. Protected backups and a reviewed stop/rollback procedure are retained; rollback
+was not executed.
+
+VM reboot/power-loss and cross-boot recovery, current-release real-model and PowerToys execution,
+live publication, and unrecorded Windows hosting matrix cases retain separate acceptance. The
+short two-task capacity observation and sampled 4 GiB serial workflow do not establish sustained
+workload, concurrent capacity, physical SQLite/WAL growth limits, or disk reclamation. Historical
+Peek/Launcher outcomes and the original external HTTP 401 remain unresolved within their original
+scope.
 
 General model-quality evaluation and third-party login remain outside this delivery. Private
 checkout, automatic Worker release distribution/upgrades, and reusable build outputs are optional

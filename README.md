@@ -123,9 +123,12 @@ The [production operations workflow](./deploy/operations/README.md) provides Win
 administrator-only storage observations, explicit capacity thresholds, and a deployment acceptance
 checklist. The [four-GiB workflow handoff](./docs/handoff/2026-09-27-four-gib-workflow-acceptance.md)
 records passed native lifecycle and Dashboard checks, isolated Scheduled Task hosting, cooperative
-shutdown, backup/restore, and bounded failure recovery. The operations baseline is published on
-`main` at `b690dd9`; production cutover still requires its own deployment receipt. VM reboot,
-real-application execution, live publication, and sustained capacity remain separate acceptance.
+shutdown, backup/restore, and bounded failure recovery. The subsequent
+[CI correction and production cutover](./docs/handoff/2026-09-27-ci-and-production-cutover.md)
+deployed release `a6ae2995407037683e5be120f76e928aad212c4b` after all three CI jobs passed.
+The Server, static Worker, and Dashboard relay are running with preserved accounts and retained
+data. VM reboot, real-application execution, live publication, and sustained capacity remain
+separate acceptance.
 
 The Dashboard development server uses clearly labeled synthetic data, including PowerToys PR,
 Bug, Feature, incomplete-report, and page-two P0 examples:
@@ -204,9 +207,17 @@ Scheduled Task hosting, duplicate-start protection, cooperative shutdown, popula
 bounded Server retries, and the Worker's same-boot recovery gate passed in isolation. Webhook tests
 separately cover relay cached duplicates and actual Server receiver re-entry across restart. The
 short two-task capacity observation and sampled 4 GiB workflow are not sustained or concurrent
-capacity results. The current [implementation status](./docs/IMPLEMENTATION_STATUS.md) records the
-remaining release checks and production cutover separately; no real model, PowerToys build/UI,
-GitHub write, or VM reboot was performed by this operations acceptance.
+capacity results. No real model, PowerToys build/UI, GitHub write, or VM reboot was performed by
+that isolated operations acceptance.
+
+The subsequent production cutover preserved the original account identity and password, four
+Tasks, four report exports, and 47 evidence records. Persisted Server static concurrency and Worker
+concurrency are both one, with no active leases or new Tasks. A six-step read-only browser check
+and three inspected screenshots covered the running Dashboard; action availability was still
+loading in its capture, and media playback was not exercised. Outbound writes, media uploads,
+webhook intake, and E2E remain held. The current [implementation status](./docs/IMPLEMENTATION_STATUS.md)
+and [cutover record](./docs/handoff/2026-09-27-ci-and-production-cutover.md) preserve the exact scope
+and the remaining acceptance work.
 
 [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) distinguishes this refactor from historical
 milestones. M39/M40 model workflows, M41 publication acceptance, M42 selected PowerToys tests, and

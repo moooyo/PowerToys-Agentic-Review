@@ -4,8 +4,10 @@
 
 The user authorized correction of the main-branch CI failure, reconciliation of current status
 documents, and production deployment with backup and rollback preparation. The implementation
-base is `b690dd982488ed75e4448ae099187447f4af69ef`. Verification and deployment are in progress;
-their final source, CI, and deployment receipts must be recorded before claiming completion.
+base is `b690dd982488ed75e4448ae099187447f4af69ef`. The deployed runtime release is
+`a6ae2995407037683e5be120f76e928aad212c4b`. Production cutover, scoped read-only browser
+acceptance, and temporary-resource cleanup are complete. The three permanent production
+components remained enabled and running at the final observation on September 27 at 10:53:39 UTC.
 No local software verification, real model invocation, PowerToys build/UI exercise, or actual
 repository PR/Issue mutation is part of this work.
 
@@ -46,7 +48,7 @@ JavaScript programs, unique DOM IDs, static ARIA references, explicit button typ
 documents parsed as XML. These are syntax and document-structure checks, not browser interaction
 acceptance. Isolated generator cases also covered the legal placeholder, payload escaping,
 missing/duplicate-marker rejection of atlas output, and generated SVG validity. The full-tree
-lint check still passed after regeneration. The next CI run remains a separate release gate.
+lint check still passed after regeneration. Published CI outcomes are recorded separately below.
 
 The correction was published as `d55690934c170b6f11ee22b1d32b5f8ab8650049`.
 [CI run 36310037038](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36310037038)
@@ -64,7 +66,20 @@ preventing a late check or teardown from taking a later test's directories. No g
 or production behavior changes. The complete Dashboard test file passed all 94 cases remotely;
 the full-size boundary case took about 1.19 seconds. Both Worker tests passed on Windows, with
 the complete package check taking about 3.38 seconds and no owned temporary directory remaining.
-Both projects' type checks and the changed-test lint passed. The next full CI result remains pending.
+Both projects' type checks and the changed-test lint passed.
+
+[CI run 36310776052](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36310776052)
+completed successfully for `a6ae2995407037683e5be120f76e928aad212c4b`. Node Linux Checks,
+Windows Worker Checks, and ProcessHost Linux Checks all passed, including full tests, builds,
+lint, native checks, and deployment-script checks. Production activation began only after an
+independent readback confirmed that exact commit and all three successful jobs.
+
+The source archive identifies all 1,856 tracked files. The 1,299 application output files are
+reused from the verified `d556909` build: only two tests and two Markdown files changed, and the
+complete source comparison confirms unchanged production sources, package manifests, and lockfile.
+Every reused output was hash-verified. The release receipt explicitly records this lineage rather
+than claiming a new compilation. Windows additionally verified its production dependency closure,
+with 78 external packages and 104 links whose targets remain inside the final release.
 
 ## Status reconciliation
 
@@ -73,7 +88,7 @@ completed four-GiB synthetic acceptance from production cutover and broader acce
 record executed webhook duplicate tests and the existing `investigation-v5` upgrade boundary.
 Historical failures, real-application exclusions, and the original external HTTP 401 remain.
 
-## Deployment preparation
+## Production deployment and rollback preparation
 
 The old production processes were stopped at baseline. Inspection used copies of both formal
 database sets, including their WAL/SHM sidecars, without opening the originals through SQLite.
@@ -87,12 +102,60 @@ Worker journals, relay state, and replaced task definitions are retained. Worker
 at their original bound path. The narrowly reviewed parent ACL change preserved all 88 child
 directory ACLs, effective rules, and owners.
 
-The production target will use the exact CI-accepted release, a dedicated Server account,
-Scheduled Task supervision, the existing interactive Worker identity, and serial static work
-within the existing four-GiB VM ceiling. Outbound writes, media upload, webhook intake, and E2E
-remain held during deployment readiness checks. No bootstrap reset or historical Task rerun is
-planned. Production startup, existing-account readback, access-path checks, and final operational
-state are pending their actual receipts.
+The production deployment uses the exact CI-accepted release, a dedicated limited Server account,
+Scheduled Task supervision, and the existing interactive Worker identity. Nine exact superseded
+component task definitions were preserved and disabled; unrelated historical tasks were untouched.
+The new tasks were held disabled until the CI gate passed.
+
+The Server started under its dedicated identity in Session 0. Native sign-in confirmed the original
+account ID, version, and unchanged password digest without a bootstrap reset. All four existing
+tasks, four report exports, and 47 evidence records matched the retained baseline. All four leases
+remain released, the 22 delivery records remain terminal, and no new action intent or task appeared.
+
+The persisted scheduler setting overrides the environment default, so the empty deployment was
+changed from two static slots to one through the native administrator API and then read back.
+The Worker runs in the existing interactive session with a static role and one concurrent task.
+Its original CLI profile, trusted execution mappings, executable pins, plan environment, and
+compiler selection are preserved. A final configuration comparison found omitted static execution
+settings in the first preparation helper; the idle Worker was stopped cooperatively, those exact
+settings were restored, and a fresh generation passed readiness. The earlier generation remains
+in its history. No model or PowerToys task was used as a deployment probe.
+
+The existing peer-restricted Dashboard access path has a new owned relay generation. Health and
+Dashboard requests returned HTTP 200, and served index bytes matched the release. These requests
+used the established private peer path; no local desktop network probe was run and no new SSH
+forward was created. Server, Worker, and relay remain running with bounded supervision.
+
+Six read-only browser steps passed in the existing interactive Worker session, with three
+screenshots independently inspected. The Dashboard showed the four retained tasks, an existing
+report, and its historical image evidence. This was not a new application or E2E execution.
+The action-availability capture still showed loading, so panel readiness was not established;
+video playback and publishing were not exercised. The temporary login was revoked and the
+browser closed. An earlier launch under SYSTEM failed before authentication, with a separate
+diagnostic recording Edge exit code 1002. Both receipts remain; they do not establish Session 0
+as the definitive cause. The successful run used the same frozen helper in the interactive session.
+
+The VM remains at four GiB. Worker subprocess memory retains the prior two-GiB ceiling; this is
+a configured guard, not measured real-model capacity. GitHub read credentials are preserved and
+their expected identity was confirmed by GET. Outbound writes, media uploads, webhook intake,
+and E2E remain held. The previous ephemeral webhook tunnel is not restarted or retargeted.
+
+A reviewed private stop/rollback procedure can cooperatively stop the new components, disable
+their tasks, and conditionally restore the recorded parent ACL to the original stopped baseline.
+It does not overwrite new data, start old single-use launchers, or re-enable external writes.
+The protected backup and old release remain available; rollback itself was not executed.
+
+Final native readback reconfirmed the retained account and data, one static slot, no occupied
+leases, and an idle Worker heartbeat. The final process inventory contained five production Node
+processes and one idle ProcessHost with its expected console host, with no model/task children or
+Edge processes. The exact temporary browser task, empty temporary directory, and owned transfer
+resources were removed. The three permanent tasks, their required identities and rights, and all
+production data were retained. Twenty-five final operational receipts were exported with matching
+per-file hashes; private handoff and machine memory were updated, and exclusive worker ownership
+was released. No further acceptance job or monitoring loop remains active.
+
+The last guest available-memory observation was about 1.26 GiB while idle. This single sample
+does not establish production workload capacity or change the remaining acceptance below.
 
 ## Remaining acceptance
 

@@ -1,22 +1,48 @@
 # Implementation Status
 
-## Published operations baseline and release follow-up, 2026-09-27
+## CI correction and production cutover, 2026-09-27
 
-The operations implementation and its scoped acceptance are published on `main` at
-`b690dd982488ed75e4448ae099187447f4af69ef`. Git integration and source publication are complete.
-Production cutover is a separate authorized follow-up and remains pending its deployment receipt;
-the isolated checks below are not a completed production deployment.
+Production release `a6ae2995407037683e5be120f76e928aad212c4b` is deployed with the Server in
+Session 0, the static Worker in its intended interactive session, and the Dashboard relay running.
+Git integration, CI correction, and production cutover are complete within the
+[current cutover record](handoff/2026-09-27-ci-and-production-cutover.md). That record supersedes
+the earlier pending-cutover status while retaining the isolated acceptance scopes below.
 
 [CI run 36304015077](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36304015077)
 passed Linux type checking, tests, and builds, plus the Windows and ProcessHost Linux jobs. Its
-Linux lint step failed with 4,335 errors, so that run is not green. The lint correction and its
-new verification must be recorded separately rather than changing the failed run's outcome.
+Linux lint step failed with 4,335 errors. That run remains failed.
 
 The lint correction in `d556909` passed remote whole-tree Biome with zero errors. Its
 [CI run 36310037038](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36310037038)
 then hit the default five-second deadline in two existing large-input/package-integrity tests.
-The bounded per-test timing and teardown correction, and its subsequent CI result, remain a
-separate gate. See the [CI and cutover record](handoff/2026-09-27-ci-and-production-cutover.md).
+That run also remains failed. Only those two tests received 30-second limits; Worker teardown now
+waits for the original check to settle before deleting its owned temporary roots. Assertions and
+production behavior were unchanged.
+
+[CI run 36310776052](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36310776052)
+passed all three jobs for the deployed release: Node Linux Checks, Windows Worker Checks, and
+ProcessHost Linux Checks. Full tests, builds, lint, native checks, and deployment-script checks
+passed. The earlier lint and timeout failures are separate retained receipts.
+
+The cutover preserved the original account ID, version, and password, and matched all four Tasks,
+four report exports, and 47 evidence records to the baseline. The persisted Server static
+concurrency was changed from two to one through the native administrator API; Worker concurrency
+is also one. Readback showed no active leases, new Tasks, or new business records. The GitHub read
+credential was retained and its represented identity matched the expected `GET /user` response.
+Outbound writes, media uploads, webhook intake, and E2E remain held.
+
+The original six trusted executable mappings, plan environment, PATH, and MSBuild 14.50/v145
+selection were restored to the deployed static Worker and checked after cooperative restart.
+No model was invoked. The VM retains its 4 GiB ceiling and the prior 2 GiB subprocess memory guard;
+these settings do not establish real-model or concurrent workload capacity.
+
+Six read-only production browser steps passed, with three screenshots independently inspected.
+The action-availability capture still showed loading and does not establish action-panel readiness.
+No video playback or new E2E run was performed. The protected backup contains 270 files and 51
+directories; the reviewed parent ACL change preserved all 88 child directory ACLs. Nine old task
+definitions remain disabled and preserved, while the three new production tasks remain running.
+Stop and rollback procedures are prepared but were not executed. Private identities, credentials,
+machine addresses, and raw operational receipts remain outside the repository.
 
 ## Serial workflow acceptance with 4 GiB, 2026-09-27
 
@@ -1046,10 +1072,11 @@ for closing this controlled-fixture milestone.
 
 ## Remaining product work
 
-This is the current backlog and acceptance boundary at the published `b690dd9` operations baseline.
-The September 27 checks above supersede earlier statements that the operations tests or all Windows
-hosting checks remain unexecuted. Historical milestone limitations below do not override later
-accepted scopes, and retired designs are not queued implementation work.
+This is the current backlog and acceptance boundary at deployed release `a6ae299`.
+The September 27 CI and production cutover record supersedes earlier pending correction/cutover
+statements and claims that all Windows hosting checks remain unexecuted. Historical milestone
+limitations below do not override later accepted scopes, and retired designs are not queued
+implementation work.
 
 The 2026-09-15 [structured investigation refactor](./design/2026-09-15-structured-investigation-results-and-loop.md)
 is implemented and verified within the automated and browser scope recorded above. Its native
@@ -1098,13 +1125,15 @@ service-broker or externally detached processes. Historical failed receipts rema
   redelivery did not enter the Server a second time. The earlier CLI-hook HTTP 401 remains a failed
   receipt with no established cause. Full live-path and physical power-loss claims need their own
   evidence; the completed native duplicate tests are not an unexecuted backlog item.
-- **Release verification and production cutover — pending completion:** the operations baseline is
-  published, but its CI lint failure requires a separately verified correction. Native consecutive
-  tasks, cancellation, restart/resume, partial reports, cleanup, and the compiled Dashboard against
-  real HTTP/SQLite passed in isolated acceptance. Scheduled Task Server hosting in Session 0,
-  interactive idle Worker hosting, duplicate-start protection, cooperative shutdown, populated
-  backup/restore and application reopening, bounded Server retries, and the same-boot Worker
-  recovery gate also passed. Production cutover remains pending a new deployment receipt.
+- **Release verification and production cutover — complete within recorded scope:** release
+  `a6ae2995407037683e5be120f76e928aad212c4b` passed all three CI jobs and is running under the
+  new Server/Worker/relay supervision. Existing accounts, Tasks, reports, evidence, and histories
+  were preserved, with one static slot, Worker concurrency one, no active leases, and outbound
+  writes and E2E held. The six-step read-only production browser check and three inspected
+  screenshots passed; the still-loading action-availability capture, video playback, and new E2E
+  are not accepted by that check. Isolated native lifecycle, hosting, backup/restore, bounded
+  retries, and same-boot recovery retain their earlier successful scope. Stop/rollback is prepared
+  but unexecuted.
 - **Remaining deployment acceptance:** VM reboot and subsequent user logon, cross-boot recovery,
   current-release real-model/PowerToys execution and live publication, and unrecorded cases in the
   [Windows hosting matrix](../deploy/operations/WINDOWS.md#verification-to-execute-after-the-worker-is-ready)
