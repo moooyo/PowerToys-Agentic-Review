@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "role": "worker",
+  "taskName": "AgenticReview-Worker",
+  "identity": "HOSTNAME\\review-worker",
+  "releaseDirectory": "D:\\AgenticReview\\Releases\\replace-with-release-id",
+  "dataDirectory": "D:\\AgenticReview\\Data\\Worker",
+  "stateDirectory": "D:\\AgenticReview\\Operations\\Worker",
+  "nodeExecutable": "C:\\Program Files\\nodejs\\node.exe",
+  "restartLimit": 3,
+  "restartDelaySeconds": 5,
+  "restartMaximumDelaySeconds": 60,
+  "shutdownTimeoutSeconds": 240,
+  "artifact": {
+    "sourceRevision": "0000000000000000000000000000000000000000",
+    "entrySha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "environment": {
+    "INVESTIGATION_WORKER_SERVER_URL": "http://127.0.0.1:18880",
+    "INVESTIGATION_WORKER_ALLOW_INSECURE_HTTP": "true",
+    "INVESTIGATION_WORKER_TOKEN": "replace-with-private-base64url-token-at-least-43-characters",
+    "INVESTIGATION_WORKER_TRUSTED_EXECUTABLE_ROOT": "D:\\AgenticReview\\Trusted",
+    "INVESTIGATION_WORKER_PROCESS_HOST_PATH": "D:\\AgenticReview\\Trusted\\AgenticReview.ProcessHost.exe",
+    "INVESTIGATION_WORKER_PROCESS_HOST_SHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "INVESTIGATION_WORKER_GIT_PATH": "D:\\AgenticReview\\Trusted\\git.exe",
+    "INVESTIGATION_WORKER_GIT_SHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "INVESTIGATION_WORKER_CLI_ENGINE": "codex",
+    "INVESTIGATION_WORKER_CLI_PATH": "C:\\Program Files\\Codex\\codex.exe",
+    "INVESTIGATION_WORKER_CLI_SHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "INVESTIGATION_WORKER_MODEL_ENVIRONMENT_JSON": "{\"USERPROFILE\":\"C:\\\\Users\\\\review-worker\",\"CODEX_HOME\":\"D:\\\\AgenticReview\\\\CliHome\"}",
+    "INVESTIGATION_WORKER_ALLOWED_REPOSITORIES_JSON": "[\"example/PowerToys\"]",
+    "INVESTIGATION_WORKER_ROLE": "all",
+    "INVESTIGATION_WORKER_SHUTDOWN_TIMEOUT_MS": "60000",
+    "INVESTIGATION_WORKER_DESKTOP_LOCK_DIRECTORY": "D:\\AgenticReview\\DesktopLocks",
+    "INVESTIGATION_WORKER_STATIC_CONFIG_VERIFIED": "false"
+  }
+}

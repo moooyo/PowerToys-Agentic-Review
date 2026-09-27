@@ -59,7 +59,9 @@ records its resolved HEAD; the source manifest remains the actual snapshot ident
    checkpoint, and resume into a new attempt without rewriting the historical partial report.
 5. Verify complete export and pagination of 137 findings and more than 2 MiB of report data,
    reporter-evidence reference integrity, recheck counts, retained partial findings, empty owned
-   attempt directories, native process identity closure, and zero persisted action intents.
+   attempt directories, native process identity closure, all five static resource leases released,
+   and zero persisted action intents. The queued tasks and held running tasks are observed through
+   the native HTTP API.
 
 Complete Issue inputs are seeded only into a fresh synthetic SQLite database before Server
 startup. No GitHub credentials are passed. External writes are false, the Worker repository
@@ -76,6 +78,57 @@ Synthetic reporter statements must never be described as captured command or scr
 Failures leave their receipt, logs, databases, and report data for diagnosis. Normal cleanup targets
 only child handles created by the harness and owned attempt directories cleaned by the production
 Worker. The harness never terminates processes by executable name or deletes shared data.
+
+## Optional short capacity observation
+
+`--capacity-policy` enables a separate 60-second observation, sampled every six seconds, around
+the first two successful synthetic tasks. All shared packages and application outputs remain
+prebuilt. The existing Go fixture still speaks the current `InvestigationModelTurnDeltaV1`
+protocol; no PowerToys build, real model, or extra application process is introduced.
+
+Create a JSON file outside the checkout containing explicit thresholds for this small workload.
+The following policy is suitable only as a declared short acceptance target, not a production
+capacity claim:
+
+```json
+{
+  "minimumDurationSeconds": 60,
+  "minimumCompletedTasks": 2,
+  "minimumCompletionsPerHour": 30,
+  "maximumFailedTasks": 0,
+  "maximumBlockedTasks": 0,
+  "maximumCancelledTasks": 0,
+  "minimumAvailableBytes": "2147483648",
+  "maximumDatabaseGrowthBytes": "268435456",
+  "maximumWalBytes": "134217728"
+}
+```
+
+Add the policy argument to the normal prebuilt harness command:
+
+```powershell
+node '.\deploy\investigation-acceptance\run.mjs' --repo-root 'D:\Source\PowerToys-Agentic-Review' --tools-root 'D:\AcceptanceTools' --process-host 'D:\AcceptanceTools\AgenticReview.ProcessHost.exe' --git 'D:\AcceptanceTools\git\cmd\git.exe' --source-revision '2d0c36e' --capacity-policy 'D:\AcceptanceInputs\synthetic-capacity-policy.json' --output 'D:\AcceptanceRuns\synthetic-lifecycle-capacity-unique-run'
+```
+
+The harness authenticates an independent observer session and waits for its actual baseline while
+both tasks are queued and the Worker has not started. It then starts the one Worker, checks both
+complete reports, and waits for the capacity receipt before cancellation or restart scenarios.
+This keeps deliberately cancelled/interrupted tasks and the deliberate Server restart outside
+the capacity window. Cached samples cannot extend the window; the shared collector permits at
+most its bounded two-minute grace for a final independent sample. A failed baseline prevents
+Worker startup. Harness failure aborts pending sampling, waits for observer logout, and retains
+the failed receipt before stopping the isolated Server.
+
+`capacity-workload.json` binds the two task identities, source/runtime manifests, synthetic scope,
+and thresholds. `capacity-receipt.json` contains the real operations snapshots, its independent
+run ID, workload-manifest digest, evaluation, and logout result. Generated credentials remain only
+in the harness process environment and memory; the observation does not publish them in receipts.
+The static tasks do not use the separate E2E desktop cleanup journal, so their cleanup evidence is
+owned process/workspace closure plus each native resource lease's recorded release.
+
+This observation checks the current synthetic flow and storage thresholds for two completions.
+It does not satisfy sustained production throughput, retention expiry, physical disk reclamation,
+UI readiness, or a real deployment's operational acceptance.
 
 ## Real CLI companion
 

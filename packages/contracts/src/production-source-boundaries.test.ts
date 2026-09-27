@@ -20,6 +20,11 @@ const serverBindingSignerHostFixtureBasename = "server-binding-signer-host-fixtu
 const serverBindingAuthorityConsumerAllowlist: readonly string[] = [];
 const evidenceVerifierClientSuffix = "/apps/server/src/database/evidence-verification-client.ts";
 const evidenceVerifierWorkerSuffix = "/apps/server/src/database/evidence-verification-worker.ts";
+const windowsSupervisorSuffix = "/deploy/operations/windows-supervisor.mjs";
+const reviewedSupervisorForkCall =
+  'fork(entryPath,[],{cwd:config.dataDirectory,env:childEnvironment,execPath:config.nodeExecutable,execArgv:["--enable-source-maps","--import",pathToFileURL(bridgePath).href],stdio:["ignore","pipe","pipe","ipc"],windowsHide:true,})';
+const reviewedSupervisorEntries =
+  'Object.freeze({server:"apps/server/dist/main.js",worker:"apps/worker/dist/worker.mjs",})';
 const reviewedEvidenceWorkerCall =
   'newWorker(newURL("./evidence-verification-worker.js",import.meta.url),{workerData:this.#root,resourceLimits:{maxOldGenerationSizeMb:128},})';
 const reviewedEvidenceRootInitialization =
@@ -102,6 +107,12 @@ const testOnlyAcceptanceSourceFiles = new Set([
   "deploy/worker/issue-summary-acceptance/server.ts",
   "deploy/worker/issue-summary-acceptance/worker.ts",
 ]);
+// These tools only author offline design artifacts from installed dependencies.
+// Keep them separate from acceptance programs and do not exempt their directory.
+const designBuildSourceFiles = new Set([
+  "docs/design/dashboard-review-2026-09-25/bundle-controls.mjs",
+  "docs/design/dashboard-review-2026-09-25/generate-material-assets.mjs",
+]);
 
 describe("production source boundaries", () => {
   it("prunes the protected Worker directory before inspecting or traversing it", () => {
@@ -165,6 +176,13 @@ describe("production source boundaries", () => {
       "deploy/investigation-acceptance/nested/run.mjs",
       "deploy/investigation-acceptance-old/run.mjs",
       "apps/worker/src/deploy/investigation-acceptance/run.mjs",
+      "deploy/operations/windows-supervisor.mjs",
+      "deploy/operations/windows-shutdown-bridge.mjs",
+      "deploy/operations/production-loader.mjs",
+      "docs/design/dashboard-review-2026-09-25/production-loader.mjs",
+      "docs/design/dashboard-review-2026-09-25/nested/bundle-controls.mjs",
+      "docs/design/dashboard-review-2026-09-25-old/generate-material-assets.mjs",
+      "apps/dashboard/src/docs/design/dashboard-review-2026-09-25/bundle-controls.mjs",
       "config/artifact-policy.ts",
     ];
     const excludedPaths = [
@@ -178,6 +196,7 @@ describe("production source boundaries", () => {
       "apps/dashboard/src/page.spec.tsx",
       "deploy/worker/cli-workflow-acceptance/cleanup-verification.test.ts",
       ...testOnlyAcceptanceSourceFiles,
+      ...designBuildSourceFiles,
     ];
     try {
       for (const path of [...includedPaths, ...excludedPaths]) {
@@ -245,6 +264,43 @@ describe("production source boundaries", () => {
         "production import of a test-only acceptance module",
       );
     }
+  });
+
+  it("rejects production imports and re-exports of exact offline design build tools", () => {
+    const root = resolve("design-build-boundary-fixtures");
+    const sourceDirectory = join(root, "apps/dashboard/src");
+    const sources = [
+      ...[...designBuildSourceFiles].flatMap((path) => {
+        const specifier = relative(sourceDirectory, join(root, path)).replaceAll("\\", "/");
+        return [
+          `import ${JSON.stringify(specifier)};`,
+          `export * from ${JSON.stringify(specifier)};`,
+          `type DesignTool = import(${JSON.stringify(specifier)}).DesignTool;`,
+          `import ${JSON.stringify(pathToFileURL(join(root, path)).href)};`,
+        ];
+      }),
+      'import "../../../docs/design/dashboard-review-2026-09-25/../dashboard-review-2026-09-25/bundle-controls.mjs?build=1";',
+      'export * from "../../../docs/design/dashboard-review-2026-09-25/%67enerate-material-assets.mjs";',
+      'import "@/../../../docs/design/dashboard-review-2026-09-25/bundle-controls";',
+      'export * from "@@/../../../../docs/design/dashboard-review-2026-09-25/generate-material-assets.mjs";',
+    ].map((source, index) => ({
+      fileName: join(sourceDirectory, `consumer-${index}.tsx`),
+      source,
+    }));
+    const inspections = inspectProductionModules(sources);
+    for (const source of sources) {
+      expect(inspections.get(source.fileName), source.source).toContain(
+        "production import of an offline design build tool",
+      );
+    }
+    const adjacentProduction = {
+      fileName: join(sourceDirectory, "consumer.tsx"),
+      source:
+        'import "../../../docs/design/dashboard-review-2026-09-25/production-loader.mjs"; import "../../../docs/design/dashboard-review-2026-09-25/nested/bundle-controls.mjs";',
+    };
+    expect(inspectProductionModules([adjacentProduction]).get(adjacentProduction.fileName)).toEqual(
+      [],
+    );
   });
 
   it("retains the exact offline and loopback boundaries of opt-in investigation acceptance", () => {
@@ -826,6 +882,132 @@ describe("production source boundaries", () => {
     for (const mutation of mutations)
       expect(inspections.get(mutation.fileName)?.length ?? 0, mutation.source).toBeGreaterThan(0);
   });
+
+  it("permits only the sealed production supervisor fork and rejects loader drift", () => {
+    const fixture = `
+      import { fork } from "node:child_process";
+      const entries = Object.freeze({
+        server: "apps/server/dist/main.js",
+        worker: "apps/worker/dist/worker.mjs",
+      });
+      export async function runSupervisor(configurationPath) {
+        const config = validateConfiguration(readJson(configurationPath));
+        const entryPath = resolve(config.releaseDirectory, entries[config.role]);
+        const bridgePath = resolve(config.releaseDirectory, "deploy/operations/windows-shutdown-bridge.mjs");
+        let child;
+        const launch = () => {
+          child = fork(entryPath, [], {
+            cwd: config.dataDirectory,
+            env: childEnvironment,
+            execPath: config.nodeExecutable,
+            execArgv: ["--enable-source-maps", "--import", pathToFileURL(bridgePath).href],
+            stdio: ["ignore", "pipe", "pipe", "ipc"],
+            windowsHide: true,
+          });
+        };
+      }
+    `;
+    const repositoryRoot = resolve("supervisor-loader-fixtures/allowed");
+    const allowed = {
+      fileName: join(repositoryRoot, windowsSupervisorSuffix.slice(1)),
+      repositoryRoot,
+      source: fixture,
+    };
+    const guardedRoot = resolve("supervisor-loader-fixtures/guarded");
+    const guarded = {
+      fileName: join(guardedRoot, windowsSupervisorSuffix.slice(1)),
+      repositoryRoot: guardedRoot,
+      source: fixture
+        .replace(
+          "const launch = () => {",
+          'const launch = () => { if (!save({ state: "starting", childPid: null })) return; try {',
+        )
+        .replace("        };", "          } catch { child = undefined; }\n        };"),
+    };
+    const formattedRoot = resolve("supervisor-loader-fixtures/formatted");
+    const formatted = {
+      fileName: join(formattedRoot, windowsSupervisorSuffix.slice(1)),
+      repositoryRoot: formattedRoot,
+      source: guarded.source.replace(
+        '"deploy/operations/windows-shutdown-bridge.mjs");',
+        '"deploy/operations/windows-shutdown-bridge.mjs",);',
+      ),
+    };
+    const productionRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    const productionFileName = join(productionRoot, windowsSupervisorSuffix.slice(1));
+    const production = {
+      fileName: productionFileName,
+      repositoryRoot: productionRoot,
+      source: readFileSync(productionFileName, "utf8"),
+    };
+    const allowedSources = [allowed, guarded, formatted, production];
+    const allowedInspections = inspectProductionModules(allowedSources);
+    for (const source of allowedSources) {
+      expect(allowedInspections.get(source.fileName), source.source).toEqual([]);
+    }
+    const mutations = [
+      fixture.replace('import { fork } from "node:child_process";', ""),
+      fixture.replace('"node:child_process"', '"child_process"'),
+      fixture.replace("import { fork }", "import * as childProcess"),
+      fixture.replace("import { fork }", "import { fork, execFile }"),
+      fixture
+        .replace("import { fork }", "import { fork as launchProcess }")
+        .replace("child = fork(", "child = launchProcess("),
+      `import { fork } from "node:child_process"; ${fixture}`,
+      `${fixture} export { fork };`,
+      `${fixture} const escaped = fork;`,
+      fixture.replace("child = fork(", "child = fork.call(null, "),
+      fixture.replace("child = fork(", "child = childProcess.fork("),
+      fixture.replace("child = fork(", "child = ordinaryStart("),
+      fixture.replace("child = fork(", `child = ${reviewedSupervisorForkCall}; child = fork(`),
+      fixture.replace("child = fork(", "return fork("),
+      fixture.replace("fork(entryPath, []", 'fork("./unreviewed.mjs", []'),
+      fixture.replace('"--enable-source-maps", "--import"', '"--eval", "--import"'),
+      fixture.replace("pathToFileURL(bridgePath).href", "config.loader"),
+      fixture.replace("execPath: config.nodeExecutable", "execPath: config.arbitraryExecutable"),
+      fixture.replace("env: childEnvironment", "env: process.env"),
+      fixture.replace("windowsHide: true", "windowsHide: false"),
+      fixture.replace('"ignore", "pipe", "pipe", "ipc"', '"inherit", "inherit", "inherit"'),
+      fixture.replace('worker: "apps/worker/dist/worker.mjs"', 'worker: "./unreviewed.mjs"'),
+      fixture.replace("Object.freeze({", "Object.seal({"),
+      fixture.replace("const entries =", "let entries ="),
+      fixture.replace(
+        "validateConfiguration(readJson(configurationPath))",
+        "readJson(configurationPath)",
+      ),
+      fixture.replace("entries[config.role]", "config.entryPath"),
+      fixture.replace("const entryPath =", "let entryPath ="),
+      fixture.replace('"deploy/operations/windows-shutdown-bridge.mjs"', "config.bridgePath"),
+      fixture.replace("const bridgePath =", "let bridgePath ="),
+      fixture.replace("const launch = () =>", "const launch = (entryPath) =>"),
+      fixture.replace("runSupervisor(configurationPath)", "arbitrarySupervisor(configurationPath)"),
+      fixture.replace(
+        "const launch = () => {",
+        'const launch = () => { const bridgePath = "./other.mjs";',
+      ),
+      fixture
+        .replace("const launch = () => {", "const launch = () => { const deferred = () => {")
+        .replace("        };", "        }; };"),
+    ].map((source, index) => {
+      expect(source, `Supervisor mutation ${index} must change the fixture.`).not.toBe(fixture);
+      const root = resolve(`supervisor-loader-fixtures/mutation-${index}`);
+      return {
+        fileName: join(root, windowsSupervisorSuffix.slice(1)),
+        repositoryRoot: root,
+        source,
+      };
+    });
+    const adjacent = [
+      "deploy/operations/adjacent.mjs",
+      "deploy/operations/nested/windows-supervisor.mjs",
+      "deploy/operations-old/windows-supervisor.mjs",
+      "apps/worker/src/deploy/operations/windows-supervisor.mjs",
+    ].map((path) => ({ fileName: join(repositoryRoot, path), repositoryRoot, source: fixture }));
+    const inspections = inspectProductionModules([...mutations, ...adjacent]);
+    for (const source of [...mutations, ...adjacent]) {
+      expect(inspections.get(source.fileName)?.length ?? 0, source.source).toBeGreaterThan(0);
+    }
+  });
 });
 
 function readMatchingFileNames(directory: string, pattern: RegExp): string[] {
@@ -844,6 +1026,7 @@ function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
 interface AstSourceInput {
   readonly fileName: string;
   readonly source: string;
+  readonly repositoryRoot?: string;
 }
 
 function inspectProductionModules(
@@ -854,7 +1037,10 @@ function inspectProductionModules(
     for (const source of sources) {
       const sourceFile = sourceFiles.get(source.fileName);
       if (sourceFile === undefined) throw new Error(`Missing virtual AST for ${source.fileName}.`);
-      inspections.set(source.fileName, inspectProductionSourceFile(sourceFile, source.fileName));
+      inspections.set(
+        source.fileName,
+        inspectProductionSourceFile(sourceFile, source.fileName, source.repositoryRoot),
+      );
     }
     return inspections;
   });
@@ -875,9 +1061,12 @@ function isAllowedServerBindingAuthorityImport(node: ts.Node, normalizedFileName
 function inspectProductionSourceFile(
   sourceFile: ts.SourceFile,
   originalFileName: string,
+  repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url)),
 ): string[] {
   const violations = new Set<string>();
-  const normalizedFileName = originalFileName.replaceAll("\\", "/").toLowerCase();
+  const normalizedFileName = `/${relative(repositoryRoot, originalFileName)
+    .replaceAll("\\", "/")
+    .toLowerCase()}`;
   const loaderBindings = collectImportedLoaderBindings(sourceFile);
   const reflectGetAliases = collectReflectGetAliases(sourceFile);
   if (reflectGetAliases.size !== 0) {
@@ -890,6 +1079,7 @@ function inspectProductionSourceFile(
   let allowedWorkerCalls = 0;
   let allowedSpawnSyncCalls = 0;
   let allowedProcessHostSpawnCalls = 0;
+  let allowedSupervisorForkCalls = 0;
   const inspectModuleSpecifier = (specifier: ts.Expression): void => {
     if (!ts.isStringLiteralLikeNode(specifier)) return;
     const candidates = [specifier.text, decodeStaticLiteral(specifier.getText(sourceFile))].map(
@@ -910,8 +1100,13 @@ function inspectProductionSourceFile(
       ) {
         violations.add("production import of a test bridge");
       }
-      if (isTestOnlyAcceptanceImport(normalizedCandidate, originalFileName)) {
+      if (
+        isExcludedSourceImport(normalizedCandidate, originalFileName, testOnlyAcceptanceSourceFiles)
+      ) {
         violations.add("production import of a test-only acceptance module");
+      }
+      if (isExcludedSourceImport(normalizedCandidate, originalFileName, designBuildSourceFiles)) {
+        violations.add("production import of an offline design build tool");
       }
       const moduleName = sensitiveServerBindingModuleName(candidate);
       if (
@@ -1062,6 +1257,8 @@ function inspectProductionSourceFile(
       ) {
         if (isAllowedSpawnSyncCall(node, sourceFile, normalizedFileName)) {
           allowedSpawnSyncCalls += 1;
+        } else if (isAllowedSupervisorForkCall(node, sourceFile, normalizedFileName)) {
+          allowedSupervisorForkCalls += 1;
         } else {
           violations.add(`${name} process or script loader`);
         }
@@ -1109,10 +1306,12 @@ function inspectProductionSourceFile(
   )
     ? 1
     : 0;
+  const expectedSupervisorForkCalls = normalizedFileName === windowsSupervisorSuffix ? 1 : 0;
   if (
     allowedWorkerCalls !== expectedWorkerCalls ||
     allowedSpawnSyncCalls !== expectedSpawnSyncCalls ||
-    allowedProcessHostSpawnCalls !== expectedProcessHostSpawnCalls
+    allowedProcessHostSpawnCalls !== expectedProcessHostSpawnCalls ||
+    allowedSupervisorForkCalls !== expectedSupervisorForkCalls
   ) {
     violations.add("exact loader allowlist call count mismatch");
   }
@@ -1136,10 +1335,26 @@ function inspectProductionSourceFile(
     if (imports.length !== 1)
       violations.add("exact evidence verifier worker import count mismatch");
   }
+  if (normalizedFileName === windowsSupervisorSuffix) {
+    const imports = sourceFile.statements.filter(
+      (statement) =>
+        ts.isImportDeclaration(statement) &&
+        ts.isStringLiteralLikeNode(statement.moduleSpecifier) &&
+        ["node:child_process", "child_process"].includes(
+          statement.moduleSpecifier.text.toLowerCase(),
+        ),
+    );
+    if (imports.length !== 1)
+      violations.add("exact supervisor child-process import count mismatch");
+  }
   return [...violations].sort();
 }
 
-function isTestOnlyAcceptanceImport(specifier: string, importingFileName: string): boolean {
+function isExcludedSourceImport(
+  specifier: string,
+  importingFileName: string,
+  excludedSourceFiles: ReadonlySet<string>,
+): boolean {
   let path = specifier.split(/[?#]/u, 1)[0] ?? "";
   try {
     path = decodeURIComponent(path);
@@ -1148,7 +1363,7 @@ function isTestOnlyAcceptanceImport(specifier: string, importingFileName: string
   }
   if (path.startsWith(".")) path = resolve(dirname(importingFileName), path);
   path = posix.normalize(path.replaceAll("\\", "/")).toLowerCase();
-  return [...testOnlyAcceptanceSourceFiles].some((sourcePath) =>
+  return [...excludedSourceFiles].some((sourcePath) =>
     [
       sourcePath,
       sourcePath.replace(/\.ts$/u, ".js"),
@@ -1472,7 +1687,7 @@ function isFunctionLikeNode(node: ts.Node): boolean {
   );
 }
 
-type ImportedLoaderKind = "process-host-spawn" | "spawn-sync" | "worker";
+type ImportedLoaderKind = "process-host-spawn" | "spawn-sync" | "supervisor-fork" | "worker";
 
 function collectImportedLoaderBindings(
   sourceFile: ts.SourceFile,
@@ -1500,6 +1715,7 @@ function collectImportedLoaderBindings(
       if (moduleName === "node:child_process" || moduleName === "child_process") {
         if (imported === "spawnsync") bindings.set(element.name.text, "spawn-sync");
         if (imported === "spawn") bindings.set(element.name.text, "process-host-spawn");
+        if (imported === "fork") bindings.set(element.name.text, "supervisor-fork");
       }
     }
   }
@@ -1525,6 +1741,13 @@ function isAllowedImportedLoaderReference(
     parent.expression === identifier
   ) {
     return isAllowedProcessHostSpawnCall(parent, sourceFile, normalizedFileName);
+  }
+  if (
+    kind === "supervisor-fork" &&
+    ts.isCallExpression(parent) &&
+    parent.expression === identifier
+  ) {
+    return isAllowedSupervisorForkCall(parent, sourceFile, normalizedFileName);
   }
   return false;
 }
@@ -1572,8 +1795,15 @@ function inspectLoaderImport(
       ? "spawnSync:spawnSync:value"
       : normalizedFileName.endsWith("/apps/worker/src/execution/process-host-client.ts")
         ? "ChildProcessWithoutNullStreams:ChildProcessWithoutNullStreams:type,spawn:spawnChildProcess:value"
-        : undefined;
-    if (expected === undefined || importedBindingSignature(declaration) !== expected) {
+        : normalizedFileName === windowsSupervisorSuffix
+          ? "fork:fork:value"
+          : undefined;
+    if (
+      expected === undefined ||
+      importedBindingSignature(declaration) !== expected ||
+      (normalizedFileName === windowsSupervisorSuffix &&
+        declaration.moduleSpecifier.text !== "node:child_process")
+    ) {
       violations.add("child_process import outside exact allowlist");
     }
   }
@@ -1761,6 +1991,95 @@ function isAllowedProcessHostSpawnCall(
   );
 }
 
+function isAllowedSupervisorForkCall(
+  expression: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  normalizedFileName: string,
+): boolean {
+  if (
+    normalizedFileName !== windowsSupervisorSuffix ||
+    compactNodeText(expression, sourceFile) !== reviewedSupervisorForkCall
+  ) {
+    return false;
+  }
+  const launch = findAncestor(expression, ts.isArrowFunction);
+  const launchDeclaration = launch?.parent;
+  const supervisor =
+    launch === undefined ? undefined : findAncestor(launch, ts.isFunctionDeclaration);
+  const assignment = expression.parent;
+  if (
+    launch === undefined ||
+    launch.parameters.length !== 0 ||
+    launchDeclaration === undefined ||
+    !ts.isVariableDeclaration(launchDeclaration) ||
+    !ts.isIdentifier(launchDeclaration.name) ||
+    launchDeclaration.name.text !== "launch" ||
+    launchDeclaration.initializer !== launch ||
+    supervisor?.name?.text !== "runSupervisor" ||
+    supervisor.parent !== sourceFile ||
+    supervisor.body === undefined ||
+    supervisor.parameters.length !== 1 ||
+    compactNodeText(supervisor.parameters[0] as ts.Node, sourceFile) !== "configurationPath" ||
+    launchDeclaration.parent.parent.parent !== supervisor.body ||
+    !ts.isBinaryExpression(assignment) ||
+    assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+    assignment.right !== expression ||
+    compactNodeText(assignment.left, sourceFile) !== "child"
+  ) {
+    return false;
+  }
+  return (
+    hasReviewedConstant(sourceFile, "entries", reviewedSupervisorEntries, sourceFile) &&
+    hasReviewedConstant(
+      supervisor.body,
+      "config",
+      "validateConfiguration(readJson(configurationPath))",
+      sourceFile,
+    ) &&
+    hasReviewedConstant(
+      supervisor.body,
+      "entryPath",
+      "resolve(config.releaseDirectory,entries[config.role])",
+      sourceFile,
+    ) &&
+    hasReviewedConstant(
+      supervisor.body,
+      "bridgePath",
+      'resolve(config.releaseDirectory,"deploy/operations/windows-shutdown-bridge.mjs")',
+      sourceFile,
+    )
+  );
+}
+
+function hasReviewedConstant(
+  root: ts.Node,
+  name: string,
+  initializer: string,
+  sourceFile: ts.SourceFile,
+): boolean {
+  const declarations: ts.VariableDeclaration[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
+      declarations.push(node);
+    }
+    node.forEachChild((child) => {
+      visit(child);
+      return undefined;
+    });
+  };
+  visit(root);
+  const statement = declarations[0]?.parent.parent;
+  return (
+    declarations.length === 1 &&
+    statement !== undefined &&
+    ts.isVariableStatement(statement) &&
+    statement.parent === root &&
+    // Formatting a multiline call adds a semantically inert final argument comma.
+    compactNodeText(statement, sourceFile).replace(/,\);$/u, ");") ===
+      `const${name}=${initializer};`
+  );
+}
+
 function compactNodeText(node: ts.Node, sourceFile: ts.SourceFile): string {
   return node.getText(sourceFile).replace(/\s+/gu, "");
 }
@@ -1943,7 +2262,8 @@ function productionSourceFiles(
         // Fixture modules are excluded from production compilation as well. Imports of these
         // files from a production module remain forbidden by the separate AST inspection.
         /\.(?:spec|test|testing)\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(entry.name) ||
-        testOnlyAcceptanceSourceFiles.has(repositoryPath)
+        testOnlyAcceptanceSourceFiles.has(repositoryPath) ||
+        designBuildSourceFiles.has(repositoryPath)
       ) {
         continue;
       }

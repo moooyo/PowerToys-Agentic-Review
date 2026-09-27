@@ -1,5 +1,52 @@
 # Implementation Status
 
+## Serial workflow acceptance with 4 GiB, 2026-09-27
+
+The current operations candidate has passed shared/Server/Worker/Dashboard prebuilds, 149 distinct
+targeted tests, and a serial 30-test Windows repeat. The production-entry synthetic lifecycle
+passed all 10 checks, including cancellation, restart/resume, immutable partial reports, and all
+five resource leases released. A separate 60-second, two-task capacity observation passed its
+declared thresholds. These are bounded functional observations, not sustained production capacity.
+
+The deployed production Dashboard passed an 11-step isolated native HTTP/SQLite browser exercise,
+including exact publication preparation, editing, cancellation error recovery, and 320px light/dark
+layouts. The operator had no external execution permission and the upstream transport was synthetic;
+no real GitHub mutation occurred. Earlier helper failures remain preserved separately.
+
+The new Scheduled Task launcher and supervisor passed actual Server hosting in Session 0 and
+idle Worker hosting in an interactive session, duplicate-start protection, cooperative shutdown,
+populated database/authentication backup and restored application reopening, bounded Server
+retries, and the Worker's same-boot recovery gate. All application processes exited after checks.
+Across 242 memory samples, the lowest observed available guest memory was 526.54 MiB. These
+20-second observations support this bounded serial exercise, not exact peaks or concurrent capacity.
+All 12 temporary tasks, the new hosting account and its added right, and plaintext fixture
+credentials were removed. Evidence and original data were retained; no production cutover occurred.
+
+See the [current workflow handoff](handoff/2026-09-27-four-gib-workflow-acceptance.md) for exact
+acceptance scope, operational follow-up, and limitations. PowerToys builds/UI, live publication,
+VM reboot, and long-term workloads are outside this four-GiB exercise.
+
+## Production operations preparation, 2026-09-26 — pre-verification record
+
+Code now includes administrator-only physical storage observations, a bounded capacity observer,
+Windows Scheduled Task hosting with cooperative shutdown, and an evidence checklist for the next
+deployment. Native HTTP/SQLite webhook regression sources distinguish relay cached duplicates from
+requests that actually re-enter the Server, including after restart. Historical Peek, Launcher,
+and external HTTP 401 cases retain their original outcomes and start new acceptance as `not_run`.
+See [the operations workflow](../deploy/operations/README.md).
+
+At that milestone the designated Worker was unavailable. No tests, builds, runtime probes,
+deployment, desktop checks, sustained workloads, or service restart acceptance had been executed
+for that code change. The September 27 entry above records subsequent remote verification and
+scoped acceptance; its exclusions remain outstanding.
+No new PR/Issue mutation is authorized by these tools or by previous consumed test approvals.
+
+Current source uses `investigation-v5` with exact supported v2/v3/v4 additive upgrades. The
+September 25 Dashboard implementation is recorded in its [current handoff](design/dashboard-review-2026-09-25/IMPLEMENTATION.md).
+Entries below preserve historical milestone scope; their former PR14 submodule/compiler blockers
+were subsequently addressed by the September 20 pinned-submodule and September 21 toolchain changes.
+Do not treat old blocker descriptions or earlier UI checks as acceptance of the current release.
+
 ## Worker controls and webhook recovery implementation, 2026-09-19
 
 The implementation, sealed v4 software candidate, and scoped Dashboard/native-intake

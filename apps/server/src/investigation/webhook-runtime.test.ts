@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,8 +14,15 @@ import { createInvestigationRuntime } from "../../dist/investigation/runtime-mai
 import { InvestigationStore } from "../../dist/investigation/store.js";
 import type { InvestigationActionTransport } from "../../dist/investigation/types.js";
 import type { InvestigationWebhookReceipt } from "../../dist/investigation/webhook-intake.js";
+import {
+  createWebhookRelayTransport,
+  type WebhookRelayEnvelope,
+  type WebhookRelayResponse,
+  WebhookRelaySpool,
+} from "../../dist/investigation/webhook-relay-spool.js";
 
 const applications = new Set<FastifyInstance>();
+const relaySpools = new Set<WebhookRelaySpool>();
 const directories: string[] = [];
 const origin = "http://127.0.0.1:8000";
 const host = "127.0.0.1:8000";
@@ -34,6 +41,8 @@ const enabledSettings = {
 afterEach(async () => {
   for (const app of applications) await app.close();
   applications.clear();
+  for (const spool of relaySpools) spool.close();
+  relaySpools.clear();
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
 });
@@ -49,6 +58,56 @@ function gate() {
 async function closeRuntime(app: FastifyInstance) {
   applications.delete(app);
   await app.close();
+}
+
+async function nativeReceiver(app: FastifyInstance) {
+  const received: {
+    deliveryId: string | string[] | undefined;
+    signature: string | string[] | undefined;
+    bodyBytes: number;
+  }[] = [];
+  app.server.on("request", (request) => {
+    if (request.method !== "POST" || request.url !== "/api/github/webhook") return;
+    // Observe native entry without consuming the stream before Fastify's raw-body parser.
+    received.push({
+      deliveryId: request.headers["x-github-delivery"],
+      signature: request.headers["x-hub-signature-256"],
+      bodyBytes: Number(request.headers["content-length"]),
+    });
+  });
+  const address = await app.listen({ host: "127.0.0.1", port: 0 });
+  return {
+    received,
+    transport: createWebhookRelayTransport(`${address}/api/github/webhook`),
+  };
+}
+
+function relayEnvelope(request: { headers: Record<string, string>; payload: string }) {
+  // Preserve noncanonical JSON bytes so parsing and reserializing cannot satisfy this check.
+  const json = JSON.stringify(JSON.parse(request.payload), null, 2).replaceAll("\n", "\r\n");
+  const body = Buffer.from(`${json}\r\n`);
+  return {
+    body,
+    headers: {
+      ...request.headers,
+      "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`,
+    },
+  } satisfies WebhookRelayEnvelope;
+}
+
+function directDelivery(envelope: WebhookRelayEnvelope) {
+  return {
+    ...envelope,
+    deliveryId: envelope.headers["x-github-delivery"]!,
+    eventName: envelope.headers["x-github-event"]!,
+    signal: AbortSignal.timeout(5_000),
+  };
+}
+
+function openRelay(config: InvestigationRuntimeConfig) {
+  const spool = new WebhookRelaySpool({ databasePath: `${config.databasePath}.relay.sqlite` });
+  relaySpools.add(spool);
+  return spool;
 }
 
 function stored<T>(config: InvestigationRuntimeConfig, read: (store: InvestigationStore) => T): T {
@@ -260,12 +319,33 @@ async function fixture(
       payload: body,
     };
   }
+  function commandDelivery(deliveryId = "e2e-runtime-command") {
+    const body = JSON.stringify({
+      action: "created",
+      repository: { id: repository.githubRepositoryId, full_name: repository.fullName },
+      sender: { id: 44, login: "trusted-maintainer", type: "User" },
+      issue: { id: 88, number: 7, state: "open", pull_request: {} },
+      comment: { id: 501, body: "@configured-reviewer e2e", user: { id: 44, type: "User" } },
+    });
+    return {
+      method: "POST" as const,
+      url: "/api/github/webhook",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": deliveryId,
+        "x-github-event": "issue_comment",
+        "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`,
+      },
+      payload: body,
+    };
+  }
   return {
     app,
     cookie,
     config,
     start,
     delivery,
+    commandDelivery,
     sourceCalls,
     readTarget,
     execute,
@@ -333,24 +413,7 @@ describe("production webhook runtime integration", () => {
       payload: { ...enabledSettings, enabled: false, e2eEnabled: true },
     });
     expect(configured.statusCode).toBe(200);
-    const body = JSON.stringify({
-      action: "created",
-      repository: { id: 123, full_name: repository.fullName },
-      sender: { id: 44, login: "trusted-maintainer", type: "User" },
-      issue: { id: 88, number: 7, state: "open", pull_request: {} },
-      comment: { id: 501, body: "@configured-reviewer e2e", user: { id: 44, type: "User" } },
-    });
-    const response = await test.app.inject({
-      method: "POST",
-      url: "/api/github/webhook",
-      headers: {
-        "content-type": "application/json",
-        "x-github-delivery": "e2e-runtime-command",
-        "x-github-event": "issue_comment",
-        "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`,
-      },
-      payload: body,
-    });
+    const response = await test.app.inject(test.commandDelivery());
     expect(response.statusCode).toBe(202);
     expect(response.json().status).toBe("accepted");
     await completedReceipt(test.app, test.cookie, "e2e-runtime-command");
@@ -547,6 +610,176 @@ describe("production webhook runtime integration", () => {
       expect(test.reconcile).not.toHaveBeenCalled();
     },
   );
+
+  it.each(["issue", "pull_request", "e2e"] as const)(
+    "separates cached relay redelivery from native %s receiver re-entry across restart",
+    async (kind) => {
+      const e2e = kind === "e2e";
+      const test = await fixture({ kind: kind === "issue" ? "issue" : "pull_request", e2e });
+      if (e2e) {
+        test.upstream.assignees.length = 0;
+        const configured = await test.app.inject({
+          method: "PUT",
+          url: settingsUrl,
+          headers: { host, origin, cookie: test.cookie },
+          payload: { ...enabledSettings, enabled: false, e2eEnabled: true },
+        });
+        expect(configured.statusCode).toBe(200);
+      } else {
+        await enable(test.app, test.cookie);
+      }
+      const deliveryId = `native-${kind}-redelivery`;
+      const original = relayEnvelope(
+        e2e ? test.commandDelivery(deliveryId) : test.delivery(deliveryId),
+      );
+      const receiptKey = `${e2e ? "e2e:webhook:" : "webhook:delivery:"}${deliveryId}`;
+      const expectedEntry = {
+        deliveryId,
+        signature: original.headers["x-hub-signature-256"],
+        bodyBytes: original.body.byteLength,
+      };
+      const native = await nativeReceiver(test.app);
+      const spool = openRelay(test.config);
+      expect(test.config.enableExternalWrites).toBe(false);
+      expect(spool.enqueue(original).status).toBe("accepted");
+      expect(await spool.runNext(native.transport, deliveryId)).toMatchObject({
+        deliveryId,
+        state: "delivered",
+        attempts: [{ number: 1, responseStatus: 202, acceptance: "accepted" }],
+      });
+      await completedReceipt(test.app, test.cookie, deliveryId);
+      expect(native.received).toEqual([expectedEntry]);
+
+      const businessState = () =>
+        stored(test.config, (store) => ({
+          tasks: store.list<InvestigationTaskV1>("tasks"),
+          attempts: store.list("attempts"),
+          reports: store.list("reports"),
+          resourceLeases: store.list("resourceLeases"),
+          actionIntents: store.list("actionIntents"),
+          invocations: store.list<{ invocationId?: string }>(
+            "idempotency",
+            (receipt) => receipt.invocationId !== undefined,
+          ),
+          receipt: store.get("idempotency", receiptKey),
+        }));
+      const committed = businessState();
+      expect(committed.tasks).toHaveLength(1);
+      expect(committed.tasks[0]).toMatchObject({
+        kind: e2e ? "pr-e2e" : kind === "issue" ? "issue-investigate" : "pr-review",
+        state: "queued",
+      });
+      expect(committed).toMatchObject({
+        attempts: [],
+        reports: [],
+        resourceLeases: [],
+        actionIntents: [],
+        invocations: [],
+        receipt: {
+          deliveryId,
+          taskId: committed.tasks[0]!.id,
+          state: "completed",
+          payloadSha256: createHash("sha256").update(original.body).digest("hex"),
+          attempts: 1,
+        },
+      });
+      const sourceReads = [...test.sourceCalls];
+      const targetReads = test.readTarget.mock.calls.length;
+      const delivered = spool.inspect(deliveryId);
+
+      // A relay cache hit proves no second receiver entry, independently of Server deduplication.
+      expect(spool.enqueue(original)).toMatchObject({ status: "duplicate" });
+      expect(await spool.runNext(native.transport, deliveryId)).toBeNull();
+      expect(native.received).toHaveLength(1);
+      expect(spool.inspect(deliveryId)).toEqual(delivered);
+      expect(businessState()).toEqual(committed);
+
+      // Bypass only the relay cache, never the native receiver or its persistent receipt.
+      expect(await native.transport(directDelivery(original))).toMatchObject({
+        status: 202,
+        body: { status: "duplicate", deliveryId, taskId: committed.tasks[0]!.id },
+      });
+      expect(native.received).toEqual([expectedEntry, expectedEntry]);
+      expect(businessState()).toEqual(committed);
+
+      await closeRuntime(test.app);
+      relaySpools.delete(spool);
+      spool.close();
+      const restarted = await test.start();
+      const restartedNative = await nativeReceiver(restarted);
+      const reopenedSpool = openRelay(test.config);
+      expect(reopenedSpool.enqueue(original).status).toBe("duplicate");
+      expect(await reopenedSpool.runNext(restartedNative.transport, deliveryId)).toBeNull();
+      expect(restartedNative.received).toEqual([]);
+      expect(reopenedSpool.inspect(deliveryId)).toEqual(delivered);
+      expect(await restartedNative.transport(directDelivery(original))).toMatchObject({
+        status: 202,
+        body: { status: "duplicate", deliveryId, taskId: committed.tasks[0]!.id },
+      });
+      expect(restartedNative.received).toEqual([expectedEntry]);
+      expect(businessState()).toEqual(committed);
+      expect(test.sourceCalls).toEqual(sourceReads);
+      expect(test.readTarget).toHaveBeenCalledTimes(targetReads);
+      expect(test.execute).not.toHaveBeenCalled();
+      expect(test.reconcile).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps native signature rejection and relay failure separate from business acceptance", async () => {
+    const test = await fixture();
+    await enable(test.app, test.cookie);
+    const deliveryId = "native-rejected-signature";
+    const original = relayEnvelope(test.delivery(deliveryId));
+    const invalid = {
+      ...original,
+      headers: { ...original.headers, "x-hub-signature-256": `sha256=${"0".repeat(64)}` },
+    };
+    const native = await nativeReceiver(test.app);
+    const spool = openRelay(test.config);
+    const responses: WebhookRelayResponse[] = [];
+    spool.enqueue(invalid);
+    const rejected = await spool.runNext(async (request) => {
+      const response = await native.transport(request);
+      responses.push(response);
+      return response;
+    });
+    expect(responses).toEqual([
+      {
+        status: 401,
+        body: {
+          code: "invalid_github_webhook_signature",
+          message: "GitHub webhook signature is missing or invalid.",
+          retryable: false,
+        },
+      },
+    ]);
+    expect(rejected).toMatchObject({
+      state: "failed",
+      code: "receiver_rejected",
+      attempts: [{ number: 1, outcome: "failed", responseStatus: 401, acceptance: null }],
+    });
+    expect(native.received).toEqual([
+      {
+        deliveryId,
+        signature: invalid.headers["x-hub-signature-256"],
+        bodyBytes: original.body.byteLength,
+      },
+    ]);
+    expect(spool.enqueue(invalid).status).toBe("duplicate");
+    expect(await spool.runNext(native.transport, deliveryId)).toBeNull();
+    expect(spool.inspect(deliveryId)).toEqual(rejected);
+    expect(native.received).toHaveLength(1);
+    expect(
+      stored(test.config, (store) => store.get("idempotency", `webhook:delivery:${deliveryId}`)),
+    ).toBeUndefined();
+    expect(stored(test.config, (store) => store.list("tasks"))).toEqual([]);
+    expect(stored(test.config, (store) => store.list("actionIntents"))).toEqual([]);
+    expect(test.sourceCalls).toEqual([]);
+    expect(test.execute).not.toHaveBeenCalled();
+    expect(test.reconcile).not.toHaveBeenCalled();
+    expect(JSON.stringify(rejected)).not.toContain(secret);
+    expect(JSON.stringify(rejected)).not.toContain(invalid.headers["x-hub-signature-256"]);
+  });
 
   it("rejects invalid signatures before durable admission and keeps receipts scoped to authenticated readers", async () => {
     const test = await fixture({ additionalAccounts: true });

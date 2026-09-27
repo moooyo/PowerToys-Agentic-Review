@@ -1,0 +1,18 @@
+{
+  "origin": "http://127.0.0.1:8000",
+  "credentialsPath": "D:\\PrivateOperations\\observer-credentials.json",
+  "dashboardIndexSha256": "<replace with the sealed Dashboard index SHA-256>",
+  "durationSeconds": 3600,
+  "intervalSeconds": 30,
+  "policy": {
+    "minimumDurationSeconds": 3600,
+    "minimumCompletedTasks": 100,
+    "minimumCompletionsPerHour": 100,
+    "maximumFailedTasks": 0,
+    "maximumBlockedTasks": 0,
+    "maximumCancelledTasks": 0,
+    "minimumAvailableBytes": "10737418240",
+    "maximumDatabaseGrowthBytes": "2147483648",
+    "maximumWalBytes": "536870912"
+  }
+}

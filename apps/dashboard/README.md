@@ -209,9 +209,10 @@ later report changes require an explicit choice to import them, keep the action'
 selection/text, or replace publishing text. A P0 outside the visible page cannot
 be bypassed by clearing either selection.
 
-Feedback publication follows **Select findings -> Compose -> Server preview**,
-then a separate confirmation. Compose edits each included finding's publishing
-text and, for eligible review actions, its exact source-bound code suggestion.
+Feedback publication follows **Select findings -> Preview -> Confirm**.
+Optional **Edit feedback** changes each included finding's publishing text and,
+for eligible review actions, its exact source-bound code suggestion. Editing
+requires preparing a new Server preview before confirmation.
 Conversation comments are text-only. Request changes requires at least one
 finding; Approve can have no findings or summary. This selection rule does not
 replace the server's P0, source, permission, or execution guards. Close, Merge,
@@ -422,7 +423,12 @@ user's explicit approval of the exact targets, operations, content, and executio
 scope.
 
 These instructions and registered pages do not establish live UI acceptance.
-The [current handoff](../../docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md)
+The [four-GiB workflow handoff](../../docs/handoff/2026-09-27-four-gib-workflow-acceptance.md)
+records the current compiled Dashboard's 11-step native HTTP/SQLite exercise with synthetic
+upstream data, including preparation/editing, cancellation recovery, and narrow light/dark layouts.
+It did not execute GitHub writes or actual PowerToys UI scenarios.
+
+The [September 19 handoff](../../docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md)
 records software checks and scoped real/synthetic Dashboard observations, including native
 HTTP/SQLite intake with GitHub mocked. The later scoped Calculator E2E, fifth-report GitHub media,
 cached HTTPS redelivery, and sixth/eighth-Task cleanup have separate evidence. The real-task observers

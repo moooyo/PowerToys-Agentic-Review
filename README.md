@@ -115,9 +115,15 @@ See [assignment progress setup](./apps/server/README.md#track-assignment-tasks-i
 Use Node.js 24.20.x and pnpm 11.24.x. The Server uses `INVESTIGATION_*` configuration; the Worker
 uses `INVESTIGATION_WORKER_*`. Read the [Server instructions](./apps/server/README.md) and
 [Worker instructions](./apps/worker/README.md) before starting a deployment. New investigation databases are
-initialized directly with the `investigation-v4` schema. Exact `investigation-v2` and
-`investigation-v3` databases receive additive history and scheduler storage migrations;
+initialized directly with the `investigation-v5` schema. Exact `investigation-v2`,
+`investigation-v3`, and `investigation-v4` databases receive additive storage migrations;
 unrelated or incomplete schemas are rejected without deletion.
+
+The [production operations workflow](./deploy/operations/README.md) provides Windows hosting,
+administrator-only storage observations, explicit capacity thresholds, and a pending deployment
+acceptance checklist. The [four-GiB workflow handoff](./docs/handoff/2026-09-27-four-gib-workflow-acceptance.md)
+records its bounded synthetic verification; broader production and real-application acceptance
+remain separate from preparing these tools.
 
 The Dashboard development server uses clearly labeled synthetic data, including PowerToys PR,
 Bug, Feature, incomplete-report, and page-two P0 examples:

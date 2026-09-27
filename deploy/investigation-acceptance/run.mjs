@@ -2,13 +2,25 @@ import assert from "node:assert/strict";
 import { execFile, fork } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { lstat, mkdir, readdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { finished } from "node:stream/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { collectCapacity, validateCapacityPolicy, writeReceipt } from "../operations/capacity.mjs";
+import { openObservationSession, readJsonFile } from "../operations/observation-client.mjs";
 import { recordSourceManifest } from "./source-manifest.mjs";
 
 const execute = promisify(execFile);
@@ -78,7 +90,7 @@ const receipt = {
       "abrupt crash orphan cleanup",
       "UI execution",
       "runtime artifact upload",
-      "capacity benchmark",
+      "sustained production capacity benchmarking; optional short synthetic observation is separate",
     ],
   },
   source: {},
@@ -118,8 +130,23 @@ const workerEntry = join(repo, "apps", "worker", "dist", "worker.mjs");
 const dashboardDirectory = join(repo, "apps", "dashboard", "dist");
 let serverEnvironment;
 let workerEnvironment;
+let capacityPolicy;
+let capacityObservation;
 
 try {
+  if (args.has("--capacity-policy")) {
+    capacityPolicy = validateCapacityPolicy(await readJsonFile(required("--capacity-policy")));
+    assert.equal(
+      capacityPolicy.minimumDurationSeconds,
+      60,
+      "This synthetic observation covers 60 seconds.",
+    );
+    assert.equal(
+      capacityPolicy.minimumCompletedTasks,
+      2,
+      "This synthetic workload contains two completed tasks.",
+    );
+  }
   for (const directory of [data, home, profile, join(home, "observations")]) await mkdir(directory);
   const imports = await Promise.all([
     import(pathToFileURL(join(repo, "packages", "contracts", "dist", "index.js")).href),
@@ -250,6 +277,19 @@ try {
   passed("production-password-account-and-explicit-task-permissions");
   const first = await createTask("consecutive-a");
   const second = await createTask("consecutive-b");
+  for (const task of [first, second]) {
+    const detail = await request("GET", `/api/tasks/${task.id}`);
+    assert.equal(detail.task.state, "queued", "Tasks must be observable before the Worker starts.");
+  }
+  passed("queued-tasks-observed-through-native-api");
+  if (capacityPolicy !== undefined) {
+    capacityObservation = await beginCapacityObservation([first, second]);
+    const baseline = await capacityObservation.baseline;
+    assert.equal(baseline.tasks.total, 2);
+    assert.equal(baseline.tasks.byState.queued, 2);
+    assert.equal(baseline.tasks.byState.completed, 0);
+    passed("capacity-baseline-precedes-worker-claims");
+  }
   worker = launch("worker-1", workerEntry, workerEnvironment);
   await waitTask(first, "completed");
   await verifyReport(first, "completed");
@@ -258,6 +298,27 @@ try {
   assert.equal(worker.exit, null, "The same Worker must remain alive across consecutive tasks.");
   await emptyAttempts();
   passed("two-consecutive-tasks-on-one-production-worker", { workerPid: worker.child.pid });
+  if (capacityObservation !== undefined) {
+    const result = await capacityObservation.done;
+    assert.ifError(result.error);
+    assert.equal(
+      result.receipt.status,
+      "passed",
+      "The declared synthetic capacity thresholds must pass.",
+    );
+    assert.equal(result.receipt.evaluation.metrics.completedTasks, 2);
+    receipt.capacity = {
+      status: result.receipt.status,
+      runId: result.receipt.runId,
+      receiptPath: "capacity-receipt.json",
+      workloadPath: "capacity-workload.json",
+      scope:
+        "A 60-second synthetic native-flow observation; not sustained production capacity acceptance.",
+    };
+    passed("synthetic-capacity-window-completes-before-cancel-or-restart", {
+      metrics: result.receipt.evaluation.metrics,
+    });
+  }
 
   const cancelled = await createTask("cancel-active", true);
   const cancelledTree = await waitHeld(cancelled, worker);
@@ -339,6 +400,19 @@ try {
   receipt.failure = { name: error?.name ?? "Error", message: String(error?.message ?? error) };
   process.exitCode = 1;
 } finally {
+  if (capacityObservation !== undefined) {
+    capacityObservation.abort();
+    const result = await capacityObservation.done;
+    if (result.error !== undefined || result.receipt?.status !== "passed") {
+      receipt.status = "failed";
+      receipt.capacity = {
+        status: "failed",
+        receiptPath: "capacity-receipt.json",
+        failure: "The synthetic capacity observation or its receipt finalization failed.",
+      };
+      process.exitCode = 1;
+    }
+  }
   for (const child of [...children].reverse()) {
     if (child.exit !== null) continue;
     try {
@@ -623,6 +697,102 @@ async function writeControls() {
   await writeFile(next, JSON.stringify(controls));
   await rename(next, join(home, "controls.json"));
 }
+async function beginCapacityObservation(workloadTasks) {
+  const workload = {
+    schemaVersion: "SyntheticInvestigationCapacityWorkloadV1",
+    synthetic: true,
+    realModel: false,
+    realGitHubMutation: false,
+    taskIds: workloadTasks.map((task) => task.id),
+    taskKind: "issue-investigate",
+    executionMode: "snapshot_only",
+    maximumConcurrentTasks: 1,
+    findingCountPerTask: 137,
+    minimumReportBytesPerTask: 2 * 1024 * 1024,
+    sourceManifestSha256: receipt.source.snapshot.manifestSha256,
+    runtimeManifestSha256: receipt.source.snapshot.runtimeSnapshot.manifestSha256,
+    policy: capacityPolicy,
+    durationSeconds: 60,
+    intervalSeconds: 6,
+    scope:
+      "Two synthetic completions within a short observation window; not a sustained production workload or UI acceptance.",
+  };
+  await json("capacity-workload.json", workload);
+  const handle = await open(join(output, "capacity-receipt.json"), "wx", 0o600);
+  try {
+    await writeReceipt(handle, {
+      schemaVersion: "InvestigationCapacityAcceptanceV1",
+      status: "running",
+      synthetic: true,
+      policy: capacityPolicy,
+    });
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+  const cancellation = new AbortController();
+  let resolveBaseline;
+  let rejectBaseline;
+  let baselineObserved = false;
+  const baseline = new Promise((resolve, reject) => {
+    resolveBaseline = resolve;
+    rejectBaseline = reject;
+  });
+  // The caller still awaits the rejection; attach a handler before asynchronous startup can fail.
+  void baseline.catch(() => undefined);
+  const done = (async () => {
+    let observation;
+    let failure;
+    try {
+      observation = await collectCapacity(
+        {
+          origin,
+          credentials: { username: "synthetic-admin", password },
+          policy: capacityPolicy,
+          durationSeconds: 60,
+          intervalSeconds: 6,
+          dashboardIndexSha256: receipt.source.dashboardIndex.sha256,
+        },
+        {
+          wait: (milliseconds) => delay(milliseconds, undefined, { signal: cancellation.signal }),
+          openSession: async (...parameters) => {
+            const session = await openObservationSession(...parameters);
+            return {
+              ...session,
+              async status() {
+                cancellation.signal.throwIfAborted();
+                const sample = await session.status();
+                cancellation.signal.throwIfAborted();
+                if (!baselineObserved) {
+                  baselineObserved = true;
+                  resolveBaseline(sample);
+                }
+                return sample;
+              },
+            };
+          },
+        },
+      );
+      if (!baselineObserved)
+        rejectBaseline(new Error("Capacity observation failed before its baseline."));
+      observation.synthetic = true;
+      observation.workloadManifestSha256 = hash(
+        await readFile(join(output, "capacity-workload.json")),
+      );
+      await writeReceipt(handle, observation);
+    } catch (error) {
+      failure = error;
+      if (!baselineObserved) rejectBaseline(error);
+    }
+    try {
+      await handle.close();
+    } catch (error) {
+      failure ??= error;
+    }
+    return { receipt: observation, error: failure };
+  })();
+  return { baseline, done, abort: () => cancellation.abort() };
+}
 async function until(predicate, label, timeout = 180_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -668,6 +838,7 @@ async function waitHeld(task, runningWorker) {
     `${task.label} held native CLI`,
   );
   const detail = await request("GET", `/api/tasks/${task.id}`);
+  assert.equal(detail.task.state, "running", "The held native CLI must belong to a running task.");
   assert.equal(detail.checkpoint.round, 1);
   assert.equal(detail.checkpoint.analysis.findings.length, 137);
   const tree = await snapshot(runningWorker.child.pid);
@@ -847,11 +1018,39 @@ async function verifyStoredParts(Store) {
       0,
       "No action intent or external publication is part of this acceptance.",
     );
+    const expectedAttempts = new Set(
+      receipt.scenarios.flatMap((scenario) => scenario.adoptedAttemptIds),
+    );
+    const attempts = store.list("attempts").map((record) => record.attempt);
+    const leases = store.list("resourceLeases");
+    assert.equal(attempts.length, 5, "The four tasks must retain exactly five executed attempts.");
+    assert.equal(expectedAttempts.size, attempts.length);
+    assert.equal(
+      leases.length,
+      attempts.length,
+      "Every executed attempt must have one resource lease.",
+    );
+    for (const attempt of attempts) {
+      assert(expectedAttempts.has(attempt.id));
+      const lease = leases.find((entry) => entry.attemptId === attempt.id);
+      assert(lease, "Every retained attempt must have its matching resource lease.");
+      assert.equal(lease.taskId, attempt.taskId);
+      assert.equal(lease.workerId, "synthetic-worker");
+      assert.equal(lease.fence, attempt.leaseVersion);
+      assert.equal(lease.pool, "static");
+      assert.equal(lease.state, "released", "No synthetic resource lease may remain occupied.");
+      assert(
+        Number.isFinite(Date.parse(lease.releasedAt)),
+        "Released leases require a release timestamp.",
+      );
+    }
+    await json("resource-lease-cleanup.json", leases);
+    passed("all-five-native-attempt-resource-leases-released");
     passed("persisted-report-parts-and-zero-action-intents", { reportPartCount: parts.length });
   } finally {
     store.close();
   }
 }
 function summary() {
-  return `# Synthetic Windows investigation lifecycle acceptance\n\nStatus: **${receipt.status}**.\n\nThe harness targets the prebuilt production Server and Worker entry points on Windows. The native CLI is an explicit offline synthetic fixture, with no model invocation, Git checkout, upstream import, or repository mutation. External writes are disabled, GitHub credentials absent, repository execution unauthorized, and the Worker checkout allowlist empty.\n\nOnly checks listed below have passed:\n\n${receipt.checks.map((entry) => `- Passed: ${entry.name}`).join("\n")}\n\nThe planned report checks cover 137 hypotheses, a report larger than 2 MiB, all three findings pages, reporter-evidence reference integrity, cancellation, retained partial results, an exact checkpoint across Server restart, and resume under a new Worker. Refer to receipt.json for the scenarios actually reached. Native process identities include creation time to avoid mistaking a reused PID for an owned survivor.\n\nGraceful stop uses the private acceptance IPC bridge to invoke the product's existing SIGTERM handlers. SCM/console signal delivery, hard crashes, real models, runtime artifact upload, real Git operations, UI scenarios, Linux production deployment, and capacity are outside this receipt.\n\n${receipt.failure ? `Failure: ${receipt.failure.message}\n\n` : ""}Isolated databases, logs, source/binary identities, process observations, reports, and receipt.json are retained in this new output directory. No automatic recursive deletion is performed.\n`;
+  return `# Synthetic Windows investigation lifecycle acceptance\n\nStatus: **${receipt.status}**.\n\nThe harness targets the prebuilt production Server and Worker entry points on Windows. The native CLI is an explicit offline synthetic fixture, with no model invocation, Git checkout, upstream import, or repository mutation. External writes are disabled, GitHub credentials absent, repository execution unauthorized, and the Worker checkout allowlist empty.\n\nOnly checks listed below have passed:\n\n${receipt.checks.map((entry) => `- Passed: ${entry.name}`).join("\n")}\n\nThe planned report checks cover 137 hypotheses, a report larger than 2 MiB, all three findings pages, reporter-evidence reference integrity, cancellation, retained partial results, an exact checkpoint across Server restart, and resume under a new Worker. Refer to receipt.json for the scenarios actually reached. Native process identities include creation time to avoid mistaking a reused PID for an owned survivor.\n\nGraceful stop uses the private acceptance IPC bridge to invoke the product's existing SIGTERM handlers. SCM/console signal delivery, hard crashes, real models, runtime artifact upload, real Git operations, UI scenarios, Linux production deployment, and sustained production capacity are outside this receipt.\n\n${capacityPolicy === undefined ? "No capacity observation was requested." : "A separate capacity-receipt.json records the requested 60-second synthetic observation and declared thresholds. It is not sustained production capacity acceptance; inspect its actual status and capacity-workload.json."}\n\n${receipt.failure ? `Failure: ${receipt.failure.message}\n\n` : ""}Isolated databases, logs, source/binary identities, process observations, reports, and receipt.json are retained in this new output directory. No automatic recursive deletion is performed.\n`;
 }

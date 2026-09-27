@@ -133,6 +133,20 @@ export interface InvestigationCommentDeliveryPage {
   readonly limit: number;
 }
 
+export interface InvestigationStoreOperationsStatistics {
+  readonly pageSizeBytes: number;
+  readonly pageCount: number;
+  readonly freePageCount: number;
+  readonly journalMode: string;
+  readonly taskStates: readonly { readonly state: string; readonly count: number }[];
+  readonly resourceLeaseStates: readonly {
+    readonly pool: string;
+    readonly state: string;
+    readonly count: number;
+  }[];
+  readonly evidenceUsage: { readonly bytes: number; readonly count: number };
+}
+
 function collectionName(collection: InvestigationCollection): string {
   if (!collections.has(collection)) {
     throw new InvestigationStoreError("invalid_collection", "Unknown investigation collection.");
@@ -220,6 +234,53 @@ export class InvestigationStore {
 
   get inTransaction(): boolean {
     return this.database.isTransaction;
+  }
+
+  /** A bounded read snapshot; task and lease bodies remain in SQLite. */
+  operationsStatistics(): InvestigationStoreOperationsStatistics {
+    if (this.database.isTransaction)
+      throw new InvestigationStoreError(
+        "transaction_state",
+        "Operations statistics require an independent read snapshot.",
+      );
+    this.database.exec("BEGIN");
+    try {
+      const taskStates = this.database
+        .prepare(
+          `SELECT CASE WHEN json_extract("value", '$.state') IN
+            ('queued', 'running', 'completed', 'blocked', 'failed', 'cancelled', 'interrupted')
+            THEN json_extract("value", '$.state') ELSE 'unknown' END AS state,
+            count(*) AS count FROM "tasks" GROUP BY state`,
+        )
+        .all() as { state: string; count: number }[];
+      const resourceLeaseStates = this.database
+        .prepare(
+          `SELECT CASE WHEN json_extract("value", '$.pool') IN ('static', 'e2e')
+            THEN json_extract("value", '$.pool') ELSE 'unknown' END AS pool,
+            CASE WHEN json_extract("value", '$.state') IN ('held', 'needs_cleanup', 'released')
+            THEN json_extract("value", '$.state') ELSE 'unknown' END AS state,
+            count(*) AS count FROM "resourceLeases" GROUP BY pool, state`,
+        )
+        .all() as { pool: string; state: string; count: number }[];
+      const evidenceUsage = this.get<{ bytes: number; count: number }>("evidenceUsage", "global");
+      const result = {
+        pageSizeBytes: Number(this.database.prepare("PRAGMA page_size").get()!.page_size),
+        pageCount: Number(this.database.prepare("PRAGMA page_count").get()!.page_count),
+        freePageCount: Number(this.database.prepare("PRAGMA freelist_count").get()!.freelist_count),
+        journalMode: String(this.database.prepare("PRAGMA journal_mode").get()!.journal_mode),
+        taskStates,
+        resourceLeaseStates,
+        evidenceUsage:
+          evidenceUsage === undefined
+            ? { bytes: 0, count: 0 }
+            : { bytes: evidenceUsage.bytes, count: evidenceUsage.count },
+      };
+      this.database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      if (this.database.isTransaction) this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** The callback must finish synchronously; nested transactions are rejected. */

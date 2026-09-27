@@ -1,0 +1,470 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "historical-scenarios",
+  "defaultStatus": "not_run",
+  "safetyPolicy": {
+    "mode": "offline_evidence_only",
+    "automaticExecutionAllowed": false,
+    "automaticHistoricalTaskResumeAllowed": false,
+    "externalRepositoryWritesAllowed": false,
+    "historicalRecordsImmutable": true,
+    "missingRequiredInputStatus": "not_run",
+    "missingRequiredEvidenceStatus": "not_run",
+    "newEvidenceMustUseIndependentRunIdentity": true,
+    "notes": [
+      "This catalog describes acceptance requirements and is not execution authorization.",
+      "An offline consumer may inspect supplied evidence but must not start a Worker, replay a webhook, resume a historical Task, or contact an upstream repository.",
+      "Future execution uses an isolated database and mocked outbound transports unless separately authorized for an exact live scope.",
+      "Preserve historical sealed reports, receipts, outcomes, identifiers, source pins, and media; record follow-up conclusions separately.",
+      "A missing fixture, original query, source revision, or required observation remains not_run. Do not manufacture an input or infer an assertion result from a historical aggregate."
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "H-PEEK-LOADING",
+      "title": "Resolve the historical Peek loading observation",
+      "area": "peek",
+      "defaultStatus": "not_run",
+      "historicalStatus": {
+        "status": "partial",
+        "scope": "The original Peek execution, shared with the navigation/disposal follow-up",
+        "assertions": { "passed": 2, "failed": 4, "blocked": 1 },
+        "causeEstablished": false,
+        "notes": "The application remained loading. The aggregate does not identify which individual assertion belongs to this follow-up and does not establish a PR regression."
+      },
+      "sourceReferences": [
+        "docs/handoff/2026-09-19-local-source-review-e2e.md#verification-record",
+        "docs/design/2026-09-19-worker-controls-and-webhook-recovery.md#e2e-scope-and-fixture"
+      ],
+      "input": {
+        "origin": "The original Peek sealed report and its retained source/build/execution artifacts",
+        "knownFacts": [
+          "Seven assertions were recorded; PNG and MP4 evidence includes an unsuccessful loading state."
+        ],
+        "requiredFields": [
+          "Original Task, Attempt, execution, feature, and assertion identifiers with sealed report digest",
+          "Pinned repository, base/head/source revisions, build policy, and sealed build output identity",
+          "Exact file fixture bytes or immutable digest plus retrievable artifact, file type, launch arguments, and original loading assertion",
+          "Original application configuration, dependency prerequisites, observed result, and timeout"
+        ],
+        "missingInputBehavior": "not_run",
+        "notes": "The source documents do not provide the original exact file fixture, pinned Peek revision, or per-assertion inputs. Extract them from the sealed evidence before a future run."
+      },
+      "preconditions": [
+        "The complete original input manifest has been recovered and linked without changing its sealed report.",
+        "A future authorized Windows execution environment can build and launch the pinned application with the recorded prerequisites.",
+        "The acceptance run has a new identity, isolated state, publication disabled, and owned process/window tracking."
+      ],
+      "positiveControls": [
+        "Establish that the intended owned Peek window is active and can load a known supported control fixture in the same configured session.",
+        "Record the control fixture and expected rendered content from the source and retained evidence; a responsive window or successful build alone is insufficient."
+      ],
+      "requiredEvidenceKinds": [
+        "source_revision",
+        "original_fixture",
+        "native_report",
+        "build_manifest",
+        "ui_assertions",
+        "screenshots",
+        "video",
+        "cleanup_receipt"
+      ],
+      "requiredEvidence": [
+        "Original sealed report reference and digest, recovered input manifest, new run identity, and pinned source/build identity",
+        "Owned process/window identity, actual loading transition and rendered result, timestamps, configured timeout, and positive-control observation",
+        "Per-assertion result and matching PNG/MP4 observations, including the loading failure if it persists",
+        "Confirmed owned-process exit, workspace cleanup, and execution/desktop lease release"
+      ],
+      "passCriteria": [
+        "Every recovered loading assertion is exercised against its exact fixture and passes with actual rendered content after the positive control passes.",
+        "Required evidence is complete, correlated to the new run, and cleanup is confirmed.",
+        "The new result is stored independently and the original two/four/one aggregate remains unchanged."
+      ],
+      "failCriteria": [
+        "With prerequisites and the positive control satisfied, a recovered loading assertion fails or the application remains loading beyond its recorded timeout.",
+        "Owned-process or workspace cleanup fails after an executed run.",
+        "A failure describes observed behavior; attributing it to the PR additionally requires a supported comparison that isolates the cause."
+      ],
+      "notRunCriteria": [
+        "The exact original fixture, source pin, assertion mapping, or required evidence is unavailable.",
+        "The designated Windows execution environment is unavailable, build/prerequisites fail, or the positive control cannot establish a valid loading test.",
+        "Only build success, comment/media playback, usage accounting, or recorded-result recovery is available."
+      ],
+      "cleanup": [
+        "Stop only the owned application and recording processes and retain their identity receipts.",
+        "Confirm owned workspace cleanup and lease release through the managed cleanup protocol.",
+        "Keep original sealed reports and media; retain new failure evidence before deleting disposable run data."
+      ]
+    },
+    {
+      "id": "H-PEEK-NAVIGATION-DISPOSAL",
+      "title": "Exercise Peek cross-file navigation and disposal",
+      "area": "peek",
+      "defaultStatus": "not_run",
+      "historicalStatus": {
+        "status": "not_exercised",
+        "scope": "The original Peek execution, shared with the loading follow-up",
+        "assertions": { "passed": 2, "failed": 4, "blocked": 1 },
+        "causeEstablished": false,
+        "notes": "Attempted navigation did not establish the changed disposal behavior. Cross-file disposal was not exercised; no per-feature count is inferred from the aggregate."
+      },
+      "sourceReferences": [
+        "docs/handoff/2026-09-19-local-source-review-e2e.md#verification-record",
+        "docs/design/2026-09-19-worker-controls-and-webhook-recovery.md#e2e-scope-and-fixture"
+      ],
+      "input": {
+        "origin": "The original Peek sealed report, pinned changed-source scope, and retained fixture artifacts",
+        "knownFacts": [
+          "The observed loading state prevented establishing cross-file disposal behavior."
+        ],
+        "requiredFields": [
+          "Original sealed report digest and feature/assertion identity mapping",
+          "Pinned source/build identity and the exact changed disposal/navigation expectations supported by that source",
+          "Original ordered file fixtures with bytes/digests, file types, navigation actions, and expected rendered state at each step",
+          "A supported observable disposal condition and its evidence method, including the resource identity and measurement boundary"
+        ],
+        "missingInputBehavior": "not_run",
+        "notes": "Do not invent file names, formats, navigation keystrokes, resource-release rules, or fixture ordering from the historical aggregate."
+      },
+      "preconditions": [
+        "Recover the exact original navigation/disposal inputs and source-supported observation method.",
+        "Resolve the loading prerequisite for the intended files in the future configured Windows environment.",
+        "Use a new run identity and isolated state with external publication disabled."
+      ],
+      "positiveControls": [
+        "Show the first fixture's actual rendered content before navigation in the same owned application session.",
+        "Show the next fixture can render independently so an absent post-navigation preview is not misclassified as disposal success."
+      ],
+      "requiredEvidenceKinds": [
+        "source_revision",
+        "original_fixture",
+        "native_report",
+        "ui_assertions",
+        "disposal_observation",
+        "screenshots",
+        "video",
+        "cleanup_receipt"
+      ],
+      "requiredEvidence": [
+        "Original input manifest and immutable report references linked to the new run and build",
+        "Owned process/window identity and positive controls for both fixtures",
+        "Timestamped navigation observations proving a transition between the actual fixtures",
+        "Source-supported disposal observation tied to the exact previous resource, followed by the expected new rendered state",
+        "Per-assertion PNG/MP4 evidence and confirmed managed cleanup"
+      ],
+      "passCriteria": [
+        "All recovered navigation and disposal assertions are executed after their positive controls and pass using the supported observation method.",
+        "The evidence establishes both file transition and the changed disposal behavior, with confirmed cleanup.",
+        "The original unexercised disposal result and aggregate remain unchanged."
+      ],
+      "failCriteria": [
+        "With valid fixtures, prerequisites, and controls, the expected navigation or disposal observation fails.",
+        "Owned cleanup fails after execution; record that separately from the feature observation."
+      ],
+      "notRunCriteria": [
+        "Any exact fixture, ordering, source pin, assertion mapping, or supported disposal observation is missing.",
+        "Loading or independent rendering controls fail, preventing the intended cross-file transition.",
+        "Only launch, attempted navigation, window closure, build success, or general memory readings are available."
+      ],
+      "cleanup": [
+        "Preserve the before/after resource observations and feature media before managed teardown.",
+        "Confirm owned process exit, owned workspace cleanup, and execution/desktop lease release.",
+        "Do not use deletion of a shared file or an unrelated process as evidence of disposal."
+      ]
+    },
+    {
+      "id": "H-LAUNCHER-UNIT-CONVERSION",
+      "title": "Recheck the historical Launcher unit-conversion scenarios",
+      "area": "launcher",
+      "defaultStatus": "not_run",
+      "historicalStatus": {
+        "status": "failed_overall",
+        "scenarios": { "passed": 1, "failed": 1, "blocked": 2 },
+        "causeEstablished": false,
+        "notes": "The sqmi target-operand scenario produced 1 mi² in the actual result control. A selector returned the literal label Title in the failed scenario; two blocked scenarios had no matching result row. None establishes a PR regression by itself."
+      },
+      "sourceReferences": [
+        "docs/handoff/2026-09-19-local-source-review-e2e.md#verification-record",
+        "docs/design/2026-09-19-worker-controls-and-webhook-recovery.md#e2e-scope-and-fixture"
+      ],
+      "input": {
+        "origin": "The original Launcher sealed report, four registered feature scenarios, and retained source/build/media artifacts",
+        "knownFacts": [
+          "The historical sqmi target-operand result was 1 mi²; the source documents do not disclose its complete query string."
+        ],
+        "requiredFields": [
+          "Original Task/Attempt/execution identifiers, report digest, and all four feature/assertion mappings",
+          "Pinned Launcher source revision, sealed build identity, UnitConverter plugin state, locale, and launch mode",
+          "Exact query text, encoding, expected result row, and source-supported expected result for every original scenario",
+          "Exact historical sqmi control query and actual control/value mapping, distinct from static accessibility labels"
+        ],
+        "missingInputBehavior": "not_run",
+        "notes": "Do not synthesize a complete conversion query from the token sqmi or the result 1 mi². Retrieve the exact queries and expectations from the original sealed evidence."
+      },
+      "preconditions": [
+        "Recover and preserve the complete four-scenario input manifest and exact pinned source/build identity.",
+        "A future Windows environment can launch the recorded supported application mode with UnitConverter enabled and intact text encoding.",
+        "Map observed input and result controls in a new owned application session; static Title/Path labels are diagnostic metadata."
+      ],
+      "positiveControls": [
+        "Replay the exact recovered sqmi target-operand query in the same configured session and observe 1 mi² in the actual UnitConverter result control.",
+        "Confirm UnitConverter participation and the actual result-row value before treating an absent matching row as a feature failure."
+      ],
+      "requiredEvidenceKinds": [
+        "source_revision",
+        "original_fixture",
+        "native_report",
+        "build_manifest",
+        "ui_assertions",
+        "control_mapping",
+        "screenshots",
+        "video",
+        "cleanup_receipt"
+      ],
+      "requiredEvidence": [
+        "Original sealed report and exact four-query manifest, linked to an independent new run and pinned source/build",
+        "Owned process/window identity, plugin configuration, locale, and input encoding",
+        "Observed actual query and result control mapping, the positive-control result 1 mi², and each scenario's actual result-row content or qualified absence",
+        "Per-scenario assertion result with PNG/MP4 evidence and confirmed managed cleanup"
+      ],
+      "passCriteria": [
+        "The recovered sqmi positive control and all four original feature scenarios pass against actual result controls with complete evidence.",
+        "No literal accessibility label substitutes for a functional result, and cleanup is confirmed.",
+        "The new result is independent; the original one-passed/one-failed/two-blocked outcomes remain intact."
+      ],
+      "failCriteria": [
+        "A recovered query produces a source-inconsistent actual result after the configured plugin and positive control are established.",
+        "A required actual result row is absent after same-session participation and query prerequisites are proved.",
+        "Owned cleanup fails after an executed run. Attribution to the PR needs additional supported causal evidence."
+      ],
+      "notRunCriteria": [
+        "An original exact query, expected result, source revision, or original feature mapping is unavailable.",
+        "The environment, plugin, build, positive control, or actual result-control mapping cannot be established.",
+        "Only the literal Title or Path label is observed, or a missing row is recorded without the required positive control.",
+        "Repository test builds fail before execution; source reading and successful feature-media playback do not substitute for executed feature assertions."
+      ],
+      "cleanup": [
+        "Stop the owned Launcher/application and recording processes using their retained identities.",
+        "Confirm workspace cleanup and execution/desktop lease release.",
+        "Retain original and new scenario media independently and preserve exact query encoding."
+      ]
+    },
+    {
+      "id": "H-WEBHOOK-EXTERNAL-401",
+      "title": "Establish the boundary and cause of the historical external HTTP 401",
+      "area": "webhook",
+      "defaultStatus": "not_run",
+      "historicalStatus": {
+        "status": "failed_receipt",
+        "causeEstablished": false,
+        "notes": "A real CLI-hook redelivery received external HTTP 401 before the local receiver. The cause is not established, and this does not establish Server duplicate handling or full-path redelivery idempotence."
+      },
+      "sourceReferences": [
+        "docs/handoff/2026-09-19-local-source-review-e2e.md#verification-record",
+        "docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md#confirmed-cleanup-cached-redelivery-and-spectre-installation"
+      ],
+      "input": {
+        "origin": "The original failed delivery receipt and retained endpoint/relay/receiver diagnostics",
+        "knownFacts": [
+          "The recorded HTTP status is 401 and no second entry into the local receiver was established by that failure."
+        ],
+        "requiredFields": [
+          "Original delivery identity, request timestamp, exact route/transport identity, and response receipt",
+          "Retained endpoint, authentication-boundary, relay ingress, and receiver logs for the same request",
+          "Raw-envelope digest and relevant non-secret configuration identity; redact credentials and signatures from reviewable exports",
+          "A bounded evidence statement describing which component issued the response and whether downstream receipt is positively observed or unproved"
+        ],
+        "missingInputBehavior": "not_run",
+        "notes": "A later successful HTTPS delivery is separate evidence. It does not retrospectively explain the original CLI-hook 401."
+      },
+      "preconditions": [
+        "Obtain read-only retained diagnostics with enough identity and timing information to correlate the exact failed request.",
+        "Keep original failed receipts immutable and redact secrets from exported diagnostic evidence.",
+        "Any later synthetic reproduction is isolated with mocked upstream/outbound transport; this catalog authorizes no live redelivery."
+      ],
+      "positiveControls": [
+        "Demonstrate that the chosen diagnostic source records an independently known received request in its recorded scope before relying on an absent entry.",
+        "Distinguish the external authentication boundary from relay receipt and Server receipt by separately identified logs."
+      ],
+      "requiredEvidenceKinds": [
+        "original_receipt",
+        "request_identity",
+        "boundary_diagnostics",
+        "diagnostic_control",
+        "cause_analysis"
+      ],
+      "requiredEvidence": [
+        "Immutable original 401 receipt with correlated delivery identity, timestamp, and route",
+        "Boundary-specific logs and their retention/coverage limitations, plus the diagnostic positive control",
+        "Evidence-supported cause analysis that names the response-producing boundary or explicitly retains an unknown boundary",
+        "A separate follow-up record distinguishing observed facts, causal inference, and any isolated reproduction"
+      ],
+      "passCriteria": [
+        "The exact failed request is correlated to supported boundary diagnostics and the response-producing cause is established with evidence.",
+        "The follow-up closes only the diagnostic question; the original receipt remains failed and no Server idempotence or feature acceptance is inferred."
+      ],
+      "failCriteria": [
+        "Available complete evidence contradicts the proposed diagnosis or shows a still-unresolved configured authentication/route defect in an independently authorized reproduction."
+      ],
+      "notRunCriteria": [
+        "The original receipt, request identity, retained diagnostics, or positive diagnostic control is missing.",
+        "Log absence cannot establish non-receipt because retention or recording coverage is unknown.",
+        "Only a later cached duplicate succeeds, or the historical cause remains unestablished."
+      ],
+      "cleanup": [
+        "Retain the original failed receipt and redacted diagnostic evidence.",
+        "Remove only disposable isolated reproduction resources, if a separately authorized reproduction occurred.",
+        "Do not modify hooks, credentials, repository settings, or upstream delivery state through the offline consumer."
+      ]
+    },
+    {
+      "id": "H-WEBHOOK-RELAY-CACHED-DUPLICATE",
+      "title": "Preserve and independently verify the relay cached-duplicate boundary",
+      "area": "webhook",
+      "defaultStatus": "not_run",
+      "historicalStatus": {
+        "status": "passed_with_boundary",
+        "receiverReentryTested": false,
+        "notes": "Actual standard HTTPS redelivery returned 202 duplicate from the owned relay's cached receipt for the same delivery GUID and original raw bytes. The four then-existing PR #15 Task, Attempt, and invocation identities and spool history were unchanged."
+      },
+      "sourceReferences": [
+        "docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md#confirmed-cleanup-cached-redelivery-and-spectre-installation",
+        "docs/design/2026-09-19-worker-controls-and-webhook-recovery.md#event-intake-and-publication",
+        "docs/design/2026-09-19-worker-controls-and-webhook-recovery.md#e2e-scope-and-fixture"
+      ],
+      "input": {
+        "origin": "The original cached-redelivery receipts for historical review, or a separately identified isolated synthetic fixture for new acceptance",
+        "knownFacts": [
+          "The accepted historical response came from the relay cache; receiverReentryTested=false."
+        ],
+        "requiredFields": [
+          "Exact delivery GUID and raw-envelope digest, matched across first delivery and duplicate",
+          "Original cached response and spool-history snapshot for historical review",
+          "For a new isolated run: fixture manifest, first receiver acknowledgment, cache receipt, and before/after Task/Attempt/invocation/spool identity snapshots",
+          "Receiver ingress observations that distinguish cache handling from a second Server request"
+        ],
+        "missingInputBehavior": "not_run",
+        "notes": "Synthetic fixtures must be explicitly labeled as new fixtures and must not be presented as reconstructed historical payloads."
+      },
+      "preconditions": [
+        "An independent future run uses an isolated relay and Server state with mocked upstream and publication transports.",
+        "The first accepted delivery has a correlated durable receipt before the exact envelope is presented to the relay again.",
+        "Receiver ingress and identity snapshots cover both delivery observations."
+      ],
+      "positiveControls": [
+        "The first delivery demonstrably reaches the isolated Server receiver and produces the matching durable acceptance acknowledgment.",
+        "The cached receipt matches that delivery GUID and exact raw-envelope digest."
+      ],
+      "requiredEvidenceKinds": [
+        "fixture_manifest",
+        "request_identity",
+        "relay_receipt",
+        "receiver_receipt",
+        "identity_snapshots",
+        "outbound_write_log",
+        "cleanup_receipt"
+      ],
+      "requiredEvidence": [
+        "New fixture/run identity or immutable historical receipt reference, delivery GUID, raw-envelope digest, and matching acknowledgments",
+        "Relay cache decision and before/after spool history",
+        "Receiver ingress count and before/after Task, Attempt, invocation, and execution identity snapshots",
+        "Mock transport record proving zero external repository writes and isolated resource cleanup"
+      ],
+      "passCriteria": [
+        "The exact duplicate receives the matching cached 202 duplicate response without another Server receiver entry.",
+        "Spool history and Task/Attempt/invocation/execution identities remain unchanged after the cached duplicate.",
+        "The result explicitly records receiverReentryTested=false and claims only the relay cache boundary."
+      ],
+      "failCriteria": [
+        "The cached response mismatches delivery identity or content, or duplicate handling creates additional state/work.",
+        "A request enters the Server again when the asserted cache path is expected; record the actual path instead of accepting a cached-boundary claim.",
+        "Any external repository write occurs in an isolated run."
+      ],
+      "notRunCriteria": [
+        "First-delivery acknowledgment, exact-envelope correlation, receiver ingress coverage, or identity snapshots are unavailable.",
+        "The supplied evidence only covers native Server duplicate handling or relay process restart.",
+        "Only historical narrative is available without the required receipt artifacts for an independent acceptance result."
+      ],
+      "cleanup": [
+        "Retain the correlated cache/receiver receipts and before/after snapshots.",
+        "Stop only isolated test processes and remove only owned disposable fixture databases after evidence retention.",
+        "Preserve historical spool/Server databases and do not replay historical Tasks."
+      ]
+    },
+    {
+      "id": "H-WEBHOOK-NATIVE-SERVER-DUPLICATE",
+      "title": "Verify a genuine second entry into the native Server receiver",
+      "area": "webhook",
+      "defaultStatus": "not_run",
+      "historicalStatus": {
+        "status": "independent_evidence_required",
+        "receiverReentryTestedByCachedRedelivery": false,
+        "notes": "Earlier native duplicate and committed-Task recovery checks retain their own evidence. The real HTTPS cached duplicate did not enter the Server twice and cannot accept this boundary."
+      },
+      "sourceReferences": [
+        "docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md#confirmed-cleanup-cached-redelivery-and-spectre-installation",
+        "docs/design/2026-09-19-worker-controls-and-webhook-recovery.md#event-intake-and-publication",
+        "docs/design/2026-09-19-worker-controls-and-webhook-recovery.md#acceptance-matrix"
+      ],
+      "input": {
+        "origin": "A separately identified isolated native-Server fixture and its evidence; exact historical native receipts are required for any historical claim",
+        "knownFacts": ["The relay cache path must not hide the second native Server request."],
+        "requiredFields": [
+          "New isolated fixture/run identity, exact signed synthetic envelope, delivery GUID, and raw-envelope digest",
+          "Native Server receiver request/response receipts for two separate entries and a third entry after Server restart using the same GUID and bytes",
+          "After-first, after-second, and post-restart persisted delivery, Task, Attempt, model-invocation, and execution identity snapshots",
+          "Deterministic fixture processing completion boundary and mocked provider/upstream/outbound logs"
+        ],
+        "missingInputBehavior": "not_run",
+        "notes": "The initial request may pass through the relay, but subsequent native re-entry requests must bypass only its cache. Retain both Server and relay databases during restart. The offline consumer only reads receipts; it sends no requests."
+      },
+      "preconditions": [
+        "Future execution uses an isolated application database, native Server receiver, deterministic synthetic processing, and mocked external transports.",
+        "The first request's committed intake and any fixture-created Task are observable before capturing the comparison baseline.",
+        "Evidence can prove two actual native receiver entries plus a third entry after restarting the Server with its unchanged database, and distinguish intake acknowledgment from Task creation or execution."
+      ],
+      "positiveControls": [
+        "The first valid signed fixture request reaches the native receiver, returns a matching 202 accepted acknowledgment, and commits the expected intake receipt.",
+        "The fixture's initial processing reaches its declared deterministic boundary so later state comparisons cannot hide asynchronous first-request work."
+      ],
+      "requiredEvidenceKinds": [
+        "fixture_manifest",
+        "request_identity",
+        "receiver_receipt",
+        "identity_snapshots",
+        "restart_receipt",
+        "native_report",
+        "outbound_write_log",
+        "cleanup_receipt"
+      ],
+      "requiredEvidence": [
+        "Source revision, new fixture/run identity, exact-envelope digest, delivery GUID, and isolated database identity",
+        "Three distinct native receiver ingress receipts and matching response bodies and statuses, including the re-entry after restart",
+        "Durable canonical delivery identity and after-first/after-second/post-restart Task/Attempt/invocation/execution snapshots at the declared processing boundary",
+        "Server restart receipt with the same database identity, preserved canonical record, and no idempotency clearing or historical Task replay",
+        "Mocked upstream/provider/outbound call records, zero external repository writes, and owned fixture cleanup"
+      ],
+      "passCriteria": [
+        "Two native receiver entries are proved for identical delivery identity and raw bytes; the second returns matching 202 duplicate, and a third request returns the same duplicate after Server restart with its retained database.",
+        "The same canonical receipt is reused and no additional Task, Attempt, model invocation, or desktop execution is caused by the duplicate.",
+        "The result records receiverReentryTested=true and the bounded Server restart observation; it remains separate from relay cached duplicate, physical power-loss, and full live HTTPS claims.",
+        "External repository writes are zero and owned fixture cleanup is confirmed."
+      ],
+      "failCriteria": [
+        "The exact duplicate creates another canonical intake record, Task, Attempt, invocation, or desktop execution.",
+        "The native duplicate acknowledgment mismatches the GUID or returns an unexpected acceptance state.",
+        "Any external repository write occurs in the isolated run or an owned fixture cannot be cleaned up."
+      ],
+      "notRunCriteria": [
+        "Only a relay cached acknowledgment is present, fewer than two native ingress receipts exist, or the required post-restart re-entry evidence is absent.",
+        "Exact raw-envelope identity, deterministic baseline, persisted identity snapshots, or required mock transport records are missing.",
+        "An actual authorized execution environment is unavailable; source implementation or test definitions alone cannot pass this scenario."
+      ],
+      "cleanup": [
+        "Retain all receiver and restart receipts, the canonical intake record, identity snapshots, and mock call logs.",
+        "Stop only owned isolated processes and dispose of only owned fixture databases after evidence retention.",
+        "Do not retry or resume any historical Task, modify retained production state, or contact an actual upstream repository."
+      ]
+    }
+  ]
+}

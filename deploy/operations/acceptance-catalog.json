@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "production-readiness",
+  "defaultStatus": "not_run",
+  "scenarios": [
+    {
+      "id": "D-RELEASE-IDENTITY",
+      "title": "Deploy the exact verified Server, Dashboard, Worker, and ProcessHost payload",
+      "requiredEvidenceKinds": [
+        "source_manifest",
+        "build_receipt",
+        "runtime_manifest",
+        "supervisor_status",
+        "served_dashboard_hash"
+      ],
+      "passCriteria": [
+        "Build and runtime manifests identify the same complete release.",
+        "The running Server and Worker entries and Dashboard match the approved runtime hashes.",
+        "Persistent configuration, accounts, history, and recovery journals remain preserved."
+      ]
+    },
+    {
+      "id": "D-NATIVE-LIFECYCLE",
+      "title": "Exercise native production entries in an isolated synthetic deployment",
+      "requiredEvidenceKinds": ["source_manifest", "native_lifecycle_receipt", "cleanup_receipt"],
+      "passCriteria": [
+        "The existing investigation-acceptance/run.mjs passes using prebuilt current source.",
+        "Cancellation, Server reopen, Worker restart, checkpoint resume, and owned process cleanup are independently observed.",
+        "The fixture has external writes disabled, no GitHub token, and no real model."
+      ]
+    },
+    {
+      "id": "D-DASHBOARD-INTEGRATION",
+      "title": "Exercise the deployed Dashboard against the current native Server",
+      "requiredEvidenceKinds": [
+        "served_dashboard_hash",
+        "browser_assertions",
+        "screenshots",
+        "native_report",
+        "publication_preview"
+      ],
+      "passCriteria": [
+        "Real application routes, sign-in, source lists, Task/report navigation, and Worker observations agree with the native API.",
+        "Select findings, Preview, Confirm preparation, optional editing, and unknown/conflict recovery preserve the exact prepared payload.",
+        "No actual GitHub dispatch occurs without separate exact-scope approval.",
+        "Light/dark, narrow layouts, keyboard focus, and retained drafts are inspected on the final deployed assets."
+      ]
+    },
+    {
+      "id": "O-MANAGED-RESTART",
+      "title": "Accept the selected Windows task-hosting and cooperative shutdown policy",
+      "requiredEvidenceKinds": [
+        "task_configuration",
+        "supervisor_status",
+        "restart_observations",
+        "cleanup_receipt"
+      ],
+      "passCriteria": [
+        "Server starts under its configured boot identity and restart attempts remain bounded.",
+        "UI Worker only starts in the intended interactive logon session; logged-out or Session 0 execution cannot be accepted as UI-ready.",
+        "Stop requests invoke native shutdown; a timeout or unconfirmed cleanup remains a failure and cannot trigger an overlapping replacement.",
+        "A host restart and a subsequent user logon preserve database/account configuration and recover task ownership without replaying completed work."
+      ]
+    },
+    {
+      "id": "O-BACKUP-RESTORE",
+      "title": "Rehearse a consistent stopped-runtime backup and isolated restore",
+      "requiredEvidenceKinds": [
+        "stopped_process_receipt",
+        "backup_manifest",
+        "restore_manifest",
+        "restored_runtime_observations"
+      ],
+      "passCriteria": [
+        "All database writers, relay companions, and Worker attempts are confirmed stopped before copying.",
+        "Back up the complete persistent roots, required SQLite sidecars, private configuration, and journals with protected ACLs.",
+        "Restore to fresh isolated roots with external writes disabled and no intake or live Worker claims.",
+        "Account identity, reports, scheduler state, and recovery journals match; the original runtime and data remain untouched."
+      ]
+    },
+    {
+      "id": "O-CAPACITY",
+      "title": "Measure a declared sustained workload against explicit throughput and storage limits",
+      "requiredEvidenceKinds": [
+        "capacity_policy",
+        "workload_definition",
+        "capacity_receipt",
+        "retention_observations"
+      ],
+      "passCriteria": [
+        "The predeclared workload actually completes and the capacity receipt passes every explicit threshold.",
+        "Samples cover a continuous process generation with available DB/WAL/filesystem measurements.",
+        "Observe retained and expired evidence, protected follow-up dependencies, and physical storage after cleanup.",
+        "Sampling claims do not imply allocated-block compaction, inter-sample peak bounds, or power-loss durability."
+      ]
+    }
+  ]
+}

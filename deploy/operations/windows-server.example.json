@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "role": "server",
+  "taskName": "AgenticReview-Server",
+  "identity": "HOSTNAME\\review-server",
+  "releaseDirectory": "D:\\AgenticReview\\Releases\\replace-with-release-id",
+  "dataDirectory": "D:\\AgenticReview\\Data\\Server",
+  "stateDirectory": "D:\\AgenticReview\\Operations\\Server",
+  "nodeExecutable": "C:\\Program Files\\nodejs\\node.exe",
+  "restartLimit": 3,
+  "restartDelaySeconds": 5,
+  "restartMaximumDelaySeconds": 60,
+  "shutdownTimeoutSeconds": 90,
+  "artifact": {
+    "sourceRevision": "0000000000000000000000000000000000000000",
+    "entrySha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "dashboardIndexSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "environment": {
+    "INVESTIGATION_HOST": "127.0.0.1",
+    "INVESTIGATION_PORT": "18880",
+    "INVESTIGATION_PUBLIC_ORIGIN": "http://127.0.0.1:18880",
+    "INVESTIGATION_BOOTSTRAP_ADMIN_USERNAME": "admin",
+    "INVESTIGATION_BOOTSTRAP_ADMIN_PASSWORD_PATH": "D:\\AgenticReview\\Config\\Server\\bootstrap-password.txt",
+    "INVESTIGATION_WORKERS_JSON_PATH": "D:\\AgenticReview\\Config\\Server\\workers.json",
+    "INVESTIGATION_ENABLE_EXTERNAL_WRITES": "false"
+  }
+}

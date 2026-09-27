@@ -38,6 +38,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Test deferred operations tooling
+        run: node --test deploy/operations/acceptance.test.mjs deploy/operations/capacity.test.mjs deploy/operations/observation-client.test.mjs deploy/operations/tests/windows-supervisor.test.mjs
+
       - name: Test
         run: pnpm test
 
@@ -131,11 +134,14 @@ jobs:
         working-directory: native/process-host
         run: go build -trimpath -o AgenticReview.ProcessHost.exe .
 
-      - name: Validate deploy worker PowerShell script syntax
+      - name: Validate deployment PowerShell script syntax
         run: |
-          $scriptPaths = @(Get-ChildItem -Path (Join-Path $PWD "deploy/worker") -Filter "*.ps1" -File | Select-Object -ExpandProperty FullName)
+          $scriptPaths = @(
+            Get-ChildItem -LiteralPath (Join-Path $PWD "deploy/worker") -Filter "*.ps1" -File
+            Get-ChildItem -LiteralPath (Join-Path $PWD "deploy/operations") -Filter "*.ps1" -File
+          ) | Select-Object -ExpandProperty FullName
           if ($scriptPaths.Count -eq 0) {
-            throw "No deploy/worker PowerShell scripts found to validate."
+            throw "No deployment PowerShell scripts found to validate."
           }
 
           $hasErrors = $false
@@ -150,8 +156,11 @@ jobs:
           }
 
           if ($hasErrors) {
-            throw "PowerShell syntax validation failed for deploy/worker scripts."
+            throw "PowerShell syntax validation failed for deployment scripts."
           }
+
+      - name: Test deferred operations tooling on Windows
+        run: node --test deploy/operations/acceptance.test.mjs deploy/operations/capacity.test.mjs deploy/operations/observation-client.test.mjs deploy/operations/tests/windows-supervisor.test.mjs
 
       - name: Test Worker E2E evidence collector
         run: ./deploy/worker/tests/invoke-worker-e2e.tests.ps1

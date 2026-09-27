@@ -20,6 +20,7 @@ import { InvestigationE2eIntake } from "./e2e-intake.js";
 import { createInvestigationE2eMediaPublications } from "./e2e-media-runtime.js";
 import { requireCondition } from "./errors.js";
 import { InvestigationGitHubTransport } from "./github-transport.js";
+import { InvestigationOperations, registerInvestigationOperationsRoute } from "./operations.js";
 import { InvestigationProgressReplies } from "./progress-reply.js";
 import { InvestigationRuntimeAuth } from "./runtime-auth.js";
 import {
@@ -171,6 +172,15 @@ export async function createInvestigationRuntime(
       ...(actionTransport === undefined ? {} : { actionTransport }),
       registerIngressRoutes: (ingressApp, service) => {
         reapTaskLeases = () => service.reapExpiredLeases();
+        registerInvestigationOperationsRoute(ingressApp, {
+          authenticateOperator: runtimeAuth.authenticateOperator,
+          operations: new InvestigationOperations({
+            store,
+            databasePath: config.databasePath,
+            authDatabasePath: config.authDatabasePath,
+            evidencePolicy: service.evidence.policy,
+          }),
+        });
         const params = Type.Object(
           { id: Type.String({ minLength: 1, maxLength: 256 }) },
           { additionalProperties: false },

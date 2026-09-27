@@ -1258,7 +1258,7 @@ describe("loopback webhook relay transport", () => {
     expect(() => createWebhookRelayTransport(target)).toThrow("invalid_configuration");
   });
 
-  it("sends exact signed bytes and receives the real durable receipt", async () => {
+  it("sends exact signed bytes through native HTTP and validates the receiver acknowledgment", async () => {
     const original = envelope();
     const url = await receiver((request, response) => {
       const chunks: Buffer[] = [];
@@ -1277,6 +1277,28 @@ describe("loopback webhook relay transport", () => {
     expect(await spool.runNext(createWebhookRelayTransport(url))).toMatchObject({
       state: "delivered",
     });
+  });
+
+  it("does not promote a native HTTP 401 with a duplicate-shaped body to delivered", async () => {
+    let calls = 0;
+    const url = await receiver((_request, response) => {
+      calls += 1;
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify(accepted("delivery-1", "duplicate").body));
+    });
+    const spool = fixture().open();
+    const original = envelope();
+    spool.enqueue(original);
+    const failed = await spool.runNext(createWebhookRelayTransport(url));
+    expect(failed).toMatchObject({
+      state: "failed",
+      code: "receiver_rejected",
+      attempts: [{ responseStatus: 401, acceptance: null, outcome: "failed" }],
+    });
+    expect(spool.enqueue(original).status).toBe("duplicate");
+    expect(await spool.runNext(createWebhookRelayTransport(url))).toBeNull();
+    expect(spool.inspect("delivery-1")).toEqual(failed);
+    expect(calls).toBe(1);
   });
 
   it("does not follow redirects or accept oversized receipt bodies", async () => {
