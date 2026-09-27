@@ -213,10 +213,19 @@ that isolated operations acceptance.
 The subsequent production cutover preserved the original account identity and password, four
 Tasks, four report exports, and 47 evidence records. Persisted Server static concurrency and Worker
 concurrency are both one, with no active leases or new Tasks. A six-step read-only browser check
-and three inspected screenshots covered the running Dashboard; action availability was still
-loading in its capture, and media playback was not exercised. Outbound writes, media uploads,
-webhook intake, and E2E remain held. The current [implementation status](./docs/IMPLEMENTATION_STATUS.md)
-and [cutover record](./docs/handoff/2026-09-27-ci-and-production-cutover.md) preserve the exact scope
+and three inspected screenshots covered the running Dashboard. Its action-loading capture and
+unexercised media remain historical limits of that run. The subsequent
+[Dashboard interaction follow-up](./docs/handoff/2026-09-27-dashboard-interaction-acceptance.md)
+observed completed native action availability, disabled external actions with their guard reasons,
+PNG preview/focus recovery, and playback, pause, seek, and disposal of an existing MP4. Final
+independent review accepted all eight production steps and three screenshots with unchanged
+business-state digests. A separate isolated phase passed seven steps and five reviewed screenshots
+covering validation, retained drafts, same-key recovery after an injected 503, and a new edited
+preview while preserving the first intent. Confirmation stayed disabled and no external operation
+occurred. Temporary sessions, processes, tasks, and credentials were cleaned up. Outbound writes,
+media uploads, webhook intake, and E2E remain held. The current
+[implementation status](./docs/IMPLEMENTATION_STATUS.md) and
+[cutover record](./docs/handoff/2026-09-27-ci-and-production-cutover.md) preserve the exact scope
 and the remaining acceptance work.
 
 [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) distinguishes this refactor from historical

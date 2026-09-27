@@ -1,5 +1,42 @@
 # Implementation Status
 
+## Dashboard interaction follow-up, 2026-09-27 — complete within recorded scope
+
+The production phase completed eight browser steps with three screenshots against the sealed
+`a6ae2995407037683e5be120f76e928aad212c4b` runtime. This work is based on `e38dbbc` and changes
+documentation only; it does not deploy a new application build. The native action-context request
+completed in 3.895 seconds, and Other actions showed seven disabled external actions with their
+native guard reasons. The previous loading capture did not establish a persistent product failure.
+
+PNG preview opened and closed with focus returned to its opener. Play recording advanced an
+existing 30-second MP4 by 0.15905 seconds. HTML media API observations then confirmed stable pause
+and a seek to 22.5 seconds. Closing the preview removed the video and revoked its blob URL, with
+positive and negative controls. This is not pointer acceptance of browser-native media controls,
+new recording generation, or a new PowerToys/E2E run.
+
+The temporary session logged out, the browser closed, and no owned Edge process remained. The
+before/after digests matched all four Tasks, four Reports, and 47 evidence records, with four
+released leases and zero ActionIntents. All three production screenshots were independently
+reviewed. A temporary Guest Agent channel failure recovered with the same boot and production
+generations. The failed dispatch remains retained; a fresh conditional continuation confirmed
+the exact temporary-task and empty-directory cleanup. The three production tasks stayed running.
+
+The single isolated native-Server/compiled-Dashboard run passed seven steps with five independently
+reviewed screenshots and exit code zero. Selection and summary validation issued no preparation
+requests. Dirty-close and save/reopen flows retained drafts. An injected 503 occurred before native
+intent creation; Recover preview reused the exact payload and key to create one intent. Corrected
+feedback used a new key, ID, and digest for a second intent, leaving the first intent's full JSON
+unchanged. Three POSTs comprised one injected fault and two native preparations. Confirmation
+stayed disabled; execute, reconcile, import, upload, and outbound counts were zero.
+
+The isolated fixture had no GitHub configuration or token, Worker, or actor execution permission.
+Its session was revoked, the session read returned unauthenticated, the browser closed, and the
+fixture Server exited with code zero. Final readback confirmed removal of both temporary tasks,
+the empty temporary directory, and the generated fixture credential. All original business digests
+still matched, and the three production services remained running at 4 GiB with their flags held.
+Both interaction phases and operational closeout are complete within these boundaries. See the
+[current interaction handoff](handoff/2026-09-27-dashboard-interaction-acceptance.md) for boundaries.
+
 ## CI correction and production cutover, 2026-09-27
 
 Production release `a6ae2995407037683e5be120f76e928aad212c4b` is deployed with the Server in
@@ -1130,10 +1167,17 @@ service-broker or externally detached processes. Historical failed receipts rema
   new Server/Worker/relay supervision. Existing accounts, Tasks, reports, evidence, and histories
   were preserved, with one static slot, Worker concurrency one, no active leases, and outbound
   writes and E2E held. The six-step read-only production browser check and three inspected
-  screenshots passed; the still-loading action-availability capture, video playback, and new E2E
-  are not accepted by that check. Isolated native lifecycle, hosting, backup/restore, bounded
-  retries, and same-boot recovery retain their earlier successful scope. Stop/rollback is prepared
-  but unexecuted.
+  screenshots passed within the original cutover scope. The independent interaction follow-up
+  below addresses that run's action-panel and media limits. Isolated native lifecycle, hosting,
+  backup/restore, bounded retries, and same-boot recovery retain their earlier successful scope.
+  Stop/rollback is prepared but unexecuted.
+- **Dashboard interaction acceptance — both phases accepted:** eight production steps and three
+  reviewed screenshots cover completed guarded actions, PNG preview/focus recovery, and existing
+  MP4 playback/pause/seek/disposal, with unchanged business state. Seven isolated steps and five
+  reviewed screenshots cover validation, draft retention, same-key preview recovery, and a new
+  edited intent while preserving the original. Confirmation remained disabled and external
+  operation counts stayed zero. Final temporary-resource cleanup and production-state readback
+  passed; actual publication, new recordings, and new E2E behavior remain separate acceptance.
 - **Remaining deployment acceptance:** VM reboot and subsequent user logon, cross-boot recovery,
   current-release real-model/PowerToys execution and live publication, and unrecorded cases in the
   [Windows hosting matrix](../deploy/operations/WINDOWS.md#verification-to-execute-after-the-worker-is-ready)

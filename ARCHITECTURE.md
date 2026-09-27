@@ -485,11 +485,20 @@ The original trusted execution mappings, plan environment, PATH, and MSBuild com
 were restored and checked after a cooperative Worker restart without invoking a model.
 
 Read-only production browser acceptance passed six steps with three independently inspected
-screenshots. The action-availability capture still showed loading, so it does not establish that
-panel's readiness; video playback and new E2E execution were not exercised. Outbound writes, media
-uploads, webhook intake, and E2E remain held. The VM retains a 4 GiB ceiling and the existing 2 GiB
-subprocess guard. Protected backups and a reviewed stop/rollback procedure are retained; rollback
-was not executed.
+screenshots. That cutover run did not establish action-panel readiness or media playback. The
+separate [Dashboard interaction follow-up](./docs/handoff/2026-09-27-dashboard-interaction-acceptance.md)
+subsequently observed the native action response and seven disabled external actions with guard
+reasons, PNG preview/focus recovery, and existing MP4 playback, pause, seek, and blob cleanup.
+Its eight production steps and three screenshots passed independent review, with unchanged
+business-state digests and confirmed production-helper cleanup. A separate isolated native
+Server/compiled-Dashboard phase passed seven steps and five reviewed screenshots: selection and
+field validation, retained drafts, same-key recovery after an injected 503, and a new edited intent
+with the original unchanged. Confirmation remained disabled; execute, reconcile, import, upload,
+and outbound counts were zero. Final temporary-task and credential cleanup passed. A temporary
+Guest Agent interruption recovered without VM or service restart and is not reboot acceptance.
+No new E2E execution is implied. Outbound writes, media uploads, webhook intake, and E2E remain
+held. The VM retains a 4 GiB ceiling and the existing 2 GiB subprocess guard. Protected
+backups and a reviewed stop/rollback procedure are retained; rollback was not executed.
 
 VM reboot/power-loss and cross-boot recovery, current-release real-model and PowerToys execution,
 live publication, and unrecorded Windows hosting matrix cases retain separate acceptance. The
