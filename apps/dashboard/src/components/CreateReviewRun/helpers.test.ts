@@ -905,7 +905,10 @@ describe("reproduction review run creation intent", () => {
     );
   });
 
-  it("accepts an exact 2 MiB UTF-8 body and rejects one additional byte including the outer request", () => {
+  // This validates the complete large request, not a five-second serialization benchmark.
+  it("accepts an exact 2 MiB UTF-8 body and rejects one additional byte including the outer request", {
+    timeout: 30_000,
+  }, () => {
     const accepted = registry().intents.prepare(
       reproductionDraftWithWireSize(maximumIssueReproductionRequestUtf8Bytes),
     );

@@ -12,6 +12,12 @@ passed Linux type checking, tests, and builds, plus the Windows and ProcessHost 
 Linux lint step failed with 4,335 errors, so that run is not green. The lint correction and its
 new verification must be recorded separately rather than changing the failed run's outcome.
 
+The lint correction in `d556909` passed remote whole-tree Biome with zero errors. Its
+[CI run 36310037038](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36310037038)
+then hit the default five-second deadline in two existing large-input/package-integrity tests.
+The bounded per-test timing and teardown correction, and its subsequent CI result, remain a
+separate gate. See the [CI and cutover record](handoff/2026-09-27-ci-and-production-cutover.md).
+
 ## Serial workflow acceptance with 4 GiB, 2026-09-27
 
 The published operations baseline passed shared/Server/Worker/Dashboard prebuilds, 149 distinct

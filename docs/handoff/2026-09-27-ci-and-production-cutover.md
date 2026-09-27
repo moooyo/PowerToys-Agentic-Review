@@ -38,8 +38,7 @@ the remote host's memory; its empty report is incomplete evidence, regardless of
 The retained summary and bounded reports account for all errors without truncating their totals.
 Remote full-tree Biome now passes across 1,344 checked files with zero errors, 2,304 warnings,
 and 596 informational diagnostics. Warnings remain visible. The authored-source corrections
-received an independent static behavior review. No application, shared-package, ProcessHost,
-or deployment-tool source code changed.
+received an independent static behavior review. No production runtime source code changed.
 
 The existing bundle/asset generators, three prototype composers, and atlas publisher completed.
 Eight generated files changed. Offline checks passed for seven HTML documents, eight embedded
@@ -48,6 +47,24 @@ documents parsed as XML. These are syntax and document-structure checks, not bro
 acceptance. Isolated generator cases also covered the legal placeholder, payload escaping,
 missing/duplicate-marker rejection of atlas output, and generated SVG validity. The full-tree
 lint check still passed after regeneration. The next CI run remains a separate release gate.
+
+The correction was published as `d55690934c170b6f11ee22b1d32b5f8ab8650049`.
+[CI run 36310037038](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36310037038)
+then failed two existing tests at their default five-second deadline: complete Playwright runtime
+copy/manifest/import verification on Windows and the exact two-MiB request-body boundary on Linux.
+The Windows log also retained an `ENOTEMPTY` teardown error after the timeout. That run remains
+failed; production startup was held.
+
+Only those two large checks now receive explicit 30-second limits. Their complete-package and
+exact-byte boundary assertions remain unchanged. Worker teardown waits for the original complete
+check to settle before deleting its captured temporary roots, with a separate bounded cleanup
+deadline. The original promise is still returned to the test runner, so assertion failures and
+timeouts remain failures. Temporary-root ownership is captured before asynchronous allocation,
+preventing a late check or teardown from taking a later test's directories. No global test timeout
+or production behavior changes. The complete Dashboard test file passed all 94 cases remotely;
+the full-size boundary case took about 1.19 seconds. Both Worker tests passed on Windows, with
+the complete package check taking about 3.38 seconds and no owned temporary directory remaining.
+Both projects' type checks and the changed-test lint passed. The next full CI result remains pending.
 
 ## Status reconciliation
 

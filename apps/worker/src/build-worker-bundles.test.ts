@@ -12,9 +12,15 @@ interface WorkerBundleScript {
 const script: WorkerBundleScript = await import(
   new URL("../scripts/build-worker-bundles.mjs", import.meta.url).href
 );
-const temporaryRoots: string[] = [];
+let temporaryRoots: string[] = [];
+const pendingRuntimeChecks: Promise<void>[] = [];
 afterEach(async () => {
-  for (const root of temporaryRoots.splice(0)) {
+  const ownedRoots = temporaryRoots;
+  temporaryRoots = [];
+  // A Vitest timeout does not cancel file copies; drain the original check before cleanup.
+  // The test returns the original promise and remains responsible for reporting its failure.
+  await Promise.allSettled(pendingRuntimeChecks.splice(0));
+  for (const root of ownedRoots) {
     const name = relative(resolve(tmpdir()), resolve(root));
     if (
       name === "" ||
@@ -25,10 +31,11 @@ afterEach(async () => {
       throw new Error("Runtime test cleanup escaped its owned temporary directory.");
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 60_000);
 async function temporaryRoot(): Promise<string> {
+  const ownedRoots = temporaryRoots;
   const root = await mkdtemp(join(tmpdir(), "worker-runtime-bundle-"));
-  temporaryRoots.push(root);
+  ownedRoots.push(root);
   return root;
 }
 async function contentManifest(root: string): Promise<Map<string, string>> {
@@ -54,32 +61,38 @@ async function contentManifest(root: string): Promise<Map<string, string>> {
 }
 
 describe("Worker runtime distribution", () => {
-  it("ships the Windows probe and an independently importable complete Playwright package", async () => {
-    const root = await temporaryRoot();
-    const output = join(root, "dist");
-    await script.copyWorkerRuntimeAssets(output);
-    const sourceEntry = fileURLToPath(new URL("./ui/windows-driver-entry.ps1", import.meta.url));
-    expect(await readFile(join(output, "windows-driver-entry.ps1"))).toEqual(
-      await readFile(sourceEntry),
-    );
-    const installedPackage = await realpath(
-      dirname(fileURLToPath(import.meta.resolve("playwright-core/package.json"))),
-    );
-    const packagedRuntime = join(output, "node_modules", "playwright-core");
-    expect(await contentManifest(packagedRuntime)).toEqual(await contentManifest(installedPackage));
-    const metadata = JSON.parse(await readFile(join(packagedRuntime, "package.json"), "utf8"));
-    expect(metadata.name).toBe("playwright-core");
-    expect(Object.keys(metadata.dependencies ?? {})).toEqual([]);
-    const browserMetadata = JSON.parse(
-      await readFile(join(packagedRuntime, "browsers.json"), "utf8"),
-    );
-    expect(
-      browserMetadata.browsers.some((browser: { name: string }) => browser.name === "chromium"),
-    ).toBe(true);
-    const standalone = await import(pathToFileURL(join(packagedRuntime, "index.mjs")).href);
-    expect(typeof standalone.chromium.launch).toBe("function");
-    expect(typeof standalone.chromium.executablePath()).toBe("string");
-  });
+  it("ships the Windows probe and an independently importable complete Playwright package", () => {
+    const check = (async () => {
+      const root = await temporaryRoot();
+      const output = join(root, "dist");
+      await script.copyWorkerRuntimeAssets(output);
+      const sourceEntry = fileURLToPath(new URL("./ui/windows-driver-entry.ps1", import.meta.url));
+      expect(await readFile(join(output, "windows-driver-entry.ps1"))).toEqual(
+        await readFile(sourceEntry),
+      );
+      const installedPackage = await realpath(
+        dirname(fileURLToPath(import.meta.resolve("playwright-core/package.json"))),
+      );
+      const packagedRuntime = join(output, "node_modules", "playwright-core");
+      expect(await contentManifest(packagedRuntime)).toEqual(
+        await contentManifest(installedPackage),
+      );
+      const metadata = JSON.parse(await readFile(join(packagedRuntime, "package.json"), "utf8"));
+      expect(metadata.name).toBe("playwright-core");
+      expect(Object.keys(metadata.dependencies ?? {})).toEqual([]);
+      const browserMetadata = JSON.parse(
+        await readFile(join(packagedRuntime, "browsers.json"), "utf8"),
+      );
+      expect(
+        browserMetadata.browsers.some((browser: { name: string }) => browser.name === "chromium"),
+      ).toBe(true);
+      const standalone = await import(pathToFileURL(join(packagedRuntime, "index.mjs")).href);
+      expect(typeof standalone.chromium.launch).toBe("function");
+      expect(typeof standalone.chromium.executablePath()).toBe("string");
+    })();
+    pendingRuntimeChecks.push(check);
+    return check;
+  }, 30_000);
 
   it("cleans only the fixed dist child while preserving sibling deployment data", async () => {
     const root = await temporaryRoot();
