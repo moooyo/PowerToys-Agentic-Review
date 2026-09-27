@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import textwrap
 from pathlib import Path
 
@@ -316,7 +317,10 @@ def main() -> None:
             "diagrams": diagrams, "flows": flows, "overview": overview}
     payload = json.dumps(data, ensure_ascii=True).replace("</", "<\\/")
     template = (ROOT / "viewer.html").read_text(encoding="utf-8")
-    (ROOT / "atlas.html").write_text(template.replace("/*__REVIEW_DATA__*/", payload), encoding="utf-8")
+    page, replacements = re.subn(r"/\*__REVIEW_DATA__\*/\s*null\b", lambda _: payload, template)
+    if replacements != 1:
+        raise ValueError("The atlas template must contain exactly one review data placeholder.")
+    (ROOT / "atlas.html").write_text(page, encoding="utf-8")
     manifest = {"baseline": BASELINE, "date": DATE, "screenCount": len(screens), "journeyCount": len(journeys),
                 "evidence": "Source-derived wireframes with illustrative content; not screenshots or runtime acceptance.",
                 "verification": "Blocked: designated remote Windows environment was stopped. No local verification performed."}

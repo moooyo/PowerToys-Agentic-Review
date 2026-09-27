@@ -1,8 +1,10 @@
 # Historical scenario acceptance
 
-Status: acceptance definitions prepared; every new scenario is `not_run`. No execution,
-deployment, build, test, or runtime verification is claimed by this document. A prepared
-catalog is not evidence that a functional or delivery scenario passed.
+Status: the catalog prepares each new acceptance packet as `not_run`; it does not store run results.
+The September 27 [four-GiB workflow handoff](../handoff/2026-09-27-four-gib-workflow-acceptance.md)
+records executed native webhook regression coverage and bounded operations acceptance. Those
+checks do not close the historical Peek/Launcher scenarios or diagnose the original external
+HTTP `401`. A prepared catalog alone is not evidence that a scenario passed.
 
 The machine-readable catalog is
 [`deploy/operations/historical-scenarios.json`](../../deploy/operations/historical-scenarios.json).
@@ -105,14 +107,16 @@ isolated synthetic fixture and deterministic processing boundary so asynchronous
 first request cannot be mistaken for duplicate work from the second. Record mocked outbound calls
 to prove that no actual repository write occurred.
 
-The prepared coverage in `apps/server/src/investigation/webhook-runtime.test.ts` uses native
+The executed coverage in `apps/server/src/investigation/webhook-runtime.test.ts` uses native
 loopback HTTP and real isolated SQLite for issue assignment, PR assignment, and E2E command
 intake. It separately observes relay cache hits and native receiver entries, including retained
 Server/relay databases across restart. The receiver verifies HMAC over exact CRLF JSON bytes and
 the receipt preserves their digest. Source reads and publication transports are mocked; no Worker
 or model runs. Additional native cases preserve signature `401` as a failed relay attempt with no
 business receipt and reject a `401` even when its body resembles a duplicate acknowledgment.
-These definitions have not been executed for this change and do not diagnose the historical `401`.
+These tests passed in the September 27 targeted software verification recorded in the workflow
+handoff. Their isolated synthetic inputs do not reconstruct or diagnose the historical `401`,
+and passing tests do not automatically populate or accept an independent catalog evidence packet.
 
 Neither cached replay nor native duplicate handling establishes physical power-loss durability,
 sustained throughput, total SQLite/WAL storage capacity, or an entire live HTTPS path. Those
@@ -127,9 +131,9 @@ operation, content, and scope under [AGENTS.md](../../AGENTS.md).
 
 Use isolated databases and mocked upstream/provider/outbound transports for future webhook
 execution. Future functional runs use a new explicit Task/run identity and the authorized Windows
-environment when it becomes available. Keep publication disabled for isolated acceptance. Do not
-resume old incomplete execution to obtain fresh observations; recorded-result recovery only
-adopts saved evidence and does not constitute a new functional test.
+environment. Keep publication disabled for isolated acceptance. Do not resume old incomplete
+execution to obtain fresh observations; recorded-result recovery only adopts saved evidence and
+does not constitute a new functional test.
 
 Retain receipts and media before disposing of owned run resources. Functional cleanup must prove
 owned process exit, workspace cleanup, and execution/desktop lease release through the managed

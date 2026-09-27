@@ -12,8 +12,9 @@ not converted into the older Job protocol. Historical source modules, design dec
 acceptance receipts do not define alternate production endpoints. There is no legacy API
 compatibility, dual-write path, data conversion, or retired Job database migration project.
 
-The current store accepts only the exact additive `investigation-v2` and `investigation-v3`
-upgrades described below; this does not add compatibility with the retired Job runtime.
+The current `investigation-v5` store accepts only the exact additive `investigation-v2`,
+`investigation-v3`, and `investigation-v4` upgrades described below; this does not add compatibility
+with the retired Job runtime.
 
 The [structured investigation design](./docs/design/2026-09-15-structured-investigation-results-and-loop.md)
 and [built-in account design](./docs/design/2026-09-15-built-in-accounts.md) record the current
@@ -130,7 +131,7 @@ upstream redelivery. Events lost before relay receipt remain outside its recover
 An explicit `retryFailed` command uses numeric version checks and idempotent request IDs to queue
 another finite batch only for failed deliveries. It preserves cumulative attempts and reserves
 additional history capacity atomically; delivered records never requeue. Spool schema v2 additively
-upgrades v1 independently of the application's `investigation-v4` store.
+upgrades v1 independently of the application's `investigation-v5` store.
 
 Operators register exact internal and GitHub numeric repository identities. The production import
 endpoint reads the current PR or Issue and every conversation page, including PR review comments
@@ -353,10 +354,11 @@ report. Server recommendations and hard blockers use the complete saved collecti
 findings beyond the visible page. Export retains the complete result and its logical content digest.
 
 The Server process owns SQLite through `InvestigationStore`, with schema identity
-`investigation-v4`, and a separate account store. New investigation databases initialize directly
-at v4. Exact, complete `investigation-v2` and `investigation-v3` databases receive additive comment
-history and scheduler storage migrations. Unrelated or incomplete schemas are rejected without
-deletion or fallback. Both databases must remain private and outside the Dashboard static directory.
+`investigation-v5`, and a separate account store. New investigation databases initialize directly
+at v5. Exact, complete `investigation-v2`, `investigation-v3`, and `investigation-v4` databases receive
+additive history, scheduler, normalized-output, and directory-storage migrations. Unrelated or
+incomplete schemas are rejected without deletion or fallback. Both databases must remain private
+and outside the Dashboard static directory.
 Detailed retention controls and operating guidance are in the [Server instructions](./apps/server/README.md).
 Historical evidence services and schema numbers do not describe this active store.
 
@@ -451,10 +453,10 @@ fifth report's four GitHub images and MP4 playback passed while its Task remaine
 HTTPS redelivery returned a cached duplicate without another Server receiver entry. The eighth Task
 completed naturally with confirmed cleanup but no disable CAS. A separate native cancellation fixture
 passed with synthetic inputs and real runtime/window/FFmpeg processes. Operational closeout is complete;
-temporary capacity settings are restored with legacy services/history preserved. Git publication is
-a separate handoff. PR #14 remains an
-open draft with two failed/cancelled live sequences, including source
-admission blocked by unsupported gitlinks. The current fixture is owned-fork PR #15, using
+temporary capacity settings were restored with legacy services/history preserved. Source publication
+is complete. Earlier PR #14 source-preparation failures remain historical; pinned-submodule support
+and deployment-owned compiler selection subsequently addressed those implementation blockers.
+The recorded September 19 fixture is owned-fork PR #15, using
 the actual merge of upstream PowerToys PR #47506 and its sole parent, whose complete trees have no
 gitlinks. All four changed files belong to Run Calculator. Three scenarios cover
 explicit complex-number errors, suppression of implicit-query error rows, and ordinary arithmetic.
@@ -464,10 +466,26 @@ The existing all-changed-path coverage gate remains in force. The earlier mixed 
 owned-fork PR #13, is superseded, unexecuted, and closed; neither fixture changes the older
 Peek/Launcher outcomes.
 
-Production hosting, service restart policy, and sustained workload/physical SQLite and WAL capacity
-acceptance are explicitly deferred. General model-quality evaluation and third-party login remain
-outside this delivery. Private checkout, automatic Worker distribution/installation/upgrades, and
-reusable build outputs are optional unimplemented extensions. Video evidence is implemented and
-accepted within the recorded scope. [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) tracks
-the current backlog separately from historical receipts. Retired split-Worker, protected-journal,
-provider-registry, and model-relay designs are not current backlog items.
+The operations baseline is published on `main` at `b690dd9`. Its
+[September 27 workflow handoff](./docs/handoff/2026-09-27-four-gib-workflow-acceptance.md) records
+149 distinct targeted tests, a 30-test Windows repeat, 10 native lifecycle checks, and 11 compiled
+Dashboard/native HTTP/SQLite browser steps. Actual isolated Scheduled Task Server hosting in
+Session 0, idle Worker hosting in an interactive session, duplicate-start protection, cooperative
+shutdown, populated backup/restore and application reopening, bounded Server retries, and the
+Worker's same-boot recovery gate passed. Targeted webhook tests separately observe relay cache
+hits and native Server receiver re-entry across restart. These are completed scoped checks.
+
+Production cutover remains pending its deployment receipt. VM reboot/power-loss and cross-boot
+recovery, current-release real-model and PowerToys execution, live publication, and unrecorded
+Windows hosting matrix cases retain separate acceptance. The short two-task capacity observation
+and sampled 4 GiB serial workflow do not establish sustained workload, concurrent capacity, physical
+SQLite/WAL growth limits, or disk reclamation. Historical Peek/Launcher outcomes and the original
+external HTTP 401 remain unresolved within their original scope.
+
+General model-quality evaluation and third-party login remain outside this delivery. Private
+checkout, automatic Worker release distribution/upgrades, and reusable build outputs are optional
+unimplemented extensions. Manual Scheduled Task registration is implemented; its installer does
+not package, copy, or replace releases. Video evidence is implemented and accepted within the
+recorded scope. [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) tracks current release
+verification and the backlog separately from historical receipts. Retired split-Worker,
+protected-journal, provider-registry, and model-relay designs are not current backlog items.

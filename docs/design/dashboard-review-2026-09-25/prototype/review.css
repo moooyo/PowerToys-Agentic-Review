@@ -1,78 +1,243 @@
 /* Keep the interactive application primary; scenario controls stay optional. */
-html { min-width:320px; }
-body { margin:0; padding:12px 18px 24px; background:light-dark(#faf9fd,#10141b); }
-#ar-m3-prototype { max-width:1600px; margin:0 auto; }
-#ar-m3-prototype .ar-prototype-bar { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:62px; padding:8px 4px 14px; }
-#ar-m3-prototype .ar-prototype-title { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
-#ar-m3-prototype .ar-prototype-title strong { font-size:14px; font-weight:500; }
-#ar-m3-prototype .ar-prototype-title>.ar-small { font-size:12px; }
-#ar-m3-prototype .ar-prototype-bar>.ar-row { flex-shrink:0; gap:8px; }
-#ar-m3-prototype .ar-prototype-bar .ar-btn { font-size:12px; }
-#ar-m3-prototype details.ar-lab { display:none; margin:0 0 12px; padding:12px 18px; border:1px solid var(--ar-line); background:var(--ar-soft); }
-#ar-m3-prototype details.ar-lab[open] { display:block; }
-#ar-m3-prototype .ar-prototype-shortcuts { display:flex; flex-wrap:wrap; gap:8px; padding:0 0 8px; }
-#ar-m3-prototype .ar-app { min-height:calc(100dvh - 102px); }
-#ar-m3-prototype .ar-shell { min-height:calc(100dvh - 102px); }
-#ar-m3-prototype .ar-workspace { display:flex; flex-direction:column; }
-#ar-m3-prototype .ar-main { flex:1; }
-#ar-m3-prototype .ar-footer a { color:var(--ar-blue); text-decoration:underline; text-underline-offset:3px; }
-#ar-m3-prototype .ar-footer { flex-wrap:wrap; }
+html {
+  min-width: 320px;
+}
+body {
+  margin: 0;
+  padding: 12px 18px 24px;
+  background: light-dark(#faf9fd, #10141b);
+}
+#ar-m3-prototype {
+  max-width: 1600px;
+  margin: 0 auto;
+}
+#ar-m3-prototype .ar-prototype-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 62px;
+  padding: 8px 4px 14px;
+}
+#ar-m3-prototype .ar-prototype-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+#ar-m3-prototype .ar-prototype-title strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+#ar-m3-prototype .ar-prototype-title > .ar-small {
+  font-size: 12px;
+}
+#ar-m3-prototype .ar-prototype-bar > .ar-row {
+  flex-shrink: 0;
+  gap: 8px;
+}
+#ar-m3-prototype .ar-prototype-bar .ar-btn {
+  font-size: 12px;
+}
+#ar-m3-prototype details.ar-lab {
+  display: none;
+  margin: 0 0 12px;
+  padding: 12px 18px;
+  border: 1px solid var(--ar-line);
+  background: var(--ar-soft);
+}
+#ar-m3-prototype details.ar-lab[open] {
+  display: block;
+}
+#ar-m3-prototype .ar-prototype-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 8px;
+}
+#ar-m3-prototype .ar-app {
+  min-height: calc(100dvh - 102px);
+}
+#ar-m3-prototype .ar-shell {
+  min-height: calc(100dvh - 102px);
+}
+#ar-m3-prototype .ar-workspace {
+  display: flex;
+  flex-direction: column;
+}
+#ar-m3-prototype .ar-main {
+  flex: 1;
+}
+#ar-m3-prototype .ar-footer a {
+  color: var(--ar-blue);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+#ar-m3-prototype .ar-footer {
+  flex-wrap: wrap;
+}
 /* Keep feedback visible without moving the workspace content. */
 #ar-m3-prototype .ar-toast {
-  position:fixed; inset:auto 24px 24px auto; z-index:20;
-  display:flex; align-items:center; justify-content:space-between; gap:16px;
-  width:max-content; max-width:min(480px,calc(100vw - 32px));
-  max-height:calc(100dvh - 48px); overflow:auto;
-  margin:0; padding:10px 12px 10px 18px;
-  border:1px solid var(--ar-line); border-radius:12px;
-  color:var(--ar-text); background:var(--md-surface-high);
-  box-shadow:0 8px 28px rgb(0 0 0 / .16);
+  position: fixed;
+  inset: auto 24px 24px auto;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: max-content;
+  max-width: min(480px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px 10px 18px;
+  border: 1px solid var(--ar-line);
+  border-radius: 12px;
+  color: var(--ar-text);
+  background: var(--md-surface-high);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.16);
 }
-#ar-m3-prototype .ar-toast>span { min-width:0; overflow-wrap:anywhere; }
-#ar-m3-prototype .ar-toast>.ar-btn { flex-shrink:0; padding:8px; min-width:40px; color:inherit; }
+#ar-m3-prototype .ar-toast > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+#ar-m3-prototype .ar-toast > .ar-btn {
+  flex-shrink: 0;
+  padding: 8px;
+  min-width: 40px;
+  color: inherit;
+}
 /* Keep dialog actions reachable while long forms scroll independently. */
 #ar-m3-prototype dialog#ar-dialog[open] {
-  display:grid; grid-template-rows:auto minmax(0,1fr) auto;
-  max-height:calc(100dvh - 40px); overflow:hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: calc(100dvh - 40px);
+  overflow: hidden;
 }
-#ar-m3-prototype #ar-dialog>.ar-dialog-body { min-height:0; overflow-y:auto; overscroll-behavior:contain; }
-#ar-m3-prototype #ar-dialog>.ar-dialog-foot { padding-top:16px; border-top:1px solid var(--ar-line); background:var(--md-surface-high); }
-#ar-m3-prototype dialog#ar-dialog[open]:has(>.ar-toast:not([hidden])) { grid-template-rows:auto minmax(0,1fr) auto auto; }
-#ar-m3-prototype #ar-dialog>.ar-toast {
-  position:static; inset:auto; width:auto; max-width:none;
-  max-height:min(160px,25dvh); margin:0 20px 16px; box-shadow:none;
+#ar-m3-prototype #ar-dialog > .ar-dialog-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
-#ar-m3-prototype .ar-outcome-summary { padding:20px; gap:20px; }
-#ar-m3-prototype .ar-outcome-summary h2 { font-size:24px; line-height:32px; }
-#ar-m3-prototype .ar-outcome-action { display:flex; flex-direction:column; justify-content:center; padding-inline-start:20px; }
-#ar-m3-prototype .ar-outcome-action .ar-row { margin-top:4px; }
-#ar-m3-prototype .ar-outcome-summary details { margin-top:8px; }
-#ar-m3-prototype .ar-outcome-summary details>summary { color:var(--ar-muted); font-size:13px; }
-#ar-m3-prototype .ar-source-meta { font-size:12px; color:var(--ar-muted); }
-#ar-m3-prototype .ar-source-row>.ar-state>strong { font-weight:500; }
-#ar-m3-prototype .ar-heading p:empty { display:none; }
-#ar-m3-prototype [data-action="prototype-settings"] { white-space:nowrap; }
-#ar-m3-prototype[data-page=login] .ar-rail,
-#ar-m3-prototype[data-page=login] .ar-header { display:none; }
-#ar-m3-prototype[data-page=login] .ar-shell { display:block; }
-#ar-m3-prototype[data-page=login] .ar-signin { margin:40px auto; }
-@media(max-width:1000px) {
-  #ar-m3-prototype .ar-outcome-action { padding-inline-start:0; }
+#ar-m3-prototype #ar-dialog > .ar-dialog-foot {
+  padding-top: 16px;
+  border-top: 1px solid var(--ar-line);
+  background: var(--md-surface-high);
 }
-@media(max-width:760px) {
-  body { padding:8px; }
-  #ar-m3-prototype .ar-prototype-bar { flex-wrap:wrap; gap:10px; padding:8px 4px 12px; }
-  #ar-m3-prototype .ar-prototype-title { gap:8px; }
-  #ar-m3-prototype .ar-prototype-title>.ar-small { flex-basis:auto; }
-  #ar-m3-prototype .ar-prototype-bar>.ar-row { margin-left:auto; }
-  #ar-m3-prototype .ar-lab-controls { align-items:stretch; }
-  #ar-m3-prototype .ar-lab-controls>label { display:grid; gap:6px; flex:1 1 220px; }
-  #ar-m3-prototype .ar-lab-controls select { max-width:100%; }
-  #ar-m3-prototype .ar-toast { inset:auto 16px 16px; width:auto; max-width:none; }
-  #ar-m3-prototype dialog#ar-dialog[open] { max-height:calc(100dvh - 24px); }
-  #ar-m3-prototype .ar-outcome-summary { padding:16px; }
-  #ar-m3-prototype .ar-outcome-action { padding-inline-start:0; }
+#ar-m3-prototype dialog#ar-dialog[open]:has(> .ar-toast:not([hidden])) {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
 }
-@media(prefers-reduced-motion:reduce) {
-  #ar-m3-prototype *,#ar-m3-prototype *::before,#ar-m3-prototype *::after { transition:none!important; animation:none!important; scroll-behavior:auto!important; }
+#ar-m3-prototype #ar-dialog > .ar-toast {
+  position: static;
+  inset: auto;
+  width: auto;
+  max-width: none;
+  max-height: min(160px, 25dvh);
+  margin: 0 20px 16px;
+  box-shadow: none;
+}
+#ar-m3-prototype .ar-outcome-summary {
+  padding: 20px;
+  gap: 20px;
+}
+#ar-m3-prototype .ar-outcome-summary h2 {
+  font-size: 24px;
+  line-height: 32px;
+}
+#ar-m3-prototype .ar-outcome-action {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-inline-start: 20px;
+}
+#ar-m3-prototype .ar-outcome-action .ar-row {
+  margin-top: 4px;
+}
+#ar-m3-prototype .ar-outcome-summary details {
+  margin-top: 8px;
+}
+#ar-m3-prototype .ar-outcome-summary details > summary {
+  color: var(--ar-muted);
+  font-size: 13px;
+}
+#ar-m3-prototype .ar-source-meta {
+  font-size: 12px;
+  color: var(--ar-muted);
+}
+#ar-m3-prototype .ar-source-row > .ar-state > strong {
+  font-weight: 500;
+}
+#ar-m3-prototype .ar-heading p:empty {
+  display: none;
+}
+#ar-m3-prototype [data-action="prototype-settings"] {
+  white-space: nowrap;
+}
+#ar-m3-prototype[data-page="login"] .ar-rail,
+#ar-m3-prototype[data-page="login"] .ar-header {
+  display: none;
+}
+#ar-m3-prototype[data-page="login"] .ar-shell {
+  display: block;
+}
+#ar-m3-prototype[data-page="login"] .ar-signin {
+  margin: 40px auto;
+}
+@media (max-width: 1000px) {
+  #ar-m3-prototype .ar-outcome-action {
+    padding-inline-start: 0;
+  }
+}
+@media (max-width: 760px) {
+  body {
+    padding: 8px;
+  }
+  #ar-m3-prototype .ar-prototype-bar {
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 8px 4px 12px;
+  }
+  #ar-m3-prototype .ar-prototype-title {
+    gap: 8px;
+  }
+  #ar-m3-prototype .ar-prototype-title > .ar-small {
+    flex-basis: auto;
+  }
+  #ar-m3-prototype .ar-prototype-bar > .ar-row {
+    margin-left: auto;
+  }
+  #ar-m3-prototype .ar-lab-controls {
+    align-items: stretch;
+  }
+  #ar-m3-prototype .ar-lab-controls > label {
+    display: grid;
+    gap: 6px;
+    flex: 1 1 220px;
+  }
+  #ar-m3-prototype .ar-lab-controls select {
+    max-width: 100%;
+  }
+  #ar-m3-prototype .ar-toast {
+    inset: auto 16px 16px;
+    width: auto;
+    max-width: none;
+  }
+  #ar-m3-prototype dialog#ar-dialog[open] {
+    max-height: calc(100dvh - 24px);
+  }
+  #ar-m3-prototype .ar-outcome-summary {
+    padding: 16px;
+  }
+  #ar-m3-prototype .ar-outcome-action {
+    padding-inline-start: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #ar-m3-prototype *,
+  #ar-m3-prototype *::before,
+  #ar-m3-prototype *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
 }

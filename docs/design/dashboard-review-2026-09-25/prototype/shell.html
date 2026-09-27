@@ -1,4 +1,4 @@
-<div id="ar-m3-prototype" aria-label="Agentic Review interactive UI and UX prototype">
+<section id="ar-m3-prototype" aria-label="Agentic Review interactive UI and UX prototype">
   <div class="ar-prototype-bar">
     <div class="ar-prototype-title"><span class="ar-lab-tag">Optimized UI</span><span class="ar-small ar-muted">Material 3 &middot; Sample data</span></div>
     <div class="ar-row">
@@ -8,24 +8,24 @@
   </div>
   <details class="ar-lab" id="ar-prototype-settings">
     <summary><span>Roles and states</span><span class="ar-lab-hint">Close</span></summary>
-    <div class="ar-lab-controls" aria-label="Prototype controls">
+    <section class="ar-lab-controls" aria-label="Prototype controls">
       <label>Role <select id="ar-role"><option value="admin">Administrator</option><option value="preparer">Prepare only</option><option value="reader">Read-only</option></select></label>
       <label>State <select id="ar-scenario"><option value="normal">Normal</option><option value="loading">Initial loading</option><option value="empty">Empty</option><option value="error">Initial load failure</option><option value="refresh-error">Refresh failed, retained data</option><option value="conflict">Version conflict</option><option value="unknown">Unconfirmed submission</option><option value="noaccess">Access denied</option><option value="stale">Source changed</option></select></label>
       <span class="ar-small ar-muted">Reload to reset sample changes.</span>
-    </div>
-    <div class="ar-prototype-shortcuts" aria-label="Example workflows">
+    </section>
+    <section class="ar-prototype-shortcuts" aria-label="Example workflows">
       <button type="button" class="ar-btn small tonal" data-action="journey:review">Review and publish feedback</button>
       <button type="button" class="ar-btn small" data-action="journey:p0">Inspect a P0 blocker</button>
       <button type="button" class="ar-btn small" data-action="journey:resume">Resume an interrupted task</button>
       <button type="button" class="ar-btn small" data-action="journey:issue">Prepare an issue follow-up</button>
-    </div>
+    </section>
   </details>
   <div class="ar-app">
     <button type="button" class="ar-skip" data-action="skip-main">Skip to workspace content</button>
     <div id="ar-toast" class="ar-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <div class="ar-shell">
       <aside class="ar-rail" aria-label="Main navigation">
-        <div class="ar-mark" aria-label="Agentic Review"><i data-lucide="panels-top-left" aria-hidden="true"></i></div>
+        <div class="ar-mark" aria-hidden="true"><i data-lucide="panels-top-left" aria-hidden="true"></i></div>
         <nav id="ar-nav" class="ar-nav"></nav>
         <span class="ar-rail-caption">WORKSPACE</span>
       </aside>
@@ -43,6 +43,6 @@
         <footer class="ar-footer"><span id="ar-context">All repositories</span><span><a href="optimized-overview.svg">Visual overview</a> &middot; <a href="atlas.html">Review notes</a></span></footer>
       </div>
     </div>
-    <dialog id="ar-dialog" aria-labelledby="ar-dialog-title"><div class="ar-dialog-head"><h2 id="ar-dialog-title"></h2><button type="button" class="ar-btn ghost ar-icon-button" data-action="dialog-close" aria-label="Close dialog"><i data-lucide="x" aria-hidden="true"></i></button></div><div class="ar-dialog-body" id="ar-dialog-body"></div><div class="ar-dialog-foot" id="ar-dialog-foot"></div></dialog>
+    <dialog id="ar-dialog" aria-labelledby="ar-dialog-title"><div class="ar-dialog-head"><h2 id="ar-dialog-title">Workspace dialog</h2><button type="button" class="ar-btn ghost ar-icon-button" data-action="dialog-close" aria-label="Close dialog"><i data-lucide="x" aria-hidden="true"></i></button></div><div class="ar-dialog-body" id="ar-dialog-body"></div><div class="ar-dialog-foot" id="ar-dialog-foot"></div></dialog>
   </div>
-</div>
+</section>

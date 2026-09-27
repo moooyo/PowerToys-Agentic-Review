@@ -120,10 +120,12 @@ initialized directly with the `investigation-v5` schema. Exact `investigation-v2
 unrelated or incomplete schemas are rejected without deletion.
 
 The [production operations workflow](./deploy/operations/README.md) provides Windows hosting,
-administrator-only storage observations, explicit capacity thresholds, and a pending deployment
-acceptance checklist. The [four-GiB workflow handoff](./docs/handoff/2026-09-27-four-gib-workflow-acceptance.md)
-records its bounded synthetic verification; broader production and real-application acceptance
-remain separate from preparing these tools.
+administrator-only storage observations, explicit capacity thresholds, and a deployment acceptance
+checklist. The [four-GiB workflow handoff](./docs/handoff/2026-09-27-four-gib-workflow-acceptance.md)
+records passed native lifecycle and Dashboard checks, isolated Scheduled Task hosting, cooperative
+shutdown, backup/restore, and bounded failure recovery. The operations baseline is published on
+`main` at `b690dd9`; production cutover still requires its own deployment receipt. VM reboot,
+real-application execution, live publication, and sustained capacity remain separate acceptance.
 
 The Dashboard development server uses clearly labeled synthetic data, including PowerToys PR,
 Bug, Feature, incomplete-report, and page-two P0 examples:
@@ -148,13 +150,13 @@ third-party login and conversion of the previous authentication database are out
 GitHub API credentials and Worker credentials remain independent of console login.
 
 The [account design](./docs/design/2026-09-15-built-in-accounts.md) records the API, session behavior,
-and acceptance scope. General model-quality evaluation remains outside this delivery. The current
+and acceptance scope. General model-quality evaluation remains outside this delivery. The recorded
 [Worker controls and webhook recovery follow-up](./docs/design/2026-09-19-worker-controls-and-webhook-recovery.md)
-targets the real merged revision of a PR whose changes are entirely in PowerToys Run Calculator,
-retaining full changed-path coverage. The current fixture is owned-fork PR #15; PR #14
-remains an open draft preserving its unsuccessful source-preparation sequences. Earlier Peek and
-Launcher failures and blockers
-remain recorded in the [2026-09-19 handoff](./docs/handoff/2026-09-19-local-source-review-e2e.md).
+used owned-fork PR #15 and retained complete changed-path coverage of PowerToys Run Calculator.
+The earlier PR #14 source-preparation failures remain historical; pinned-submodule support and
+deployment-owned compiler selection were subsequently implemented. Earlier Peek and Launcher
+outcomes and the exact inputs required for independent follow-up are recorded in the
+[historical scenario catalog](./docs/operations/historical-scenarios.md).
 
 Run verification on the project-designated remote Windows worker. Linux-specific checks may use
 `test-env`; local verification requires explicit authorization for the current task. Standard
@@ -163,6 +165,12 @@ package build, typecheck, test, and lint scripts remain available. The
 opt-in synthetic lifecycle harness and real CLI companion, including prerequisites and exclusions;
 their availability does not imply a completed acceptance run. Tests should use mocked transports
 and isolated databases, with no real repository mutations.
+
+Biome checks authored application and design sources. Its explicit design-artifact exclusions
+cover generated composite HTML/SVG, generated icon/font assets, and vendored dependency bundles;
+the corresponding JavaScript, JSX, CSS, HTML templates, JSON inputs, and generator sources remain
+in scope. Regenerate the affected offline artifacts after source changes and validate SVG as XML.
+See the [CI correction and deployment record](./docs/handoff/2026-09-27-ci-and-production-cutover.md).
 
 ## Evidence and project status
 
@@ -176,8 +184,8 @@ The 2026-09-19 acceptance covers complete pinned-checkout static review, invocat
 static/E2E scheduling, independent PNG/MP4 publication and playback, managed recovery, and
 application-open cancellation. Functional PR scenarios retain their own unsuccessful outcomes;
 playable evidence is not a functional pass. That earlier redelivery received an external HTTP 401
-before the receiver; the later cached-duplicate result below retains its separate scope. Production deployment
-and sustained workload/storage-capacity acceptance are explicitly deferred.
+before the receiver; the later cached-duplicate result below retains its separate scope. Neither
+result diagnoses that original failure or establishes sustained workload/storage capacity.
 
 The subsequent Worker controls, static-media publication guards, webhook recovery, and durable relay
 spool have [scoped software and Dashboard/native-intake verification](./docs/handoff/2026-09-19-worker-controls-and-webhook-recovery.md).
@@ -187,7 +195,18 @@ GitHub images and MP4 playback passed while that Task remained blocked. Real HTT
 returned a cached duplicate without a second Server receipt. The eighth Task completed naturally
 with confirmed cleanup but no disable CAS. A separate synthetic-input/real-runtime native W4 fixture
 passed; the real-PR observer failures remain. Operational closeout is complete and temporary capacity
-settings are restored, with legacy services/history preserved. Git integration/publication is a separate handoff.
+settings were restored with legacy services/history preserved. That implementation is part of the
+published source; its original acceptance boundaries remain unchanged.
+
+The September 27 operations increment passed 149 distinct targeted tests, a 30-test serial Windows
+repeat, 10 native lifecycle checks, and 11 production Dashboard/native HTTP/SQLite browser steps.
+Scheduled Task hosting, duplicate-start protection, cooperative shutdown, populated backup/restore,
+bounded Server retries, and the Worker's same-boot recovery gate passed in isolation. Webhook tests
+separately cover relay cached duplicates and actual Server receiver re-entry across restart. The
+short two-task capacity observation and sampled 4 GiB workflow are not sustained or concurrent
+capacity results. The current [implementation status](./docs/IMPLEMENTATION_STATUS.md) records the
+remaining release checks and production cutover separately; no real model, PowerToys build/UI,
+GitHub write, or VM reboot was performed by this operations acceptance.
 
 [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) distinguishes this refactor from historical
 milestones. M39/M40 model workflows, M41 publication acceptance, M42 selected PowerToys tests, and

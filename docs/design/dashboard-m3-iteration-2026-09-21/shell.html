@@ -1,19 +1,19 @@
-<div id="ar-m3-prototype" aria-label="Agentic Review Material 3 interactive prototype">
+<section id="ar-m3-prototype" aria-label="Agentic Review Material 3 interactive prototype">
   <details class="ar-lab">
     <summary><span class="ar-lab-tag">M3 / 06</span><span>交互原型</span><span class="ar-lab-hint">原型设置</span></summary>
-    <div class="ar-lab-controls" aria-label="Prototype controls">
+    <section class="ar-lab-controls" aria-label="Prototype controls">
       <label>角色 <select id="ar-role"><option value="admin">管理员 + 仓库权限</option><option value="preparer">可准备 / 不可执行</option><option value="reader">只读成员</option></select></label>
       <label>状态 <select id="ar-scenario"><option value="normal">正常</option><option value="loading">首次加载</option><option value="empty">真实空状态</option><option value="error">首次加载失败</option><option value="refresh-error">刷新失败 · 保留数据</option><option value="conflict">版本冲突</option><option value="unknown">提交结果未知</option><option value="noaccess">无访问权限</option><option value="stale">来源已更新</option></select></label>
       <button class="ar-btn" type="button" data-action="journeys"><i data-lucide="route" aria-hidden="true"></i>流程地图</button>
       <span class="ar-small ar-muted">合成数据 · 所有业务操作仅本地模拟</span>
-    </div>
+    </section>
   </details>
   <div class="ar-app">
     <button type="button" class="ar-skip" data-action="skip-main">Skip to workspace content</button>
     <div id="ar-toast" class="ar-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <div class="ar-shell">
       <aside class="ar-rail" aria-label="Main navigation">
-        <div class="ar-mark" aria-label="Agentic Review"><i data-lucide="panels-top-left" aria-hidden="true"></i></div>
+        <div class="ar-mark" aria-hidden="true"><i data-lucide="panels-top-left" aria-hidden="true"></i></div>
         <nav id="ar-nav" class="ar-nav"></nav>
         <span class="ar-rail-caption">WORKSPACE</span>
       </aside>
@@ -32,6 +32,6 @@
         <footer class="ar-footer"><span id="ar-context">All repositories · Synthetic data</span><span>M3 workflow study · 22 Sep 2026</span></footer>
       </div>
     </div>
-    <dialog id="ar-dialog" aria-labelledby="ar-dialog-title"><div class="ar-dialog-head"><h2 id="ar-dialog-title"></h2><button type="button" class="ar-btn ghost ar-icon-button" data-action="dialog-close" aria-label="Close dialog"><i data-lucide="x" aria-hidden="true"></i></button></div><div class="ar-dialog-body" id="ar-dialog-body"></div><div class="ar-dialog-foot" id="ar-dialog-foot"></div></dialog>
+    <dialog id="ar-dialog" aria-labelledby="ar-dialog-title"><div class="ar-dialog-head"><h2 id="ar-dialog-title">Workspace dialog</h2><button type="button" class="ar-btn ghost ar-icon-button" data-action="dialog-close" aria-label="Close dialog"><i data-lucide="x" aria-hidden="true"></i></button></div><div class="ar-dialog-body" id="ar-dialog-body"></div><div class="ar-dialog-foot" id="ar-dialog-foot"></div></dialog>
   </div>
-</div>
+</section>

@@ -8,7 +8,24 @@
       "!!**/.umi",
       "!!**/.umi-production",
       "!!**/coverage",
-      "!!apps/dashboard/src/services/generated"
+      "!!apps/dashboard/src/services/generated",
+      "!!docs/design/dashboard-m3-iteration-2026-09-21/index.html",
+      "!!docs/design/dashboard-m3-iteration-2026-09-21/prototype.fragment.html",
+      "!!docs/design/dashboard-m3-iteration-2026-09-21/vendor/lucide.min.js",
+      "!!docs/design/dashboard-ux-review-2026-09-21/index.html",
+      "!!docs/design/dashboard-ux-review-2026-09-21/prototype.fragment.html",
+      "!!docs/design/dashboard-review-2026-09-25/index.html",
+      "!!docs/design/dashboard-review-2026-09-25/optimized.html",
+      "!!docs/design/dashboard-review-2026-09-25/atlas.html",
+      "!!docs/design/dashboard-review-2026-09-25/screens",
+      "!!docs/design/dashboard-review-2026-09-25/flows",
+      "!!docs/design/dashboard-review-2026-09-25/overview.svg",
+      "!!docs/design/dashboard-review-2026-09-25/optimized-screens",
+      "!!docs/design/dashboard-review-2026-09-25/optimized-overview.svg",
+      "!!docs/design/dashboard-review-2026-09-25/prototype/vendor/lucide.min.js",
+      "!!docs/design/dashboard-review-2026-09-25/prototype/vendor/material-controls.bundle.js",
+      "!!docs/design/dashboard-review-2026-09-25/prototype/material-assets.js",
+      "!!docs/design/dashboard-review-2026-09-25/prototype/material-fonts.css"
     ]
   },
   "formatter": {

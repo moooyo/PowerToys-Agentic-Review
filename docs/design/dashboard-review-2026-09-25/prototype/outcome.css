@@ -1,26 +1,99 @@
 /* Saved decisions and current next actions use separate, visible M3 surfaces. */
-#ar-m3-prototype .ar-github-entry { display:inline-flex; align-items:center; flex-wrap:wrap; gap:0 8px; max-width:100%; }
-#ar-m3-prototype .ar-github-entry a { text-decoration:none; }
-#ar-m3-prototype .ar-github-note { font-size:12px; line-height:18px; color:var(--ar-muted); }
-#ar-m3-prototype .ar-outcome-summary { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:24px; padding:24px; margin:16px 0 20px; border-radius:16px; background:var(--md-surface-low); border:1px solid var(--md-outline-variant); }
-#ar-m3-prototype .ar-outcome-summary>div { min-width:0; }
-#ar-m3-prototype .ar-outcome-summary p { margin:8px 0; }
-#ar-m3-prototype .ar-outcome-summary .ar-kicker { margin:0 0 8px; color:var(--ar-muted); }
-#ar-m3-prototype .ar-outcome-summary h2 { margin:0; font-size:28px; line-height:36px; color:var(--md-on-surface); }
-#ar-m3-prototype .ar-outcome-summary h3 { margin:0; font-size:18px; line-height:26px; }
-#ar-m3-prototype .ar-outcome-action { border-inline-start:1px solid var(--md-outline-variant); padding-inline-start:24px; }
-#ar-m3-prototype .ar-outcome-action .ar-row { margin-top:16px; }
-#ar-m3-prototype .ar-outcome-validation { display:flex; align-items:center; gap:8px; }
-#ar-m3-prototype .ar-outcome-validation .ar-icon { flex-shrink:0; }
-#ar-m3-prototype .ar-report-identity { grid-template-columns:minmax(0,1fr); }
-#ar-m3-prototype .ar-report-identity>.ar-row { grid-column:1; grid-row:auto; justify-content:flex-start; margin-top:8px; }
-#ar-m3-prototype .ar-state .ar-list-next { color:var(--ar-text); }
-@media(max-width:1000px) {
-  #ar-m3-prototype .ar-outcome-summary { grid-template-columns:minmax(0,1fr); gap:16px; }
-  #ar-m3-prototype .ar-outcome-action { border-inline-start:0; padding-inline-start:0; border-top:1px solid var(--md-outline-variant); padding-top:16px; }
+#ar-m3-prototype .ar-github-entry {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  max-width: 100%;
 }
-@media(max-width:620px) {
-  #ar-m3-prototype .ar-outcome-summary { padding:16px; margin-top:12px; }
-  #ar-m3-prototype .ar-outcome-summary h2 { font-size:24px; line-height:32px; }
-  #ar-m3-prototype .ar-github-entry { width:100%; }
+#ar-m3-prototype .ar-github-entry a {
+  text-decoration: none;
+}
+#ar-m3-prototype .ar-github-note {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ar-muted);
+}
+#ar-m3-prototype .ar-outcome-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 24px;
+  padding: 24px;
+  margin: 16px 0 20px;
+  border-radius: 16px;
+  background: var(--md-surface-low);
+  border: 1px solid var(--md-outline-variant);
+}
+#ar-m3-prototype .ar-outcome-summary > div {
+  min-width: 0;
+}
+#ar-m3-prototype .ar-outcome-summary p {
+  margin: 8px 0;
+}
+#ar-m3-prototype .ar-outcome-summary .ar-kicker {
+  margin: 0 0 8px;
+  color: var(--ar-muted);
+}
+#ar-m3-prototype .ar-outcome-summary h2 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 36px;
+  color: var(--md-on-surface);
+}
+#ar-m3-prototype .ar-outcome-summary h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 26px;
+}
+#ar-m3-prototype .ar-outcome-action {
+  border-inline-start: 1px solid var(--md-outline-variant);
+  padding-inline-start: 24px;
+}
+#ar-m3-prototype .ar-outcome-action .ar-row {
+  margin-top: 16px;
+}
+#ar-m3-prototype .ar-outcome-validation {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#ar-m3-prototype .ar-outcome-validation .ar-icon {
+  flex-shrink: 0;
+}
+#ar-m3-prototype .ar-report-identity {
+  grid-template-columns: minmax(0, 1fr);
+}
+#ar-m3-prototype .ar-report-identity > .ar-row {
+  grid-column: 1;
+  grid-row: auto;
+  justify-content: flex-start;
+  margin-top: 8px;
+}
+#ar-m3-prototype .ar-state .ar-list-next {
+  color: var(--ar-text);
+}
+@media (max-width: 1000px) {
+  #ar-m3-prototype .ar-outcome-summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+  #ar-m3-prototype .ar-outcome-action {
+    border-inline-start: 0;
+    padding-inline-start: 0;
+    border-top: 1px solid var(--md-outline-variant);
+    padding-top: 16px;
+  }
+}
+@media (max-width: 620px) {
+  #ar-m3-prototype .ar-outcome-summary {
+    padding: 16px;
+    margin-top: 12px;
+  }
+  #ar-m3-prototype .ar-outcome-summary h2 {
+    font-size: 24px;
+    line-height: 32px;
+  }
+  #ar-m3-prototype .ar-github-entry {
+    width: 100%;
+  }
 }

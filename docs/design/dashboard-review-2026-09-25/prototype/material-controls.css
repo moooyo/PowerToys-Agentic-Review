@@ -1,107 +1,306 @@
 /* MUI owns select layout, focus, disabled/error presentation, and menu interaction. */
-#ar-m3-prototype .ar-mui-container { position:relative; min-width:0; margin-top:8px; }
-#ar-m3-prototype .ar-mui-select-host { display:block; width:100%; min-width:0; }
-#ar-m3-prototype .ar-material-form-control { min-width:0; width:100%; }
-#ar-m3-prototype select.ar-mui-native {
-  position:absolute!important; top:0!important; left:0!important;
-  width:1px!important; height:1px!important; min-width:0!important; min-height:0!important;
-  margin:0!important; padding:0!important; border:0!important;
-  opacity:0!important; clip-path:inset(50%)!important; pointer-events:none!important;
+#ar-m3-prototype .ar-mui-container {
+  position: relative;
+  min-width: 0;
+  margin-top: 8px;
 }
-#ar-m3-prototype .ar-material-form-control input.MuiSelect-nativeInput { display:none!important; }
-#ar-m3-prototype .ar-material-form-control .MuiOutlinedInput-root { background:var(--ar-surface); }
-#ar-m3-prototype .ar-material-form-control .MuiSelect-select { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-#ar-m3-prototype .ar-material-form-control .MuiSelect-select:focus-visible { outline:none; }
-#ar-m3-prototype .ar-material-menu { color-scheme:inherit; }
-#ar-m3-prototype .ar-toolbar>.ar-field.ar-mui-container { flex:0 1 220px; min-width:160px; }
-#ar-m3-prototype .ar-scope.ar-mui-container { display:block; flex:0 1 280px; min-width:160px; }
-#ar-m3-prototype .ar-lab-controls>.ar-mui-container { flex:1 1 220px; max-width:340px; }
-#ar-m3-prototype .ar-mui-container>.ar-inline-error,
-#ar-m3-prototype .ar-mui-container>.ar-field-error { order:2; }
+#ar-m3-prototype .ar-mui-select-host {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+#ar-m3-prototype .ar-material-form-control {
+  min-width: 0;
+  width: 100%;
+}
+#ar-m3-prototype select.ar-mui-native {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  clip-path: inset(50%) !important;
+  pointer-events: none !important;
+}
+#ar-m3-prototype .ar-material-form-control input.MuiSelect-nativeInput {
+  display: none !important;
+}
+#ar-m3-prototype .ar-material-form-control .MuiOutlinedInput-root {
+  background: var(--ar-surface);
+}
+#ar-m3-prototype .ar-material-form-control .MuiSelect-select {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#ar-m3-prototype .ar-material-form-control .MuiSelect-select:focus-visible {
+  outline: none;
+}
+#ar-m3-prototype .ar-material-menu {
+  color-scheme: inherit;
+}
+#ar-m3-prototype .ar-toolbar > .ar-field.ar-mui-container {
+  flex: 0 1 220px;
+  min-width: 160px;
+}
+#ar-m3-prototype .ar-scope.ar-mui-container {
+  display: block;
+  flex: 0 1 280px;
+  min-width: 160px;
+}
+#ar-m3-prototype .ar-lab-controls > .ar-mui-container {
+  flex: 1 1 220px;
+  max-width: 340px;
+}
+#ar-m3-prototype .ar-mui-container > .ar-inline-error,
+#ar-m3-prototype .ar-mui-container > .ar-field-error {
+  order: 2;
+}
 /* Text fields share the outlined floating-label treatment without changing their IDs. */
 #ar-m3-prototype label.ar-outlined-field {
-  --ar-field-fill:var(--ar-surface);
-  position:relative; display:flex; flex-direction:column; gap:0; margin-top:8px;
+  --ar-field-fill: var(--ar-surface);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 8px;
 }
-#ar-m3-prototype label.ar-outlined-field>.ar-floating-label {
-  position:absolute; z-index:1; left:10px; top:17px; max-width:calc(100% - 26px);
-  padding:0 4px; background:transparent; color:var(--ar-muted); pointer-events:none;
-  font-size:16px; line-height:22px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  transition:top 160ms ease,font-size 160ms ease,line-height 160ms ease,background-color 160ms ease;
+#ar-m3-prototype label.ar-outlined-field > .ar-floating-label {
+  position: absolute;
+  z-index: 1;
+  left: 10px;
+  top: 17px;
+  max-width: calc(100% - 26px);
+  padding: 0 4px;
+  background: transparent;
+  color: var(--ar-muted);
+  pointer-events: none;
+  font-size: 16px;
+  line-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    top 160ms ease,
+    font-size 160ms ease,
+    line-height 160ms ease,
+    background-color 160ms ease;
 }
-#ar-m3-prototype label.ar-outlined-field.ar-field-floated>.ar-floating-label { top:-8px; font-size:12px; line-height:16px; background:var(--ar-field-fill); }
-#ar-m3-prototype label.ar-outlined-field.ar-field-disabled>.ar-floating-label { color:color-mix(in srgb,var(--md-on-surface) 38%,transparent); }
-#ar-m3-prototype label.ar-outlined-field>input,
-#ar-m3-prototype label.ar-outlined-field>textarea {
-  min-height:56px; padding:16px 14px; border-radius:4px;
-  border-color:var(--md-outline); background:var(--ar-field-fill); line-height:22px;
+#ar-m3-prototype label.ar-outlined-field.ar-field-floated > .ar-floating-label {
+  top: -8px;
+  font-size: 12px;
+  line-height: 16px;
+  background: var(--ar-field-fill);
 }
-#ar-m3-prototype label.ar-outlined-field>input:focus,
-#ar-m3-prototype label.ar-outlined-field>textarea:focus {
-  outline:none; border:2px solid var(--ar-blue); padding:15px 13px;
+#ar-m3-prototype label.ar-outlined-field.ar-field-disabled > .ar-floating-label {
+  color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
 }
-#ar-m3-prototype label.ar-outlined-field:focus-within>.ar-floating-label { color:var(--ar-blue); }
-#ar-m3-prototype label.ar-outlined-field:has([aria-invalid=true])>.ar-floating-label { color:var(--ar-red); }
+#ar-m3-prototype label.ar-outlined-field > input,
+#ar-m3-prototype label.ar-outlined-field > textarea {
+  min-height: 56px;
+  padding: 16px 14px;
+  border-radius: 4px;
+  border-color: var(--md-outline);
+  background: var(--ar-field-fill);
+  line-height: 22px;
+}
+#ar-m3-prototype label.ar-outlined-field > input:focus,
+#ar-m3-prototype label.ar-outlined-field > textarea:focus {
+  outline: none;
+  border: 2px solid var(--ar-blue);
+  padding: 15px 13px;
+}
+#ar-m3-prototype label.ar-outlined-field:focus-within > .ar-floating-label {
+  color: var(--ar-blue);
+}
+#ar-m3-prototype label.ar-outlined-field:has([aria-invalid="true"]) > .ar-floating-label {
+  color: var(--ar-red);
+}
 #ar-m3-prototype label.ar-outlined-field:has([readonly]),
-#ar-m3-prototype label.ar-outlined-field:has(:disabled) { --ar-field-fill:var(--ar-soft); }
-#ar-m3-prototype .ar-dialog-body label.ar-outlined-field { --ar-field-fill:var(--md-surface-high); }
-#ar-m3-prototype .ar-dialog-body .ar-material-form-control .MuiOutlinedInput-root { background:var(--md-surface-high); }
+#ar-m3-prototype label.ar-outlined-field:has(:disabled) {
+  --ar-field-fill: var(--ar-soft);
+}
+#ar-m3-prototype .ar-dialog-body label.ar-outlined-field {
+  --ar-field-fill: var(--md-surface-high);
+}
+#ar-m3-prototype .ar-dialog-body .ar-material-form-control .MuiOutlinedInput-root {
+  background: var(--md-surface-high);
+}
 /* Essential finding choices retain native input, label, and keyboard behavior. */
 #ar-m3-prototype label.ar-native-choice-label {
-  min-height:48px; gap:4px; cursor:pointer; flex:1; min-width:0; flex-wrap:nowrap;
+  min-height: 48px;
+  gap: 4px;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
 }
-#ar-m3-prototype label.ar-native-choice-label > strong { min-width:0; flex:1; }
-#ar-m3-prototype label.ar-native-choice-label:has(input:disabled) { cursor:default; }
+#ar-m3-prototype label.ar-native-choice-label > strong {
+  min-width: 0;
+  flex: 1;
+}
+#ar-m3-prototype label.ar-native-choice-label:has(input:disabled) {
+  cursor: default;
+}
 #ar-m3-prototype input.ar-native-choice[type="checkbox"] {
-  appearance:none; -webkit-appearance:none; display:inline-grid; place-content:center;
-  position:relative; flex:0 0 20px; width:20px; height:20px; min-width:20px; min-height:20px;
-  margin:14px; padding:0; border:2px solid var(--md-on-surface-variant); border-radius:2px;
-  background:transparent; color:var(--md-on-primary); cursor:inherit; vertical-align:middle;
-  box-sizing:border-box; opacity:1;
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-grid;
+  place-content: center;
+  position: relative;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  min-height: 20px;
+  margin: 14px;
+  padding: 0;
+  border: 2px solid var(--md-on-surface-variant);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--md-on-primary);
+  cursor: inherit;
+  vertical-align: middle;
+  box-sizing: border-box;
+  opacity: 1;
 }
 #ar-m3-prototype input.ar-native-choice[type="checkbox"]:checked {
-  border-color:var(--md-primary); background:var(--md-primary);
+  border-color: var(--md-primary);
+  background: var(--md-primary);
 }
 #ar-m3-prototype input.ar-native-choice[type="checkbox"]:checked::before {
-  content:""; display:block; width:12px; height:10px; background:currentColor;
-  clip-path:polygon(0 45%,16% 28%,40% 57%,85% 0,100% 15%,40% 100%);
+  content: "";
+  display: block;
+  width: 12px;
+  height: 10px;
+  background: currentColor;
+  clip-path: polygon(0 45%, 16% 28%, 40% 57%, 85% 0, 100% 15%, 40% 100%);
 }
 #ar-m3-prototype label.ar-native-choice-label:hover input.ar-native-choice:not(:disabled) {
-  box-shadow:0 0 0 12px var(--md-hover);
+  box-shadow: 0 0 0 12px var(--md-hover);
 }
 #ar-m3-prototype label.ar-native-choice-label:active input.ar-native-choice:not(:disabled) {
-  box-shadow:0 0 0 12px var(--md-pressed);
+  box-shadow: 0 0 0 12px var(--md-pressed);
 }
 #ar-m3-prototype input.ar-native-choice[type="checkbox"]:focus-visible {
-  outline:3px solid var(--md-primary); outline-offset:5px;
+  outline: 3px solid var(--md-primary);
+  outline-offset: 5px;
 }
-#ar-m3-prototype input.ar-native-choice[type="checkbox"]:disabled { opacity:.38; }
-@media (forced-colors:active) {
-  #ar-m3-prototype input.ar-native-choice[type="checkbox"] { appearance:auto; -webkit-appearance:auto; }
-  #ar-m3-prototype input.ar-native-choice[type="checkbox"]::before { display:none; }
+#ar-m3-prototype input.ar-native-choice[type="checkbox"]:disabled {
+  opacity: 0.38;
+}
+@media (forced-colors: active) {
+  #ar-m3-prototype input.ar-native-choice[type="checkbox"] {
+    appearance: auto;
+    -webkit-appearance: auto;
+  }
+  #ar-m3-prototype input.ar-native-choice[type="checkbox"]::before {
+    display: none;
+  }
 }
 /* Original model inputs are hidden only after their MUI replacement is available. */
-#ar-m3-prototype .ar-material-choice-host { display:inline-flex; vertical-align:middle; flex-shrink:0; }
-#ar-m3-prototype .ar-material-choice-host[hidden] { display:none!important; }
-#ar-m3-prototype .ar-material-choice-source { display:none!important; }
-#ar-m3-prototype .ar-material-choice-label { gap:4px; min-height:48px; }
-#ar-m3-prototype .ar-material-choice-host input {
-  position:absolute!important; width:100%!important; height:100%!important; min-height:0!important; min-width:0!important;
-  margin:0!important; padding:0!important; opacity:0!important; top:0!important; left:0!important; cursor:inherit;
+#ar-m3-prototype .ar-material-choice-host {
+  display: inline-flex;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
-#ar-m3-prototype .ar-material-choice-host .MuiSwitch-input { left:-100%!important; width:300%!important; }
-#ar-m3-prototype .ar-material-choice-host input:focus-visible { outline:none; }
-#ar-m3-prototype :is(button.ar-btn,button.ar-avatar,.ar-nav>button,.ar-group>button,.ar-tabs>button,.ar-pills>button,button.ar-finding-choice,button.ar-publish-choice,button.ar-source-row) { position:relative; }
-#ar-m3-prototype .ar-material-ripple-host { position:absolute; inset:0; display:block; overflow:hidden; border-radius:inherit; pointer-events:none; }
-#ar-m3-prototype .ar-material-tooltip-anchor { position:absolute; inset:0; pointer-events:none; }
-#ar-m3-prototype .ar-material-tab-panel { min-width:0; }
-#ar-m3-prototype .ar-stack>.ar-material-tab-panel { display:grid; gap:inherit; align-content:start; }
-#ar-m3-prototype .ar-password-field { position:relative; grid-template-columns:minmax(0,1fr); }
-#ar-m3-prototype .ar-password-field>.ar-icon-button { position:absolute; top:16px; right:8px; }
-#ar-m3-prototype .ar-password-field label.ar-outlined-field>input { padding-right:56px; }
-#ar-m3-prototype .ar-password-field .ar-floating-label { max-width:calc(100% - 64px); }
-@media(max-width:620px) {
-  #ar-m3-prototype .ar-scope.ar-mui-container { flex:1 0 100%; width:100%; }
-  #ar-m3-prototype .ar-lab-controls>.ar-mui-container { max-width:none; flex-basis:100%; }
-  #ar-m3-prototype .ar-toolbar>.ar-field.ar-mui-container { min-width:0; flex:1 1 140px; }
+#ar-m3-prototype .ar-material-choice-host[hidden] {
+  display: none !important;
+}
+#ar-m3-prototype .ar-material-choice-source {
+  display: none !important;
+}
+#ar-m3-prototype .ar-material-choice-label {
+  gap: 4px;
+  min-height: 48px;
+}
+#ar-m3-prototype .ar-material-choice-host input {
+  position: absolute !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  opacity: 0 !important;
+  top: 0 !important;
+  left: 0 !important;
+  cursor: inherit;
+}
+#ar-m3-prototype .ar-material-choice-host .MuiSwitch-input {
+  left: -100% !important;
+  width: 300% !important;
+}
+#ar-m3-prototype .ar-material-choice-host input:focus-visible {
+  outline: none;
+}
+#ar-m3-prototype
+  :is(
+    button.ar-btn,
+    button.ar-avatar,
+    .ar-nav > button,
+    .ar-group > button,
+    .ar-tabs > button,
+    .ar-pills > button,
+    button.ar-finding-choice,
+    button.ar-publish-choice,
+    button.ar-source-row
+  ) {
+  position: relative;
+}
+#ar-m3-prototype .ar-material-ripple-host {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+#ar-m3-prototype .ar-material-tooltip-anchor {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+#ar-m3-prototype .ar-material-tab-panel {
+  min-width: 0;
+}
+#ar-m3-prototype .ar-stack > .ar-material-tab-panel {
+  display: grid;
+  gap: inherit;
+  align-content: start;
+}
+#ar-m3-prototype .ar-password-field {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+}
+#ar-m3-prototype .ar-password-field > .ar-icon-button {
+  position: absolute;
+  top: 16px;
+  right: 8px;
+}
+#ar-m3-prototype .ar-password-field label.ar-outlined-field > input {
+  padding-right: 56px;
+}
+#ar-m3-prototype .ar-password-field .ar-floating-label {
+  max-width: calc(100% - 64px);
+}
+@media (max-width: 620px) {
+  #ar-m3-prototype .ar-scope.ar-mui-container {
+    flex: 1 0 100%;
+    width: 100%;
+  }
+  #ar-m3-prototype .ar-lab-controls > .ar-mui-container {
+    max-width: none;
+    flex-basis: 100%;
+  }
+  #ar-m3-prototype .ar-toolbar > .ar-field.ar-mui-container {
+    min-width: 0;
+    flex: 1 1 140px;
+  }
 }

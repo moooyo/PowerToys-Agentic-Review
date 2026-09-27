@@ -20,7 +20,7 @@
 <a class="skip" href="#main">Skip to review content</a>
 <header class="top">
   <div class="brand"><div class="mark" aria-hidden="true">AR</div><div><div class="brand-title"><h1>UI / UX review atlas</h1><span class="version">V8 / 91021df</span></div><p>Agentic Review &middot; Current frontend &middot; 25 Sep 2026</p></div></div>
-  <div class="top-actions"><button class="print" id="print">Print view</button><button class="primary" id="export">Export review</button></div>
+  <div class="top-actions"><button type="button" class="print" id="print">Print view</button><button type="button" class="primary" id="export">Export review</button></div>
 </header>
 <nav class="navigation" aria-label="Review views"><div class="tabs"><a href="#view=map" data-view="map">Flow map</a><a href="#screen=pull-requests" data-view="screens">Screens</a><a href="#view=journeys" data-view="journeys">Journeys</a><a href="#view=review" data-view="review">Review notes</a></div><div class="progress"><div class="track" aria-hidden="true"><span id="progress-bar"></span></div><span id="progress-label"></span></div></nav>
 <div class="scope"><strong>SOURCE-DERIVED PROTOTYPE</strong><span>Illustrative wireframes. Linked controls navigate review states. Browser verification is pending.</span></div>
@@ -32,7 +32,7 @@
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 <script>
 "use strict";
-const DATA = /*__REVIEW_DATA__*/;
+const DATA = /*__REVIEW_DATA__*/ null;
 const SCREENS = new Map(DATA.screens.map(screen => [screen.id, screen]));
 const JOURNEYS = new Map(DATA.journeys.map(journey => [journey.id, journey]));
 const KEY = "agentic-review-atlas:" + DATA.baseline + ":2026-09-25";
@@ -101,11 +101,11 @@ function mapView() {
 }
 function inspector(screen) {
   const note = noteFor(screen.id);
-  return `<aside class="inspector" aria-label="Review this screen"><section><h3>Your review</h3><p>Record the decision for this screen.</p><div class="review-options" aria-label="Review status">${Object.entries(labels).map(([value,label]) => `<button data-status="${value}" aria-pressed="${note.status === value}">${label}</button>`).join("")}</div><label class="notes-label" data-print="${E(note.text)}" for="review-note">Review notes<textarea id="review-note" placeholder="What should change? What needs a decision?">${E(note.text)}</textarea></label><p class="notes-help" id="note-status">${storageAvailable ? "Saved in this browser. Export to share or back up." : "Stored in this open page only. Export before closing."}</p></section><section><h3>Questions for review</h3><ul class="checks">${screen.checks.map(check => `<li>${E(check)}</li>`).join("")}</ul></section><section><h3>Source references</h3><p class="mono">Baseline ${DATA.baseline}</p>${screen.sources.map(source => `<a class="source-link" href="../../../${E(source.path)}" title="Open source file; referenced line ${source.line}">${E(source.path)}:${source.line}</a>`).join("")}<p>Diagrams group controls for clarity. These are not pixel-accurate screenshots or runtime acceptance evidence.</p></section></aside>`;
+  return `<aside class="inspector" aria-label="Review this screen"><section><h3>Your review</h3><p>Record the decision for this screen.</p><div class="review-options" role="group" aria-label="Review status">${Object.entries(labels).map(([value,label]) => `<button type="button" data-status="${value}" aria-pressed="${note.status === value}">${label}</button>`).join("")}</div><label class="notes-label" data-print="${E(note.text)}" for="review-note">Review notes<textarea id="review-note" placeholder="What should change? What needs a decision?">${E(note.text)}</textarea></label><p class="notes-help" id="note-status">${storageAvailable ? "Saved in this browser. Export to share or back up." : "Stored in this open page only. Export before closing."}</p></section><section><h3>Questions for review</h3><ul class="checks">${screen.checks.map(check => `<li>${E(check)}</li>`).join("")}</ul></section><section><h3>Source references</h3><p class="mono">Baseline ${DATA.baseline}</p>${screen.sources.map(source => `<a class="source-link" href="../../../${E(source.path)}" title="Open source file; referenced line ${source.line}">${E(source.path)}:${source.line}</a>`).join("")}<p>Diagrams group controls for clarity. These are not pixel-accurate screenshots or runtime acceptance evidence.</p></section></aside>`;
 }
 function screenView(screen, journey, journeyIndex = 0) {
   const index = DATA.screens.indexOf(screen);
-  const actions = `<a href="screens/${screen.id}.svg" download>Download SVG</a><button id="copy-link">Copy link</button>`;
+  const actions = `<a href="screens/${screen.id}.svg" download>Download SVG</a><button type="button" id="copy-link">Copy link</button>`;
   let context = "";
   if (journey) {
     const active = journeyIndex;
@@ -115,7 +115,7 @@ function screenView(screen, journey, journeyIndex = 0) {
   }
   const transitions = screen.transitions || [];
   return heading(`${screen.group} / Screen ${String(index + 1).padStart(2,"0")}`,screen.title,screen.summary,actions) + context +
-    `<div class="screen-layout"><div><div class="canvas-card"><div class="canvas-tools"><span class="mono">${E(screen.route)}</span><button id="zoom" aria-pressed="${!fit}">${fit ? "View at 100%" : "Fit diagram"}</button></div><div class="drawing ${fit ? "" : "actual"}" id="drawing" role="region" aria-label="${E(screen.title)} wireframe; horizontally scrollable at full size" tabindex="0">${DATA.diagrams[screen.id]}</div><div class="diagram-caption">Click linked rows or buttons to open another state. Other fields are schematic. Use the transition list for complete navigation.</div></div><div class="section-title"><h3>Where this interaction goes</h3><span class="muted" style="font-size:12px">${transitions.length} transitions</span></div><div class="transitions">${transitions.map(item => `<a class="transition" href="#screen=${item.target}"><span>${E(item.label)}${item.condition ? `<small>${E(item.condition)}</small>` : ""}</span><span aria-hidden="true">&#8594;</span></a>`).join("") || '<p class="notice">Return to the screen index to continue reviewing.</p>'}</div><div class="scene-next">${index > 0 ? `<a href="#screen=${DATA.screens[index-1].id}">&#8592; ${E(DATA.screens[index-1].title)}</a>` : "<span></span>"}${index < DATA.screens.length - 1 ? `<a href="#screen=${DATA.screens[index+1].id}">${E(DATA.screens[index+1].title)} &#8594;</a>` : ""}</div></div>${inspector(screen)}</div>`;
+    `<div class="screen-layout"><div><div class="canvas-card"><div class="canvas-tools"><span class="mono">${E(screen.route)}</span><button type="button" id="zoom" aria-pressed="${!fit}">${fit ? "View at 100%" : "Fit diagram"}</button></div><div class="drawing ${fit ? "" : "actual"}" id="drawing" role="region" aria-label="${E(screen.title)} wireframe; horizontally scrollable at full size" tabindex="0">${DATA.diagrams[screen.id]}</div><div class="diagram-caption">Click linked rows or buttons to open another state. Other fields are schematic. Use the transition list for complete navigation.</div></div><div class="section-title"><h3>Where this interaction goes</h3><span class="muted" style="font-size:12px">${transitions.length} transitions</span></div><div class="transitions">${transitions.map(item => `<a class="transition" href="#screen=${item.target}"><span>${E(item.label)}${item.condition ? `<small>${E(item.condition)}</small>` : ""}</span><span aria-hidden="true">&#8594;</span></a>`).join("") || '<p class="notice">Return to the screen index to continue reviewing.</p>'}</div><div class="scene-next">${index > 0 ? `<a href="#screen=${DATA.screens[index-1].id}">&#8592; ${E(DATA.screens[index-1].title)}</a>` : "<span></span>"}${index < DATA.screens.length - 1 ? `<a href="#screen=${DATA.screens[index+1].id}">${E(DATA.screens[index+1].title)} &#8594;</a>` : ""}</div></div>${inspector(screen)}</div>`;
 }
 function journeyView(journey) {
   return heading("GUIDED REVIEW",journey.title,journey.summary,`<a href="#journey=${journey.id}&step=1">Start journey &#8594;</a><a href="flows/${journey.id}.svg" download>Download SVG</a>`) +
@@ -137,11 +137,15 @@ async function copyLink() {
 function bindScreen(screen) {
   $("#zoom").addEventListener("click", () => {fit = !fit; $("#drawing").classList.toggle("actual",!fit); $("#zoom").textContent = fit ? "View at 100%" : "Fit diagram"; $("#zoom").setAttribute("aria-pressed",String(!fit));});
   $("#copy-link").addEventListener("click",copyLink);
-  document.querySelectorAll("[data-status]").forEach(button => button.addEventListener("click",() => {
-    save(screen.id,{status:button.dataset.status});
-    document.querySelectorAll("[data-status]").forEach(candidate => candidate.setAttribute("aria-pressed",String(candidate === button)));
-    announce(screen.title + ": " + labels[button.dataset.status] + ".");
-  }));
+  document.querySelectorAll("[data-status]").forEach(button => {
+    button.addEventListener("click",() => {
+      save(screen.id,{status:button.dataset.status});
+      document.querySelectorAll("[data-status]").forEach(candidate => {
+        candidate.setAttribute("aria-pressed",String(candidate === button));
+      });
+      announce(screen.title + ": " + labels[button.dataset.status] + ".");
+    });
+  });
   $("#review-note").addEventListener("input",event => {
     save(screen.id,{text:event.target.value});
     event.target.parentElement.dataset.print = event.target.value;
@@ -205,7 +209,9 @@ window.addEventListener("storage",event => {
     if (selected === id && document.activeElement !== $("#review-note")) {
       $("#review-note").value = note.text;
       $("#review-note").parentElement.dataset.print = note.text;
-      document.querySelectorAll("[data-status]").forEach(button => button.setAttribute("aria-pressed",String(button.dataset.status === note.status)));
+      document.querySelectorAll("[data-status]").forEach(button => {
+        button.setAttribute("aria-pressed",String(button.dataset.status === note.status));
+      });
     }
   } catch { /* Ignore malformed data from another browser context. */ }
 });

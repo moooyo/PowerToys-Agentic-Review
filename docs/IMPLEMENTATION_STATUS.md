@@ -1,14 +1,26 @@
 # Implementation Status
 
+## Published operations baseline and release follow-up, 2026-09-27
+
+The operations implementation and its scoped acceptance are published on `main` at
+`b690dd982488ed75e4448ae099187447f4af69ef`. Git integration and source publication are complete.
+Production cutover is a separate authorized follow-up and remains pending its deployment receipt;
+the isolated checks below are not a completed production deployment.
+
+[CI run 36304015077](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36304015077)
+passed Linux type checking, tests, and builds, plus the Windows and ProcessHost Linux jobs. Its
+Linux lint step failed with 4,335 errors, so that run is not green. The lint correction and its
+new verification must be recorded separately rather than changing the failed run's outcome.
+
 ## Serial workflow acceptance with 4 GiB, 2026-09-27
 
-The current operations candidate has passed shared/Server/Worker/Dashboard prebuilds, 149 distinct
+The published operations baseline passed shared/Server/Worker/Dashboard prebuilds, 149 distinct
 targeted tests, and a serial 30-test Windows repeat. The production-entry synthetic lifecycle
 passed all 10 checks, including cancellation, restart/resume, immutable partial reports, and all
 five resource leases released. A separate 60-second, two-task capacity observation passed its
 declared thresholds. These are bounded functional observations, not sustained production capacity.
 
-The deployed production Dashboard passed an 11-step isolated native HTTP/SQLite browser exercise,
+The compiled production Dashboard passed an 11-step isolated native HTTP/SQLite browser exercise,
 including exact publication preparation, editing, cancellation error recovery, and 320px light/dark
 layouts. The operator had no external execution permission and the upstream transport was synthetic;
 no real GitHub mutation occurred. Earlier helper failures remain preserved separately.
@@ -1028,14 +1040,16 @@ for closing this controlled-fixture milestone.
 
 ## Remaining product work
 
-This is the current backlog and acceptance boundary. Historical milestone limitations below do
-not override later accepted scopes, and retired designs are not queued implementation work.
+This is the current backlog and acceptance boundary at the published `b690dd9` operations baseline.
+The September 27 checks above supersede earlier statements that the operations tests or all Windows
+hosting checks remain unexecuted. Historical milestone limitations below do not override later
+accepted scopes, and retired designs are not queued implementation work.
 
 The 2026-09-15 [structured investigation refactor](./design/2026-09-15-structured-investigation-results-and-loop.md)
 is implemented and verified within the automated and browser scope recorded above. Its native
 contracts, storage, complete Worker loop, operation handlers, and Dashboard are the active path.
 Legacy API compatibility, dual writes, data backfills, and retired Job database conversion are not
-pending work. The active investigation store's limited v2/v3 additive migrations are implemented.
+pending work. The active `investigation-v5` store's exact v2/v3/v4 additive upgrades are implemented.
 Actual deployment and scenario acceptance remain scoped below; automated verification does not
 authorize writes to actual repository PRs or issues.
 
@@ -1056,14 +1070,15 @@ and cancellation with an owned application open. Managed process generation and 
 were verified, including a lost Server acknowledgement. This does not prove cleanup of arbitrary
 service-broker or externally detached processes. Historical failed receipts remain unchanged.
 
-- **Worker controls and webhook recovery — implementation/acceptance in progress:** the new
+- **Worker controls and webhook recovery — implemented with scoped acceptance:** the
   default-off Worker policy, disable/cleanup lifecycle, static-media upload guard, intake history
   and retry, and durable relay module have the software and scoped browser evidence recorded in the
   current handoff. Real static-only execution, static/E2E overlap, static text publication, and cached
   HTTPS redelivery have their recorded scopes. The sixth Task's functional E2E and fifth report's
   GitHub media display/playback and sixth/eighth-Task cleanup are accepted. The real-task observers
   failed before disable; the separate synthetic-input/real-runtime W4 fixture passed. Operational
-  closeout is complete; Git integration/publication is a separate handoff.
+  closeout and source publication are complete. These historical scopes are not substitutes for
+  current release deployment or a new real-application run.
 - **Real functional E2E — accepted for the recorded PR #15 scope:** the sixth Task independently
   built and launched the pinned Run Calculator source and passed three features/four required UI
   assertions, including the implicit positive control. Earlier Peek has two passed, four failed, and one
@@ -1072,17 +1087,29 @@ service-broker or externally detached processes. Historical failed receipts rema
   scenarios. Build success, media playback, and recorded-result recovery are separate claims.
 - **Webhook recovery — accepted within recorded boundaries:** native failure/retry and committed-Task
   recovery, isolated relay restart, and real same-delivery HTTPS cached redelivery have separate
-  evidence. The real redelivery did not enter the Server a second time. The earlier CLI-hook HTTP
-  401 remains a failed receipt with no established cause; neither result claims physical power-loss
-  or long-term capacity acceptance.
-- **Production deployment — deferred:** full Server/Worker entry points, consecutive tasks,
-  graceful restart/resume, managed cleanup recovery, and real cancellation have accepted scopes.
-  Production hosting, unattended service installation, and SCM restart/signal policy remain
-  unaccepted and are deferred from the current follow-up.
+  evidence. The September 27 targeted tests separately cover relay cache hits and actual native
+  Server receiver re-entry, including retained databases across restart. The historical real cached
+  redelivery did not enter the Server a second time. The earlier CLI-hook HTTP 401 remains a failed
+  receipt with no established cause. Full live-path and physical power-loss claims need their own
+  evidence; the completed native duplicate tests are not an unexecuted backlog item.
+- **Release verification and production cutover — pending completion:** the operations baseline is
+  published, but its CI lint failure requires a separately verified correction. Native consecutive
+  tasks, cancellation, restart/resume, partial reports, cleanup, and the compiled Dashboard against
+  real HTTP/SQLite passed in isolated acceptance. Scheduled Task Server hosting in Session 0,
+  interactive idle Worker hosting, duplicate-start protection, cooperative shutdown, populated
+  backup/restore and application reopening, bounded Server retries, and the same-boot Worker
+  recovery gate also passed. Production cutover remains pending a new deployment receipt.
+- **Remaining deployment acceptance:** VM reboot and subsequent user logon, cross-boot recovery,
+  current-release real-model/PowerToys execution and live publication, and unrecorded cases in the
+  [Windows hosting matrix](../deploy/operations/WINDOWS.md#verification-to-execute-after-the-worker-is-ready)
+  remain separate. Historical Peek/Launcher and the original external HTTP 401 need their exact
+  retained inputs and independent follow-up; simpler synthetic checks cannot close them.
 - **Long-term operational capacity — deferred:** resident evidence quotas, bounded retention,
-  expiry reads, and source protection are implemented. Sustained workload throughput and physical
-  SQLite/WAL storage growth still need acceptance. A bounded logical content quota does not
-  establish total disk capacity or physical file compaction.
+  expiry reads, source protection, and administrator-only physical storage observations are
+  implemented. A short two-task observation passed declared thresholds, and the 4 GiB serial
+  synthetic workflow passed within its sampled scope. Sustained throughput, concurrency, retained
+  and expired evidence under load, physical SQLite/WAL growth, and total deployment disk capacity
+  still need acceptance. Logical quotas and free-list reuse do not establish physical compaction.
 
 General model-quality evaluation remains outside the current delivery. Ordinary software tests,
 report validation, and source/evidence checks remain part of implementation correctness; no
@@ -1090,11 +1117,12 @@ model-ranking or quality-scoring project is required.
 
 The removed split Worker, WindowsAttempt protected-journal/OS-attestation, provider registry and
 model HTTP relay are retired. Broad legacy upgrades, resets, conversions, and compatibility work
-are not product tasks for this unreleased codebase. Private checkout, automatic Worker
-distribution/installation/upgrades, and reusable build outputs remain optional unimplemented
-extensions. Video evidence is implemented and its publication/playback was accepted in the
-2026-09-19 scope; it is no longer an unimplemented backlog item. These extensions do not reopen
-the completed M38/M39 milestones.
+are not product tasks for this unreleased codebase. Private checkout, automatic Worker release
+distribution/upgrades, and reusable build outputs remain optional unimplemented extensions.
+Manual Scheduled Task registration is implemented and was exercised; automatic release packaging,
+copying, and replacement are not provided by that installer. Video evidence is implemented and its
+publication/playback was accepted in the 2026-09-19 scope; it is no longer an unimplemented backlog
+item. These extensions do not reopen the completed M38/M39 milestones.
 
 Automated tests must not write any repository's PRs/issues without explicit approval of the exact
 targets, operations and content. General implementation or verification authorization does not
