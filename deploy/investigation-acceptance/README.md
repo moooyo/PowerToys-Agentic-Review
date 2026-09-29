@@ -188,6 +188,19 @@ node '.\deploy\investigation-acceptance\run-real-cli.mjs' --repo-root 'D:\Source
 remains failed acceptance with its original report and logs; the harness does not rewrite the
 outcome, retry models automatically, or substitute synthetic data.
 
+The default coverage requirement is one accepted analysis round: a valid complete product
+result may finish in one round. `--max-rounds` accepts 1 through 64. Use
+`--min-accepted-rounds 2` only when this run explicitly requires multiple accepted rounds;
+the minimum defaults to 1 and must not exceed `--max-rounds`. Invalid combinations are
+rejected before any process or model starts. The receipt and summary record `productResult`
+separately from `roundCoverage`. Unmet explicit coverage remains failed acceptance with
+`ROUND_COVERAGE_NOT_OBSERVED`, even when the product completed correctly. A round count
+does not independently prove specific discovery/finalization phases. No additional model
+call is forced, and existing historical failed receipts remain unchanged.
+
+The pure assessment checks require no Server, Worker, or model. Run them on the designated
+verification environment with `node --test deploy/investigation-acceptance/real-cli-assessment.test.mjs`.
+
 `--worker-path` optionally supplies the entire trusted executable search path through
 `INVESTIGATION_WORKER_PATH`. Omit it to retain the runtime's existing default; the companion does
 not replace that default with the launcher's full PATH. A CLI-owned external authentication

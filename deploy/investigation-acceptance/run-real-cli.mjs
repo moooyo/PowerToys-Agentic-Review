@@ -9,6 +9,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { finished } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { assessRealCliResult, parseRoundPolicy } from "./real-cli-assessment.mjs";
 import { recordSourceManifest } from "./source-manifest.mjs";
 
 const execute = promisify(execFile);
@@ -23,6 +24,10 @@ for (let index = 2; index < process.argv.length; index += 2) {
   );
   args.set(name, value);
 }
+const roundPolicy = parseRoundPolicy({
+  maxRounds: args.get("--max-rounds"),
+  minAcceptedRounds: args.get("--min-accepted-rounds"),
+});
 assert.equal(process.platform, "win32", "Run only on the authorized remote Windows worker.");
 assert.equal(
   args.get("--static-config-verified"),
@@ -85,6 +90,13 @@ const receipt = {
   source: {},
   checks: [],
   processes: [],
+  productResult: { status: "not_assessed", taskState: null, reportCompleteness: null },
+  roundCoverage: {
+    status: "not_observed",
+    requiredMinimum: roundPolicy.minAcceptedRounds,
+    acceptedRounds: null,
+    multiRoundObserved: false,
+  },
 };
 const children = [];
 const streams = [];
@@ -288,7 +300,7 @@ try {
   const port = await unusedPort();
   origin = `http://127.0.0.1:${port}`;
   const maxDurationMs = positiveArgument("--max-duration-ms", 600_000, 60_000, 3_600_000);
-  const maxRounds = positiveArgument("--max-rounds", 16, 2, 64);
+  const maxRounds = roundPolicy.maxRounds;
   const maxTokens = positiveArgument("--max-tokens", 200_000, 1_000, 2_000_000);
   const budget = { maxRounds, maxDurationMs, maxTokens, maxReportBytes: 32 * 1024 * 1024 };
   receipt.budget = budget;
@@ -449,16 +461,18 @@ try {
     };
     passed("real-cli-output-contract-complete-export-and-pagination");
   }
-  assert.equal(
-    detail.task.state,
-    "completed",
-    "A partial or failed actual-model outcome remains failed acceptance with its original evidence.",
+  const assessment = assessRealCliResult(
+    {
+      taskState: detail.task.state,
+      reportCompleteness: receipt.report?.completeness ?? null,
+      acceptedRounds: detail.checkpoint?.consumed.rounds ?? 0,
+    },
+    roundPolicy,
   );
-  assert.equal(receipt.report?.completeness, "complete");
-  assert(
-    detail.checkpoint.consumed.rounds >= 2,
-    "The production discovery/finalization loop must actually execute.",
-  );
+  receipt.productResult = assessment.productResult;
+  receipt.roundCoverage = assessment.roundCoverage;
+  if (assessment.failure !== null)
+    throw Object.assign(new Error(assessment.failure.message), { code: assessment.failure.code });
   const nativeTree = await processSnapshot(worker.child.pid);
   await json("worker-process-identities.json", nativeTree);
   await until(
@@ -493,7 +507,11 @@ try {
   receipt.status = "passed";
 } catch (error) {
   receipt.status = "failed";
-  receipt.failure = { name: error?.name ?? "Error", message: String(error?.message ?? error) };
+  receipt.failure = {
+    name: error?.name ?? "Error",
+    ...(typeof error?.code === "string" ? { code: error.code } : {}),
+    message: String(error?.message ?? error),
+  };
   process.exitCode = 1;
 } finally {
   for (const child of [...children].reverse()) {
@@ -521,7 +539,7 @@ try {
   await json("receipt.json", receipt);
   await writeFile(
     join(output, "summary.md"),
-    `# Real CLI frozen Issue acceptance\n\nStatus: **${receipt.status}**.\n\nOnly the following checks passed:\n\n${receipt.checks.map((name) => `- ${name}`).join("\n")}\n\nThis isolated Windows exercise uses the real configured CLI and the production Task/Report entries. The input is a previously frozen public Issue snapshot. The Server has no GitHub credential, external writes are disabled, and the account/Worker cannot execute repository source or create upstream actions. Model provider traffic remains owned by the installed CLI.\n\n${receipt.failure ? `Failure: ${receipt.failure.message}\n\n` : ""}Report contract/execution correctness does not establish model quality or independently verified remote model identity. No UI, source execution, runtime artifact upload, publication, Linux production deployment, or hard-crash acceptance is claimed. The private IPC signal bridge is described in the harness README.\n`,
+    `# Real CLI frozen Issue acceptance\n\nStatus: **${receipt.status}**.\n\nProduct result: **${receipt.productResult.status}** (Task: ${receipt.productResult.taskState ?? "not observed"}; Report: ${receipt.productResult.reportCompleteness ?? "not observed"}).\n\nAccepted-round coverage: **${receipt.roundCoverage.status}** (${receipt.roundCoverage.acceptedRounds ?? "not observed"} accepted; ${receipt.roundCoverage.requiredMinimum} required). Multiple accepted rounds observed: **${receipt.roundCoverage.multiRoundObserved}**. This count does not independently establish particular analysis phases.\n\nOnly the following checks passed:\n\n${receipt.checks.map((name) => `- ${name}`).join("\n")}\n\nThis isolated Windows exercise uses the real configured CLI and the production Task/Report entries. The input is a previously frozen public Issue snapshot. The Server has no GitHub credential, external writes are disabled, and the account/Worker cannot execute repository source or create upstream actions. Model provider traffic remains owned by the installed CLI.\n\n${receipt.failure ? `Failure${receipt.failure.code ? ` (${receipt.failure.code})` : ""}: ${receipt.failure.message}\n\n` : ""}Report contract/execution correctness does not establish model quality or independently verified remote model identity. No UI, source execution, runtime artifact upload, publication, Linux production deployment, or hard-crash acceptance is claimed. The private IPC signal bridge is described in the harness README.\n`,
     "utf8",
   );
   console.log(JSON.stringify({ status: receipt.status, receipt: join(output, "receipt.json") }));
