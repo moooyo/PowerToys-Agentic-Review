@@ -44,6 +44,19 @@ const git = pathArgument("--git");
 const configuredCli = pathArgument("--cli");
 let cli = configuredCli;
 const engine = args.get("--cli-engine") ?? "codex";
+const codexTransport = args.get("--codex-transport") ?? "exec";
+assert(
+  ["exec", "app-server"].includes(codexTransport),
+  "--codex-transport must be exec or app-server.",
+);
+assert(
+  codexTransport !== "app-server" ||
+    (engine === "codex" &&
+      args.has("--cli-model") &&
+      args.get("--cli-model").trim().length > 0 &&
+      args.get("--cli-model").trim() === args.get("--cli-model")),
+  "The app-server transport requires --cli-engine codex and an explicit --cli-model.",
+);
 const workerPath = args.get("--worker-path");
 assert(
   workerPath === undefined ||
@@ -90,6 +103,7 @@ const receipt = {
   source: {},
   checks: [],
   processes: [],
+  checkpointObservations: [],
   productResult: { status: "not_assessed", taskState: null, reportCompleteness: null },
   roundCoverage: {
     status: "not_observed",
@@ -136,6 +150,23 @@ try {
   const { FormatRegistry } = requireServer("@sinclair/typebox");
   FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
   FormatRegistry.Set("uri", (value) => URL.canParse(value));
+  let taskScope;
+  if (args.has("--scope-json")) {
+    const scopePath = pathArgument("--scope-json");
+    const scopeBytes = await readFile(scopePath);
+    taskScope = JSON.parse(scopeBytes.toString("utf8").replace(/^\uFEFF/u, ""));
+    assert(
+      Value.Check(contracts.InvestigationCoverageSchema, taskScope),
+      "--scope-json must contain a valid InvestigationCoverage object.",
+    );
+    receipt.source.taskScope = {
+      path: scopePath,
+      sha256: hash(scopeBytes),
+      byteLength: scopeBytes.length,
+      digest: domain.investigationContentDigest(taskScope),
+    };
+    await writeFile(join(output, "task-scope.json"), scopeBytes);
+  }
   const fixtureBytes = await readFile(fixturePath);
   const fixture = JSON.parse(fixtureBytes.toString("utf8"));
   assert.equal(fixture.schemaVersion, "FrozenPublicIssueAcceptanceV1");
@@ -258,6 +289,7 @@ try {
   });
   receipt.cli = {
     engine,
+    configuredTransport: codexTransport,
     configuredModel: args.get("--cli-model") ?? null,
     explicitWorkerPath: workerPath ?? null,
     version: version.stdout.trim().split(/\r?\n/u)[0],
@@ -358,6 +390,7 @@ try {
     kind: "issue-investigate",
     executionMode: "snapshot_only",
     budget,
+    ...(taskScope === undefined ? {} : { scope: taskScope }),
   });
   receipt.taskId = task.id;
   worker = launch("worker", workerEntry, {
@@ -374,6 +407,7 @@ try {
     INVESTIGATION_WORKER_CLI_PATH: cli,
     INVESTIGATION_WORKER_CLI_SHA256: receipt.source.cli.sha256,
     INVESTIGATION_WORKER_CLI_ENGINE: engine,
+    ...(engine === "codex" ? { INVESTIGATION_WORKER_CODEX_TRANSPORT: codexTransport } : {}),
     ...(workerPath === undefined ? {} : { INVESTIGATION_WORKER_PATH: workerPath }),
     ...(args.has("--cli-model") ? { INVESTIGATION_WORKER_CLI_MODEL: args.get("--cli-model") } : {}),
     INVESTIGATION_WORKER_ALLOWED_REPOSITORIES_JSON: "[]",
@@ -388,9 +422,26 @@ try {
     INVESTIGATION_WORKER_SHUTDOWN_TIMEOUT_MS: "60000",
   });
   let lastProgress = "";
+  let lastCapturedRound = -1;
   const detail = await until(
     async () => {
       const current = await request("GET", `/api/tasks/${task.id}`);
+      if (
+        current.checkpoint !== null &&
+        current.checkpoint !== undefined &&
+        current.checkpoint.round > lastCapturedRound
+      ) {
+        const path = `checkpoint-round-${current.checkpoint.round}.json`;
+        await json(path, current.checkpoint);
+        receipt.checkpointObservations.push({
+          round: current.checkpoint.round,
+          id: current.checkpoint.id,
+          version: current.checkpoint.version,
+          digest: current.checkpoint.digest,
+          path,
+        });
+        lastCapturedRound = current.checkpoint.round;
+      }
       const progress = JSON.stringify({
         state: current.task.state,
         round: current.checkpoint?.round ?? 0,

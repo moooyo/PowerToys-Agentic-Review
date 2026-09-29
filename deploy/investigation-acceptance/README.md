@@ -201,6 +201,21 @@ call is forced, and existing historical failed receipts remain unchanged.
 The pure assessment checks require no Server, Worker, or model. Run them on the designated
 verification environment with `node --test deploy/investigation-acceptance/real-cli-assessment.test.mjs`.
 
+`--codex-transport exec|app-server` selects the Codex transport and defaults to `exec`.
+`app-server` requires the Codex engine and an explicit `--cli-model`; invalid transport
+combinations are rejected before setup. The selected transport is recorded as
+`cli.configuredTransport` and passed to the Worker. Use `app-server` when the run requires
+live response-boundary usage control.
+
+`--scope-json <absolute path>` optionally supplies a complete `InvestigationCoverage`
+object for the new Task. The harness validates its shared schema, retains `task-scope.json`
+and the input path/raw SHA-256/canonical digest, and forwards it to the normal Task API.
+The API still requires pending units bound to the frozen Issue subject, including a complete
+`issue_snapshot` unit. This option does not modify the frozen fixture or model output.
+Without it, the Server's existing default scope remains in use. A requested multi-stage
+analysis does not guarantee multiple accepted rounds; the coverage requirement still records
+the actual result without an automatic retry.
+
 `--worker-path` optionally supplies the entire trusted executable search path through
 `INVESTIGATION_WORKER_PATH`. Omit it to retain the runtime's existing default; the companion does
 not replace that default with the launcher's full PATH. A CLI-owned external authentication
