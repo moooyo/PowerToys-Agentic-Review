@@ -711,6 +711,16 @@ child windows; target.pid may select a registered child PID from that applicatio
 {"operation":"register-feature","feature":{"id":"conversion","title":"Square mile conversion","paths":["changed/file.cs"],"scenario":"Enter the input and inspect the calculated area.","userVisible":true,"assertions":[{"id":"result","kind":"ui","description":"The converted area matches the expected value.","selector":{"automationId":"Result"},"assertion":{"property":"text","expected":"2589988","match":"contains"}}]}}
 UI assertions require a specific named or automated control. Their expected values are
 registered before execution. User-visible features cannot pass from a process exit code.
+Each UI assertion requires id, kind "ui", description, selector and assertion. The only
+assertion properties are exists, text, value, enabled, offscreen, focused and toggleState.
+For exists, enabled, offscreen and focused, expected must be a JSON boolean, not a string.
+For text and value, expected must be a string; toggleState expects "on", "off" or "indeterminate".
+match defaults to "equals"; "contains" is only valid for nonempty text or value expectations.
+Absence uses {"property":"exists","expected":false}, never property or kind "absent".
+Selector name and automationId use exact case-sensitive matching, not contains or wildcards.
+This complete absence registration uses illustrative paths and selectors; replace them with
+the actual changed path and expected error control identified from pinned source and inspection:
+{"operation":"register-feature","feature":{"id":"invalid-input","title":"Invalid input handling","paths":["changed/file.cs"],"scenario":"After a positive control in the same query mode, enter invalid input and verify that no error result appears.","userVisible":true,"assertions":[{"id":"error-absent","kind":"ui","description":"The error result is absent.","selector":{"automationId":"ErrorResult"},"assertion":{"property":"exists","expected":false}}]}}
 Verify the changed behavior with concrete inputs and expected outputs. Application startup
 or the mere existence of a window is a prerequisite, not proof that a feature works.
 For a non-visual feature covered by an existing repository test, register kind process with outputPath, arguments,
@@ -729,6 +739,11 @@ The Worker supplies the registered selector and expectation. Do not supply repla
 {"operation":"screenshot","featureId":"conversion","processRef":"..."}
 A screenshot must follow successful assertions for this feature in the same application
 and unchanged UI interaction state. Each feature needs its own capture receipt.
+Every passed assertion needs media from its own UI state, including the positive control
+and the absence check. Execute positive query -> assert -> screenshot before changing input,
+then invalid query -> absence assert -> screenshot. Alternatively, record a video containing
+both successful assertions and their interactions. Retain all assertion and media receipt IDs
+in the final response; the final screenshot alone cannot prove the earlier positive control.
 {"operation":"video-start","featureId":"conversion","processRef":"...","durationSeconds":30}
 {"operation":"video-stop","processRef":"video processRef"}
 Recording requires an active owned application window and crops to its actual bounds.
