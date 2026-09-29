@@ -14,6 +14,7 @@ import {
   type ProcessLaunchSpec,
   processHostProtocolVersion,
 } from "../execution/process-host-protocol.js";
+import { ModelBudgetExceededError } from "./model-budget.js";
 import { createModelEditAdapter, type ModelEditRunnerOptions } from "./model-edit-runner.js";
 import type {
   ModelTurnFileIO,
@@ -270,13 +271,15 @@ describe("saved model edit adapter", () => {
 
   it("uses the strict edit schema and returns passive edits with observed usage", async () => {
     const f = fixture();
-    const result = await f.adapter.execute(f.input, f.context);
+    const invocationBudget = { remainingTokens: 321, deadlineAtMs: Date.now() + 60_000 };
+    const result = await f.adapter.execute(f.input, { ...f.context, invocationBudget });
     expect(result).toEqual({ proposal: f.proposal, usage: { tokens: 50, source: "cli" } });
     expect(f.input.workspace.readSourceFile).toHaveBeenCalledTimes(2);
     expect(f.input.workspace.applyEdits).not.toHaveBeenCalled();
     expect(f.input.workspace.capturePatch).not.toHaveBeenCalled();
     expect(f.context.processHost.start).not.toHaveBeenCalled();
     const request = f.execute.mock.calls[0]![0];
+    expect(request.invocationBudget).toEqual(invocationBudget);
     expect(request.schema).toBe(InvestigationModelEditsV1Schema);
     expect(request.toolPolicy).toBe("passive_proposal");
     expect(request.signal).toBe(f.context.signal);
@@ -285,6 +288,20 @@ describe("saved model edit adapter", () => {
     expect(request.prompt).toContain("Do not invoke tools");
     expect(request.prompt).toContain("commit, push");
     expect(f.input.workspace.assertSourceBinding).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates a transport budget stop without applying or accepting a partial edit proposal", async () => {
+    const f = fixture();
+    const stopped = new ModelBudgetExceededError("tokens");
+    f.execute.mockRejectedValue(stopped);
+    await expect(
+      f.adapter.execute(f.input, {
+        ...f.context,
+        invocationBudget: { remainingTokens: 1, deadlineAtMs: Date.now() + 60_000 },
+      }),
+    ).rejects.toBe(stopped);
+    expect(f.input.workspace.applyEdits).not.toHaveBeenCalled();
+    expect(f.execute).toHaveBeenCalledOnce();
   });
 
   it("passes missing usage through as unavailable for the trusted executor budget gate", async () => {

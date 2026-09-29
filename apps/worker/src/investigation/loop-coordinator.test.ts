@@ -28,6 +28,7 @@ import {
   InvestigationLoopCoordinator,
   type InvestigationLoopCoordinatorOptions,
 } from "./loop-coordinator.js";
+import { ModelBudgetExceededError } from "./model-budget.js";
 import { ModelOutputValidationError } from "./model-output-diagnostics.js";
 import type {
   ModelTurnExecutionInput,
@@ -726,6 +727,87 @@ describe("InvestigationLoopCoordinator", () => {
     expect(interrupt).not.toHaveProperty("modelUsage");
   });
 
+  it("keeps one attempt deadline across source preparation and recomputes each round token allowance", async () => {
+    const startedAt = Date.parse(recordedAt);
+    let now = startedAt;
+    const f = fixture(2, 8, "bug", { now: () => now });
+    f.prepare.mockImplementation(async () => {
+      now += 5_000;
+      return f.workspace;
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    const calls = vi.mocked(f.model.execute).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]![0].invocationBudget).toEqual({
+      remainingTokens: f.claim.task.budget.maxTokens,
+      deadlineAtMs: startedAt + f.claim.task.budget.maxDurationMs,
+    });
+    expect(calls[1]![0].invocationBudget).toEqual({
+      remainingTokens: f.claim.task.budget.maxTokens - 100,
+      deadlineAtMs: startedAt + f.claim.task.budget.maxDurationMs,
+    });
+  });
+
+  it("retains partial invocation usage and seals an interrupted budget report after a live stop", async () => {
+    const f = fixture();
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      input.onUsage?.({ tokens: 71, source: "cli", completeness: "partial" });
+      throw new AggregateError(
+        [new ModelBudgetExceededError("tokens")],
+        "Synthetic accounting wrapper.",
+      );
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    const interrupt = vi
+      .mocked(f.client.checkpoint)
+      .mock.calls.find(([, request]) => request.kind === "interrupt")?.[1];
+    expect(interrupt).toMatchObject({
+      reason: "budget_exhausted",
+      modelUsage: { round: 1, tokens: 71 },
+    });
+    expect(f.current().stopReason).toBe("budget_exhausted");
+    expect(f.current().round).toBe(0);
+    expect(f.current().consumed.tokens).toBe(71);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.submissions[0]?.header).toMatchObject({
+      outcome: "interrupted",
+      report: { completeness: "partial" },
+    });
+    expect(f.workspace.cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("keeps cleanup failure visible instead of replacing it with the nested budget stop", async () => {
+    const onNodeFault = vi.fn();
+    const cleanupUnconfirmed = vi.fn(async () => undefined);
+    const f = fixture(2, 8, "bug", {
+      onNodeFault,
+      onAttemptCleanupUnconfirmed: cleanupUnconfirmed,
+    });
+    vi.mocked(f.model.execute).mockRejectedValue(
+      new AggregateError(
+        [
+          new ModelBudgetExceededError("duration"),
+          Object.assign(new Error("The owned process did not exit."), {
+            code: "MODEL_PROCESS_CLEANUP_UNCONFIRMED",
+          }),
+        ],
+        "Synthetic combined failure.",
+      ),
+    );
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(onNodeFault).toHaveBeenCalledWith("MODEL_PROCESS_CLEANUP_UNCONFIRMED");
+    expect(cleanupUnconfirmed).toHaveBeenCalledWith("OWNED_PROCESS_CLEANUP_UNCONFIRMED");
+    expect(f.workspace.cleanup).not.toHaveBeenCalled();
+    expect(f.submissions[0]?.header.outcome).toBe("failed");
+    const interrupt = vi
+      .mocked(f.client.checkpoint)
+      .mock.calls.find(([, request]) => request.kind === "interrupt")?.[1];
+    expect(interrupt).toMatchObject({
+      reason: "error",
+      diagnostics: [expect.objectContaining({ code: "MODEL_PROCESS_CLEANUP_UNCONFIRMED" })],
+    });
+  });
+
   it("retains the last valid checkpoint when a later model turn drops a candidate", async () => {
     const f = fixture();
     vi.mocked(f.model.execute).mockImplementation(async (input) => {
@@ -945,6 +1027,7 @@ describe("InvestigationLoopCoordinator", () => {
         expect(input.correction).toMatchObject({ issue });
         expect(input.checkpoint?.round).toBe(0);
         expect(input.checkpoint?.consumed.tokens).toBe(371);
+        expect(input.invocationBudget?.remainingTokens).toBe(f.claim.task.budget.maxTokens - 371);
         expect(input.checkpoint?.version).toBeGreaterThan(f.claim.checkpoint!.version);
         const result = modelRound(input, proposedAnalysis(f.initial.result), "discovery");
         return { ...result, usage: { ...result.usage, invocationId: "accepted-call" } };

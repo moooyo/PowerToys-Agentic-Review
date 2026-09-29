@@ -100,6 +100,25 @@ acceptance. A general deployment approval does not approve actual PR/issue write
 
 ## Register, start, stop, and restart
 
+For Codex Workers that need response-boundary token stop controls, set
+`INVESTIGATION_WORKER_CODEX_TRANSPORT=app-server` and select an explicit model with
+`INVESTIGATION_WORKER_CLI_MODEL`. This uses the installed CLI's stdio protocol and
+existing provider configuration. The default `exec` transport remains available
+for older CLIs and synthetic fixtures; its token usage arrives only at turn end.
+
+The app-server transport receives cumulative usage during an invocation and
+interrupts when the remaining task allowance is exhausted. The task deadline
+also covers preparation and cancellation has a bounded native teardown fallback.
+Interrupted calls retain observed usage as partial, including any excess, and
+cannot contribute accepted model output. Accounting regressions, compaction and
+unexpected model changes stop the call instead of admitting more work.
+
+This is a response-boundary stop control, not an exact prepaid token or currency
+cap: an in-flight response and notification latency can overshoot, and provider
+accounting may not expose every charge. Keep the task duration bounded and do not
+restart an interrupted call without reviewing its retained usage and remaining
+allowance.
+
 Run the installed scripts from the configured release. These examples are future
 operator commands, not records of executed actions. Registration requires an
 elevated administrator; runtime tasks use the limited account configured above.

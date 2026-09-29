@@ -13,6 +13,7 @@ import {
   type ManagedProcessRunner,
 } from "../execution/managed-process-runner.js";
 import type { ProcessHostClient } from "../execution/process-host-protocol.js";
+import { ModelBudgetExceededError } from "./model-budget.js";
 import {
   digestInvestigationExecutableStep,
   type InvestigationModelEditAdapter,
@@ -617,6 +618,61 @@ describe("ProductionInvestigationPlanExecutor", () => {
     expect(result.outcome).toBe("blocked");
     expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_TOKEN_BUDGET_EXCEEDED");
     expect(result.state.completedSteps[0]?.modelUsage?.tokens).toBe(120);
+    expect(f.workspace.applyEdits).not.toHaveBeenCalled();
+  });
+
+  it("deducts each edit from the invocation allowance while retaining the attempt deadline", async () => {
+    const f = explicitIssueSourceFixture("issue-fix");
+    f.plan.steps.push({ ...f.plan.steps[0]!, id: "second-edit", checkIds: [] });
+    f.plan.digest = createHash("sha256")
+      .update(investigationCanonicalJson(investigationPlanDigestPayload(f.plan)))
+      .digest("hex");
+    f.task.planRef = { id: f.plan.id, version: f.plan.version, digest: f.plan.digest };
+    f.execution.planRef = f.task.planRef;
+    const operation = { kind: "model-edit" as const, allowedPaths: ["src/file.ts"] };
+    f.execution.steps.push({
+      stepId: "second-edit",
+      operation,
+      digest: digestInvestigationExecutableStep({ stepId: "second-edit", operation }),
+    });
+    const invocationBudget = { remainingTokens: 300, deadlineAtMs: Date.now() + 60_000 };
+    const result = await f.executor.execute(
+      { ...f.input, consumedTokens: 200 },
+      { ...f.context, invocationBudget },
+    );
+    expect(result.outcome).toBe("completed");
+    expect(f.edit.mock.calls.map(([, context]) => context.invocationBudget)).toEqual([
+      invocationBudget,
+      { remainingTokens: 180, deadlineAtMs: invocationBudget.deadlineAtMs },
+    ]);
+    expect(result.state.completedSteps.map((step) => step.modelUsage?.tokens)).toEqual([120, 120]);
+  });
+
+  it("does not dispatch an edit when its supplied invocation allowance is exhausted", async () => {
+    const f = explicitIssueSourceFixture("issue-fix");
+    await expect(
+      f.executor.execute(f.input, {
+        ...f.context,
+        invocationBudget: { remainingTokens: 0, deadlineAtMs: Date.now() + 60_000 },
+      }),
+    ).rejects.toBeInstanceOf(ModelBudgetExceededError);
+    expect(f.edit).not.toHaveBeenCalled();
+    expect(f.context.onStepStarted).not.toHaveBeenCalled();
+    expect(f.workspace.applyEdits).not.toHaveBeenCalled();
+  });
+
+  it("propagates a live edit budget stop without recording a successful step or applying edits", async () => {
+    const f = explicitIssueSourceFixture("issue-fix");
+    const stopped = new ModelBudgetExceededError("tokens");
+    f.edit.mockRejectedValue(stopped);
+    await expect(
+      f.executor.execute(f.input, {
+        ...f.context,
+        invocationBudget: { remainingTokens: 1, deadlineAtMs: Date.now() + 60_000 },
+      }),
+    ).rejects.toBe(stopped);
+    expect(f.context.onStepStarted).toHaveBeenCalledOnce();
+    expect(f.context.onStepCompleted).not.toHaveBeenCalled();
     expect(f.workspace.applyEdits).not.toHaveBeenCalled();
   });
 

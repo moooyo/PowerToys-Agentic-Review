@@ -13,6 +13,7 @@ import { createE2eAgentRunner, createE2ePrompt, projectE2eResult } from "./e2e-a
 import type { E2eBuildRecord } from "./e2e-build.js";
 import { type E2eFeaturePlan, parseE2eFeaturePlan } from "./e2e-feature-plan.js";
 import type { E2eToolReceipt, E2eToolServer } from "./e2e-tool-server.js";
+import { ModelBudgetExceededError } from "./model-budget.js";
 import type {
   ModelTurnExecutionInput,
   ModelTurnFileIO,
@@ -382,6 +383,56 @@ function frozenInputFixture(input: ModelTurnExecutionInput) {
 }
 
 describe("E2E interruption recovery", () => {
+  it.each([false, true])(
+    "cleans owned E2E tools after a model budget stop: cleanup failure=%s",
+    async (cleanupFails) => {
+      const f = recoveryFixture();
+      const frozen = frozenInputFixture(f.input);
+      f.checkpoint.runtime.e2eExecution = {
+        attemptId: f.input.attempt.id,
+        status: "started",
+        startedAt: "2026-09-19T00:00:00Z",
+        completedAt: null,
+      };
+      const stopped = new ModelBudgetExceededError("tokens");
+      const execute = vi.fn(async () => {
+        throw stopped;
+      });
+      const cleanup = vi.fn(async () => {
+        if (cleanupFails) throw new Error("The owned application is still running.");
+      });
+      const tools = {
+        start: vi.fn(async () => ({
+          endpoint: "http://127.0.0.1:1234/tool",
+          capability: "synthetic",
+          directory: "C:/Attempts/evidence",
+        })),
+        executionSignal: new AbortController().signal,
+        cleanup,
+      } as unknown as E2eToolServer;
+      const runner = createE2eAgentRunner({
+        modelOptions: { engine: "codex", fileIO: frozen.fileIO } as ModelTurnRunnerOptions,
+        processHost: {} as ProcessHostClient,
+        environment: {},
+        processLimits: {} as ProcessResourceLimits,
+        powershellExecutablePath: "C:/Windows/powershell.exe",
+        gitExecutablePath: "C:/Tools/git.exe",
+        jsonRunner: { execute },
+        createTools: () => tools,
+      });
+      const pending = runner.execute({
+        ...f.input,
+        workspace: frozen.workspace,
+        invocationBudget: { remainingTokens: 1, deadlineAtMs: Date.now() + 60_000 },
+      });
+      if (cleanupFails)
+        await expect(pending).rejects.toMatchObject({ code: "E2E_CLEANUP_UNCONFIRMED" });
+      else await expect(pending).rejects.toBe(stopped);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(cleanup).toHaveBeenCalledOnce();
+    },
+  );
+
   it("delivers frozen PR context and scope without duplicating source bodies in the model prompt", async () => {
     const f = recoveryFixture();
     const frozen = frozenInputFixture(f.input);
@@ -495,12 +546,15 @@ describe("E2E interruption recovery", () => {
       jsonRunner: { execute },
       createTools: () => tools,
     });
+    const invocationBudget = { remainingTokens: 321, deadlineAtMs: Date.now() + 60_000 };
     const result = await runner.execute({
       ...f.input,
       workspace: frozen.workspace,
+      invocationBudget,
     });
     expect(execute).toHaveBeenCalledTimes(1);
     const modelInput = execute.mock.calls[0]![0];
+    expect(modelInput.invocationBudget).toEqual(invocationBudget);
     expect(modelInput.outputProtectedValues).toEqual(["http://127.0.0.1:1234/tool", "synthetic"]);
     const context = JSON.parse(
       modelInput.prompt

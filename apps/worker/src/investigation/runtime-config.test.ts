@@ -36,6 +36,29 @@ function msbuildEnvironment(): Record<string, string> {
 }
 
 describe("native investigation Worker configuration", () => {
+  it("selects the explicit Codex transport without changing model or provider configuration", () => {
+    const config = loadInvestigationWorkerRuntimeConfig({
+      ...environment(),
+      INVESTIGATION_WORKER_CLI_MODEL: "gpt-6-luna",
+      INVESTIGATION_WORKER_CODEX_TRANSPORT: "app-server",
+    });
+    expect(config.cli.model).toBe("gpt-6-luna");
+    expect(config.cli.codexTransport).toBe("app-server");
+    expect(loadInvestigationWorkerRuntimeConfig(environment()).cli.codexTransport).toBeUndefined();
+  });
+
+  it.each([
+    { INVESTIGATION_WORKER_CODEX_TRANSPORT: "unknown" },
+    {
+      INVESTIGATION_WORKER_CODEX_TRANSPORT: "app-server",
+      INVESTIGATION_WORKER_CLI_ENGINE: "copilot",
+    },
+  ])("rejects unsupported transport selections", (overrides) => {
+    expect(() => loadInvestigationWorkerRuntimeConfig({ ...environment(), ...overrides })).toThrow(
+      /CODEX_TRANSPORT/,
+    );
+  });
+
   it("loads the native token and never forwards ambient service or Git credentials", () => {
     const input: Record<string, string> = {
       ...environment(),

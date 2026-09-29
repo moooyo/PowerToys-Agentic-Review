@@ -197,6 +197,9 @@ export function createModelEditAdapter(
         toolPolicy: "passive_proposal",
         usageContext: { taskId: task.id, attemptId: attempt.id, purpose: "model_edit" },
         ...(context.usageLease === undefined ? {} : { usageLease: context.usageLease }),
+        ...(context.invocationBudget === undefined
+          ? {}
+          : { invocationBudget: context.invocationBudget }),
         workspace,
         signal: context.signal,
         prompt,

@@ -37,6 +37,11 @@ import {
   type ProcessLaunchSpec,
 } from "../execution/process-host-protocol.js";
 import {
+  type CodexAppServerSession,
+  createCodexAppServerSession,
+} from "./codex-app-server-session.js";
+import { ModelBudgetExceededError, type ModelInvocationBudget } from "./model-budget.js";
+import {
   ModelOutputValidationError,
   modelOutputSchemaError,
   safeModelOutputValidationIssue,
@@ -58,9 +63,9 @@ import {
   mergeModelTurnDelta,
   prepareModelTurnProjection,
 } from "./model-turn-projection.js";
-import {
-  type InvestigationModelUsageJournal,
-  type ModelInvocationContext,
+import type {
+  InvestigationModelUsageJournal,
+  ModelInvocationContext,
 } from "./model-usage-journal.js";
 import { parseCliModelUsage } from "./model-usage-parser.js";
 import type { InvestigationOutputJournal } from "./output-journal.js";
@@ -76,6 +81,7 @@ import {
 } from "./workspace.js";
 
 export interface ModelTurnExecutionInput {
+  readonly invocationBudget?: ModelInvocationBudget;
   readonly usageLease?: InvestigationWorkerLease;
   readonly task: InvestigationTaskV1;
   readonly attempt: InvestigationAttemptV1;
@@ -143,6 +149,7 @@ export interface ModelTurnRunner {
 }
 
 export interface StaticModelJsonInput {
+  readonly invocationBudget?: ModelInvocationBudget;
   /** Private runtime capabilities may be present in an authorized prompt, but never in visible output. */
   readonly outputProtectedValues?: readonly string[];
   /** Saved-plan edits remain passive proposals; static review and E2E use native tools. */
@@ -198,6 +205,8 @@ export interface ModelTurnFileIO {
 }
 
 export interface ModelTurnRunnerOptions {
+  /** App-server supplies response-boundary accounting; exec retains the legacy transport. */
+  readonly codexTransport?: "exec" | "app-server";
   readonly outputJournal?: InvestigationOutputJournal;
   /** Optional visible output must not hold process dispatch or cancellation indefinitely. */
   readonly outputInitializationTimeoutMs?: number;
@@ -249,6 +258,7 @@ export type ModelTurnFailureCode =
   | "MODEL_OUTPUT_LIMIT_EXCEEDED"
   | "MODEL_PROCESS_START_FAILED"
   | "MODEL_PROCESS_FAILED"
+  | "MODEL_USAGE_UNAVAILABLE"
   | "MODEL_PROCESS_CLEANUP_UNCONFIRMED"
   | "MODEL_OUTPUT_INVALID"
   | "MODEL_TOOL_POLICY_VIOLATION"
@@ -388,6 +398,9 @@ export function createModelTurnRunner(suppliedOptions: ModelTurnRunnerOptions): 
         ...(input.usageLease === undefined ? {} : { usageLease: input.usageLease }),
         workspace: input.workspace,
         signal: input.signal,
+        ...(input.invocationBudget === undefined
+          ? {}
+          : { invocationBudget: input.invocationBudget }),
         prompt,
         schema: InvestigationModelTurnDeltaV1Schema,
         hardTimeoutMs: input.task.budget.maxDurationMs,
@@ -444,6 +457,11 @@ export function createStaticModelJsonRunner(
     },
   };
   const io = options.fileIO ?? defaultFileIO;
+  if (
+    options.codexTransport !== undefined &&
+    (options.engine !== "codex" || !["exec", "app-server"].includes(options.codexTransport))
+  )
+    throw failure("MODEL_POLICY_UNAVAILABLE", "The selected CLI transport is unsupported.");
   const inputLimit = options.maximumInputBytes ?? maximumTransportInputBytes;
   const teardownTimeoutMs = options.teardownTimeoutMs ?? 5_000;
   const outputInitializationTimeoutMs = options.outputInitializationTimeoutMs ?? 1_000;
@@ -483,6 +501,27 @@ export function createStaticModelJsonRunner(
   return {
     async execute(input) {
       input.signal.throwIfAborted();
+      const appServerTransport =
+        options.engine === "codex" && options.codexTransport === "app-server";
+      if (appServerTransport && input.invocationBudget === undefined)
+        throw failure("MODEL_INPUT_INVALID", "App-server model execution requires a task budget.");
+      if (appServerTransport && options.model === undefined)
+        throw failure(
+          "MODEL_POLICY_UNAVAILABLE",
+          "App-server execution requires an explicit model selection.",
+        );
+      if (input.invocationBudget !== undefined) {
+        if (
+          !Number.isSafeInteger(input.invocationBudget.remainingTokens) ||
+          input.invocationBudget.remainingTokens < 0 ||
+          !Number.isSafeInteger(input.invocationBudget.deadlineAtMs)
+        )
+          throw failure("MODEL_INPUT_INVALID", "The invocation allowance is invalid.");
+        if (input.invocationBudget.remainingTokens === 0)
+          throw new ModelBudgetExceededError("tokens");
+        if (input.invocationBudget.deadlineAtMs <= Date.now())
+          throw new ModelBudgetExceededError("duration");
+      }
       if (!options.staticConfiguration.verified)
         throw failure(
           "MODEL_POLICY_UNAVAILABLE",
@@ -510,6 +549,9 @@ export function createStaticModelJsonRunner(
       let invocationCompleted = false;
       let processStartAttempted = false;
       let invocationUsage: ReturnType<typeof parseCliModelUsage> | undefined;
+      let appSession: CodexAppServerSession | undefined;
+      let usageUpdates = Promise.resolve();
+      let liveUsageError: unknown;
       let visibleOutput: ModelOutputObserver | undefined;
       let captureEnabled = false;
       const recordOutput = (observation: ModelOutputObservation): void => {
@@ -546,7 +588,11 @@ export function createStaticModelJsonRunner(
         const hardTimeoutMs = Math.min(
           Math.max(1, options.limits.hardTimeoutMs - teardownTimeoutMs),
           input.hardTimeoutMs,
+          input.invocationBudget === undefined
+            ? Number.MAX_SAFE_INTEGER
+            : input.invocationBudget.deadlineAtMs - Date.now(),
         );
+        if (hardTimeoutMs <= 0) throw new ModelBudgetExceededError("duration");
         const passiveProposal = input.toolPolicy === "passive_proposal";
         const baseSpec = buildCliLaunchSpec({
           engine: options.engine,
@@ -574,13 +620,29 @@ export function createStaticModelJsonRunner(
             ),
           },
         });
-        const spec: ProcessLaunchSpec = {
+        let spec: ProcessLaunchSpec = {
           ...baseSpec,
           arguments: [
             ...staticArguments(options, baseSpec.arguments, passiveProposal),
             ...(options.engine === "copilot" ? ["--usage-output-file", usagePath] : []),
           ],
         };
+        if (appServerTransport) {
+          const { standardInput: _standardInput, ...interactiveSpec } = spec;
+          const policies = staticArguments(options, [], passiveProposal);
+          spec = {
+            ...interactiveSpec,
+            interactiveStdin: true,
+            arguments: [
+              "app-server",
+              "--listen",
+              "stdio://",
+              ...policies.flatMap((argument, index) =>
+                argument === "--config" ? [argument, policies[index + 1]!] : [],
+              ),
+            ],
+          };
+        }
         input.signal.throwIfAborted();
         if (options.usageJournal !== undefined) {
           if (input.usageContext === undefined)
@@ -634,12 +696,20 @@ export function createStaticModelJsonRunner(
         let managed: ManagedProcess;
         // The worker deadline starts before dispatch; the native deadline reserves teardown time.
         const timeout = new AbortController();
-        const timer = setTimeout(
-          () => timeout.abort(new Error("The model turn exceeded its time budget.")),
+        const transportStop = new AbortController();
+        const dispatchTimeoutMs = Math.min(
           hardTimeoutMs,
+          input.invocationBudget === undefined
+            ? Number.MAX_SAFE_INTEGER
+            : input.invocationBudget.deadlineAtMs - Date.now(),
+        );
+        if (dispatchTimeoutMs <= 0) throw new ModelBudgetExceededError("duration");
+        const timer = setTimeout(
+          () => timeout.abort(new ModelBudgetExceededError("duration")),
+          dispatchTimeoutMs,
         );
         timer.unref();
-        const signal = AbortSignal.any([input.signal, timeout.signal]);
+        const signal = AbortSignal.any([input.signal, timeout.signal, transportStop.signal]);
         processDrained = false;
         const activity = createModelActivityObserver(options.engine, input.onActivity);
         let dispatched = false;
@@ -683,6 +753,90 @@ export function createStaticModelJsonRunner(
         observe({ stage: "started", requestId: managed.requestId, processId: managed.processId });
         try {
           let observedTokens: number | null = null;
+          if (appServerTransport) {
+            if (managed.stdin === undefined)
+              transportStop.abort(
+                failure(
+                  "MODEL_POLICY_UNAVAILABLE",
+                  "App-server requires interactive ProcessHost stdin.",
+                ),
+              );
+            else {
+              appSession = createCodexAppServerSession({
+                model: options.model!,
+                cwd: spec.workingDirectory,
+                prompt,
+                outputSchema: JSON.parse(schemaJson),
+                passiveProposal,
+                maximumTokens: input.invocationBudget!.remainingTokens,
+                maximumResultBytes: Math.min(
+                  input.maximumResultBytes,
+                  options.limits.maximumOutputBytes,
+                ),
+                onEvent: (chunk) => {
+                  activity.push(chunk);
+                  visibleOutput?.push(chunk);
+                },
+                onStop: (reason) => {
+                  recordOutput({
+                    itemId: "model-transport-stop",
+                    kind: "system",
+                    operation: "append",
+                    status: "cancelled",
+                    text: `The model invocation was stopped: ${reason}.`,
+                  });
+                  transportStop.abort(
+                    reason === "token_budget"
+                      ? new ModelBudgetExceededError("tokens")
+                      : failure(
+                          reason === "usage_unavailable"
+                            ? "MODEL_USAGE_UNAVAILABLE"
+                            : reason === "model_mismatch"
+                              ? "MODEL_POLICY_UNAVAILABLE"
+                              : "MODEL_PROCESS_FAILED",
+                          reason === "usage_unavailable"
+                            ? "Model usage accounting became unavailable during the invocation."
+                            : reason === "model_mismatch"
+                              ? "The CLI selected a model other than the explicitly requested model."
+                              : "The Codex app-server protocol failed.",
+                        ),
+                  );
+                },
+                onUsage: (usage) => {
+                  invocationUsage = usage;
+                  usageUpdates = usageUpdates
+                    .then(async () => {
+                      input.onUsage?.({
+                        tokens: usage.usage.totalTokens,
+                        source: usage.usage.totalTokens === null ? "unavailable" : "cli",
+                        ...(invocationId === undefined ? {} : { invocationId }),
+                        details: usage.usage,
+                        completeness: "partial",
+                      });
+                      if (options.usageJournal !== undefined && invocationId !== undefined)
+                        await options.usageJournal.update(invocationId, {
+                          usage: usage.usage,
+                          completeness: "partial",
+                        });
+                    })
+                    .catch((error: unknown) => {
+                      liveUsageError ??= error;
+                      transportStop.abort(
+                        failure(
+                          "MODEL_USAGE_UNAVAILABLE",
+                          "Streaming model usage could not be retained.",
+                        ),
+                      );
+                    });
+                },
+              });
+              void appSession.start(managed.stdin).catch(() => {
+                transportStop.abort(
+                  failure("MODEL_PROCESS_FAILED", "The Codex app-server session could not start."),
+                );
+              });
+            }
+          }
           const capture = await collectManagedProcess(
             managed,
             signal,
@@ -694,6 +848,8 @@ export function createStaticModelJsonRunner(
             observe,
             options.protectedValues,
             async (stdout, completeTransport) => {
+              await usageUpdates;
+              if (liveUsageError !== undefined) throw liveUsageError;
               let sidecar: string | undefined;
               if (options.engine === "copilot") {
                 try {
@@ -708,7 +864,10 @@ export function createStaticModelJsonRunner(
                   // Keep the JSONL observations when the optional provider sidecar is unavailable.
                 }
               }
-              invocationUsage = parseCliModelUsage(options.engine, stdout, sidecar);
+              invocationUsage =
+                appSession === undefined
+                  ? parseCliModelUsage(options.engine, stdout, sidecar)
+                  : appSession.snapshot(completeTransport);
               if (!completeTransport && invocationUsage.completeness === "complete")
                 invocationUsage.completeness = "partial";
               if (invocationId !== undefined)
@@ -726,6 +885,16 @@ export function createStaticModelJsonRunner(
                 });
               }
               if (!completeTransport) return;
+              if (appSession !== undefined) {
+                observedTokens = invocationUsage.usage.totalTokens;
+                if (invocationId === undefined)
+                  input.onUsage?.({
+                    tokens: observedTokens,
+                    source: observedTokens === null ? "unavailable" : "cli",
+                    completeness: invocationUsage.completeness,
+                  });
+                return;
+              }
               const reported = reportedTokenUsage(options.engine, stdout);
               if (reported === null) return;
               observedTokens = reported.tokens;
@@ -749,18 +918,20 @@ export function createStaticModelJsonRunner(
             },
             activity,
             visibleOutput,
+            appSession,
           );
           signal.throwIfAborted();
           const roundOutputLimit = Math.min(
             input.maximumResultBytes,
             options.limits.maximumOutputBytes,
           );
-          const events = parseEvents(
-            options.engine,
-            capture.stdout,
-            roundOutputLimit,
-            passiveProposal,
-          );
+          const events =
+            appSession === undefined
+              ? parseEvents(options.engine, capture.stdout, roundOutputLimit, passiveProposal)
+              : {
+                  finalMessage: appSession.finalMessage(),
+                  tokens: invocationUsage?.usage.totalTokens ?? null,
+                };
           const tokens =
             invocationId === undefined
               ? (events.tokens ?? observedTokens)
@@ -773,7 +944,7 @@ export function createStaticModelJsonRunner(
             ...(invocationId === undefined ? {} : { invocationId }),
           });
           const output =
-            options.engine === "codex"
+            options.engine === "codex" && appSession === undefined
               ? await readStableUtf8(
                   io,
                   resultPath,
@@ -2238,6 +2409,7 @@ async function collectManagedProcess(
   onCompleteOutput: (stdout: string, completeTransport: boolean) => Promise<void>,
   activity: ModelActivityObserver,
   output?: ModelOutputObserver,
+  appSession?: CodexAppServerSession,
 ): Promise<{ stdout: string }> {
   let totalBytes = 0;
   let stdoutBytes = 0;
@@ -2252,8 +2424,10 @@ async function collectManagedProcess(
       totalBytes += chunk.byteLength;
       if (capture) {
         stdoutBytes += chunk.byteLength;
-        activity.push(chunk);
-        output?.push(chunk);
+        if (appSession === undefined) {
+          activity.push(chunk);
+          output?.push(chunk);
+        } else appSession.push(chunk);
       } else stderrBytes += chunk.byteLength;
       if (totalBytes > maximumBytes) {
         exceeded = true;
@@ -2261,6 +2435,7 @@ async function collectManagedProcess(
       if (capture && remainingBytes > 0) capturedStdout.push(chunk.subarray(0, remainingBytes));
     }
     if (capture) {
+      appSession?.finish();
       activity.finish();
       output?.finish();
     }
@@ -2293,31 +2468,48 @@ async function collectManagedProcess(
   try {
     let settled = await Promise.race([settlement, aborted]);
     if (settled === null) {
-      void Promise.resolve()
-        .then(() => managed.terminate("cancelled"))
-        .catch(() => undefined);
-      settled = await Promise.race([
-        settlement,
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
-            observe({
-              stage: "cleanup_timeout",
-              requestId: managed.requestId,
-              processId: managed.processId,
-              stdoutBytes,
-              stderrBytes,
-              cleanupConfirmed: false,
-            });
-            reject(
-              failure(
-                "MODEL_PROCESS_CLEANUP_UNCONFIRMED",
-                "The managed CLI process and its output streams did not finish cleanup.",
-              ),
-            );
-          }, teardownTimeoutMs);
-          timer.unref();
-        }),
-      ]);
+      if (appSession !== undefined) {
+        let graceTimer: NodeJS.Timeout | undefined;
+        try {
+          void appSession.interrupt().catch(() => undefined);
+          settled = await Promise.race([
+            settlement,
+            new Promise<null>((resolve) => {
+              graceTimer = setTimeout(() => resolve(null), Math.min(2_000, teardownTimeoutMs));
+              graceTimer.unref();
+            }),
+          ]);
+        } finally {
+          if (graceTimer !== undefined) clearTimeout(graceTimer);
+        }
+      }
+      if (settled === null) {
+        void Promise.resolve()
+          .then(() => managed.terminate("cancelled"))
+          .catch(() => undefined);
+        settled = await Promise.race([
+          settlement,
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              observe({
+                stage: "cleanup_timeout",
+                requestId: managed.requestId,
+                processId: managed.processId,
+                stdoutBytes,
+                stderrBytes,
+                cleanupConfirmed: false,
+              });
+              reject(
+                failure(
+                  "MODEL_PROCESS_CLEANUP_UNCONFIRMED",
+                  "The managed CLI process and its output streams did not finish cleanup.",
+                ),
+              );
+            }, teardownTimeoutMs);
+            timer.unref();
+          }),
+        ]);
+      }
     }
     const [exit, stdout, stderr, completion] = settled;
     const exitConfirmed =

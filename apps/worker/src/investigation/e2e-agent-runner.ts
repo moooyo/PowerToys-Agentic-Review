@@ -196,6 +196,9 @@ export function createE2eAgentRunner(options: E2eAgentRunnerOptions): E2eAgentRu
           outputProtectedValues: [endpoint.endpoint, endpoint.capability],
           usageContext: { taskId: input.task.id, attemptId: input.attempt.id, purpose: "e2e" },
           ...(input.usageLease === undefined ? {} : { usageLease: input.usageLease }),
+          ...(input.invocationBudget === undefined
+            ? {}
+            : { invocationBudget: input.invocationBudget }),
           workspace: input.workspace,
           signal: AbortSignal.any([input.signal, tools.executionSignal]),
           prompt,

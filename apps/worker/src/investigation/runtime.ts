@@ -490,6 +490,9 @@ export async function createInvestigationExecutionRuntime(
       engine: config.cli.engine,
       cliExecutablePath: binaries.cliPath,
       ...(config.cli.model === undefined ? {} : { model: config.cli.model }),
+      ...(config.cli.codexTransport === undefined
+        ? {}
+        : { codexTransport: config.cli.codexTransport }),
       processHost,
       environment: modelEnvironment,
       limits: config.processLimits,

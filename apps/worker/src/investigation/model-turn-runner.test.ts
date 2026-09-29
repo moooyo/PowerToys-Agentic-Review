@@ -42,6 +42,7 @@ import {
   type ModelTurnFileStat,
   type ModelTurnRunnerOptions,
   makePrompt,
+  type StaticModelJsonInput,
 } from "./model-turn-runner.js";
 import { InvestigationModelUsageJournal } from "./model-usage-journal.js";
 import type { InvestigationOutputJournal } from "./output-journal.js";
@@ -4068,6 +4069,369 @@ describe("bounded usage prefix retention", () => {
       });
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("static app-server invocation budgets", () => {
+  const proposal = {
+    schemaVersion: "InvestigationModelEditsV1",
+    summary: "The controlled response proposes no edits.",
+    edits: [],
+  };
+
+  function appServerFixture(usageJournal?: InvestigationModelUsageJournal) {
+    const diagnostics = vi.fn();
+    const f = fixture({
+      options: {
+        codexTransport: "app-server",
+        model: "gpt-6-luna",
+        onProcessDiagnostic: diagnostics,
+        ...(usageJournal === undefined ? {} : { usageJournal }),
+      },
+    });
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const completed = Promise.withResolvers<ProcessExitedEvent>();
+    const turnStarted = Promise.withResolvers<void>();
+    const interrupted = Promise.withResolvers<void>();
+    const inputClosed = Promise.withResolvers<void>();
+    const requests: {
+      id?: number;
+      method: string;
+      params?: Record<string, unknown>;
+    }[] = [];
+    const threadId = "controlled-thread";
+    const turnId = "controlled-turn";
+    let pendingInput = "";
+    let processExited = false;
+    const emit = (event: unknown) => stdout.write(`${JSON.stringify(event)}\n`);
+    const notification = (method: string, params: Record<string, unknown>) =>
+      emit({ method, params: { threadId, turnId, ...params } });
+    const stdin: NonNullable<ManagedProcess["stdin"]> = {
+      streamId: "a".repeat(64),
+      write: vi.fn(async (bytes: Uint8Array) => {
+        pendingInput += Buffer.from(bytes).toString("utf8");
+        let newline = pendingInput.indexOf("\n");
+        while (newline !== -1) {
+          const request = JSON.parse(pendingInput.slice(0, newline)) as (typeof requests)[number];
+          pendingInput = pendingInput.slice(newline + 1);
+          requests.push(request);
+          switch (request.method) {
+            case "initialize":
+              emit({ id: request.id, result: {} });
+              break;
+            case "initialized":
+              break;
+            case "thread/start":
+              emit({ id: request.id, result: { thread: { id: threadId }, model: "gpt-6-luna" } });
+              break;
+            case "turn/start":
+              emit({ id: request.id, result: { turn: { id: turnId } } });
+              turnStarted.resolve();
+              break;
+            case "turn/interrupt":
+              emit({ id: request.id, result: {} });
+              notification("turn/completed", {
+                turn: { id: turnId, status: "interrupted", items: [] },
+              });
+              interrupted.resolve();
+              break;
+            default:
+              throw new Error(`Unexpected controlled app-server request: ${request.method}`);
+          }
+          newline = pendingInput.indexOf("\n");
+        }
+      }),
+      close: vi.fn(async () => {
+        inputClosed.resolve();
+      }),
+    };
+    f.start.mockImplementation(async (spec, _signal, onDispatch) => {
+      expect(spec.arguments.slice(0, 3)).toEqual(["app-server", "--listen", "stdio://"]);
+      expect(spec.interactiveStdin).toBe(true);
+      expect(spec).not.toHaveProperty("standardInput");
+      onDispatch?.();
+      return {
+        requestId: f.exit.requestId,
+        processId: 17,
+        stdin,
+        stdout,
+        stderr,
+        exited: completed.promise,
+        completed: completed.promise,
+        terminate: f.terminate,
+      };
+    });
+    const input: StaticModelJsonInput = {
+      workspace: f.input.workspace,
+      signal: f.input.signal,
+      usageContext: { taskId: f.input.task.id, attemptId: f.input.attempt.id, purpose: "analysis" },
+      prompt: "Return the controlled passive proposal as structured JSON.",
+      schema: InvestigationModelEditsV1Schema,
+      hardTimeoutMs: 30_000,
+      maximumResultBytes: 1024 * 1024,
+      invocationBudget: { remainingTokens: 100, deadlineAtMs: Date.now() + 30_000 },
+    };
+    return {
+      f,
+      input,
+      runner: createStaticModelJsonRunner(f.options),
+      diagnostics,
+      requests,
+      stdin,
+      turnStarted: turnStarted.promise,
+      interrupted: interrupted.promise,
+      inputClosed: inputClosed.promise,
+      processExited: () => processExited,
+      usage: (inputTokens: number, outputTokens: number) =>
+        notification("thread/tokenUsage/updated", {
+          tokenUsage: {
+            total: {
+              inputTokens,
+              outputTokens,
+              cachedInputTokens: 7,
+              reasoningOutputTokens: 0,
+              totalTokens: inputTokens + outputTokens,
+            },
+          },
+        }),
+      finalMessage: () =>
+        notification("item/completed", {
+          item: {
+            id: "controlled-final-answer",
+            type: "agentMessage",
+            phase: "final_answer",
+            text: JSON.stringify(proposal),
+          },
+        }),
+      completeTurn: () =>
+        notification("turn/completed", {
+          turn: { id: turnId, status: "completed", items: [] },
+        }),
+      finishProcess: (stdoutError?: Error) => {
+        if (processExited) return;
+        processExited = true;
+        if (stdoutError === undefined) stdout.end();
+        else stdout.destroy(stdoutError);
+        stderr.end();
+        completed.resolve(f.exit);
+      },
+    };
+  }
+
+  async function trackedFixture() {
+    const directory = await mkdtemp(join(tmpdir(), "runner-app-server-usage-"));
+    const receipts: InvestigationModelInvocationReceipt[] = [];
+    const partialRecorded = Promise.withResolvers<void>();
+    const journal = new InvestigationModelUsageJournal({
+      directory,
+      createInvocationId: () => "controlled-app-server-call",
+      deliver: async (receipt) => {
+        receipts.push(receipt);
+        if (receipt.completeness === "partial") partialRecorded.resolve();
+      },
+    });
+    return {
+      ...appServerFixture(journal),
+      directory,
+      receipts,
+      partialRecorded: partialRecorded.promise,
+    };
+  }
+
+  it("interrupts an alive over-budget turn, drains it, and retains the actual excess usage", async () => {
+    const f = await trackedFixture();
+    const onUsage = vi.fn();
+    let settled = false;
+    const execution = f.runner.execute({ ...f.input, onUsage }).then(
+      (value) => {
+        settled = true;
+        return { value };
+      },
+      (error: unknown) => {
+        settled = true;
+        return { error };
+      },
+    );
+    try {
+      await f.turnStarted;
+      f.finalMessage();
+      f.usage(80, 45);
+      await Promise.all([f.interrupted, f.partialRecorded, f.inputClosed]);
+      expect(f.processExited()).toBe(false);
+      expect(settled).toBe(false);
+      expect(f.f.io.removeDirectory).not.toHaveBeenCalled();
+      expect(f.receipts.at(-1)).toMatchObject({
+        state: "running",
+        completeness: "partial",
+        usage: { inputTokens: 80, outputTokens: 45, totalTokens: 125 },
+      });
+      expect(onUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ tokens: 125, source: "cli", completeness: "partial" }),
+      );
+      expect(f.requests.filter((request) => request.method === "turn/interrupt")).toEqual([
+        expect.objectContaining({
+          params: { threadId: "controlled-thread", turnId: "controlled-turn" },
+        }),
+      ]);
+      f.finishProcess();
+      await expect(execution).resolves.toMatchObject({
+        error: { code: "MODEL_BUDGET_EXCEEDED", kind: "tokens" },
+      });
+      expect(f.receipts.at(-1)).toMatchObject({
+        state: "failed",
+        disposition: "rejected",
+        completeness: "partial",
+        usage: { totalTokens: 125 },
+      });
+      expect(f.receipts.some((receipt) => receipt.completeness === "complete")).toBe(false);
+      expect(f.diagnostics).toHaveBeenLastCalledWith(
+        expect.objectContaining({ cleanupConfirmed: true }),
+      );
+      expect(f.f.io.removeDirectory).toHaveBeenCalledOnce();
+    } finally {
+      f.finishProcess();
+      await execution;
+      await rm(f.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts final JSON only after turn completion and drain, with streamed usage kept partial", async () => {
+    const f = await trackedFixture();
+    let settled = false;
+    const execution = f.runner.execute(f.input).then(
+      (value) => {
+        settled = true;
+        return { value };
+      },
+      (error: unknown) => {
+        settled = true;
+        return { error };
+      },
+    );
+    try {
+      await f.turnStarted;
+      expect(f.requests.map((request) => request.method)).toEqual([
+        "initialize",
+        "initialized",
+        "thread/start",
+        "turn/start",
+      ]);
+      expect(f.requests.filter((request) => request.method.endsWith("/start"))).toEqual([
+        expect.objectContaining({
+          method: "thread/start",
+          params: expect.objectContaining({ model: "gpt-6-luna" }),
+        }),
+        expect.objectContaining({
+          method: "turn/start",
+          params: expect.objectContaining({ model: "gpt-6-luna" }),
+        }),
+      ]);
+      f.usage(31, 9);
+      await f.partialRecorded;
+      expect(f.receipts.at(-1)).toMatchObject({
+        state: "running",
+        completeness: "partial",
+        usage: { totalTokens: 40 },
+      });
+      expect(f.processExited()).toBe(false);
+      expect(f.stdin.close).not.toHaveBeenCalled();
+      f.finalMessage();
+      f.usage(31, 19);
+      f.completeTurn();
+      await f.inputClosed;
+      expect(f.stdin.close).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      expect(f.receipts.some((receipt) => receipt.completeness === "complete")).toBe(false);
+      expect(f.f.io.removeDirectory).not.toHaveBeenCalled();
+      f.finishProcess();
+      await expect(execution).resolves.toMatchObject({
+        value: {
+          value: proposal,
+          usage: {
+            tokens: 50,
+            source: "cli",
+            completeness: "complete",
+            details: { totalTokens: 50, cachedReadTokens: 7 },
+          },
+        },
+      });
+      expect(f.receipts.at(-1)).toMatchObject({
+        state: "completed",
+        completeness: "complete",
+        usage: { totalTokens: 50 },
+      });
+      expect(f.requests.some((request) => request.method === "turn/interrupt")).toBe(false);
+      expect(f.f.terminate).not.toHaveBeenCalled();
+      expect(f.f.io.removeDirectory).toHaveBeenCalledOnce();
+    } finally {
+      f.finishProcess();
+      await execution;
+      await rm(f.directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["tokens", "duration"] as const)(
+    "does not dispatch an exhausted %s allowance",
+    async (kind) => {
+      const f = appServerFixture();
+      const onUsage = vi.fn();
+      await expect(
+        f.runner.execute({
+          ...f.input,
+          onUsage,
+          invocationBudget: {
+            remainingTokens: kind === "tokens" ? 0 : 100,
+            deadlineAtMs: kind === "duration" ? Date.now() - 1 : Date.now() + 30_000,
+          },
+        }),
+      ).rejects.toMatchObject({ code: "MODEL_BUDGET_EXCEEDED", kind });
+      expect(f.f.start).not.toHaveBeenCalled();
+      expect(f.f.io.createPrivateDirectory).not.toHaveBeenCalled();
+      expect(f.stdin.write).not.toHaveBeenCalled();
+      expect(onUsage).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps an unconfirmed stream drain visible instead of masking it with the token budget", async () => {
+    const f = await trackedFixture();
+    const execution = f.runner.execute(f.input).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    try {
+      await f.turnStarted;
+      f.usage(80, 45);
+      await Promise.all([f.interrupted, f.partialRecorded, f.inputClosed]);
+      f.finishProcess(new Error("The controlled stdout drain failed."));
+      const errors: unknown[] = [await execution];
+      for (let index = 0; index < errors.length; index++) {
+        const error = errors[index];
+        if (error instanceof AggregateError) errors.push(...error.errors);
+      }
+      expect(
+        errors.some(
+          (error) =>
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "MODEL_PROCESS_CLEANUP_UNCONFIRMED",
+        ),
+      ).toBe(true);
+      expect(f.f.io.removeDirectory).not.toHaveBeenCalled();
+      expect(f.receipts.at(-1)).toMatchObject({
+        state: "failed",
+        disposition: "rejected",
+        completeness: "partial",
+        usage: { totalTokens: 125 },
+      });
+      expect(f.diagnostics).toHaveBeenLastCalledWith(
+        expect.objectContaining({ cleanupConfirmed: false }),
+      );
+    } finally {
+      f.finishProcess();
+      await execution;
+      await rm(f.directory, { recursive: true, force: true });
     }
   });
 });

@@ -32,6 +32,7 @@ export interface InvestigationWorkerRuntimeConfig {
   readonly cli: InvestigationExecutableConfiguration & {
     readonly engine: CliEngine;
     readonly model?: string;
+    readonly codexTransport?: "exec" | "app-server";
   };
   readonly allowedRepositories: readonly string[];
   readonly supportedKinds: readonly InvestigationTaskKind[];
@@ -144,6 +145,12 @@ export function loadInvestigationWorkerRuntimeConfig(
   if (engine !== "codex" && engine !== "copilot")
     throw invalid("CLI_ENGINE", "must be codex or copilot");
   const model = value("CLI_MODEL");
+  const codexTransport = value("CODEX_TRANSPORT");
+  if (
+    codexTransport !== undefined &&
+    (engine !== "codex" || !["exec", "app-server"].includes(codexTransport))
+  )
+    throw invalid("CODEX_TRANSPORT", "must be exec or app-server and requires the Codex engine");
   if (model !== undefined && (text(model, "CLI_MODEL").length > 256 || model.includes(workerToken)))
     throw invalid("CLI_MODEL", "must be a bounded non-secret model identifier");
   const osRoot = text(environment.SYSTEMROOT ?? environment.SystemRoot, "SYSTEMROOT");
@@ -354,7 +361,14 @@ export function loadInvestigationWorkerRuntimeConfig(
     trustedExecutableRoot,
     processHost,
     git,
-    cli: { ...cliBinary, engine, ...(model === undefined ? {} : { model }) },
+    cli: {
+      ...cliBinary,
+      engine,
+      ...(model === undefined ? {} : { model }),
+      ...(codexTransport === undefined
+        ? {}
+        : { codexTransport: codexTransport as "exec" | "app-server" }),
+    },
     allowedRepositories,
     supportedKinds: roleKinds as InvestigationTaskKind[],
     maximumConcurrentTasks: maximumConcurrentStaticTasks,

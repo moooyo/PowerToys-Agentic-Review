@@ -25,6 +25,7 @@ import {
 } from "./attempt-heartbeat.js";
 import type { E2eAgentRunner } from "./e2e-agent-runner.js";
 import type { InvestigationWorkerClient } from "./http-client.js";
+import { findModelBudgetExceeded } from "./model-budget.js";
 import { safeModelOutputValidationMessage } from "./model-output-diagnostics.js";
 import {
   getModelOutputCorrection,
@@ -125,6 +126,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
       claim.task.kind === "pr-e2e" ? this.options.e2eAgentRunner : this.options.modelTurnRunner;
     const budget = new AbortController();
     const remainingDuration = claim.task.budget.maxDurationMs - checkpoint.consumed.durationMs;
+    const deadlineAtMs = this.#now() + remainingDuration;
     const deadline = setTimeout(
       () =>
         budget.abort(
@@ -302,6 +304,13 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
               processHost: this.options.processHost,
               signal: executionSignal,
               usageLease: claim.lease,
+              invocationBudget: {
+                remainingTokens: Math.max(
+                  0,
+                  claim.task.budget.maxTokens - checkpoint.consumed.tokens,
+                ),
+                deadlineAtMs,
+              },
               onStepStarted: async (event) => {
                 await accepted({
                   kind: "execution",
@@ -420,6 +429,13 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             onUsage: observeUsage,
             onActivity: progress.onActivity,
             usageLease: claim.lease,
+            invocationBudget: {
+              remainingTokens: Math.max(
+                0,
+                claim.task.budget.maxTokens - checkpoint.consumed.tokens,
+              ),
+              deadlineAtMs,
+            },
             ...(correction === undefined ? {} : { correction }),
           };
           let e2eOutcome: InvestigationOutcome | undefined;
@@ -621,7 +637,15 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         cleanupConfirmed = false;
         this.options.onNodeFault?.(processFault);
       }
-      const stop = classifyStop(executionSignal.aborted ? executionSignal.reason : error);
+      const stop =
+        processFault !== null
+          ? {
+              outcome: "failed" as const,
+              code: processFault,
+              message:
+                "Owned execution cleanup was not confirmed; its resources remain quarantined.",
+            }
+          : classifyStop(executionSignal.aborted ? executionSignal.reason : error);
       outcome = stop.outcome;
       terminalDiagnostics.push(
         this.#diagnostic(stop.code, stop.message, outcome === "blocked" ? "blocker" : "error"),
@@ -637,7 +661,9 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         const reason =
           outcome === "failed"
             ? "error"
-            : outcome === "interrupted" && checkpoint.stopReason === "budget_exhausted"
+            : outcome === "interrupted" &&
+                (checkpoint.stopReason === "budget_exhausted" ||
+                  terminalDiagnostics.some((diagnostic) => diagnostic.code === "BUDGET_EXHAUSTED"))
               ? "budget_exhausted"
               : outcome;
         const response = await this.#withRetry(
@@ -843,6 +869,9 @@ function classifyStop(error: unknown): {
   readonly code: string;
   readonly message: string;
 } {
+  const budget = findModelBudgetExceeded(error);
+  if (budget !== null)
+    return { outcome: "interrupted", code: "BUDGET_EXHAUSTED", message: budget.message };
   const validationMessage = safeModelOutputValidationMessage(error);
   if (validationMessage !== null)
     return {
@@ -883,6 +912,13 @@ function classifyStop(error: unknown): {
         "The server cancelled the task before accepting further work; the last accepted checkpoint was retained.",
     };
   }
+  if (code === "MODEL_USAGE_UNAVAILABLE")
+    return {
+      outcome: "interrupted",
+      code,
+      message:
+        "Reliable in-flight model accounting became unavailable; retained usage remains partial and no further call was admitted.",
+    };
   const submodulePrerequisites: Readonly<Record<string, string>> = {
     SOURCE_SUBMODULE_UNAVAILABLE:
       "A pinned Git submodule could not be acquired from its recorded public repository. Restore access to the exact dependency commit before resuming.",

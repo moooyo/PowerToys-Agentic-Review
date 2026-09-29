@@ -34,6 +34,7 @@ import {
   type ProcessHostClient,
   type ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
+import { ModelBudgetExceededError, type ModelInvocationBudget } from "./model-budget.js";
 import type { PreparedInvestigationWorkspace } from "./workspace.js";
 
 export type {
@@ -62,6 +63,7 @@ export interface InvestigationPlanExecutorInput {
 
 export interface InvestigationPlanExecutorContext {
   readonly usageLease?: InvestigationWorkerLease;
+  readonly invocationBudget?: ModelInvocationBudget;
   readonly processHost: ProcessHostClient;
   readonly signal: AbortSignal;
   readonly onProgress?: () => void;
@@ -127,6 +129,7 @@ export interface InvestigationModelEditAdapter {
     },
     context: {
       readonly usageLease?: InvestigationWorkerLease;
+      readonly invocationBudget?: ModelInvocationBudget;
       readonly signal: AbortSignal;
       readonly processHost: ProcessHostClient;
       readonly onProgress?: () => void;
@@ -213,6 +216,7 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
       0,
     );
     let consumedTokens = input.consumedTokens ?? priorModelTokens;
+    const initialConsumedTokens = consumedTokens;
     const result = (
       outcome: InvestigationOutcome,
       diagnostics: readonly InvestigationDiagnostic[] = [],
@@ -296,14 +300,29 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
       const step = plan.steps.find((candidate) => candidate.id === executable.stepId);
       if (step === undefined)
         return block("PLAN_STEP_MISSING", "The executable step is absent from the saved plan.");
-      if (
-        executable.operation.kind === "model-edit" &&
-        consumedTokens >= input.task.budget.maxTokens
-      )
-        return block(
-          "PLAN_MODEL_TOKEN_BUDGET_EXCEEDED",
-          "The task has no model token budget remaining for this edit step.",
-        );
+      const invocationBudget =
+        context.invocationBudget === undefined
+          ? undefined
+          : {
+              remainingTokens: Math.max(
+                0,
+                Math.min(
+                  input.task.budget.maxTokens - consumedTokens,
+                  context.invocationBudget.remainingTokens -
+                    (consumedTokens - initialConsumedTokens),
+                ),
+              ),
+              deadlineAtMs: context.invocationBudget.deadlineAtMs,
+            };
+      if (executable.operation.kind === "model-edit") {
+        if (invocationBudget !== undefined && invocationBudget.remainingTokens <= 0)
+          throw new ModelBudgetExceededError("tokens");
+        if (consumedTokens >= input.task.budget.maxTokens)
+          return block(
+            "PLAN_MODEL_TOKEN_BUDGET_EXCEEDED",
+            "The task has no model token budget remaining for this edit step.",
+          );
+      }
       await input.workspace.assertIntegrity();
       await input.workspace.assertSourceBinding();
       const started: InvestigationPlanStepStarted = {
@@ -317,7 +336,11 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
       };
       await context.onStepStarted(structuredClone(started));
       state.startedSteps.push(started);
-      let observation = await this.observeStep(executable, { ...input, consumedTokens }, context);
+      let observation = await this.observeStep(
+        executable,
+        { ...input, consumedTokens },
+        invocationBudget === undefined ? context : { ...context, invocationBudget },
+      );
       if (observation.modelUsage !== undefined) consumedTokens += observation.modelUsage.tokens;
       context.signal.throwIfAborted();
       await input.workspace.assertIntegrity();
@@ -558,6 +581,9 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
           signal: context.signal,
           processHost: context.processHost,
           ...(context.usageLease === undefined ? {} : { usageLease: context.usageLease }),
+          ...(context.invocationBudget === undefined
+            ? {}
+            : { invocationBudget: context.invocationBudget }),
           ...(context.onProgress === undefined ? {} : { onProgress: context.onProgress }),
         },
       );
