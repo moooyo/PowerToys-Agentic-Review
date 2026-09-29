@@ -5,11 +5,23 @@ param(
 )
 
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
+
+function Read-OperationsControlJson([string]$Path) {
+    # Status replacement and consumed-request removal must remain possible during reads.
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+    try {
+        $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true))
+        try { return ($reader.ReadToEnd() | ConvertFrom-Json) }
+        finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
 $loaded = Get-OperationsConfiguration $ConfigPath
 $config = $loaded.Value
 $statusPath = Join-Path $config.stateDirectory 'status.json'
 Assert-OperationsPath $statusPath
-try { $status = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { throw 'The private supervisor status could not be read.' }
+try { $status = Read-OperationsControlJson $statusPath } catch { throw 'The private supervisor status could not be read.' }
 if ($status.schemaVersion -ne 1 -or $status.instanceId -cnotmatch '^[0-9a-f-]{36}$' -or $status.taskName -cne $config.taskName -or $status.role -cne $config.role) {
     throw 'The supervisor status does not match this task configuration.'
 }
@@ -36,7 +48,7 @@ if (-not $published) {
     $saved = $null
     try {
         Assert-OperationsPath $requestPath
-        $saved = Get-Content -LiteralPath $requestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $saved = Read-OperationsControlJson $requestPath
     } catch {
         # A completed supervisor removes its consumed request. The status below is authoritative.
         if (Test-Path -LiteralPath $requestPath) { throw 'The existing stop request could not be read safely.' }
@@ -48,7 +60,7 @@ if (-not $published) {
 $deadline = [DateTime]::UtcNow.AddSeconds($WaitTimeoutSeconds)
 while ([DateTime]::UtcNow -lt $deadline) {
     Start-Sleep -Milliseconds 500
-    try { $latest = Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
+    try { $latest = Read-OperationsControlJson $statusPath } catch { continue }
     if ($latest.instanceId -cne $status.instanceId) { throw 'The supervisor generation changed while waiting for shutdown.' }
     if ($latest.state -eq 'stopped') { Write-Output 'Cooperative shutdown completed.'; return }
     if ($latest.state -in @('failed', 'shutdown-timeout', 'recovery-required')) {

@@ -205,6 +205,33 @@ export function restartDelayMilliseconds(config, restartNumber) {
   );
 }
 
+const statusRenameRetryDelaysMs = [10, 25, 50, 100, 200, 400, 800];
+const statusRenameWait = new Int32Array(new SharedArrayBuffer(4));
+
+/** Readers without Windows delete sharing can briefly block an otherwise atomic replacement. */
+export function replaceStatusFile(
+  temporary,
+  statusPath,
+  { rename = renameSync, wait = (ms) => Atomics.wait(statusRenameWait, 0, 0, ms) } = {},
+) {
+  const retryCodes = [];
+  for (;;) {
+    try {
+      rename(temporary, statusPath);
+      return retryCodes;
+    } catch (error) {
+      if (
+        !["EACCES", "EPERM"].includes(error?.code) ||
+        retryCodes.length >= statusRenameRetryDelaysMs.length
+      )
+        throw error;
+      const delay = statusRenameRetryDelaysMs[retryCodes.length];
+      retryCodes.push(error.code);
+      wait(delay);
+    }
+  }
+}
+
 function readJson(path) {
   const bytes = readFileSync(path);
   if (bytes.length > 1024 * 1024) fail("An operations control file exceeds its limit.");
@@ -388,14 +415,34 @@ export async function runSupervisor(configurationPath) {
   };
   let persistenceFailed = false;
   let onPersistenceFailure = () => {};
+  const statusDiagnostic = (message, failure = false) => {
+    try {
+      log.write(message);
+    } catch {
+      // Diagnostics must not replace the original status persistence failure.
+    }
+    if (failure) console.error(message);
+    else console.log(message);
+  };
   const save = (next) => {
     Object.assign(state, next, { updatedAt: new Date().toISOString() });
     const temporary = `${statusPath}.${instanceId}.tmp`;
+    let phase = "write";
     try {
       writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600, flush: true });
-      renameSync(temporary, statusPath);
+      phase = "rename";
+      const retryCodes = replaceStatusFile(temporary, statusPath);
+      if (retryCodes.length > 0)
+        statusDiagnostic(
+          `Supervisor status persistence recovered: phase=rename codes=${retryCodes.join(",")} retries=${retryCodes.length}.`,
+        );
       return true;
-    } catch {
+    } catch (error) {
+      const code =
+        typeof error?.code === "string" && /^[A-Z0-9_]{1,40}$/u.test(error.code)
+          ? error.code
+          : "UNKNOWN";
+      statusDiagnostic(`Supervisor status persistence failed: phase=${phase} code=${code}.`, true);
       if (!persistenceFailed) {
         persistenceFailed = true;
         onPersistenceFailure();
