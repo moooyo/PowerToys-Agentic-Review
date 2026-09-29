@@ -77,6 +77,27 @@ export function getE2eBuildCapturedOutput(error: E2eBuildError): E2eBuildCapture
   return output === undefined ? null : structuredClone(output);
 }
 
+export interface E2eBuildArtifactDiagnostics {
+  readonly schemaVersion: "E2eBuildArtifactDiagnosticsV1";
+  readonly phase: "manifest_capture" | "output_tree_validation" | "artifact_validation";
+  readonly relativePath: string;
+  readonly kind: "file" | "directory";
+  readonly changedFields: readonly string[];
+  readonly expected: Readonly<Record<string, string | null>> | null;
+  readonly actual: Readonly<Record<string, string | null>> | null;
+  readonly actualSha256Status: "captured" | "unavailable" | "size_limit" | "not_file";
+  readonly sha256LimitBytes: number;
+}
+
+// Filesystem details belong in a private artifact, not the model's diagnostic preview.
+const artifactDiagnostics = new WeakMap<E2eBuildError, E2eBuildArtifactDiagnostics>();
+export function getE2eBuildArtifactDiagnostics(
+  error: E2eBuildError,
+): E2eBuildArtifactDiagnostics | null {
+  const diagnostic = artifactDiagnostics.get(error);
+  return diagnostic === undefined ? null : structuredClone(diagnostic);
+}
+
 export interface E2eBuildRequest {
   readonly tool: "msbuild" | "dotnet";
   readonly projectPath: string;
@@ -451,9 +472,16 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
       requestedPaths.has(key),
     );
     if (!sameFile(file.stat, observation.stat))
-      throw failure(
-        "E2E_BUILD_ARTIFACT_INVALID",
+      throw await artifactChangeFailure(
         "The output tree changed while its manifest was being captured.",
+        "manifest_capture",
+        file.relativePath,
+        "file",
+        file.stat,
+        observation.stat,
+        file.path,
+        undefined,
+        observation.artifact.digest,
       );
     manifest.set(key, observation);
   }
@@ -468,7 +496,12 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
       );
     observations.set(key, observation);
   }
-  assertSameOutputTree(outputTree, await readOutputTree(outputDirectory));
+  await assertSameOutputTree(
+    outputTree,
+    await readOutputTree(outputDirectory),
+    outputDirectory,
+    manifest,
+  );
   await assertDirectoryIdentities(directoryIdentities);
   input.signal.throwIfAborted();
   const fields = {
@@ -559,9 +592,16 @@ async function validateBuildFile(
     expected.artifact.digest !== observed.artifact.digest ||
     expected.artifact.byteLength !== observed.artifact.byteLength
   )
-    throw failure(
-      "E2E_BUILD_ARTIFACT_INVALID",
+    throw await artifactChangeFailure(
       "The build artifact changed after the compiler completed.",
+      "artifact_validation",
+      expected.artifact.relativePath,
+      "file",
+      expected.stat,
+      observed.stat,
+      expected.artifact.path,
+      expected.artifact.digest,
+      observed.artifact.digest,
     );
   return expected.artifact;
 }
@@ -1174,15 +1214,12 @@ async function readOutputTree(outputDirectory: string): Promise<OutputTree> {
   }
 }
 
-function assertSameOutputTree(expected: OutputTree, actual: OutputTree): void {
-  if (
-    expected.files.size !== actual.files.size ||
-    expected.directories.size !== actual.directories.size
-  )
-    throw failure(
-      "E2E_BUILD_ARTIFACT_INVALID",
-      "Files or directories were added to or removed from the build output.",
-    );
+async function assertSameOutputTree(
+  expected: OutputTree,
+  actual: OutputTree,
+  outputDirectory: string,
+  manifest: ReadonlyMap<string, ArtifactObservation>,
+): Promise<void> {
   for (const [key, original] of expected.files) {
     const observed = actual.files.get(key);
     if (
@@ -1190,34 +1227,162 @@ function assertSameOutputTree(expected: OutputTree, actual: OutputTree): void {
       observed.relativePath !== original.relativePath ||
       !sameFile(original.stat, observed.stat)
     )
-      throw failure(
-        "E2E_BUILD_ARTIFACT_INVALID",
+      throw await artifactChangeFailure(
         "A file in the complete build output manifest changed.",
+        "output_tree_validation",
+        original.relativePath,
+        "file",
+        original.stat,
+        observed?.stat,
+        observed?.path,
+        manifest.get(key)?.artifact.digest,
+        undefined,
+        observed !== undefined && observed.relativePath !== original.relativePath
+          ? ["relativePath"]
+          : [],
+      );
+  }
+  for (const [key, observed] of actual.files) {
+    if (!expected.files.has(key))
+      throw await artifactChangeFailure(
+        "Files or directories were added to or removed from the build output.",
+        "output_tree_validation",
+        observed.relativePath,
+        "file",
+        undefined,
+        observed.stat,
+        observed.path,
       );
   }
   for (const [key, original] of expected.directories) {
     const observed = actual.directories.get(key);
     if (observed === undefined || !sameDirectory(original, observed))
-      throw failure(
-        "E2E_BUILD_ARTIFACT_INVALID",
+      throw await artifactChangeFailure(
         "A directory in the complete build output manifest changed.",
+        "output_tree_validation",
+        win32.relative(outputDirectory, key).replaceAll("\\", "/") || ".",
+        "directory",
+        original,
+        observed,
+      );
+  }
+  for (const [key, observed] of actual.directories) {
+    if (!expected.directories.has(key))
+      throw await artifactChangeFailure(
+        "Files or directories were added to or removed from the build output.",
+        "output_tree_validation",
+        win32.relative(outputDirectory, key).replaceAll("\\", "/") || ".",
+        "directory",
+        undefined,
+        observed,
       );
   }
 }
 
 async function assertOutputManifest(provenance: BuildProvenance): Promise<void> {
   const observed = await readOutputTree(provenance.outputDirectory);
-  assertSameOutputTree(provenance.outputTree, observed);
+  await assertSameOutputTree(
+    provenance.outputTree,
+    observed,
+    provenance.outputDirectory,
+    provenance.manifest,
+  );
   // Initial hashes are bound to exact file identities and change times. Unchanged metadata
   // avoids rehashing every dependency on each interaction; any change fails closed.
   for (const [key, original] of provenance.manifest) {
     const file = observed.files.get(key);
     if (file === undefined || !sameFile(original.stat, file.stat))
-      throw failure(
-        "E2E_BUILD_ARTIFACT_INVALID",
+      throw await artifactChangeFailure(
         "A hashed build dependency changed after manifest capture.",
+        "output_tree_validation",
+        original.artifact.relativePath,
+        "file",
+        original.stat,
+        file?.stat,
+        file?.path,
+        original.artifact.digest,
       );
   }
+}
+
+async function artifactChangeFailure(
+  message: string,
+  phase: E2eBuildArtifactDiagnostics["phase"],
+  relativePath: string,
+  kind: E2eBuildArtifactDiagnostics["kind"],
+  expected: BigIntStats | undefined,
+  actual: BigIntStats | undefined,
+  path?: string,
+  expectedSha256?: string,
+  actualSha256?: string,
+  extraChangedFields: readonly string[] = [],
+): Promise<E2eBuildError> {
+  const sha256LimitBytes = 16 * 1024 * 1024;
+  let actualSha256Status: E2eBuildArtifactDiagnostics["actualSha256Status"] = "not_file";
+  if (kind === "file" && actual !== undefined) {
+    actualSha256Status = actualSha256 === undefined ? "unavailable" : "captured";
+    if (actualSha256 === undefined && path !== undefined) {
+      if (actual.size > BigInt(sha256LimitBytes)) actualSha256Status = "size_limit";
+      else {
+        try {
+          const observed = await observeArtifact(
+            path,
+            relativePath,
+            0n,
+            0n,
+            false,
+            false,
+            sha256LimitBytes,
+          );
+          if (sameFile(actual, observed.stat)) {
+            actualSha256 = observed.artifact.digest;
+            actualSha256Status = "captured";
+          }
+        } catch {
+          // A failed diagnostic read must preserve the original validation failure.
+        }
+      }
+    }
+  }
+  const snapshot = (
+    stat: BigIntStats | undefined,
+    digest: string | undefined,
+  ): Readonly<Record<string, string | null>> | null =>
+    stat === undefined
+      ? null
+      : {
+          dev: stat.dev.toString(),
+          ino: stat.ino.toString(),
+          size: stat.size.toString(),
+          nlink: stat.nlink.toString(),
+          mtimeNs: stat.mtimeNs.toString(),
+          ctimeNs: stat.ctimeNs.toString(),
+          birthtimeNs: stat.birthtimeNs.toString(),
+          sha256: digest ?? null,
+        };
+  const before = snapshot(expected, expectedSha256);
+  const after = snapshot(actual, actualSha256);
+  const changedFields =
+    before === null || after === null
+      ? ["presence"]
+      : Object.keys(before).filter(
+          (field) =>
+            before[field] !== after[field] &&
+            (field !== "sha256" || (before.sha256 !== null && after.sha256 !== null)),
+        );
+  const error = failure("E2E_BUILD_ARTIFACT_INVALID", message);
+  artifactDiagnostics.set(error, {
+    schemaVersion: "E2eBuildArtifactDiagnosticsV1",
+    phase,
+    relativePath: relativePath.slice(0, 1024),
+    kind,
+    changedFields: [...extraChangedFields, ...changedFields],
+    expected: before,
+    actual: after,
+    actualSha256Status,
+    sha256LimitBytes,
+  });
+  return error;
 }
 
 function outputManifestDigest(manifest: ReadonlyMap<string, ArtifactObservation>): string {
@@ -1236,6 +1401,7 @@ async function observeArtifact(
   completedAtNs: bigint,
   enforceBuildWindow = true,
   allowTrustedBinaryHardlinks = false,
+  maximumBytes = Number.MAX_SAFE_INTEGER,
 ): Promise<ArtifactObservation> {
   try {
     await directoryChain(win32.dirname(path));
@@ -1246,7 +1412,7 @@ async function observeArtifact(
       !samePath(await realpath(path), path) ||
       (allowTrustedBinaryHardlinks ? original.nlink < 1n : original.nlink !== 1n) ||
       original.size < 0n ||
-      original.size > BigInt(Number.MAX_SAFE_INTEGER) ||
+      original.size > BigInt(maximumBytes) ||
       (enforceBuildWindow &&
         (original.size === 0n ||
           original.mtimeNs < startedAtNs ||

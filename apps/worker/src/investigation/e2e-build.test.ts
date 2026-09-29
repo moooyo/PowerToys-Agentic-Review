@@ -25,8 +25,10 @@ import type {
 } from "../execution/process-host-protocol.js";
 import {
   describeE2eBuildFailure,
+  E2eBuildError,
   type E2eBuildRecord,
   type E2eBuildRequest,
+  getE2eBuildArtifactDiagnostics,
   getE2eBuildCapturedOutput,
   parseE2eMsbuildToolchain,
   performE2eBuild,
@@ -1402,6 +1404,83 @@ describe.skipIf(process.platform !== "win32")("E2E build provenance", () => {
 });
 
 describe.skipIf(process.platform !== "win32")("E2E build output tree integrity", () => {
+  it("retains the first changed dependency's metadata and hashes separately from the error preview", async () => {
+    const f = await applicationFixture();
+    const record = await performE2eBuild(f.input);
+    const path = win32.join(win32.dirname(record.artifacts[0]!.path), "App.dll");
+    const content = Buffer.from("Modified dependency content.");
+    await writeFile(path, content);
+    const error = await validateE2eBuildArtifact(record, "App.exe").catch(
+      (value: unknown) => value,
+    );
+    expect(error).toBeInstanceOf(E2eBuildError);
+    const diagnostic = getE2eBuildArtifactDiagnostics(error as E2eBuildError)!;
+    expect(diagnostic).toMatchObject({
+      schemaVersion: "E2eBuildArtifactDiagnosticsV1",
+      phase: "output_tree_validation",
+      relativePath: "App.dll",
+      kind: "file",
+      changedFields: expect.arrayContaining(["size", "sha256"]),
+      expected: {
+        size: String(applicationFiles["App.dll"].byteLength),
+        sha256: digest(applicationFiles["App.dll"]),
+      },
+      actual: { size: String(content.byteLength), sha256: digest(content) },
+      actualSha256Status: "captured",
+    });
+    expect(JSON.stringify(error)).not.toContain("App.dll");
+    expect(JSON.stringify(diagnostic)).not.toContain(f.root);
+    expect((error as E2eBuildError).diagnostics).toBeUndefined();
+    expect(diagnostic).not.toBe(getE2eBuildArtifactDiagnostics(error as E2eBuildError));
+  });
+
+  it("identifies a same-byte replacement without reporting a content change", async () => {
+    const f = await applicationFixture();
+    const record = await performE2eBuild(f.input);
+    const path = win32.join(win32.dirname(record.artifacts[0]!.path), "App.dll");
+    await rename(path, win32.join(f.root, "original-library.dll"));
+    await writeFile(path, applicationFiles["App.dll"], { flag: "wx" });
+    const error = await validateE2eBuildArtifact(record, "App.exe").catch(
+      (value: unknown) => value,
+    );
+    const diagnostic = getE2eBuildArtifactDiagnostics(error as E2eBuildError)!;
+    expect(diagnostic.changedFields).toContain("ino");
+    expect(diagnostic.changedFields).not.toContain("sha256");
+    expect(diagnostic.actual?.sha256).toBe(diagnostic.expected?.sha256);
+  });
+
+  it("records a removed dependency without attempting to hash a missing file", async () => {
+    const f = await applicationFixture();
+    const record = await performE2eBuild(f.input);
+    await rm(win32.join(win32.dirname(record.artifacts[0]!.path), "App.deps.json"));
+    const error = await validateE2eBuildArtifact(record, "App.exe").catch(
+      (value: unknown) => value,
+    );
+    expect(getE2eBuildArtifactDiagnostics(error as E2eBuildError)).toMatchObject({
+      relativePath: "App.deps.json",
+      changedFields: ["presence"],
+      expected: { sha256: digest(applicationFiles["App.deps.json"]) },
+      actual: null,
+      actualSha256Status: "not_file",
+    });
+  });
+
+  it("bounds diagnostic hashing when a changed dependency exceeds the capture limit", async () => {
+    const f = await applicationFixture();
+    const record = await performE2eBuild(f.input);
+    const path = win32.join(win32.dirname(record.artifacts[0]!.path), "App.dll");
+    await writeFile(path, Buffer.alloc(16 * 1024 * 1024 + 1));
+    const error = await validateE2eBuildArtifact(record, "App.exe").catch(
+      (value: unknown) => value,
+    );
+    expect(getE2eBuildArtifactDiagnostics(error as E2eBuildError)).toMatchObject({
+      relativePath: "App.dll",
+      actual: { sha256: null },
+      actualSha256Status: "size_limit",
+      sha256LimitBytes: 16 * 1024 * 1024,
+    });
+  });
+
   it("seals every output file while only issuing the requested executable for launch", async () => {
     const f = await applicationFixture();
     const record = await performE2eBuild(f.input);

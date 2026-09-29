@@ -25,6 +25,7 @@ import {
   type E2eBuildRecord,
   type E2eBuildRequest,
   type E2eMsbuildToolchain,
+  getE2eBuildArtifactDiagnostics,
   getE2eBuildCapturedOutput,
   performE2eBuild,
   validateE2eBuildArtifact,
@@ -645,7 +646,23 @@ export class E2eToolServer {
       this.options.signal.throwIfAborted();
       status = "blocked";
       let buildDiagnostics = error instanceof E2eBuildError ? error.diagnostics : undefined;
+      let buildArtifactDiagnostic: { readonly artifactRef: string } | undefined;
       if (error instanceof E2eBuildError) {
+        const diagnostic = getE2eBuildArtifactDiagnostics(error);
+        if (diagnostic !== null) {
+          const captured = await this.options.workspace.writeArtifact({
+            subjectRef: this.options.task.subjectRef,
+            kind: "log",
+            name: `e2e-build-artifact-diagnostic-${id}.json`,
+            mediaType: "application/json",
+            bytes: Buffer.from(
+              JSON.stringify(diagnostic).split(this.#token).join("[REDACTED]"),
+              "utf8",
+            ),
+          });
+          artifacts.push(captured);
+          buildArtifactDiagnostic = { artifactRef: captured.id };
+        }
         const output = getE2eBuildCapturedOutput(error);
         if (output !== null) {
           const captured = await this.options.workspace.writeArtifact({
@@ -691,6 +708,7 @@ export class E2eToolServer {
           ? { errorCode: error.code }
           : {}),
         ...(buildDiagnostics !== undefined ? { buildDiagnostics } : {}),
+        ...(buildArtifactDiagnostic !== undefined ? { buildArtifactDiagnostic } : {}),
       };
     }
     observed = JSON.parse(JSON.stringify(observed).split(this.#token).join("[REDACTED]"));

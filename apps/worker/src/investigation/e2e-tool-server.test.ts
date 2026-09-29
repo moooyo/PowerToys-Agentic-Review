@@ -97,6 +97,48 @@ function fixture(
 }
 
 describe("E2E tool authority", () => {
+  it("persists artifact mismatch details privately and returns only the artifact reference", async () => {
+    const failure = new build.E2eBuildError(
+      "E2E_BUILD_ARTIFACT_INVALID",
+      "A file in the complete build output manifest changed.",
+    );
+    const diagnostic: build.E2eBuildArtifactDiagnostics = {
+      schemaVersion: "E2eBuildArtifactDiagnosticsV1",
+      phase: "output_tree_validation",
+      relativePath: "private-output/Changed.dll",
+      kind: "file",
+      changedFields: ["ctimeNs"],
+      expected: { ctimeNs: "1", sha256: "a".repeat(64) },
+      actual: { ctimeNs: "2", sha256: "a".repeat(64) },
+      actualSha256Status: "captured",
+      sha256LimitBytes: 16 * 1024 * 1024,
+    };
+    const mocked = vi.spyOn(build, "performE2eBuild").mockRejectedValueOnce(failure);
+    const diagnosticMock = vi
+      .spyOn(build, "getE2eBuildArtifactDiagnostics")
+      .mockReturnValueOnce(diagnostic);
+    try {
+      const f = fixture();
+      const receipt = await f.server.execute({ operation: "build", request: {} });
+      expect(receipt.status).toBe("blocked");
+      expect(receipt.artifactRefs).toHaveLength(2);
+      const capturedInput = f.artifactInputs.find((entry) =>
+        entry.name.startsWith("e2e-build-artifact-diagnostic-"),
+      )!;
+      expect(JSON.parse(Buffer.from(capturedInput.bytes).toString("utf8"))).toEqual(diagnostic);
+      expect(receipt.observed).toMatchObject({
+        errorCode: "E2E_BUILD_ARTIFACT_INVALID",
+        buildArtifactDiagnostic: { artifactRef: receipt.artifactRefs[0] },
+      });
+      expect(JSON.stringify(receipt)).not.toContain(diagnostic.relativePath);
+      expect(JSON.stringify(f.server.evidence)).not.toContain(diagnostic.relativePath);
+      expect(f.onRuntimeObservation).toHaveBeenCalledOnce();
+    } finally {
+      mocked.mockRestore();
+      diagnosticMock.mockRestore();
+    }
+  });
+
   it("persists the bounded complete compiler transcript separately from the agent preview and checkpoints both artifacts", async () => {
     const stdout = `${"retained compiler detail\n".repeat(5000)}error C2653: missing namespace\n`;
     const failure = build.describeE2eBuildFailure(
