@@ -651,6 +651,37 @@ export function mergeModelTurnDelta(
       issues.add("finding_owner_required", path);
   }
   next.findings = next.findings.filter((finding) => !removed.has(finding.id));
+  const submittedCandidateIds = new Set(update.candidates.map((candidate) => candidate.id));
+  const visibleCandidateIds = new Set(projection.selectedCandidateIds);
+  const previousFindings = new Map(base.findings.map((finding) => [finding.id, finding]));
+  const updatedFindings = new Map(update.findings.map((finding) => [finding.id, finding]));
+  // An omitted visible owner keeps its substantive disposition while its version pointer
+  // follows an explicitly upgraded finding. Explicit model links remain authoritative input.
+  next.candidates = next.candidates.map((candidate) => {
+    if (
+      submittedCandidateIds.has(candidate.id) ||
+      !visibleCandidateIds.has(candidate.id) ||
+      candidate.findingId === null ||
+      !visibleFindingIds.has(candidate.findingId) ||
+      removed.has(candidate.findingId) ||
+      (candidate.status !== "confirmed" && candidate.status !== "unresolved")
+    )
+      return candidate;
+    const previous = previousFindings.get(candidate.findingId);
+    const updated = updatedFindings.get(candidate.findingId);
+    if (
+      previous === undefined ||
+      updated === undefined ||
+      candidate.findingVersion !== previous.version ||
+      updated.version <= previous.version ||
+      previous.subjectRef !== candidate.subjectRef ||
+      updated.subjectRef !== candidate.subjectRef ||
+      updated.confirmation.status !==
+        (candidate.status === "confirmed" ? "confirmed" : "hypothesis")
+    )
+      return candidate;
+    return { ...candidate, findingVersion: updated.version };
+  });
   if (update.summary !== null) next.summary = update.summary;
   if (update.assessment !== null) next.assessment = structuredClone(update.assessment);
   validateReferences(projection, delta, issues.add);

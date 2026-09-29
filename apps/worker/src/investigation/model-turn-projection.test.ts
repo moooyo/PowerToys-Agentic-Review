@@ -1073,6 +1073,116 @@ describe("bounded investigation model context", () => {
       }),
     ).toThrow(/current finding version/u);
   });
+
+  it("accepts an upgraded hypothesis recheck while maintaining an omitted visible owner version", () => {
+    const f = fixture(1);
+    f.checkpoint.analysis.findings[0]!.confirmation.status = "hypothesis";
+    f.checkpoint.analysis.candidates[0]!.status = "unresolved";
+    f.checkpoint.analysis.limitations.push({
+      id: "runtime-remains-unverified",
+      description: "The supplied snapshot does not include runtime evidence.",
+      impact: "The retained concern remains a hypothesis.",
+      evidenceRefs: [],
+    });
+    const checkpoint = seal(f.checkpoint);
+    const projection = prepareModelTurnProjection({
+      ...f,
+      checkpoint,
+      maximumContextBytes: 100 * 1024,
+    });
+    const originalCandidate = structuredClone(checkpoint.analysis.candidates[0]!);
+    const originalFinding = structuredClone(checkpoint.analysis.findings[0]!);
+    expect(originalFinding.version).toBe(1);
+    const delta = recheckDelta(projection);
+    delta.analysis.candidates = [];
+    delta.analysis.rechecks[0]!.unresolvedQuestions = [
+      "Does runtime evidence reproduce this reported concern?",
+    ];
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.candidates[0]).toEqual({ ...originalCandidate, findingVersion: 2 });
+    expect(delta.analysis.candidates).toEqual([]);
+    expect(projection.baseAnalysis.candidates[0]).toEqual(originalCandidate);
+    expect(projection.baseAnalysis.findings[0]).toEqual(originalFinding);
+    const accepted = applyInvestigationLoopRound(checkpoint, round, {
+      recordedAt: checkpoint.recordedAt,
+      usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+    });
+    expect(accepted.analysis.findings[0]!.version).toBe(2);
+    expect(accepted.analysis.rechecks).toContainEqual(delta.analysis.rechecks[0]);
+    expect(accepted.analysis.candidates[0]).toEqual({ ...originalCandidate, findingVersion: 2 });
+  });
+
+  it("does not repair an explicitly submitted stale owner version", () => {
+    const f = fixture(1);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    const delta = recheckDelta(projection);
+    delta.analysis.candidates = [structuredClone(projection.context.analysis.candidates[0]!)];
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.candidates[0]!.findingVersion).toBe(1);
+    expect(() =>
+      applyInvestigationLoopRound(f.checkpoint, round, {
+        recordedAt: f.checkpoint.recordedAt,
+        usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+      }),
+    ).toThrow(/current finding version/u);
+  });
+
+  it("does not change an omitted candidate disposition when the upgraded finding confirmation changes", () => {
+    const f = fixture(1);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 100 * 1024 });
+    const candidate = structuredClone(projection.context.analysis.candidates[0]!);
+    const delta = recheckDelta(projection);
+    delta.analysis.candidates = [];
+    delta.analysis.findings[0]!.confirmation.status =
+      candidate.status === "confirmed" ? "hypothesis" : "confirmed";
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.candidates[0]).toEqual(candidate);
+    expect(() =>
+      applyInvestigationLoopRound(f.checkpoint, round, {
+        recordedAt: f.checkpoint.recordedAt,
+        usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+      }),
+    ).toThrow(/current finding version/u);
+  });
+
+  it("does not maintain the version of an owner outside the visible batch", () => {
+    const f = fixture(1);
+    f.checkpoint.analysis.candidates.push({
+      ...f.checkpoint.analysis.candidates[0]!,
+      id: "hidden-owner",
+    });
+    const checkpoint = seal(f.checkpoint);
+    const full = prepareModelTurnProjection({ ...f, checkpoint, maximumContextBytes: 100 * 1024 });
+    const projection: ModelTurnProjection = {
+      ...full,
+      selectedCandidateIds: full.selectedCandidateIds.filter((id) => id !== "hidden-owner"),
+      context: {
+        ...full.context,
+        analysis: {
+          ...full.context.analysis,
+          candidates: full.context.analysis.candidates.filter(
+            (candidate) => candidate.id !== "hidden-owner",
+          ),
+        },
+      },
+    };
+    const delta = recheckDelta(projection);
+    delta.analysis.candidates = [];
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(
+      round.analysis.candidates.find((candidate) => candidate.id !== "hidden-owner")!
+        .findingVersion,
+    ).toBe(2);
+    expect(round.analysis.candidates.find((candidate) => candidate.id === "hidden-owner")).toEqual(
+      checkpoint.analysis.candidates.find((candidate) => candidate.id === "hidden-owner"),
+    );
+    expect(() =>
+      applyInvestigationLoopRound(checkpoint, round, {
+        recordedAt: checkpoint.recordedAt,
+        usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+      }),
+    ).toThrow(/current finding version/u);
+  });
   it("exposes the accepted consumption and clamped remaining budget without spending the next round", () => {
     const f = fixture(0);
     const budget = structuredClone(f.task.budget);
