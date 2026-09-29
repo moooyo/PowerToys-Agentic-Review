@@ -252,6 +252,36 @@ async function prepareRecoveryWorkspace() {
   return { ...fixture, value, workspace, ownership, recovery };
 }
 
+function installTreeRemoval(fs: MemoryFileSystem) {
+  let active = 0;
+  let maximumActive = 0;
+  const removeTree = vi.fn(async (path: string): Promise<void> => {
+    active++;
+    maximumActive = Math.max(maximumActive, active);
+    try {
+      await Promise.resolve();
+      const prefix = `${key(path)}\\`;
+      const entries = [...fs.entries.values()]
+        .filter((entry) => key(entry.path) === key(path) || key(entry.path).startsWith(prefix))
+        .sort((left, right) => right.path.length - left.path.length);
+      for (const entry of entries) {
+        fs.entries.delete(key(entry.path));
+        fs.removed.push(entry.path);
+        if (entry.kind === "file") {
+          for (const remaining of fs.entries.values()) {
+            if (remaining.kind === "file" && remaining.identity === entry.identity)
+              fs.change(remaining.path, { linkCount: remaining.linkCount - 1 });
+          }
+        }
+      }
+    } finally {
+      active--;
+    }
+  });
+  Object.assign(fs, { removeTree });
+  return { removeTree, maximumActive: () => maximumActive };
+}
+
 function sourceBinding(value: InvestigationWorkspaceInput): InvestigationSourceBinding {
   const subject = value.task.subjects.find((candidate) => candidate.id === value.task.subjectRef);
   if (subject?.kind !== "original_pr")
@@ -2688,6 +2718,142 @@ describe("managed investigation workspace cleanup", () => {
     );
     await workspace.cleanup();
     expect(cleanupOwned.mock.calls[0]![0].nonce).toBe(original.nonce);
+    expect(fixture.fs.removed).toEqual([]);
+  });
+});
+
+describe("bulk owned investigation workspace recovery", () => {
+  it("removes top-level subtrees with bounded concurrency and linear metadata work", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    const attempt = fixture.workspace.attemptDirectory;
+    const owner = win32.join(attempt, ".owner.json");
+    let directory = fixture.workspace.tempDirectory;
+    for (let depth = 0; depth < 24; depth++) {
+      directory = win32.join(directory, `d${depth}`);
+      fixture.fs.add(directory, "directory");
+      for (let index = 0; index < 3; index++)
+        fixture.fs.add(win32.join(directory, `file-${index}.txt`), "file", "Generated output.");
+    }
+    for (let index = 0; index < 12; index++)
+      fixture.fs.add(win32.join(attempt, `extra-${index}`), "directory");
+    const hardlinks = addGeneratedHardlinks(fixture.fs, win32.join(attempt, "source"));
+    const sentinel = win32.join(root, "unrelated.txt");
+    fixture.fs.add(sentinel, "file", "Keep unrelated content.");
+    const entryCount = fixture.fs.entries.size;
+    const children = (await fixture.fs.readDirectory(attempt))
+      .filter((name) => name !== ".owner.json")
+      .map((name) => win32.join(attempt, name));
+    const bulk = installTreeRemoval(fixture.fs);
+    const lstat = vi.spyOn(fixture.fs, "lstat");
+    const chmod = vi.spyOn(fixture.fs, "setReadOnly");
+
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).resolves.toEqual({
+      state: "removed",
+    });
+
+    expect(lstat.mock.calls.length).toBeLessThan(entryCount * 6 + 100);
+    expect(bulk.removeTree.mock.calls.map(([path]) => path).sort()).toEqual(children.sort());
+    expect(bulk.maximumActive()).toBeGreaterThan(1);
+    expect(bulk.maximumActive()).toBeLessThanOrEqual(8);
+    expect(fixture.fs.removed.slice(-2)).toEqual([owner, attempt]);
+    expect(fixture.fs.entries.has(key(attempt))).toBe(false);
+    expect(fixture.fs.entry(sentinel).bytes).toEqual(Buffer.from("Keep unrelated content."));
+    expect(chmod.mock.calls.some(([path]) => hardlinks.includes(path))).toBe(false);
+  });
+
+  it.each(["external reparse point", "external hardlink"] as const)(
+    "rejects an %s before any bulk deletion",
+    async (unsafeKind) => {
+      const fixture = await prepareRecoveryWorkspace();
+      const sentinel = "C:\\outside\\sentinel.txt";
+      fixture.fs.add("C:\\outside", "directory");
+      fixture.fs.add(sentinel, "file", "External content.");
+      if (unsafeKind === "external reparse point") {
+        fixture.fs.change(fixture.workspace.tempDirectory, {
+          reparsePoint: true,
+          resolvedPath: "C:\\outside",
+        });
+      } else {
+        const paths = addGeneratedHardlinks(
+          fixture.fs,
+          win32.join(fixture.workspace.attemptDirectory, "source"),
+        );
+        fixture.fs.entries.delete(key(paths[1]!));
+        fixture.fs.change(sentinel, {
+          identity: fixture.fs.entry(paths[0]!).identity,
+          linkCount: 2,
+        });
+      }
+      const bulk = installTreeRemoval(fixture.fs);
+
+      await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+        code: "WORKSPACE_PATH_UNSAFE",
+      });
+
+      expect(bulk.removeTree).not.toHaveBeenCalled();
+      expect(fixture.fs.removed).toEqual([]);
+      expect(fixture.fs.entry(sentinel).bytes).toEqual(Buffer.from("External content."));
+    },
+  );
+
+  it("preserves the ownership marker and original error when bulk deletion fails", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    const owner = win32.join(fixture.workspace.attemptDirectory, ".owner.json");
+    const originalMarker = fixture.fs.entry(owner);
+    const bulk = installTreeRemoval(fixture.fs);
+    const error = fileError("EPERM");
+    bulk.removeTree.mockRejectedValue(error);
+
+    await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toBe(error);
+
+    expect(bulk.removeTree).toHaveBeenCalled();
+    expect(fixture.fs.entry(owner)).toEqual(originalMarker);
+    expect(fixture.fs.entries.has(key(fixture.workspace.attemptDirectory))).toBe(true);
+    expect(fixture.fs.removed).toEqual([]);
+  });
+
+  it.each(["root", "attempt", "marker"] as const)(
+    "rechecks the %s identity after scanning and before bulk deletion",
+    async (location) => {
+      const fixture = await prepareRecoveryWorkspace();
+      const owner = win32.join(fixture.workspace.attemptDirectory, ".owner.json");
+      const changed = {
+        root,
+        attempt: fixture.workspace.attemptDirectory,
+        marker: owner,
+      }[location];
+      const bulk = installTreeRemoval(fixture.fs);
+      const readDirectory = fixture.fs.readDirectory.bind(fixture.fs);
+      let replaced = false;
+      vi.spyOn(fixture.fs, "readDirectory").mockImplementation(async (path) => {
+        const names = await readDirectory(path);
+        if (!replaced && key(path) === key(fixture.workspace.tempDirectory)) {
+          replaced = true;
+          fixture.fs.change(changed, { identity: `replaced-${location}` });
+        }
+        return names;
+      });
+
+      await expect(cleanupOwnedInvestigationAttempt(fixture.recovery)).rejects.toMatchObject({
+        code: "WORKSPACE_NOT_OWNED",
+      });
+
+      expect(replaced).toBe(true);
+      expect(bulk.removeTree).not.toHaveBeenCalled();
+      expect(fixture.fs.removed).toEqual([]);
+      expect(fixture.fs.entries.has(key(owner))).toBe(true);
+    },
+  );
+
+  it("checks the full scan budget before dispatching bulk deletion", async () => {
+    const fixture = await prepareRecoveryWorkspace();
+    const bulk = installTreeRemoval(fixture.fs);
+
+    await expect(
+      cleanupOwnedInvestigationAttempt({ ...fixture.recovery, maximumTreeEntries: 2 }),
+    ).rejects.toMatchObject({ code: "WORKSPACE_TREE_LIMIT_EXCEEDED" });
+
+    expect(bulk.removeTree).not.toHaveBeenCalled();
     expect(fixture.fs.removed).toEqual([]);
   });
 });

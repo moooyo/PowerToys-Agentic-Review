@@ -7,6 +7,7 @@ import {
   open,
   readdir,
   realpath,
+  rm,
   rmdir,
   unlink,
   writeFile,
@@ -268,6 +269,8 @@ export interface InvestigationWorkspaceFileSystem {
   setReadOnly(path: string, readOnly: boolean): Promise<void>;
   removeFile(path: string): Promise<void>;
   removeEmptyDirectory(path: string): Promise<void>;
+  /** Remove a prechecked owned subtree without following directory links. */
+  removeTree?(path: string): Promise<void>;
 }
 
 /** Only a trusted worker adapter may materialize and verify repository sources. */
@@ -494,6 +497,9 @@ export class ProductionInvestigationWorkspaceFileSystem
   }
   public async removeEmptyDirectory(path: string): Promise<void> {
     await rmdir(path);
+  }
+  public async removeTree(path: string): Promise<void> {
+    await rm(path, { recursive: true, force: false, maxRetries: 2, retryDelay: 100 });
   }
 }
 
@@ -2004,7 +2010,11 @@ class WorkspaceGuard {
   }
 
   public async removeOwnedTree(assertOwned: () => Promise<void>): Promise<void> {
-    const entries = await this.scanTree(this.layout.attempt, true);
+    if (this.fs.removeTree !== undefined) await assertOwned();
+    const entries =
+      this.fs.removeTree === undefined
+        ? await this.scanTree(this.layout.attempt, true)
+        : await this.scanCleanupTree();
     let groups: ReadonlyMap<string, readonly string[]>;
     try {
       groups = validateOwnedHardlinkGroups(entries, (path) => {
@@ -2029,39 +2039,56 @@ class WorkspaceGuard {
     const ownerEntry = entries.find((entry) => samePath(entry.path, this.layout.owner));
     if (ownerEntry === undefined)
       throw failure("WORKSPACE_NOT_OWNED", "The workspace ownership marker is missing.");
-    // The caller must stop all managed processes before cleanup. Only checked, individual entries are removed.
-    for (const entry of entries.reverse()) {
-      if (samePath(entry.path, this.layout.owner) || samePath(entry.path, this.layout.attempt))
-        continue;
-      await assertOwned();
-      const remaining = remainingGroups.get(entry.state.identity);
-      if (remaining !== undefined) {
-        for (const path of remaining) {
-          const member = await this.assertPath(path, "file", true, cleanupIdentities);
-          if (member.identity !== entry.state.identity || member.linkCount !== remaining.size)
-            throw failure(
-              "WORKSPACE_PATH_UNSAFE",
-              "A generated hardlink group changed before unlinking an owned entry.",
-            );
+    if (this.fs.removeTree !== undefined) {
+      const roots = entries.filter(
+        (entry) =>
+          samePath(win32.dirname(entry.path), this.layout.attempt) &&
+          !samePath(entry.path, this.layout.owner),
+      );
+      // Execution has stopped. Keep the owner marker until every owned subtree is removed.
+      for (let offset = 0; offset < roots.length; offset += 8) {
+        await assertOwned();
+        const batch = roots.slice(offset, offset + 8);
+        for (const entry of batch)
+          await this.assertPath(entry.path, entry.state.kind, true, cleanupIdentities);
+        const results = await Promise.allSettled(
+          batch.map((entry) => this.fs.removeTree!(entry.path)),
+        );
+        for (const result of results) if (result.status === "rejected") throw result.reason;
+      }
+    } else
+      for (const entry of entries.reverse()) {
+        if (samePath(entry.path, this.layout.owner) || samePath(entry.path, this.layout.attempt))
+          continue;
+        await assertOwned();
+        const remaining = remainingGroups.get(entry.state.identity);
+        if (remaining !== undefined) {
+          for (const path of remaining) {
+            const member = await this.assertPath(path, "file", true, cleanupIdentities);
+            if (member.identity !== entry.state.identity || member.linkCount !== remaining.size)
+              throw failure(
+                "WORKSPACE_PATH_UNSAFE",
+                "A generated hardlink group changed before unlinking an owned entry.",
+              );
+          }
+        }
+        const state = await this.assertPath(
+          entry.path,
+          entry.state.kind,
+          remaining !== undefined,
+          cleanupIdentities,
+        );
+        if (state.identity !== entry.state.identity) {
+          throw failure("WORKSPACE_NOT_OWNED", "A workspace entry changed during cleanup.");
+        }
+        if (state.kind === "directory") await this.fs.removeEmptyDirectory(entry.path);
+        else {
+          // Never change a shared inode's attributes. Removing its checked owned name is sufficient.
+          if (remaining === undefined) await this.fs.setReadOnly(entry.path, false);
+          await this.fs.removeFile(entry.path);
+          remaining?.delete(entry.path);
         }
       }
-      const state = await this.assertPath(
-        entry.path,
-        entry.state.kind,
-        remaining !== undefined,
-        cleanupIdentities,
-      );
-      if (state.identity !== entry.state.identity) {
-        throw failure("WORKSPACE_NOT_OWNED", "A workspace entry changed during cleanup.");
-      }
-      if (state.kind === "directory") await this.fs.removeEmptyDirectory(entry.path);
-      else {
-        // Never change a shared inode's attributes. Removing its checked owned name is sufficient.
-        if (remaining === undefined) await this.fs.setReadOnly(entry.path, false);
-        await this.fs.removeFile(entry.path);
-        remaining?.delete(entry.path);
-      }
-    }
     await assertOwned();
     const remaining = await this.fs.readDirectory(this.layout.attempt);
     if (remaining.length !== 1 || remaining[0] !== ".owner.json") {
@@ -2071,6 +2098,46 @@ class WorkspaceGuard {
     await this.fs.removeFile(this.layout.owner);
     await this.assertPath(this.layout.attempt, "directory");
     await this.fs.removeEmptyDirectory(this.layout.attempt);
+  }
+
+  private async scanCleanupTree(): Promise<
+    Array<{ path: string; state: InvestigationWorkspacePathState }>
+  > {
+    const entries: Array<{ path: string; state: InvestigationWorkspacePathState }> = [];
+    const pending = [this.layout.attempt];
+    while (pending.length > 0) {
+      const path = pending.pop()!;
+      const state = await this.fs.lstat(path);
+      if (state === null || state.reparsePoint || state.kind === "other")
+        throw failure(
+          "WORKSPACE_PATH_UNSAFE",
+          "An owned cleanup entry is missing, linked, or has an unsafe type.",
+        );
+      const expectedIdentity = this.identities.get(pathKey(path));
+      if (expectedIdentity !== undefined && state.identity !== expectedIdentity)
+        throw failure("WORKSPACE_NOT_OWNED", "An owned cleanup entry was replaced.");
+      entries.push({ path, state });
+      if (entries.length > this.maximumTreeEntries)
+        throw failure(
+          "WORKSPACE_TREE_LIMIT_EXCEEDED",
+          "The workspace tree exceeds the entry limit.",
+        );
+      if (state.kind !== "directory") continue;
+      // Check each directory once before descending; ordinary files need no ancestor walk.
+      if (!samePath(await this.fs.realpath(path), path))
+        throw failure("WORKSPACE_PATH_UNSAFE", "An owned cleanup directory was redirected.");
+      const names = await this.fs.readDirectory(path);
+      if (entries.length + pending.length + names.length > this.maximumTreeEntries)
+        throw failure(
+          "WORKSPACE_TREE_LIMIT_EXCEEDED",
+          "The workspace tree exceeds the entry limit.",
+        );
+      for (const name of names) {
+        assertSimpleName(name);
+        pending.push(childPath(path, name));
+      }
+    }
+    return entries;
   }
 }
 
