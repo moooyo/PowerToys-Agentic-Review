@@ -286,6 +286,7 @@ interface BuildProvenance {
   readonly artifacts: ReadonlyMap<string, ArtifactObservation>;
   readonly manifest: ReadonlyMap<string, ArtifactObservation>;
   readonly outputTree: OutputTree;
+  readonly validatedFileStats: Map<string, BigIntStats>;
   readonly startedAtNs: bigint;
   readonly completedAtNs: bigint;
   readonly identity: string;
@@ -523,6 +524,7 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
     artifacts: observations,
     manifest,
     outputTree,
+    validatedFileStats: new Map([...manifest].map(([key, observation]) => [key, observation.stat])),
     startedAtNs,
     completedAtNs,
     identity: record.identity,
@@ -578,17 +580,18 @@ async function validateBuildFile(
     );
   await assertDirectoryIdentities(provenance.directoryIdentities);
   await assertOutputManifest(provenance);
+  // Freshness was proven at sealing; runtime timestamps may change without changing bytes.
   const observed = await observeArtifact(
     expected.artifact.path,
     expected.artifact.relativePath,
     provenance.startedAtNs,
     provenance.completedAtNs,
-    provenance.artifacts.has(key),
+    false,
   );
   await assertOutputManifest(provenance);
   await assertDirectoryIdentities(provenance.directoryIdentities);
   if (
-    !sameFile(expected.stat, observed.stat) ||
+    !sameFileIdentity(expected.stat, observed.stat) ||
     expected.artifact.digest !== observed.artifact.digest ||
     expected.artifact.byteLength !== observed.artifact.byteLength
   )
@@ -1219,13 +1222,16 @@ async function assertSameOutputTree(
   actual: OutputTree,
   outputDirectory: string,
   manifest: ReadonlyMap<string, ArtifactObservation>,
+  allowRuntimeMetadataChanges = false,
 ): Promise<void> {
   for (const [key, original] of expected.files) {
     const observed = actual.files.get(key);
     if (
       observed === undefined ||
       observed.relativePath !== original.relativePath ||
-      !sameFile(original.stat, observed.stat)
+      !(allowRuntimeMetadataChanges
+        ? sameFileIdentity(original.stat, observed.stat)
+        : sameFile(original.stat, observed.stat))
     )
       throw await artifactChangeFailure(
         "A file in the complete build output manifest changed.",
@@ -1256,7 +1262,12 @@ async function assertSameOutputTree(
   }
   for (const [key, original] of expected.directories) {
     const observed = actual.directories.get(key);
-    if (observed === undefined || !sameDirectory(original, observed))
+    if (
+      observed === undefined ||
+      !(allowRuntimeMetadataChanges
+        ? sameDirectoryIdentity(original, observed)
+        : sameDirectory(original, observed))
+    )
       throw await artifactChangeFailure(
         "A directory in the complete build output manifest changed.",
         "output_tree_validation",
@@ -1286,12 +1297,13 @@ async function assertOutputManifest(provenance: BuildProvenance): Promise<void> 
     observed,
     provenance.outputDirectory,
     provenance.manifest,
+    true,
   );
-  // Initial hashes are bound to exact file identities and change times. Unchanged metadata
-  // avoids rehashing every dependency on each interaction; any change fails closed.
+  // Keep the sealed identities and hashes. Runtime timestamp changes require a stable
+  // content read before refreshing the metadata cache used by subsequent interactions.
   for (const [key, original] of provenance.manifest) {
     const file = observed.files.get(key);
-    if (file === undefined || !sameFile(original.stat, file.stat))
+    if (file === undefined || !sameFileIdentity(original.stat, file.stat))
       throw await artifactChangeFailure(
         "A hashed build dependency changed after manifest capture.",
         "output_tree_validation",
@@ -1302,6 +1314,32 @@ async function assertOutputManifest(provenance: BuildProvenance): Promise<void> 
         file?.path,
         original.artifact.digest,
       );
+    const lastValidated = provenance.validatedFileStats.get(key) ?? original.stat;
+    if (sameFile(lastValidated, file.stat)) continue;
+    const rehashed = await observeArtifact(
+      file.path,
+      file.relativePath,
+      provenance.startedAtNs,
+      provenance.completedAtNs,
+      false,
+    );
+    if (
+      !sameFile(file.stat, rehashed.stat) ||
+      original.artifact.digest !== rehashed.artifact.digest ||
+      original.artifact.byteLength !== rehashed.artifact.byteLength
+    )
+      throw await artifactChangeFailure(
+        "A hashed build dependency changed after manifest capture.",
+        "output_tree_validation",
+        original.artifact.relativePath,
+        "file",
+        original.stat,
+        rehashed.stat,
+        file.path,
+        original.artifact.digest,
+        rehashed.artifact.digest,
+      );
+    provenance.validatedFileStats.set(key, rehashed.stat);
   }
 }
 
@@ -1475,6 +1513,18 @@ function sameFile(
   );
 }
 
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    right.isFile() &&
+    !isLink(right) &&
+    right.nlink === 1n &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.birthtimeNs === right.birthtimeNs
+  );
+}
+
 function sameDirectory(left: BigIntStats, right: BigIntStats): boolean {
   return (
     right.isDirectory() &&
@@ -1483,6 +1533,16 @@ function sameDirectory(left: BigIntStats, right: BigIntStats): boolean {
     left.ino === right.ino &&
     left.mtimeNs === right.mtimeNs &&
     left.ctimeNs === right.ctimeNs &&
+    left.birthtimeNs === right.birthtimeNs
+  );
+}
+
+function sameDirectoryIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    right.isDirectory() &&
+    !isLink(right) &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
     left.birthtimeNs === right.birthtimeNs
   );
 }

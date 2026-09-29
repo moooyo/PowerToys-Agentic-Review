@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmod,
   link,
   lstat,
   mkdir,
@@ -1536,6 +1537,96 @@ describe.skipIf(process.platform !== "win32")("E2E build output tree integrity",
     await expect(validateE2eBuildArtifact(record, "App.exe")).resolves.toBe(record.artifacts[0]);
   });
 
+  it.each(["App.exe", "App.dll"] as const)(
+    "accepts post-seal timestamp changes without changing file identity or content: %s",
+    async (relativePath) => {
+      const f = await applicationFixture();
+      const record = await performE2eBuild(f.input);
+      const path = win32.join(win32.dirname(record.artifacts[0]!.path), relativePath);
+      const before = await lstat(path, { bigint: true });
+      const oldTime = new Date("2000-01-01T00:00:00.000Z");
+      await utimes(path, oldTime, oldTime);
+      const after = await lstat(path, { bigint: true });
+      expect(after).toMatchObject({
+        dev: before.dev,
+        ino: before.ino,
+        birthtimeNs: before.birthtimeNs,
+        size: before.size,
+      });
+      expect(after.mtimeNs).not.toBe(before.mtimeNs);
+      expect(after.ctimeNs).not.toBe(before.ctimeNs);
+      await expect(validateE2eBuildFile(record, path)).resolves.toMatchObject({
+        relativePath,
+        digest: digest(applicationFiles[relativePath]),
+      });
+      await expect(validateE2eBuildArtifact(record, "App.exe")).resolves.toBe(record.artifacts[0]);
+    },
+  );
+
+  it("accepts a dependency change-time update with unchanged modification time and bytes", async () => {
+    const f = await applicationFixture();
+    const record = await performE2eBuild(f.input);
+    const path = win32.join(win32.dirname(record.artifacts[0]!.path), "App.dll");
+    const before = await lstat(path, { bigint: true });
+    try {
+      await chmod(path, 0o444);
+    } finally {
+      await chmod(path, Number(before.mode & 0o777n));
+    }
+    const after = await lstat(path, { bigint: true });
+    expect(after).toMatchObject({
+      dev: before.dev,
+      ino: before.ino,
+      birthtimeNs: before.birthtimeNs,
+      size: before.size,
+      mtimeNs: before.mtimeNs,
+    });
+    expect(after.ctimeNs).not.toBe(before.ctimeNs);
+    await expect(validateE2eBuildArtifact(record, "App.exe")).resolves.toBe(record.artifacts[0]);
+  });
+
+  it.each([".", "assets", "plugins"])(
+    "accepts post-seal directory timestamp changes with an unchanged output tree: %s",
+    async (relativePath) => {
+      const f = await applicationFixture();
+      const record = await performE2eBuild(f.input);
+      const path = win32.join(win32.dirname(record.artifacts[0]!.path), relativePath);
+      const before = await lstat(path, { bigint: true });
+      const oldTime = new Date("2000-01-01T00:00:00.000Z");
+      await utimes(path, oldTime, oldTime);
+      const after = await lstat(path, { bigint: true });
+      expect(after).toMatchObject({
+        dev: before.dev,
+        ino: before.ino,
+        birthtimeNs: before.birthtimeNs,
+      });
+      expect(after.mtimeNs).not.toBe(before.mtimeNs);
+      await expect(validateE2eBuildArtifact(record, "App.exe")).resolves.toBe(record.artifacts[0]);
+    },
+  );
+
+  it.each(["App.exe", "App.dll"] as const)(
+    "rejects changed bytes after accepting and caching a timestamp-only update: %s",
+    async (relativePath) => {
+      const f = await applicationFixture();
+      const record = await performE2eBuild(f.input);
+      const path = win32.join(win32.dirname(record.artifacts[0]!.path), relativePath);
+      const oldTime = new Date("2000-01-01T00:00:00.000Z");
+      await utimes(path, oldTime, oldTime);
+      await expect(validateE2eBuildArtifact(record, "App.exe")).resolves.toBe(record.artifacts[0]);
+      const before = await lstat(path, { bigint: true });
+      await writeFile(path, Buffer.alloc(applicationFiles[relativePath].byteLength, 0x58));
+      await utimes(path, oldTime, oldTime);
+      const after = await lstat(path, { bigint: true });
+      expect(after.size).toBe(before.size);
+      expect(after.mtimeNs).toBe(before.mtimeNs);
+      expect(after.ctimeNs).not.toBe(before.ctimeNs);
+      await expect(validateE2eBuildArtifact(record, "App.exe")).rejects.toMatchObject({
+        code: "E2E_BUILD_ARTIFACT_INVALID",
+      });
+    },
+  );
+
   it.each([
     "App.dll",
     "App.runtimeconfig.json",
@@ -1558,6 +1649,15 @@ describe.skipIf(process.platform !== "win32")("E2E build output tree integrity",
     const record = await performE2eBuild(f.input);
     const output = win32.dirname(record.artifacts[0]!.path);
     await writeFile(win32.join(output, "plugins", "NewPlugin.dll"), "New plugin content.");
+    await expect(validateE2eBuildArtifact(record, "App.exe")).rejects.toMatchObject({
+      code: "E2E_BUILD_ARTIFACT_INVALID",
+    });
+  });
+
+  it("rejects a new empty directory added after the output tree was sealed", async () => {
+    const f = await applicationFixture();
+    const record = await performE2eBuild(f.input);
+    await mkdir(win32.join(win32.dirname(record.artifacts[0]!.path), "new-plugins"));
     await expect(validateE2eBuildArtifact(record, "App.exe")).rejects.toMatchObject({
       code: "E2E_BUILD_ARTIFACT_INVALID",
     });
