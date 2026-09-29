@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $all = @(Get-CimInstance Win32_Process)
 $selected = @()
 if ($IdentityPath) {
-    $identities = @(Get-Content -LiteralPath $IdentityPath -Raw | ConvertFrom-Json)
+    $identities = Get-Content -LiteralPath $IdentityPath -Raw | ConvertFrom-Json
     foreach ($identity in $identities) {
         $selected += @($all | Where-Object {
             $_.ProcessId -eq $identity.processId -and
@@ -16,11 +16,18 @@ if ($IdentityPath) {
 } else {
     if ($RootProcessId -le 0) { throw 'A positive owned root process ID is required.' }
     $ids = [System.Collections.Generic.HashSet[int]]::new()
-    [void]$ids.Add($RootProcessId)
+    $createdAt = @{}
+    foreach ($root in @($all | Where-Object { $_.ProcessId -eq $RootProcessId })) {
+        [void]$ids.Add($RootProcessId)
+        $createdAt[$RootProcessId] = $root.CreationDate.ToUniversalTime()
+    }
     do {
         $added = $false
         foreach ($entry in $all) {
-            if ($ids.Contains([int]$entry.ParentProcessId) -and $ids.Add([int]$entry.ProcessId)) {
+            if ($ids.Contains([int]$entry.ParentProcessId) -and
+                $entry.CreationDate.ToUniversalTime() -ge $createdAt[[int]$entry.ParentProcessId] -and
+                $ids.Add([int]$entry.ProcessId)) {
+                $createdAt[[int]$entry.ProcessId] = $entry.CreationDate.ToUniversalTime()
                 $added = $true
             }
         }
