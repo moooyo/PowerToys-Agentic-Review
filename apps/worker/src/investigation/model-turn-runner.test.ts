@@ -17,6 +17,7 @@ import {
   investigationContentDigest,
   rejectInvestigationModelOutput,
 } from "@agentic-review/domain";
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 import { ProcessHostRequestError } from "../execution/process-host-client.js";
 import {
@@ -34,6 +35,7 @@ import {
   type ModelTurnProjectionContext,
 } from "./model-turn-projection.js";
 import {
+  assertModelPromptBudget,
   createModelTurnRunner,
   createStaticModelJsonRunner,
   getModelOutputCorrection,
@@ -1909,9 +1911,22 @@ describe("investigation model turn runner", () => {
         expect(spec.arguments).not.toContain("--available-tools=view,glob,grep");
         expect(spec.arguments).not.toContain("--skip-git-repo-check");
       }
-      expect(f.io.writeExclusiveUtf8).toHaveBeenCalledWith(
-        win32.join(f.roundDirectory, "round-schema.json"),
-        JSON.stringify(createInvestigationModelOutputSchema(InvestigationModelTurnDeltaV1Schema)),
+      const schemaWrite = vi
+        .mocked(f.io.writeExclusiveUtf8)
+        .mock.calls.find(([path]) => path === win32.join(f.roundDirectory, "round-schema.json"))!;
+      const schema = JSON.parse(schemaWrite[1]);
+      expect(schema.properties).toMatchObject({
+        taskId: { const: f.input.task.id },
+        attemptId: { const: f.input.attempt.id },
+        round: { const: 1 },
+        phase: { const: "discovery" },
+        inputCheckpointRef: { type: "null" },
+      });
+      expect(schema.properties.analysis).toEqual(
+        (
+          createInvestigationModelOutputSchema(InvestigationModelTurnDeltaV1Schema)
+            .properties as Record<string, unknown>
+        ).analysis,
       );
       expect(f.io.removeDirectory).toHaveBeenCalledWith(f.roundDirectory);
       expect(f.input.workspace.cleanup).not.toHaveBeenCalled();
@@ -3049,6 +3064,84 @@ describe("investigation model turn runner", () => {
     await expect(f.runner.execute(f.input)).rejects.toMatchObject({
       code: "MODEL_ROUND_BINDING_MISMATCH",
     });
+  });
+
+  it("keeps concurrent task and checkpoint literals separate without changing the shared schema", async () => {
+    const sharedBefore = JSON.stringify(InvestigationModelTurnDeltaV1Schema);
+    const calls = [fixture(), fixture()];
+    const bothStarted = Promise.withResolvers<void>();
+    let started = 0;
+    for (const [index, f] of calls.entries()) {
+      f.input.task.id = `task-${index}`;
+      f.input.attempt.taskId = f.input.task.id;
+      f.input.attempt.id = `attempt-${index}`;
+      f.round.taskId = f.input.task.id;
+      f.round.attemptId = f.input.attempt.id;
+      const checkpoint = createInvestigationCheckpoint({
+        task: f.input.task,
+        attemptId: f.input.attempt.id,
+        checkpointId: `checkpoint-${index}`,
+        leaseVersion: f.input.attempt.leaseVersion,
+        recordedAt: f.input.task.updatedAt,
+      });
+      Object.assign(f.input, { checkpoint });
+      f.round.analysis = structuredClone(checkpoint.analysis);
+      const start = f.start.getMockImplementation()!;
+      f.start.mockImplementation(async (...argumentsList) => {
+        if (++started === 2) bothStarted.resolve();
+        await bothStarted.promise;
+        return start(...argumentsList);
+      });
+    }
+    await Promise.all(calls.map((f) => f.runner.execute(f.input)));
+    for (const f of calls) {
+      const schemaWrite = vi
+        .mocked(f.io.writeExclusiveUtf8)
+        .mock.calls.find(([path]) => path === win32.join(f.roundDirectory, "round-schema.json"))!;
+      expect(JSON.parse(schemaWrite[1]).properties).toMatchObject({
+        taskId: { const: f.input.task.id },
+        attemptId: { const: f.input.attempt.id },
+        round: { const: 1 },
+        phase: { const: "discovery" },
+        inputCheckpointRef: {
+          type: "object",
+          properties: {
+            id: { const: f.input.checkpoint!.id },
+            version: { const: f.input.checkpoint!.version },
+            digest: { const: f.input.checkpoint!.digest },
+          },
+          required: ["id", "version", "digest"],
+          additionalProperties: false,
+        },
+      });
+    }
+    expect(JSON.stringify(InvestigationModelTurnDeltaV1Schema)).toBe(sharedBefore);
+  });
+
+  it("charges the actual generation schema against the Copilot prompt transport budget", () => {
+    const schema = Type.Object({ value: Type.String() }, { additionalProperties: false });
+    const generationSchema = Type.Object(
+      { value: Type.Literal("b".repeat(2_000)) },
+      { additionalProperties: false },
+    );
+    expect(() =>
+      assertModelPromptBudget(
+        { prompt: "Return JSON.", schema },
+        {
+          engine: "copilot",
+          maximumInputBytes: 1_024,
+        },
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertModelPromptBudget(
+        { prompt: "Return JSON.", schema, generationSchema },
+        {
+          engine: "copilot",
+          maximumInputBytes: 1_024,
+        },
+      ),
+    ).toThrow("exceeds the configured CLI transport budget");
   });
 
   it("rejects model-authored claims of authoritative model identity", async () => {
@@ -4196,13 +4289,13 @@ describe("static app-server invocation budgets", () => {
             },
           },
         }),
-      finalMessage: () =>
+      finalMessage: (value: unknown = proposal) =>
         notification("item/completed", {
           item: {
             id: "controlled-final-answer",
             type: "agentMessage",
             phase: "final_answer",
-            text: JSON.stringify(proposal),
+            text: JSON.stringify(value),
           },
         }),
       completeTurn: () =>
@@ -4219,6 +4312,89 @@ describe("static app-server invocation budgets", () => {
       },
     };
   }
+
+  it.each([false, true])(
+    "sends current binding literals through app-server and rejects a b-to-d UUID typo: mismatch=%s",
+    async (mismatch) => {
+      const f = appServerFixture();
+      const taskId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab";
+      f.f.input.task.id = taskId;
+      f.f.input.attempt.taskId = taskId;
+      f.f.round.taskId = taskId;
+      const checkpoint = createInvestigationCheckpoint({
+        task: f.f.input.task,
+        attemptId: f.f.input.attempt.id,
+        checkpointId: "current-checkpoint",
+        leaseVersion: f.f.input.attempt.leaseVersion,
+        recordedAt: f.f.input.task.updatedAt,
+      });
+      f.f.round.analysis = structuredClone(checkpoint.analysis);
+      const execution = f.f.runner
+        .execute({
+          ...f.f.input,
+          checkpoint,
+          invocationBudget: f.input.invocationBudget!,
+        })
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+      try {
+        await f.turnStarted;
+        const params = f.requests.find((request) => request.method === "turn/start")!.params!;
+        expect(params.outputSchema).toMatchObject({
+          properties: {
+            taskId: { const: taskId },
+            attemptId: { const: f.f.input.attempt.id },
+            round: { const: 1 },
+            phase: { const: "discovery" },
+            inputCheckpointRef: {
+              properties: {
+                id: { const: checkpoint.id },
+                version: { const: checkpoint.version },
+                digest: { const: checkpoint.digest },
+              },
+            },
+          },
+        });
+        const prompt = (params.input as { text: string }[])[0]!.text;
+        const context = JSON.parse(
+          prompt
+            .split("<frozen_investigation_context>\n")[1]!
+            .split("\n</frozen_investigation_context>")[0]!,
+        ) as { turn: ModelTurnProjectionContext };
+        const delta = fixtureDelta(
+          {
+            ...f.f.round,
+            taskId: mismatch ? taskId.replace(/b$/u, "d") : taskId,
+            round: context.turn.round,
+            phase: context.turn.phase,
+            inputCheckpointRef: context.turn.inputCheckpointRef,
+          },
+          context.turn,
+        );
+        f.usage(31, 19);
+        f.finalMessage(delta);
+        f.completeTurn();
+        await f.inputClosed;
+        f.finishProcess();
+        const result = await execution;
+        if (mismatch) {
+          expect(result).toMatchObject({ error: { code: "MODEL_ROUND_BINDING_MISMATCH" } });
+          expect(getModelOutputCorrection("error" in result ? result.error : null)).toBeNull();
+        } else {
+          expect(result).toMatchObject({
+            value: { round: { taskId, inputCheckpointRef: context.turn.inputCheckpointRef } },
+          });
+        }
+        expect(f.f.start).toHaveBeenCalledOnce();
+        expect(f.f.io.removeDirectory).toHaveBeenCalledOnce();
+      } finally {
+        f.finishProcess();
+        await execution;
+      }
+    },
+  );
 
   async function trackedFixture() {
     const directory = await mkdtemp(join(tmpdir(), "runner-app-server-usage-"));

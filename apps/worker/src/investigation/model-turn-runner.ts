@@ -25,7 +25,7 @@ import {
   isCorrectableInvestigationModelOutputIssue,
 } from "@agentic-review/contracts";
 import { initialInvestigationReviewMode, investigationContentDigest } from "@agentic-review/domain";
-import type { TSchema } from "@sinclair/typebox";
+import { type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { ProcessHostRequestError } from "../execution/process-host-client.js";
 import {
@@ -160,6 +160,8 @@ export interface StaticModelJsonInput {
   readonly signal: AbortSignal;
   readonly prompt: string;
   readonly schema: TSchema;
+  /** Generation-only literals may specialize the schema; semantic acceptance still checks schema. */
+  readonly generationSchema?: TSchema;
   readonly hardTimeoutMs: number;
   readonly maximumResultBytes: number;
   readonly onUsage?: (usage: ModelTurnExecutionResult["usage"]) => void;
@@ -340,9 +342,15 @@ export function createModelTurnRunner(suppliedOptions: ModelTurnRunnerOptions): 
         );
       assertInputBinding(input);
       await input.workspace.assertIntegrity();
+      // Retaining the phase union here reserves at least the final literal schema's bytes.
       const schemaBudget =
         suppliedOptions.engine === "copilot"
-          ? Buffer.byteLength(JSON.stringify(InvestigationModelTurnDeltaV1Schema), "utf8") + 256
+          ? Buffer.byteLength(
+              JSON.stringify(
+                createInvestigationModelOutputSchema(createModelTurnGenerationSchema(input)),
+              ),
+              "utf8",
+            ) + 256
           : 0;
       const correction = input.correction;
       if (correction !== undefined) {
@@ -403,6 +411,7 @@ export function createModelTurnRunner(suppliedOptions: ModelTurnRunnerOptions): 
           : { invocationBudget: input.invocationBudget }),
         prompt,
         schema: InvestigationModelTurnDeltaV1Schema,
+        generationSchema: createModelTurnGenerationSchema(input, projection.phase),
         hardTimeoutMs: input.task.budget.maxDurationMs,
         maximumResultBytes: maximumModelDeltaBytes,
         ...(input.onUsage === undefined ? {} : { onUsage: input.onUsage }),
@@ -574,7 +583,9 @@ export function createStaticModelJsonRunner(
         const schemaPath = win32.join(directory, "round-schema.json");
         const resultPath = win32.join(directory, "round-result.json");
         const usagePath = win32.join(directory, "round-usage.json");
-        const schemaJson = JSON.stringify(createInvestigationModelOutputSchema(input.schema));
+        const schemaJson = JSON.stringify(
+          createInvestigationModelOutputSchema(input.generationSchema ?? input.schema),
+        );
         await io.writeExclusiveUtf8(schemaPath, schemaJson);
         await assertMissing(io, resultPath);
         if (options.engine === "copilot") await assertMissing(io, usagePath);
@@ -1156,7 +1167,7 @@ function assertInputBinding(input: ModelTurnExecutionInput): void {
 }
 
 export function assertModelPromptBudget(
-  input: Pick<StaticModelJsonInput, "prompt" | "schema">,
+  input: Pick<StaticModelJsonInput, "prompt" | "schema" | "generationSchema">,
   options: Pick<ModelTurnRunnerOptions, "engine" | "maximumInputBytes">,
 ): void {
   const inputLimit = options.maximumInputBytes ?? maximumTransportInputBytes;
@@ -1170,7 +1181,9 @@ export function assertModelPromptBudget(
     Buffer.byteLength(input.prompt, "utf8") +
     (options.engine === "copilot"
       ? Buffer.byteLength(
-          JSON.stringify(createInvestigationModelOutputSchema(input.schema)),
+          JSON.stringify(
+            createInvestigationModelOutputSchema(input.generationSchema ?? input.schema),
+          ),
           "utf8",
         ) + 256
       : 0);
@@ -2368,6 +2381,34 @@ function makePrChunkReader(manifest: InvestigationPrDiffManifest, input: ModelTu
       return [...selected];
     },
   };
+}
+
+function createModelTurnGenerationSchema(
+  input: ModelTurnExecutionInput,
+  phase?: InvestigationLoopRoundV1["phase"],
+): TSchema {
+  const checkpoint = input.checkpoint;
+  return Type.Object(
+    {
+      ...InvestigationModelTurnDeltaV1Schema.properties,
+      taskId: Type.Literal(input.task.id),
+      attemptId: Type.Literal(input.attempt.id),
+      round: Type.Literal((checkpoint?.round ?? 0) + 1),
+      inputCheckpointRef:
+        checkpoint === null
+          ? Type.Null()
+          : Type.Object(
+              {
+                id: Type.Literal(checkpoint.id),
+                version: Type.Literal(checkpoint.version),
+                digest: Type.Literal(checkpoint.digest),
+              },
+              { additionalProperties: false },
+            ),
+      ...(phase === undefined ? {} : { phase: Type.Literal(phase) }),
+    },
+    { additionalProperties: false },
+  );
 }
 
 function assertRoundBinding(
