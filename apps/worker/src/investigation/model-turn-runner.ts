@@ -342,13 +342,10 @@ export function createModelTurnRunner(suppliedOptions: ModelTurnRunnerOptions): 
         );
       assertInputBinding(input);
       await input.workspace.assertIntegrity();
-      // Retaining the phase union here reserves at least the final literal schema's bytes.
-      const schemaBudget =
+      const schemaBudget = (schema: TSchema): number =>
         suppliedOptions.engine === "copilot"
           ? Buffer.byteLength(
-              JSON.stringify(
-                createInvestigationModelOutputSchema(createModelTurnGenerationSchema(input)),
-              ),
+              JSON.stringify(createInvestigationModelOutputSchema(schema)),
               "utf8",
             ) + 256
           : 0;
@@ -381,17 +378,35 @@ export function createModelTurnRunner(suppliedOptions: ModelTurnRunnerOptions): 
           );
       }
       const minimalCorrection = correction === undefined ? "" : correctionSuffix(correction, false);
-      const promptLimit = inputLimit - schemaBudget;
-      const {
-        prompt: basePrompt,
-        projection,
-        sourceUnitIds,
-      } = await makePrompt(
-        input,
-        io,
-        promptLimit - Buffer.byteLength(minimalCorrection, "utf8"),
-        maximumSnapshotBytes,
-      );
+      let promptLimit = inputLimit - schemaBudget(createModelTurnGenerationSchema(input));
+      let prepared: Awaited<ReturnType<typeof makePrompt>>;
+      let generationSchema: TSchema;
+      while (true) {
+        prepared = await makePrompt(
+          input,
+          io,
+          promptLimit - Buffer.byteLength(minimalCorrection, "utf8"),
+          maximumSnapshotBytes,
+        );
+        generationSchema = createModelTurnGenerationSchema(
+          input,
+          prepared.projection.context.subjects,
+          prepared.projection.phase,
+        );
+        const availablePromptBytes = inputLimit - schemaBudget(generationSchema);
+        if (
+          Buffer.byteLength(prepared.prompt + minimalCorrection, "utf8") <= availablePromptBytes
+        ) {
+          promptLimit = Math.min(promptLimit, availablePromptBytes);
+          break;
+        }
+        // Reuse normal batch selection with a smaller allowance. Never reserve invisible subjects.
+        promptLimit = Math.min(
+          promptLimit - 1,
+          Math.max(Math.floor(promptLimit / 2), availablePromptBytes),
+        );
+      }
+      const { prompt: basePrompt, projection, sourceUnitIds } = prepared;
       let prompt = basePrompt + minimalCorrection;
       if (correction?.previousResponse !== undefined) {
         const withProposal = basePrompt + correctionSuffix(correction, true);
@@ -411,7 +426,7 @@ export function createModelTurnRunner(suppliedOptions: ModelTurnRunnerOptions): 
           : { invocationBudget: input.invocationBudget }),
         prompt,
         schema: InvestigationModelTurnDeltaV1Schema,
-        generationSchema: createModelTurnGenerationSchema(input, projection.phase),
+        generationSchema,
         hardTimeoutMs: input.task.budget.maxDurationMs,
         maximumResultBytes: maximumModelDeltaBytes,
         ...(input.onUsage === undefined ? {} : { onUsage: input.onUsage }),
@@ -2385,29 +2400,63 @@ function makePrChunkReader(manifest: InvestigationPrDiffManifest, input: ModelTu
 
 function createModelTurnGenerationSchema(
   input: ModelTurnExecutionInput,
+  subjects?: readonly { readonly id: string }[],
   phase?: InvestigationLoopRoundV1["phase"],
 ): TSchema {
   const checkpoint = input.checkpoint;
-  return Type.Object(
-    {
-      ...InvestigationModelTurnDeltaV1Schema.properties,
-      taskId: Type.Literal(input.task.id),
-      attemptId: Type.Literal(input.attempt.id),
-      round: Type.Literal((checkpoint?.round ?? 0) + 1),
-      inputCheckpointRef:
-        checkpoint === null
-          ? Type.Null()
-          : Type.Object(
-              {
-                id: Type.Literal(checkpoint.id),
-                version: Type.Literal(checkpoint.version),
-                digest: Type.Literal(checkpoint.digest),
-              },
-              { additionalProperties: false },
+  const subjectIds =
+    subjects === undefined ? undefined : [...new Set(subjects.map((subject) => subject.id))].sort();
+  if (subjectIds?.length === 0)
+    throw failure("MODEL_INPUT_INVALID", "The model generation schema requires visible subjects.");
+  const bindSubjects = (schema: TSchema, subjectProperty = false): TSchema => {
+    if (subjectIds !== undefined && subjectProperty && schema.type === "string")
+      return subjectIds.length === 1
+        ? Type.Literal(subjectIds[0]!)
+        : Type.String({ enum: [...subjectIds] });
+    return {
+      ...schema,
+      ...(schema.properties === undefined
+        ? {}
+        : {
+            properties: Object.fromEntries(
+              Object.entries(schema.properties as Record<string, TSchema>).map(([name, value]) => [
+                name,
+                bindSubjects(value, name === "subjectRef"),
+              ]),
             ),
-      ...(phase === undefined ? {} : { phase: Type.Literal(phase) }),
-    },
-    { additionalProperties: false },
+          }),
+      ...(schema.items === undefined ? {} : { items: bindSubjects(schema.items as TSchema) }),
+      ...(schema.anyOf === undefined
+        ? {}
+        : {
+            anyOf: (schema.anyOf as TSchema[]).map((branch) =>
+              bindSubjects(branch, subjectProperty),
+            ),
+          }),
+    };
+  };
+  return bindSubjects(
+    Type.Object(
+      {
+        ...InvestigationModelTurnDeltaV1Schema.properties,
+        taskId: Type.Literal(input.task.id),
+        attemptId: Type.Literal(input.attempt.id),
+        round: Type.Literal((checkpoint?.round ?? 0) + 1),
+        inputCheckpointRef:
+          checkpoint === null
+            ? Type.Null()
+            : Type.Object(
+                {
+                  id: Type.Literal(checkpoint.id),
+                  version: Type.Literal(checkpoint.version),
+                  digest: Type.Literal(checkpoint.digest),
+                },
+                { additionalProperties: false },
+              ),
+        ...(phase === undefined ? {} : { phase: Type.Literal(phase) }),
+      },
+      { additionalProperties: false },
+    ),
   );
 }
 

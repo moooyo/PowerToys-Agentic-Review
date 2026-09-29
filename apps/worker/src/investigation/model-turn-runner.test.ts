@@ -58,6 +58,23 @@ import type {
 
 const hash = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 const jsonl = (...events: unknown[]) => events.map((event) => `${JSON.stringify(event)}\n`);
+function subjectSchemas(schema: unknown): Record<string, unknown>[] {
+  const found: Record<string, unknown>[] = [];
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const properties = record.properties as Record<string, unknown> | undefined;
+    if (properties?.subjectRef !== undefined)
+      found.push(properties.subjectRef as Record<string, unknown>);
+    Object.values(record).forEach(visit);
+  };
+  visit(schema);
+  return found;
+}
 const codexComplete = {
   type: "turn.completed",
   usage: { input_tokens: 31, cached_input_tokens: 7, output_tokens: 19 },
@@ -1922,12 +1939,16 @@ describe("investigation model turn runner", () => {
         phase: { const: "discovery" },
         inputCheckpointRef: { type: "null" },
       });
-      expect(schema.properties.analysis).toEqual(
-        (
-          createInvestigationModelOutputSchema(InvestigationModelTurnDeltaV1Schema)
-            .properties as Record<string, unknown>
-        ).analysis,
-      );
+      expect(subjectSchemas(schema).length).toBeGreaterThan(8);
+      for (const subject of subjectSchemas(schema))
+        expect(subject).toEqual({ type: "string", const: f.input.task.subjectRef });
+      expect(schema.properties.analysis.properties.assessment.anyOf).toContainEqual({
+        type: "null",
+      });
+      expect(
+        schema.properties.analysis.properties.findings.items.properties.feedbackDraft.properties
+          .suggestion.anyOf,
+      ).toContainEqual({ type: "null" });
       expect(f.io.removeDirectory).toHaveBeenCalledWith(f.roundDirectory);
       expect(f.input.workspace.cleanup).not.toHaveBeenCalled();
     },
@@ -3077,6 +3098,19 @@ describe("investigation model turn runner", () => {
       f.input.attempt.id = `attempt-${index}`;
       f.round.taskId = f.input.task.id;
       f.round.attemptId = f.input.attempt.id;
+      const secondary = { ...f.input.task.subjects[0]!, id: `visible-subject-${index}` };
+      f.input.task.subjects.push(secondary);
+      f.input.task.executionPolicy.allowedSubjectRefs.push(secondary.id);
+      f.input.task.scope.includedUnits.push({
+        id: `secondary-unit-${index}`,
+        subjectRef: secondary.id,
+        kind: "issue_snapshot",
+        paths: [],
+        requiredWork: "Analyze this supplied secondary snapshot.",
+        status: "pending",
+        evidenceRefs: [],
+      });
+      f.input.task.scope.unresolvedUnitRefs.push(`secondary-unit-${index}`);
       const checkpoint = createInvestigationCheckpoint({
         task: f.input.task,
         attemptId: f.input.attempt.id,
@@ -3114,6 +3148,11 @@ describe("investigation model turn runner", () => {
           additionalProperties: false,
         },
       });
+      for (const subject of subjectSchemas(JSON.parse(schemaWrite[1])))
+        expect(subject).toEqual({
+          type: "string",
+          enum: f.input.task.subjects.map((entry) => entry.id).sort(),
+        });
     }
     expect(JSON.stringify(InvestigationModelTurnDeltaV1Schema)).toBe(sharedBefore);
   });
@@ -3142,6 +3181,205 @@ describe("investigation model turn runner", () => {
         },
       ),
     ).toThrow("exceeds the configured CLI transport budget");
+  });
+
+  it("retains the exact subject literal and rejects the observed b-to-e evidence typo without correction", async () => {
+    const expected =
+      "issue-snapshot-65d02ab6c9ff77b5290e77d72d5c23ab8eac0246a5bd8bc9a2c2d014eb39044d";
+    const wrong = "issue-snapshot-65d02ab6c9ff77b5290e77d72d5c23ab8eac0246a5bd8bc9a2c2d014ee39044d";
+    const f = fixture();
+    const original = f.input.task.subjectRef;
+    const replaceSubject = <T>(value: T): T =>
+      JSON.parse(
+        JSON.stringify(value).split(JSON.stringify(original)).join(JSON.stringify(expected)),
+      ) as T;
+    Object.assign(f.input.task, replaceSubject(f.input.task));
+    Object.assign(f.round, replaceSubject(f.round));
+    const snapshot = replaceSubject(
+      JSON.parse(f.files.get(f.input.workspace.modelInputPath)!.toString("utf8")),
+    );
+    const text = JSON.stringify(snapshot);
+    f.files.set(f.input.workspace.modelInputPath, Buffer.from(text));
+    Object.assign(f.input.workspace, { modelInputDigest: hash(text) });
+    while (f.round.analysis.evidence.length < 7)
+      f.round.analysis.evidence.push({
+        id: `evidence-extra-${f.round.analysis.evidence.length}`,
+        subjectRef: expected,
+        source: "reporter_statement",
+        summary: "A distinct supplied snapshot observation.",
+        evidenceRefs: [],
+      });
+    f.round.analysis.evidence[6]!.subjectRef = wrong;
+    let rejected: unknown;
+    try {
+      await f.runner.execute(f.input);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toMatchObject({
+      code: "MODEL_OUTPUT_INVALID",
+      rule: "reference_outside_batch",
+      paths: expect.arrayContaining(["/analysis/evidence/6/subjectRef"]),
+    });
+    expect(getModelOutputCorrection(rejected)).toBeNull();
+    const schemaWrite = vi
+      .mocked(f.io.writeExclusiveUtf8)
+      .mock.calls.find(([path]) => path.endsWith("round-schema.json"))!;
+    for (const subject of subjectSchemas(JSON.parse(schemaWrite[1])))
+      expect(subject).toEqual({ type: "string", const: expected });
+    expect(f.start).toHaveBeenCalledOnce();
+  });
+
+  it("uses only projected subjects while retaining an already supplied runtime patch subject", async () => {
+    const f = fixture({ outputText: "{}" });
+    const source = {
+      id: "source-base",
+      kind: "source_commit" as const,
+      repositoryId: f.input.task.repository.id,
+      workItemId: f.input.task.workItem.id,
+      revisionKey: "b".repeat(64),
+      commitSha: "b".repeat(40),
+    };
+    const hidden = { ...source, id: "unselected-subject" };
+    f.input.task.subjects.push(source, hidden);
+    f.input.task.executionPolicy.allowedSubjectRefs.push(source.id, hidden.id);
+    const checkpoint = createInvestigationCheckpoint({
+      task: f.input.task,
+      attemptId: f.input.attempt.id,
+      checkpointId: "runtime-subject-checkpoint",
+      leaseVersion: f.input.attempt.leaseVersion,
+      recordedAt: f.input.task.updatedAt,
+    });
+    const patch = {
+      id: "worker-created-patch",
+      kind: "local_patch" as const,
+      repositoryId: source.repositoryId,
+      workItemId: source.workItemId,
+      revisionKey: "c".repeat(64),
+      baseSubjectRef: source.id,
+      baseSha: source.commitSha,
+      patchDigest: "d".repeat(64),
+      artifactRef: "trusted-patch-artifact",
+    };
+    checkpoint.runtime.subjects.push(patch);
+    checkpoint.analysis.coverage.includedUnits.push({
+      id: "patch-analysis",
+      subjectRef: patch.id,
+      kind: "source",
+      paths: [],
+      requiredWork: "Analyze the supplied patch observation.",
+      status: "pending",
+      evidenceRefs: [],
+    });
+    checkpoint.analysis.coverage.unresolvedUnitRefs.push("patch-analysis");
+    await expect(f.runner.execute({ ...f.input, checkpoint })).rejects.toMatchObject({
+      code: "MODEL_OUTPUT_INVALID",
+    });
+    const prompt = f.start.mock.calls[0]![0].standardInput!;
+    const context = JSON.parse(
+      prompt
+        .split("<frozen_investigation_context>\n")[1]!
+        .split("\n</frozen_investigation_context>")[0]!,
+    ) as { turn: ModelTurnProjectionContext };
+    const visible = context.turn.subjects.map((subject) => subject.id).sort();
+    expect(visible).toEqual([f.input.task.subjectRef, patch.id].sort());
+    const schemaWrite = vi
+      .mocked(f.io.writeExclusiveUtf8)
+      .mock.calls.find(([path]) => path.endsWith("round-schema.json"))!;
+    for (const subject of subjectSchemas(JSON.parse(schemaWrite[1])))
+      expect(subject).toEqual({ type: "string", enum: visible });
+  });
+
+  it("does not reserve invisible long subjects against the Copilot generation budget", async () => {
+    const f = fixture({ engine: "copilot", outputText: "{}" });
+    await expect(f.runner.execute(f.input)).rejects.toMatchObject({ code: "MODEL_OUTPUT_INVALID" });
+    const maximumInputBytes =
+      Buffer.byteLength(f.start.mock.calls[0]![0].standardInput!, "utf8") + 4096;
+    f.start.mockClear();
+    vi.mocked(f.io.writeExclusiveUtf8).mockClear();
+    const original = f.input.task.subjects[0]!;
+    for (let index = 0; index < 200; index++)
+      f.input.task.subjects.push({ ...original, id: `invisible-${index}-${"a".repeat(200)}` });
+    const runner = createModelTurnRunner({ ...f.options, maximumInputBytes });
+    await expect(runner.execute(f.input)).rejects.toMatchObject({ code: "MODEL_OUTPUT_INVALID" });
+    expect(f.start).toHaveBeenCalledOnce();
+    const spec = f.start.mock.calls[0]![0];
+    expect(Buffer.byteLength(spec.standardInput!, "utf8")).toBeLessThanOrEqual(maximumInputBytes);
+    const schemaWrite = vi
+      .mocked(f.io.writeExclusiveUtf8)
+      .mock.calls.find(([path]) => path.endsWith("round-schema.json"))!;
+    expect(schemaWrite[1]).not.toContain("invisible-");
+    for (const subject of subjectSchemas(JSON.parse(schemaWrite[1])))
+      expect(subject).toEqual({ type: "string", const: f.input.task.subjectRef });
+  });
+
+  it("reselects a smaller Copilot batch when repeated visible subject literals exceed the initial schema allowance", async () => {
+    const f = fixture({ engine: "copilot", outputText: "{}" });
+    const checkpoint = createInvestigationCheckpoint({
+      task: f.input.task,
+      attemptId: f.input.attempt.id,
+      checkpointId: "copilot-multiple-subjects",
+      leaseVersion: f.input.attempt.leaseVersion,
+      recordedAt: f.input.task.updatedAt,
+    });
+    Object.assign(f.input, { checkpoint });
+    const original = f.input.task.subjects[0]!;
+    for (let index = 0; index < 12; index++) {
+      const subject = { ...original, id: `visible-${index}-${"a".repeat(200)}` };
+      const id = `subject-work-${index}`;
+      f.input.task.subjects.push(subject);
+      f.input.task.executionPolicy.allowedSubjectRefs.push(subject.id);
+      checkpoint.analysis.coverage.includedUnits.push({
+        id,
+        subjectRef: subject.id,
+        kind: "issue_snapshot",
+        paths: [],
+        requiredWork: "Analyze this separately supplied snapshot context.",
+        status: "pending",
+        evidenceRefs: [],
+      });
+      checkpoint.analysis.coverage.unresolvedUnitRefs.push(id);
+    }
+    await expect(f.runner.execute(f.input)).rejects.toMatchObject({ code: "MODEL_OUTPUT_INVALID" });
+    const parseContext = (prompt: string): ModelTurnProjectionContext =>
+      (
+        JSON.parse(
+          prompt
+            .split("<frozen_investigation_context>\n")[1]!
+            .split("\n</frozen_investigation_context>")[0]!,
+        ) as { turn: ModelTurnProjectionContext }
+      ).turn;
+    const baselineInput = f.start.mock.calls[0]![0].standardInput!;
+    expect(parseContext(baselineInput).subjects).toHaveLength(f.input.task.subjects.length);
+    const maximumInputBytes = Buffer.byteLength(baselineInput, "utf8") - 1024;
+    f.start.mockClear();
+    vi.mocked(f.io.writeExclusiveUtf8).mockClear();
+    const projection = vi.spyOn(modelTurnProjection, "prepareModelTurnProjection");
+    try {
+      const runner = createModelTurnRunner({ ...f.options, maximumInputBytes });
+      await expect(runner.execute(f.input)).rejects.toMatchObject({ code: "MODEL_OUTPUT_INVALID" });
+      expect(f.start).toHaveBeenCalledOnce();
+      const spec = f.start.mock.calls[0]![0];
+      expect(Buffer.byteLength(spec.standardInput!, "utf8")).toBeLessThanOrEqual(maximumInputBytes);
+      const context = parseContext(spec.standardInput!);
+      expect(context.subjects.length).toBeGreaterThan(1);
+      expect(context.subjects.length).toBeLessThan(f.input.task.subjects.length);
+      const selectedCounts = projection.mock.results
+        .filter((result) => result.type === "return")
+        .map((result) => result.value.context.subjects.length as number);
+      expect(selectedCounts.length).toBeGreaterThan(1);
+      expect(Math.max(...selectedCounts)).toBeGreaterThan(context.subjects.length);
+      const schemaWrite = vi
+        .mocked(f.io.writeExclusiveUtf8)
+        .mock.calls.find(([path]) => path.endsWith("round-schema.json"))!;
+      for (const subject of subjectSchemas(JSON.parse(schemaWrite[1])))
+        expect(subject).toEqual({
+          type: "string",
+          enum: context.subjects.map((entry) => entry.id).sort(),
+        });
+    } finally {
+      projection.mockRestore();
+    }
   });
 
   it("rejects model-authored claims of authoritative model identity", async () => {
@@ -4357,6 +4595,8 @@ describe("static app-server invocation budgets", () => {
             },
           },
         });
+        for (const subject of subjectSchemas(params.outputSchema))
+          expect(subject).toEqual({ type: "string", const: f.f.input.task.subjectRef });
         const prompt = (params.input as { text: string }[])[0]!.text;
         const context = JSON.parse(
           prompt
