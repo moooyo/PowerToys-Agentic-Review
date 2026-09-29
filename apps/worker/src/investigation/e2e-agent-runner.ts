@@ -737,6 +737,19 @@ specific executed assertion or test so an empty or skipped suite cannot count as
 {"operation":"click","featureId":"conversion","processRef":"...","coordinates":{"x":100,"y":100}}
 {"operation":"type","featureId":"conversion","processRef":"...","text":"1 sqmi"}
 {"operation":"keys","featureId":"conversion","processRef":"...","keys":["ENTER"]}
+The keys operation sends input inside an already visible owned window. It cannot
+activate a tray or background application that has no visible window yet; that
+attempt returns window_unavailable before sending any key. After the owned process
+has finished startup, use the command operation for its documented global launch
+shortcut, then enumerate/inspect again and require a visible window owned by that
+same process before entering queries or asserting results. For PowerToys Run's
+Alt+Space activation, the existing Worker command path supports:
+{"operation":"command","script":"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('% ')","timeoutMs":15000}
+The command receipt establishes only that the activation command ran; it is not
+a feature assertion or proof that the expected window appeared. If an owned
+initialization dialog is present, inspect and dismiss it first, then allow startup
+to finish before dispatching the shortcut. Do not repeat window-targeted keys
+while the prerequisite window is absent.
 {"operation":"assert","featureId":"conversion","assertionId":"result","processRef":"..."}
 The Worker supplies the registered selector and expectation. Do not supply replacements.
 {"operation":"screenshot","featureId":"conversion","processRef":"..."}
