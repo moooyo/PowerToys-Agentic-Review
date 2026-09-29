@@ -711,6 +711,13 @@ Launch rechecks the output hash and returns observed.processRef. Enumerate disco
 child windows; target.pid may select a registered child PID from that application tree.
 {"operation":"enumerate"}
 {"operation":"inspect","processRef":"...","maxDepth":6,"maxNodes":200}
+When the same owned PID has multiple windows, select the intended dialog's windowHandle
+from enumerate and pass that decimal string explicitly (replace the example handle below).
+{"operation":"inspect","processRef":"...","target":{"windowHandle":"123456"},"maxDepth":6,"maxNodes":200}
+{"operation":"click","featureId":"registered-feature-id","processRef":"...","target":{"windowHandle":"123456","selector":{"name":"OK","automationId":"2"}}}
+The observed PowerToys Run initialization dialog exposes OK as automationId "2" with UIA
+controlType Pane; omit a Button controlType filter. Use an already registered feature ID.
+Coordinates still operate against the selected target window; they do not select another window.
 {"operation":"register-feature","feature":{"id":"conversion","title":"Square mile conversion","paths":["changed/file.cs"],"scenario":"Enter the input and inspect the calculated area.","userVisible":true,"assertions":[{"id":"result","kind":"ui","description":"The converted area matches the expected value.","selector":{"automationId":"Result"},"assertion":{"property":"text","expected":"2589988","match":"contains"}}]}}
 UI assertions require a specific named or automated control. Their expected values are
 registered before execution. User-visible features cannot pass from a process exit code.
