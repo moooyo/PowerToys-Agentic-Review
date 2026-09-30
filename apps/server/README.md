@@ -212,7 +212,10 @@ until the original Worker authenticates the exact task, attempt, fence, and leas
 confirms owned processes stopped and the desktop was restored. There is no time-based release.
 
 GitHub transport remains optional. Configure `INVESTIGATION_GITHUB_TOKEN` or its `_PATH` variant
-alongside `INVESTIGATION_GITHUB_USER_ID`. Without credentials, remote operations are unavailable.
+alongside `INVESTIGATION_GITHUB_USER_ID`. Without credentials, read-only source imports can
+access explicitly public repositories using anonymous GitHub GET requests. Private source reads
+and external write operations require configured credentials. Configured credentials are always
+checked against the expected user ID; a failed identity check never falls back to anonymous access.
 External writes also require `INVESTIGATION_ENABLE_EXTERNAL_WRITES=true` and the normal confirmed
 action-intent workflow. Account administration or test execution does not authorize writes to any
 actual repository PR or issue.
@@ -549,7 +552,9 @@ logs and public reports.
 After registering an exact repository ID, an operator with `repository:manage` can call
 `POST /api/repositories/:id/import-work-item` with `{ "kind": "issue", "number": 7 }` or
 `{ "kind": "pull_request", "number": 7 }`. This endpoint only performs GitHub GET requests. It
-checks the configured account, upstream numeric repository ID, work item kind, and final revision.
+checks the configured account when credentials are present, plus the upstream numeric repository
+ID, work item kind, and final revision. Anonymous imports require an explicitly public repository
+and remain subject to GitHub's anonymous API rate limit.
 It reads every conversation page, including inline review comments and review summaries for PRs.
 It returns `workItem`, `snapshotRef`, and `commentsCount` after atomically saving a complete snapshot.
 The source snapshots preserve immutable content archives; a current pointer selects the snapshot

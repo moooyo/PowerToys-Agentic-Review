@@ -44,6 +44,7 @@ function harness(
     comments?: number;
     maximumBytes?: number;
     maximumPages?: number;
+    anonymous?: boolean;
     classifyProgressComment?: InvestigationProgressCommentClassifier;
     override?: (
       path: string,
@@ -57,6 +58,7 @@ function harness(
   store.insert("repositories", repository.id, repository);
   const count = options.comments ?? 101;
   const calls: { path: string; method: string | undefined }[] = [];
+  const authorizations: (string | null)[] = [];
   const upstream = {
     id: 77,
     number: 7,
@@ -82,6 +84,7 @@ function harness(
     expect(init?.redirect).toBe("error");
     const path = `${url.pathname}${url.search}`;
     calls.push({ path, method: init?.method });
+    authorizations.push(new Headers(init?.headers).get("authorization"));
     const overridden = options.override?.(
       path,
       calls.filter((call) => call.path === path).length,
@@ -90,7 +93,7 @@ function harness(
     if (overridden !== undefined) return overridden;
     if (path === "/user") return Response.json({ id: 55 });
     if (path === "/repos/fixture/repository")
-      return Response.json({ id: 123, full_name: repository.fullName });
+      return Response.json({ id: 123, full_name: repository.fullName, private: false });
     if (
       url.pathname === "/repos/fixture/repository/issues/7" ||
       url.pathname === "/repos/fixture/repository/pulls/7"
@@ -123,7 +126,9 @@ function harness(
   };
   const importer = new InvestigationSourceImporter({
     store,
-    github: { token: "synthetic-read-token", expectedGitHubUserId: 55 },
+    ...(options.anonymous === true
+      ? {}
+      : { github: { token: "synthetic-read-token", expectedGitHubUserId: 55 } }),
     fetch,
     ...(options.maximumBytes === undefined ? {} : { maximumBytes: options.maximumBytes }),
     ...(options.maximumPages === undefined ? {} : { maximumPages: options.maximumPages }),
@@ -131,7 +136,7 @@ function harness(
       ? {}
       : { classifyProgressComment: options.classifyProgressComment }),
   });
-  return { store, importer, calls, upstream };
+  return { store, importer, calls, authorizations, upstream };
 }
 
 describe("read-only GitHub source import", () => {
@@ -177,22 +182,65 @@ describe("read-only GitHub source import", () => {
     });
   });
 
-  it("imports PR conversation, inline reviews, and review summaries with an exact base/head revision", async () => {
-    const { importer } = harness({ kind: "pull_request", comments: 1 });
-    const result = await importer.importWorkItem(operator, repository.id, {
-      kind: "pull_request",
-      number: 7,
-    });
-    expect(result.commentsCount).toBe(3);
-    expect(result.workItem.subject).toMatchObject({
-      kind: "original_pr",
-      baseSha: "b".repeat(40),
-      headSha: sha,
-      revisionKey: createHash("sha256")
-        .update(`${"b".repeat(40)}\0${sha}`)
-        .digest("hex"),
-    });
-  });
+  it.each([
+    { mode: "authenticated private", anonymous: false, private: true },
+    { mode: "anonymous public", anonymous: true, private: false },
+  ])(
+    "imports the complete PR conversation with $mode reads and an exact base/head revision",
+    async ({ anonymous, private: isPrivate }) => {
+      const { store, importer, calls, authorizations, upstream } = harness({
+        kind: "pull_request",
+        anonymous,
+        override: (path) =>
+          path === "/repos/fixture/repository"
+            ? Response.json({ id: 123, full_name: repository.fullName, private: isPrivate })
+            : undefined,
+      });
+      const result = await importer.importWorkItem(operator, repository.id, {
+        kind: "pull_request",
+        number: 7,
+      });
+      expect(result.commentsCount).toBe(103);
+      expect(result.workItem.subject).toMatchObject({
+        kind: "original_pr",
+        baseSha: "b".repeat(40),
+        headSha: sha,
+        revisionKey: createHash("sha256")
+          .update(`${"b".repeat(40)}\0${sha}`)
+          .digest("hex"),
+      });
+      expect(calls.filter((call) => call.path.includes("/issues/7/comments?"))).toHaveLength(2);
+      const { task: baseTask } = createInvestigationFixture("bug");
+      const task: InvestigationTaskV1 = {
+        ...baseTask,
+        repository,
+        workItem: result.workItem,
+        subjectRef: result.workItem.subject.id,
+        subjects: [result.workItem.subject],
+      };
+      const prepared = await importer.prepareTaskInput(task, result.workItem, null, operator);
+      expect(prepared.inputSnapshot).toMatchObject({
+        body: upstream.body,
+        subjectRef: result.workItem.subject.id,
+        subjectRevisionKey: result.workItem.subject.revisionKey,
+      });
+      expect(prepared.inputSnapshot.comments).toHaveLength(103);
+      expect(prepared.inputSnapshot.comments.slice(-3)).toEqual([
+        { id: "issue-comment:101", body: "Complete comment 101" },
+        { id: "review-comment:301", body: "Full inline review feedback" },
+        { id: "review:401", body: "Full overall review feedback" },
+      ]);
+      expect(store.get("sourceSnapshots", result.snapshotRef.id)).toMatchObject({
+        digest: result.snapshotRef.digest,
+        inputSnapshot: prepared.inputSnapshot,
+      });
+      expect(calls.filter((call) => call.path === "/user")).toHaveLength(anonymous ? 0 : 1);
+      expect(calls.every((call) => call.method === "GET")).toBe(true);
+      expect(authorizations).toEqual(
+        calls.map(() => (anonymous ? null : "Bearer synthetic-read-token")),
+      );
+    },
+  );
 
   it.each(["issue", "pull_request"] as const)(
     "annotates trusted progress publications without changing the complete %s conversation",
@@ -359,28 +407,95 @@ describe("read-only GitHub source import", () => {
     );
   });
 
-  it("checks repository identity and operator scope before saving source", async () => {
-    const scoped = harness();
-    await expect(
-      scoped.importer.importWorkItem({ ...operator, repositoryIds: [] }, repository.id, {
-        kind: "issue",
-        number: 7,
-      }),
-    ).rejects.toMatchObject({ code: "repository_forbidden" });
-    expect(scoped.calls).toHaveLength(0);
-    const wrongRepository = harness({
+  it.each([false, true])(
+    "preserves repository identity and operator scope checks with anonymous=%s",
+    async (anonymous) => {
+      for (const { actor, code } of [
+        { actor: { ...operator, repositoryIds: [] }, code: "repository_forbidden" },
+        {
+          actor: { ...operator, permissions: ["task:create"] as const },
+          code: "permission_denied",
+        },
+      ]) {
+        const scoped = harness({ anonymous });
+        await expect(
+          scoped.importer.importWorkItem(actor, repository.id, { kind: "issue", number: 7 }),
+        ).rejects.toMatchObject({ code, statusCode: 403 });
+        expect(scoped.calls).toHaveLength(0);
+        expect(scoped.store.list("workItems")).toEqual([]);
+        expect(scoped.store.list("sourceSnapshots")).toEqual([]);
+      }
+      for (const identity of [
+        { id: 999, full_name: repository.fullName },
+        { id: "123", full_name: repository.fullName },
+        { id: 123, full_name: "fixture/another-repository" },
+      ]) {
+        const wrongRepository = harness({
+          anonymous,
+          override: (path) =>
+            path === "/repos/fixture/repository"
+              ? Response.json({ ...identity, private: false })
+              : undefined,
+        });
+        await expect(
+          wrongRepository.importer.importWorkItem(operator, repository.id, {
+            kind: "issue",
+            number: 7,
+          }),
+        ).rejects.toMatchObject({ code: "source_repository_mismatch", statusCode: 409 });
+        expect(wrongRepository.calls.map((call) => call.path)).toEqual(
+          anonymous ? ["/repos/fixture/repository"] : ["/user", "/repos/fixture/repository"],
+        );
+        expect(wrongRepository.store.list("workItems")).toEqual([]);
+        expect(wrongRepository.store.list("sourceSnapshots")).toEqual([]);
+      }
+    },
+  );
+
+  it.each([
+    { visibility: "private", private: true },
+    { visibility: "missing", private: undefined },
+    { visibility: "null", private: null },
+    { visibility: "string false", private: "false" },
+    { visibility: "numeric zero", private: 0 },
+  ])("rejects anonymous imports with $visibility repository visibility", async (visibility) => {
+    const { importer, store, calls, authorizations } = harness({
+      anonymous: true,
       override: (path) =>
         path === "/repos/fixture/repository"
-          ? Response.json({ id: 999, full_name: repository.fullName })
+          ? Response.json({ id: 123, full_name: repository.fullName, private: visibility.private })
           : undefined,
     });
     await expect(
-      wrongRepository.importer.importWorkItem(operator, repository.id, {
-        kind: "issue",
-        number: 7,
-      }),
-    ).rejects.toMatchObject({ code: "source_repository_mismatch" });
-    expect(wrongRepository.store.list("workItems")).toEqual([]);
+      importer.importWorkItem(operator, repository.id, { kind: "issue", number: 7 }),
+    ).rejects.toMatchObject({ code: "source_repository_not_public", statusCode: 403 });
+    expect(calls).toEqual([{ path: "/repos/fixture/repository", method: "GET" }]);
+    expect(authorizations).toEqual([null]);
+    expect(store.list("workItems")).toEqual([]);
+    expect(store.list("sourceSnapshots")).toEqual([]);
+  });
+
+  it.each([
+    { failure: "wrong account", account: { id: 99 }, responseStatus: 200, statusCode: 403 },
+    { failure: "nonnumeric account", account: { id: "55" }, responseStatus: 200, statusCode: 403 },
+    { failure: "rejected credential", account: {}, responseStatus: 401, statusCode: 503 },
+  ])("does not fall back to anonymous reads for a configured $failure", async (failure) => {
+    const { importer, store, calls, authorizations } = harness({
+      override: (path) =>
+        path === "/user"
+          ? Response.json(failure.account, { status: failure.responseStatus })
+          : undefined,
+    });
+    await expect(
+      importer.importWorkItem(operator, repository.id, { kind: "issue", number: 7 }),
+    ).rejects.toMatchObject({
+      code: failure.responseStatus === 200 ? "source_account_mismatch" : "source_read_failed",
+      statusCode: failure.statusCode,
+    });
+    expect(calls).toEqual([{ path: "/user", method: "GET" }]);
+    expect(authorizations).toEqual(["Bearer synthetic-read-token"]);
+    expect(store.list("workItems")).toEqual([]);
+    expect(store.list("sourceSnapshots")).toEqual([]);
   });
 
   it("fails budget exhaustion or a changing target without storing truncated observations", async () => {

@@ -1011,19 +1011,15 @@ export class InvestigationSourceImporter {
     budget: SourceBudget,
   ): Promise<void> {
     const credentials = this.options.github;
-    requireCondition(
-      credentials !== undefined,
-      503,
-      "source_import_unavailable",
-      "Configure a GitHub read credential and expected account before importing source.",
-    );
-    const account = object((await this.#get("/user", budget)).value);
-    requireCondition(
-      account.id === credentials.expectedGitHubUserId,
-      403,
-      "source_account_mismatch",
-      "The GitHub credential does not belong to the configured account.",
-    );
+    if (credentials !== undefined) {
+      const account = object((await this.#get("/user", budget)).value);
+      requireCondition(
+        account.id === credentials.expectedGitHubUserId,
+        403,
+        "source_account_mismatch",
+        "The GitHub credential does not belong to the configured account.",
+      );
+    }
     const upstream = object((await this.#get(sourcePath(repository), budget)).value);
     requireCondition(
       upstream.id === repository.githubRepositoryId &&
@@ -1032,6 +1028,12 @@ export class InvestigationSourceImporter {
       409,
       "source_repository_mismatch",
       "The upstream repository identity differs from its registered numeric ID and name.",
+    );
+    requireCondition(
+      credentials !== undefined || upstream.private === false,
+      403,
+      "source_repository_not_public",
+      "Importing source without a GitHub credential requires an explicitly public repository.",
     );
   }
 
@@ -1165,12 +1167,6 @@ export class InvestigationSourceImporter {
 
   async #get(path: string, budget: SourceBudget): Promise<{ value: unknown; link: string | null }> {
     const credentials = this.options.github;
-    requireCondition(
-      credentials !== undefined,
-      503,
-      "source_import_unavailable",
-      "A GitHub read credential is required.",
-    );
     let response: Response;
     try {
       response = await this.#fetch(`https://api.github.com${path}`, {
@@ -1178,7 +1174,7 @@ export class InvestigationSourceImporter {
         redirect: "error",
         signal: AbortSignal.timeout(this.#timeout),
         headers: {
-          authorization: `Bearer ${credentials.token}`,
+          ...(credentials === undefined ? {} : { authorization: `Bearer ${credentials.token}` }),
           accept: "application/vnd.github+json",
           "x-github-api-version": "2022-11-28",
           "user-agent": "Agentic-Review-Investigation/1.0",
