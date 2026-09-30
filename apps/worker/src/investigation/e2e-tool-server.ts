@@ -13,12 +13,12 @@ import {
   ManagedProcessRunError,
   ProductionManagedProcessRunner,
 } from "../execution/managed-process-runner.js";
-import {
-  type ManagedProcess,
-  type ProcessExitedEvent,
-  type ProcessHostClient,
-  type ProcessLaunchSpec,
-  type ProcessResourceLimits,
+import type {
+  ManagedProcess,
+  ProcessExitedEvent,
+  ProcessHostClient,
+  ProcessLaunchSpec,
+  ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
 import {
   E2eBuildError,
@@ -235,6 +235,16 @@ export class E2eToolServer {
     if (address === null || typeof address === "string")
       throw new Error("E2E loopback binding failed.");
     this.#endpoint = `http://127.0.0.1:${address.port}/tool`;
+    try {
+      await writeFile(
+        win32.join(this.#directory, "transport.json"),
+        JSON.stringify({ endpoint: this.#endpoint, capability: this.#token }),
+        { flag: "wx", mode: 0o600 },
+      );
+    } catch (error) {
+      await new Promise<void>((resolve) => this.#server!.close(() => resolve()));
+      throw error;
+    }
     return { endpoint: this.#endpoint, capability: this.#token, directory: this.#directory };
   }
 

@@ -659,11 +659,17 @@ This is a valid response; the Worker retains the build evidence and records unco
 as Not run. An empty feature array never establishes successful verification.
 
 Tool transport (PowerShell; keep this capability out of logs and output):
+$transportPath = Join-Path -Path '${input.directory.replace(/'/gu, "''")}' -ChildPath 'transport.json'
+$transport = Get-Content -LiteralPath $transportPath -Raw | ConvertFrom-Json
 $responsePath = Join-Path -Path '${input.directory.replace(/'/gu, "''")}' -ChildPath ('tool-response-' + [Guid]::NewGuid().ToString('N') + '.json')
 Write-Output "Worker response file: $responsePath"
-$reply = Invoke-RestMethod -Method Post -Uri '${input.endpoint}' -Headers @{Authorization='Bearer ${input.capability}'} -ContentType 'application/json' -Body ($request | ConvertTo-Json -Depth 30)
+$reply = Invoke-RestMethod -Method Post -Uri $transport.endpoint -Headers @{Authorization=('Bearer ' + $transport.capability)} -ContentType 'application/json' -Body ($request | ConvertTo-Json -Depth 30)
 $reply | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $responsePath -Encoding utf8
 Get-Content -LiteralPath $responsePath -Raw
+The Worker writes transport.json with this session's exact endpoint and capability. Read its
+fields directly, including when configuring an existing deterministic HTTP client. Do not
+retype or reconstruct them, trim the URL or omit its /tool route. Never print this private
+file or its contents, copy it into report artifacts, or use another session's transport file.
 Run this entire transport sequence in one foreground shell invocation for each request.
 Retain the printed response path and any session ID returned when the shell yields. A yielded
 shell still owns the original HTTP call: resume or wait on that same session, using substantial

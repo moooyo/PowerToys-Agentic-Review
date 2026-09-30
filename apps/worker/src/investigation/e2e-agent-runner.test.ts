@@ -661,6 +661,27 @@ describe("E2E interruption recovery", () => {
     else expect(createTools).not.toHaveBeenCalled();
   });
 
+  it("reads exact private transport fields without embedding credentials", () => {
+    const f = recoveryFixture();
+    const prompt = createE2ePrompt({
+      snapshot: frozenInputFixture(f.input).snapshot,
+      input: f.input,
+      changedPaths: ["converter.cs"],
+      mergeBaseSha: "d".repeat(40),
+      endpoint: "http://127.0.0.1:1234/tool",
+      capability: "synthetic-private-capability",
+      directory: "C:/Attempts/reviewer's evidence",
+    });
+    expect(prompt).toContain(
+      "-Path 'C:/Attempts/reviewer''s evidence' -ChildPath 'transport.json'",
+    );
+    expect(prompt).toContain("Get-Content -LiteralPath $transportPath -Raw | ConvertFrom-Json");
+    expect(prompt).toContain("-Uri $transport.endpoint");
+    expect(prompt).toContain("Authorization=('Bearer ' + $transport.capability)");
+    expect(prompt).not.toContain("http://127.0.0.1:1234/tool");
+    expect(prompt).not.toContain("synthetic-private-capability");
+  });
+
   it("discloses only HEAD inert links and blocks claims that require real link semantics", () => {
     const f = recoveryFixture();
     const sourceSha = f.input.workspace.sourceBinding!.sourceSha;

@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { win32 } from "node:path";
 import { Readable } from "node:stream";
 import { createInvestigationPreview } from "@agentic-review/contracts";
 import { describe, expect, it, vi } from "vitest";
@@ -20,6 +23,7 @@ import type { PreparedInvestigationWorkspace } from "./workspace.js";
 function fixture(
   onRuntimeObservation = vi.fn(async () => {}),
   options: Pick<E2eToolServerOptions, "buildToolDigests" | "msbuildToolchain"> = {},
+  controlDirectory = "C:\\Attempt\\control",
 ) {
   const { task, attempt } = createInvestigationPreview("pr");
   const launches: ProcessLaunchSpec[] = [];
@@ -51,7 +55,7 @@ function fixture(
     close: async () => {},
   };
   const workspace = {
-    controlDirectory: "C:\\Attempt\\control",
+    controlDirectory,
     sourceDirectory: "C:\\Attempt\\source",
     tempDirectory: "C:\\Attempt\\temp",
     sourceBinding: { sourceSha: "a".repeat(40) },
@@ -93,10 +97,89 @@ function fixture(
     onRuntimeObservation,
     ...options,
   });
-  return { server, launches, onRuntimeObservation, artifactInputs };
+  return { server, host, launches, onRuntimeObservation, artifactInputs };
 }
 
 describe("E2E tool authority", () => {
+  it.skipIf(process.platform !== "win32")(
+    "loads the exact authenticated HTTP transport from a private file without publishing it",
+    async () => {
+      const controlDirectory = await mkdtemp(win32.join(tmpdir(), "e2e-transport-"));
+      const f = fixture(undefined, {}, controlDirectory);
+      const receipt: E2eToolReceipt = {
+        id: "transport-receipt",
+        operation: "transport-test",
+        status: "passed",
+        assertion: false,
+        summary: "The transport request completed.",
+        observed: null,
+        artifactRefs: [],
+      };
+      const execute = vi.spyOn(f.server, "execute").mockResolvedValue(receipt);
+      const startProcess = f.host.start;
+      const start = vi.spyOn(f.host, "start").mockImplementation(async (...args) => {
+        const spec = args[0];
+        const requestPath = spec.arguments.find((argument) => argument.endsWith(".request.json"))!;
+        const resultPath = spec.arguments.find((argument) => argument.endsWith(".result.json"))!;
+        const request = JSON.parse(await readFile(requestPath, "utf8")) as {
+          requestId: string;
+          action: string;
+        };
+        await writeFile(
+          resultPath,
+          JSON.stringify({
+            schemaVersion: "E2eDesktopResultV1",
+            requestId: request.requestId,
+            action: request.action,
+            success: true,
+            code: "completed",
+            message: "No owned processes remain.",
+            observedAt: new Date().toISOString(),
+            interactive: true,
+            sessionId: 1,
+            desktopName: "Default",
+            foreground: null,
+            ownedProcessesAlive: [],
+            ownedPidsPresent: [],
+            ownedProcessStates: [],
+            data: { cleanupConfirmed: true },
+          }),
+          { flag: "wx" },
+        );
+        return startProcess(...args);
+      });
+      try {
+        const session = await f.server.start();
+        const transport = JSON.parse(
+          await readFile(win32.join(session.directory, "transport.json"), "utf8"),
+        ) as { endpoint: string; capability: string };
+        expect(transport).toEqual({ endpoint: session.endpoint, capability: session.capability });
+        expect(transport.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/tool$/u);
+        const response = await fetch(transport.endpoint, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${transport.capability}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ operation: "transport-test" }),
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(receipt);
+        expect(execute).toHaveBeenCalledWith({ operation: "transport-test" });
+        expect(f.artifactInputs).toEqual([]);
+        expect(f.server.artifacts).toEqual([]);
+      } finally {
+        try {
+          await f.server.cleanup();
+        } finally {
+          execute.mockRestore();
+          start.mockRestore();
+          await rm(controlDirectory, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
   it("persists artifact mismatch details privately and returns only the artifact reference", async () => {
     const failure = new build.E2eBuildError(
       "E2E_BUILD_ARTIFACT_INVALID",
