@@ -288,31 +288,28 @@ describe("DatabaseClient startup", () => {
     },
   );
 
-  it.skipIf(process.platform === "win32")(
-    "rejects unexpected entries and database initialization history without the database",
-    async () => {
+  describe.skipIf(process.platform === "win32")("invalid database storage", () => {
+    it.each([
+      ["wrong-basename", "other.sqlite", "other", /unexpected entry other\.sqlite/u],
+      ["extra-entry", "unexpected.txt", "unexpected", /unexpected entry unexpected\.txt/u],
+    ] as const)(
+      "rejects unexpected storage entries: %s",
+      async (name, filename, content, error) => {
+        const directory = await createTemporaryDirectory();
+        const storageDirectory = join(directory, name);
+        await mkdir(storageDirectory, { mode: 0o700 });
+        await writeFile(join(storageDirectory, filename), content, { mode: 0o600 });
+        await expect(
+          DatabaseClient.create({
+            databasePath: join(storageDirectory, "state.sqlite"),
+            migrationsDirectory,
+          }),
+        ).rejects.toThrow(error);
+      },
+    );
+
+    it("rejects storage exceeding the entry limit", async () => {
       const directory = await createTemporaryDirectory();
-
-      const wrongBasenameDirectory = join(directory, "wrong-basename");
-      await mkdir(wrongBasenameDirectory, { mode: 0o700 });
-      await writeFile(join(wrongBasenameDirectory, "other.sqlite"), "other", { mode: 0o600 });
-      await expect(
-        DatabaseClient.create({
-          databasePath: join(wrongBasenameDirectory, "state.sqlite"),
-          migrationsDirectory,
-        }),
-      ).rejects.toThrow(/unexpected entry other\.sqlite/u);
-
-      const extraEntryDirectory = join(directory, "extra-entry");
-      await mkdir(extraEntryDirectory, { mode: 0o700 });
-      await writeFile(join(extraEntryDirectory, "unexpected.txt"), "unexpected", { mode: 0o600 });
-      await expect(
-        DatabaseClient.create({
-          databasePath: join(extraEntryDirectory, "state.sqlite"),
-          migrationsDirectory,
-        }),
-      ).rejects.toThrow(/unexpected entry unexpected\.txt/u);
-
       const overLimitDirectory = join(directory, "over-limit");
       const overLimitDatabasePath = join(overLimitDirectory, "state.sqlite");
       await mkdir(overLimitDirectory, { mode: 0o700 });
@@ -339,7 +336,10 @@ describe("DatabaseClient startup", () => {
       await expect(
         DatabaseClient.create({ databasePath: overLimitDatabasePath, migrationsDirectory }),
       ).rejects.toThrow(/(?:exceeds its 10-entry allowlist|unexpected entry eleventh-entry)/u);
+    });
 
+    it("rejects an empty uninitialized database", async () => {
+      const directory = await createTemporaryDirectory();
       const emptyUninitializedDirectory = join(directory, "empty-uninitialized");
       const emptyUninitializedDatabasePath = join(emptyUninitializedDirectory, "state.sqlite");
       await mkdir(emptyUninitializedDirectory, { mode: 0o700 });
@@ -350,7 +350,10 @@ describe("DatabaseClient startup", () => {
           migrationsDirectory,
         }),
       ).rejects.toThrow(/uninitialized database.*empty.*recovery is required/iu);
+    });
 
+    it("rejects an unsupported initialization marker", async () => {
+      const directory = await createTemporaryDirectory();
       const wrongMarkerDirectory = join(directory, "wrong-marker");
       const wrongMarkerDatabasePath = join(wrongMarkerDirectory, "state.sqlite");
       await mkdir(wrongMarkerDirectory, { mode: 0o700 });
@@ -363,32 +366,37 @@ describe("DatabaseClient startup", () => {
       await expect(
         DatabaseClient.create({ databasePath: wrongMarkerDatabasePath, migrationsDirectory }),
       ).rejects.toThrow(/initialization marker.*unsupported content/u);
+    });
 
-      for (const [name, databaseContent] of [
-        ["initializing-missing", undefined],
-        ["initializing-empty", ""],
-        ["initializing-nonempty", "database"],
-      ] as const) {
-        const initializingDirectory = join(directory, name);
-        const initializingDatabasePath = join(initializingDirectory, "state.sqlite");
-        await mkdir(initializingDirectory, { mode: 0o700 });
-        if (databaseContent !== undefined) {
-          await writeFile(initializingDatabasePath, databaseContent, { mode: 0o600 });
-        }
-        await writeFile(
-          databaseInitializingMarkerPath(initializingDatabasePath),
-          databaseInitializationMarkerContent,
-          { mode: 0o600 },
-        );
-        await expect(
-          DatabaseClient.create({ databasePath: initializingDatabasePath, migrationsDirectory }),
-        ).rejects.toThrow(/incomplete initialization marker.*recovery is required/u);
+    it.each([
+      ["initializing-missing", undefined],
+      ["initializing-empty", ""],
+      ["initializing-nonempty", "database"],
+    ] as const)("rejects incomplete initialization history: %s", async (name, databaseContent) => {
+      const directory = await createTemporaryDirectory();
+      const initializingDirectory = join(directory, name);
+      const initializingDatabasePath = join(initializingDirectory, "state.sqlite");
+      await mkdir(initializingDirectory, { mode: 0o700 });
+      if (databaseContent !== undefined) {
+        await writeFile(initializingDatabasePath, databaseContent, { mode: 0o600 });
       }
+      await writeFile(
+        databaseInitializingMarkerPath(initializingDatabasePath),
+        databaseInitializationMarkerContent,
+        { mode: 0o600 },
+      );
+      await expect(
+        DatabaseClient.create({ databasePath: initializingDatabasePath, migrationsDirectory }),
+      ).rejects.toThrow(/incomplete initialization marker.*recovery is required/u);
+    });
 
-      for (const [name, databaseContent] of [
-        ["initialized-missing", undefined],
-        ["initialized-empty", ""],
-      ] as const) {
+    it.each([
+      ["initialized-missing", undefined],
+      ["initialized-empty", ""],
+    ] as const)(
+      "rejects initialized database history without usable data: %s",
+      async (name, databaseContent) => {
+        const directory = await createTemporaryDirectory();
         const initializedDirectory = join(directory, name);
         const initializedDatabasePath = join(initializedDirectory, "state.sqlite");
         await mkdir(initializedDirectory, { mode: 0o700 });
@@ -399,12 +407,16 @@ describe("DatabaseClient startup", () => {
         await expect(
           DatabaseClient.create({ databasePath: initializedDatabasePath, migrationsDirectory }),
         ).rejects.toThrow(/initialized database.*missing or empty.*recovery is required/iu);
-      }
+      },
+    );
 
-      for (const [name, markerContent] of [
-        ["truncated-marker", databaseInitializationMarkerContent.slice(0, -1)],
-        ["huge-marker", "x".repeat(1_000_000)],
-      ] as const) {
+    it.each([
+      ["truncated-marker", databaseInitializationMarkerContent.slice(0, -1)],
+      ["huge-marker", "x".repeat(1_000_000)],
+    ] as const)(
+      "rejects initialization markers with an invalid size: %s",
+      async (name, markerContent) => {
+        const directory = await createTemporaryDirectory();
         const markerDirectory = join(directory, name);
         const markerDatabasePath = join(markerDirectory, "state.sqlite");
         await mkdir(markerDirectory, { mode: 0o700 });
@@ -415,8 +427,11 @@ describe("DatabaseClient startup", () => {
         await expect(
           DatabaseClient.create({ databasePath: markerDatabasePath, migrationsDirectory }),
         ).rejects.toThrow(/must contain exactly.*bytes/u);
-      }
+      },
+    );
 
+    it("rejects sidecar history without the database", async () => {
+      const directory = await createTemporaryDirectory();
       const sidecarHistoryDirectory = join(directory, "sidecar-history");
       const sidecarHistoryDatabasePath = join(sidecarHistoryDirectory, "state.sqlite");
       await mkdir(sidecarHistoryDirectory, { mode: 0o700 });
@@ -424,8 +439,8 @@ describe("DatabaseClient startup", () => {
       await expect(
         DatabaseClient.create({ databasePath: sidecarHistoryDatabasePath, migrationsDirectory }),
       ).rejects.toThrow(/missing.*recovery is required/u);
-    },
-  );
+    });
+  });
 
   it.skipIf(process.platform === "win32")(
     "rejects every existing database without this version's initialization marker",
