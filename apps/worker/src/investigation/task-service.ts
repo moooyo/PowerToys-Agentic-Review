@@ -7,6 +7,7 @@ import {
 import type { Logger } from "../logging/logger.js";
 import { delay } from "../util/async.js";
 import { type InvestigationWorkerClient, InvestigationWorkerClientError } from "./http-client.js";
+import { IsolatedInvestigationReportDeliveryError } from "./report-delivery-error.js";
 
 export type ClaimedInvestigationTask = NonNullable<InvestigationClaimResponse["claim"]>;
 export type InvestigationTaskPool = "static" | "e2e";
@@ -150,6 +151,18 @@ export class InvestigationTaskService {
       const execution = Promise.resolve()
         .then(() => this.options.executor.execute(claim, this.#shutdown.signal))
         .catch((error: unknown) => {
+          if (error instanceof IsolatedInvestigationReportDeliveryError) {
+            this.options.logger.warn(
+              "Investigation report delivery failed after confirmed cleanup.",
+              {
+                taskId,
+                attemptId,
+                code: error.code,
+                retryable: error.retryable,
+              },
+            );
+            return;
+          }
           // An executor owns durable termination. Never log model output, credentials, or server response bodies.
           this.#executionFailure ??= new Error(
             "Investigation attempt could not complete its terminal submission.",

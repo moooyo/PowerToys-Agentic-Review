@@ -6,6 +6,7 @@ import {
 import { createInvestigationCheckpoint } from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
 import { type InvestigationWorkerClient, InvestigationWorkerClientError } from "./http-client.js";
+import { IsolatedInvestigationReportDeliveryError } from "./report-delivery-error.js";
 import {
   type InvestigationClaimExecutor,
   InvestigationTaskService,
@@ -372,6 +373,115 @@ describe("InvestigationTaskService", () => {
       },
     );
     expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain("sensitive upstream response");
+  });
+
+  it.each(["issue-investigate", "pr-verify"] as const)(
+    "continues claiming %s after an isolated report rejection with confirmed cleanup",
+    async (kind) => {
+      const f = fixture();
+      const first = schedulingClaim(kind, "report-rejected");
+      const second = schedulingClaim(kind, "next-attempt");
+      f.claim.mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValue(null);
+      const failure = new IsolatedInvestigationReportDeliveryError({
+        code: "invalid_logical_report_semantics",
+        retryable: false,
+      });
+      failure.message = "Synthetic sensitive upstream response.";
+      Object.assign(failure, { responseBody: "Synthetic private report.", credential: "secret" });
+      const order: string[] = [];
+      const execute = vi.fn<InvestigationClaimExecutor["execute"]>(async (claim, signal) => {
+        expect(signal.aborted).toBe(false);
+        if (claim.attempt.id === first.attempt.id) {
+          order.push("first.cleanup-confirmed");
+          throw failure;
+        }
+        order.push("second.completed");
+        service.requestDrain();
+      });
+      const service = new InvestigationTaskService({
+        client: f.client,
+        executor: { execute },
+        supportedKinds: [kind],
+        logger: f.logger,
+      });
+
+      await expect(service.run()).resolves.toBeUndefined();
+      await expect(service.stop()).resolves.toBeUndefined();
+
+      expect(order).toEqual(["first.cleanup-confirmed", "second.completed"]);
+      expect(f.claim).toHaveBeenCalledTimes(2);
+      expect(execute.mock.calls.map(([claim]) => claim.attempt.id)).toEqual([
+        first.attempt.id,
+        second.attempt.id,
+      ]);
+      expect(f.logger.warn).toHaveBeenCalledExactlyOnceWith(
+        "Investigation report delivery failed after confirmed cleanup.",
+        {
+          taskId: first.task.id,
+          attemptId: first.attempt.id,
+          code: "invalid_logical_report_semantics",
+          retryable: false,
+        },
+      );
+      expect(f.logger.error).not.toHaveBeenCalled();
+      expect(JSON.stringify(f.logger.warn.mock.calls)).not.toMatch(
+        /sensitive|private report|secret/,
+      );
+    },
+  );
+
+  it.each(["plain object", "named Error"] as const)(
+    "does not treat a %s as proof of isolated report delivery failure",
+    async (kind) => {
+      const f = fixture();
+      const fields = {
+        name: "IsolatedInvestigationReportDeliveryError",
+        code: "invalid_logical_report_semantics",
+        retryable: false,
+        message: "Synthetic sensitive report response.",
+      };
+      const failure = kind === "plain object" ? fields : Object.assign(new Error(), fields);
+      const execute = vi.fn<InvestigationClaimExecutor["execute"]>(async () => {
+        throw failure;
+      });
+      const service = new InvestigationTaskService({
+        client: f.client,
+        executor: { execute },
+        supportedKinds: ["issue-investigate"],
+        logger: f.logger,
+      });
+
+      await expect(service.run()).rejects.toThrow(/terminal submission/);
+
+      expect(f.claim).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+      expect(f.logger.warn).not.toHaveBeenCalled();
+      expect(f.logger.error).toHaveBeenCalledExactlyOnceWith(
+        "Investigation attempt could not complete its terminal submission.",
+        {
+          taskId: execute.mock.calls[0]![0].task.id,
+          attemptId: execute.mock.calls[0]![0].attempt.id,
+        },
+      );
+    },
+  );
+
+  it.each(["", "a".repeat(129), "private response", "rejected\n", "report/422", "é"])(
+    "bounds isolated report delivery failure code %j before it reaches logging",
+    (code) => {
+      const error = new IsolatedInvestigationReportDeliveryError({ code, retryable: true });
+
+      expect(error).toMatchObject({ code: "REPORT_DELIVERY_FAILED", retryable: false });
+      expect(error.message).toBe("Investigation report delivery failed after confirmed cleanup.");
+    },
+  );
+
+  it("preserves a bounded ASCII delivery code and its retryability", () => {
+    const code = `report.delivery:retryable-${"a".repeat(102)}`;
+    const error = new IsolatedInvestigationReportDeliveryError({ code, retryable: true });
+
+    expect(error.code).toBe(code);
+    expect(error.retryable).toBe(true);
   });
 
   it("retains safe terminal HTTP metadata without its message or arbitrary error fields", async () => {

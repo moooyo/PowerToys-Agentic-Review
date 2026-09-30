@@ -181,39 +181,63 @@ describe("DatabaseClient startup", () => {
     },
   );
 
-  it("leaves a failed fresh migration in an explicit recovery-required state", async () => {
-    const directory = await createTemporaryDirectory();
-    const invalidMigrationsDirectory = join(directory, "invalid-migrations");
-    await mkdir(invalidMigrationsDirectory);
-    const migrationPath = join(invalidMigrationsDirectory, "0001_initial.sql");
-    await writeFile(migrationPath, "THIS IS NOT SQL", "utf8");
-    const databasePath = join(directory, "data", "state.sqlite");
+  it.skipIf(process.platform !== "win32")(
+    "rejects unsupported database ownership on Windows before creating initialization state",
+    async () => {
+      const directory = await createTemporaryDirectory();
+      const dataDirectory = join(directory, "data");
+      const databasePath = join(dataDirectory, "state.sqlite");
 
-    await expect(
-      DatabaseClient.create({ databasePath, migrationsDirectory: invalidMigrationsDirectory }),
-    ).rejects.toThrow();
-    expect(await readFile(databaseInitializingMarkerPath(databasePath), "utf8")).toBe(
-      databaseInitializationMarkerContent,
-    );
-    await expect(lstat(databaseInitializationMarkerPath(databasePath))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+      await expect(DatabaseClient.create({ databasePath, migrationsDirectory })).rejects.toThrow(
+        /database ownership checks require a supported POSIX platform/u,
+      );
+      for (const path of [
+        dataDirectory,
+        databasePath,
+        databaseInitializingMarkerPath(databasePath),
+        databaseInitializationMarkerPath(databasePath),
+      ]) {
+        await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    },
+  );
 
-    await writeFile(
-      migrationPath,
-      await readFile(join(migrationsDirectory, "0001_initial.sql"), "utf8"),
-      "utf8",
-    );
-    await expect(
-      DatabaseClient.create({ databasePath, migrationsDirectory: invalidMigrationsDirectory }),
-    ).rejects.toThrow(/incomplete initialization marker.*recovery is required/u);
+  it.skipIf(process.platform === "win32")(
+    "leaves a failed fresh migration in an explicit recovery-required state",
+    async () => {
+      const directory = await createTemporaryDirectory();
+      const invalidMigrationsDirectory = join(directory, "invalid-migrations");
+      await mkdir(invalidMigrationsDirectory);
+      const migrationPath = join(invalidMigrationsDirectory, "0001_initial.sql");
+      await writeFile(migrationPath, "THIS IS NOT SQL", "utf8");
+      const databasePath = join(directory, "data", "state.sqlite");
 
-    const replacement = await DatabaseClient.create({
-      databasePath: join(directory, "replacement-data", "state.sqlite"),
-      migrationsDirectory,
-    });
-    await replacement.close();
-  });
+      await expect(
+        DatabaseClient.create({ databasePath, migrationsDirectory: invalidMigrationsDirectory }),
+      ).rejects.toThrow(/near "THIS": syntax error/u);
+      expect(await readFile(databaseInitializingMarkerPath(databasePath), "utf8")).toBe(
+        databaseInitializationMarkerContent,
+      );
+      await expect(lstat(databaseInitializationMarkerPath(databasePath))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      await writeFile(
+        migrationPath,
+        await readFile(join(migrationsDirectory, "0001_initial.sql"), "utf8"),
+        "utf8",
+      );
+      await expect(
+        DatabaseClient.create({ databasePath, migrationsDirectory: invalidMigrationsDirectory }),
+      ).rejects.toThrow(/incomplete initialization marker.*recovery is required/u);
+
+      const replacement = await DatabaseClient.create({
+        databasePath: join(directory, "replacement-data", "state.sqlite"),
+        migrationsDirectory,
+      });
+      await replacement.close();
+    },
+  );
 
   it.skipIf(process.platform === "win32")(
     "creates private database and WAL files before readiness",

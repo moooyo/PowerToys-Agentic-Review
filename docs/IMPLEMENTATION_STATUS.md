@@ -1,6 +1,52 @@
 # Implementation Status
 
-## Dashboard interaction follow-up, 2026-09-27 — complete within recorded scope
+## Current capabilities — 2026-10-01
+
+The active implementation uses the Task/Report runtime and `investigation-v5` storage. The earlier
+CI baseline `2b86cdc417794ab2f12987914ed314ffbf8d10c6` passed all jobs; its database-startup
+deadline correction changed tests only. See the [current CI workflow](../.github/workflows/ci.yml)
+for the active gates. That prior result does not establish passing verification for subsequent
+implementation changes described here.
+
+- **Saved PR verification recipes (`6f0693e`):** a report's exact saved verification plan can
+  expose **Verify PR** without a model-authored next-action suggestion. Preview and confirmation
+  create a linked `pr-verify` Task against the original PR revision. Supported structured
+  PowerToys Run Calculator and UnitConverter recipes execute through the Worker with individual
+  assertion/check mappings and retained evidence. Explicit deployment bindings take precedence;
+  unstructured plans still need a configured binding. See the
+  [recipe contract and limits](../deploy/worker/e2e-recipes.md).
+- **Startup readiness and reruns (`61a114a`):** the recipe can retry Launcher activation within
+  a bounded limit after an owned initialization dialog consumes the first shortcut. Linked
+  verification adopts the newest whole rerun for the same plan and subject, including failures;
+  it does not combine checks across runs or prefer an older passing report.
+- **Parent plan projection (`df5f9e8`):** completed PR verification reports restore an omitted
+  assessment plan reference only when the trusted saved parent plan, original PR subject, report
+  identity, and digest agree. This preserves the follow-up link without accepting an unrelated plan.
+- **Report delivery failure isolation:** cleanup confirmation can carry a bounded
+  `reportDeliveryFailure` with a code and retryable flag. For an undelivered stopped checkpoint,
+  the Server interrupts only that Task and Attempt and preserves the complete checkpoint. The
+  Worker continues accepting work only after local cleanup and Server acknowledgement succeed
+  without lease loss. Other cleanup, lease, or uncertain-execution faults still drain the Worker.
+  Explicit resume of a completed checkpoint retries delivery only; it does not automatically
+  repeat model or UI execution.
+- **Windows test portability:** legacy POSIX `DatabaseClient` tests assert the exact unsupported
+  platform rejection and absence of initialized state on Windows. POSIX SQL recovery assertions
+  remain in place, and the current Windows investigation Server runtime is unchanged.
+- **CI execution layout:** Linux builds shared packages and the Server once, then runs three
+  Server test shards and the other checks in parallel. `Node Linux Checks` remains the strict
+  aggregate gate. Full Windows and Go checks remain enabled; the layout change does not remove
+  their platform coverage.
+- **Capacity tooling:** evidence quotas and retention, administrator-only physical storage
+  observations, explicit thresholds, and a bounded capacity observer are implemented. Sustained
+  throughput, concurrency, and storage growth require separate workload measurements; their
+  acceptance limits do not mean these controls are unimplemented.
+
+These are source and CI capability statements. Private deployment observations are not a public
+reproduction package. The dated records below preserve their original failures, revisions, and
+acceptance boundaries; a held flag or remaining item in an old record is not a current capability
+or deployment-state declaration.
+
+## Historical acceptance: Dashboard interaction follow-up, 2026-09-27
 
 The production phase completed eight browser steps with three screenshots against the sealed
 `a6ae2995407037683e5be120f76e928aad212c4b` runtime. This work is based on `e38dbbc` and changes
@@ -37,12 +83,12 @@ still matched, and the three production services remained running at 4 GiB with 
 Both interaction phases and operational closeout are complete within these boundaries. See the
 [current interaction handoff](handoff/2026-09-27-dashboard-interaction-acceptance.md) for boundaries.
 
-## CI correction and production cutover, 2026-09-27
+## Historical acceptance: CI correction and production cutover, 2026-09-27
 
-Production release `a6ae2995407037683e5be120f76e928aad212c4b` is deployed with the Server in
-Session 0, the static Worker in its intended interactive session, and the Dashboard relay running.
-Git integration, CI correction, and production cutover are complete within the
-[current cutover record](handoff/2026-09-27-ci-and-production-cutover.md). That record supersedes
+Production release `a6ae2995407037683e5be120f76e928aad212c4b` was deployed on September 27 with
+the Server in Session 0, the static Worker in its intended interactive session, and the Dashboard
+relay running. Git integration, CI correction, and production cutover completed within the
+[historical cutover record](handoff/2026-09-27-ci-and-production-cutover.md). That record supersedes
 the earlier pending-cutover status while retaining the isolated acceptance scopes below.
 
 [CI run 36304015077](https://github.com/moooyo/PowerToys-Agentic-Review/actions/runs/36304015077)
@@ -66,7 +112,7 @@ four report exports, and 47 evidence records to the baseline. The persisted Serv
 concurrency was changed from two to one through the native administrator API; Worker concurrency
 is also one. Readback showed no active leases, new Tasks, or new business records. The GitHub read
 credential was retained and its represented identity matched the expected `GET /user` response.
-Outbound writes, media uploads, webhook intake, and E2E remain held.
+Outbound writes, media uploads, webhook intake, and E2E were held for that cutover.
 
 The original six trusted executable mappings, plan environment, PATH, and MSBuild 14.50/v145
 selection were restored to the deployed static Worker and checked after cooperative restart.
@@ -81,7 +127,7 @@ definitions remain disabled and preserved, while the three new production tasks 
 Stop and rollback procedures are prepared but were not executed. Private identities, credentials,
 machine addresses, and raw operational receipts remain outside the repository.
 
-## Serial workflow acceptance with 4 GiB, 2026-09-27
+## Historical acceptance: serial workflow with 4 GiB, 2026-09-27
 
 The published operations baseline passed shared/Server/Worker/Dashboard prebuilds, 149 distinct
 targeted tests, and a serial 30-test Windows repeat. The production-entry synthetic lifecycle
@@ -1107,11 +1153,12 @@ occurred. Full Worker `main.ts` and Windows VM deployment acceptance, actual ups
 review and general model-quality evaluation remain separate boundaries, not additional requirements
 for closing this controlled-fixture milestone.
 
-## Remaining product work
+## Historical backlog and acceptance boundaries — 2026-09-27
 
-This is the current backlog and acceptance boundary at deployed release `a6ae299`.
-The September 27 CI and production cutover record supersedes earlier pending correction/cutover
-statements and claims that all Windows hosting checks remain unexecuted. Historical milestone
+This section preserves the backlog and acceptance boundary recorded at release `a6ae299`.
+It is not the current capability inventory; use the current-capabilities section above for later
+implementation. The September 27 CI and production cutover record supersedes earlier pending
+correction/cutover statements and claims that all Windows hosting checks remain unexecuted. Historical milestone
 limitations below do not override later accepted scopes, and retired designs are not queued
 implementation work.
 
@@ -1163,7 +1210,7 @@ service-broker or externally detached processes. Historical failed receipts rema
   receipt with no established cause. Full live-path and physical power-loss claims need their own
   evidence; the completed native duplicate tests are not an unexecuted backlog item.
 - **Release verification and production cutover — complete within recorded scope:** release
-  `a6ae2995407037683e5be120f76e928aad212c4b` passed all three CI jobs and is running under the
+  `a6ae2995407037683e5be120f76e928aad212c4b` passed all three CI jobs and ran under the
   new Server/Worker/relay supervision. Existing accounts, Tasks, reports, evidence, and histories
   were preserved, with one static slot, Worker concurrency one, no active leases, and outbound
   writes and E2E held. The six-step read-only production browser check and three inspected
@@ -1183,7 +1230,8 @@ service-broker or externally detached processes. Historical failed receipts rema
   [Windows hosting matrix](../deploy/operations/WINDOWS.md#verification-to-execute-after-the-worker-is-ready)
   remain separate. Historical Peek/Launcher and the original external HTTP 401 need their exact
   retained inputs and independent follow-up; simpler synthetic checks cannot close them.
-- **Long-term operational capacity — deferred:** resident evidence quotas, bounded retention,
+- **Long-term operational capacity acceptance — deferred at this milestone:** resident evidence
+  quotas, bounded retention,
   expiry reads, source protection, and administrator-only physical storage observations are
   implemented. A short two-task observation passed declared thresholds, and the 4 GiB serial
   synthetic workflow passed within its sampled scope. Sustained throughput, concurrency, retained

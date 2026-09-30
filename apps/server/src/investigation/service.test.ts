@@ -1497,56 +1497,86 @@ describe("investigation service API", () => {
     expect(store.list("tasks")).toEqual([]);
   });
 
-  it("recovers a completed checkpoint for delivery without repeating its investigation", async () => {
-    const { app, store, item, advance } = await harness();
-    const task = await createTask(app, item);
-    const first = await claim(app);
-    const checkpoint = first.checkpoint;
-    if (checkpoint === null) throw new Error("Claim must persist the initial checkpoint.");
-    const subject = task.subjects.find((entry) => entry.id === task.subjectRef);
-    if (subject?.kind !== "original_pr") throw new Error("Expected the original PR subject.");
-    const manifestContent = {
-      schemaVersion: "InvestigationPrDiffManifestV1" as const,
-      subjectRef: subject.id,
-      baseSha: subject.baseSha,
-      headSha: subject.headSha,
-      mergeBaseSha: subject.baseSha,
-      files: [],
-      chunks: [],
-    };
-    checkpoint.runtime.sourceCoverage = {
-      manifest: { ...manifestContent, digest: investigationContentDigest(manifestContent) },
-      brokeredUnitIds: [],
-    };
-    checkpoint.analysis.coverage.includedUnits = checkpoint.analysis.coverage.includedUnits.map(
-      (unit) => ({ ...unit, status: "completed" }),
-    );
-    checkpoint.analysis.coverage.completedUnitRefs = checkpoint.analysis.coverage.includedUnits.map(
-      (unit) => unit.id,
-    );
-    checkpoint.analysis.coverage.unresolvedUnitRefs = [];
-    checkpoint.round = 2;
-    checkpoint.consumed.rounds = 2;
-    checkpoint.lastPhase = "finalize";
-    checkpoint.stopReason = "complete";
-    const { digest: _digest, ...content } = checkpoint;
-    checkpoint.digest = investigationContentDigest(content);
-    store.put("checkpoints", task.id, checkpoint);
-    advance(1_001);
-    expect(
-      (await post(app, `/api/tasks/${task.id}/resume`, { idempotencyKey: "delivery-resume" }))
-        .statusCode,
-    ).toBe(200);
-    const second = await claim(app);
-    expect(second.attempt.id).not.toBe(first.attempt.id);
-    expect(second.checkpoint?.stopReason).toBe("complete");
-    expect(second.checkpoint?.analysis).toEqual(checkpoint.analysis);
-    expect(second.checkpoint?.adoptedAttemptIds).toEqual([first.attempt.id, second.attempt.id]);
-    expect(
-      (await post(app, `/api/worker/tasks/${task.id}/heartbeat`, { lease: first.lease }, "worker"))
-        .statusCode,
-    ).toBe(409);
-  });
+  it.each(["lease expiry", "report delivery failure"])(
+    "recovers a completed checkpoint after %s without repeating its investigation",
+    async (reason) => {
+      const { app, store, item, advance } = await harness();
+      const task = await createTask(app, item);
+      const first = await claim(app);
+      const checkpoint = first.checkpoint;
+      if (checkpoint === null) throw new Error("Claim must persist the initial checkpoint.");
+      const subject = task.subjects.find((entry) => entry.id === task.subjectRef);
+      if (subject?.kind !== "original_pr") throw new Error("Expected the original PR subject.");
+      const manifestContent = {
+        schemaVersion: "InvestigationPrDiffManifestV1" as const,
+        subjectRef: subject.id,
+        baseSha: subject.baseSha,
+        headSha: subject.headSha,
+        mergeBaseSha: subject.baseSha,
+        files: [],
+        chunks: [],
+      };
+      checkpoint.runtime.sourceCoverage = {
+        manifest: { ...manifestContent, digest: investigationContentDigest(manifestContent) },
+        brokeredUnitIds: [],
+      };
+      checkpoint.analysis.coverage.includedUnits = checkpoint.analysis.coverage.includedUnits.map(
+        (unit) => ({ ...unit, status: "completed" }),
+      );
+      checkpoint.analysis.coverage.completedUnitRefs =
+        checkpoint.analysis.coverage.includedUnits.map((unit) => unit.id);
+      checkpoint.analysis.coverage.unresolvedUnitRefs = [];
+      checkpoint.round = 2;
+      checkpoint.consumed.rounds = 2;
+      checkpoint.lastPhase = "finalize";
+      checkpoint.stopReason = "complete";
+      const { digest: _digest, ...content } = checkpoint;
+      checkpoint.digest = investigationContentDigest(content);
+      store.put("checkpoints", task.id, checkpoint);
+      const cleanupRequest = {
+        lease: first.lease,
+        ownedProcessesStopped: true,
+        desktopRestored: true,
+        reportDeliveryFailure: { code: "invalid_logical_report_semantics", retryable: false },
+      };
+      if (reason === "lease expiry") advance(1_001);
+      else {
+        expect(
+          (await post(app, `/api/worker/tasks/${task.id}/cleanup`, cleanupRequest, "worker"))
+            .statusCode,
+        ).toBe(200);
+        expect(store.get("checkpoints", task.id)).toEqual(checkpoint);
+        expect(store.get("tasks", task.id)).toMatchObject({ state: "interrupted" });
+      }
+      expect(
+        (await post(app, `/api/tasks/${task.id}/resume`, { idempotencyKey: "delivery-resume" }))
+          .statusCode,
+      ).toBe(200);
+      const second = await claim(app);
+      expect(second.attempt.id).not.toBe(first.attempt.id);
+      expect(second.checkpoint?.stopReason).toBe("complete");
+      expect(second.checkpoint?.analysis).toEqual(checkpoint.analysis);
+      expect(second.checkpoint?.adoptedAttemptIds).toEqual([first.attempt.id, second.attempt.id]);
+      if (reason === "report delivery failure") {
+        expect(
+          (await post(app, `/api/worker/tasks/${task.id}/cleanup`, cleanupRequest, "worker"))
+            .statusCode,
+        ).toBe(200);
+        expect(store.get("tasks", task.id)).toMatchObject({ state: "running" });
+        expect(store.get("checkpoints", task.id)).toEqual(second.checkpoint);
+      }
+      expect(
+        (
+          await post(
+            app,
+            `/api/worker/tasks/${task.id}/heartbeat`,
+            { lease: first.lease },
+            "worker",
+          )
+        ).statusCode,
+      ).toBe(409);
+    },
+  );
 
   it("preserves every finding across pages and export and sees a P0 on the last page", async () => {
     const { app, store, item } = await harness();

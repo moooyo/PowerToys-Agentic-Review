@@ -24,7 +24,7 @@ import {
   InvestigationTaskCancelled,
 } from "./attempt-heartbeat.js";
 import type { E2eAgentRunner } from "./e2e-agent-runner.js";
-import type { InvestigationWorkerClient } from "./http-client.js";
+import { type InvestigationWorkerClient, InvestigationWorkerClientError } from "./http-client.js";
 import { findModelBudgetExceeded } from "./model-budget.js";
 import { safeModelOutputValidationMessage } from "./model-output-diagnostics.js";
 import {
@@ -36,6 +36,11 @@ import {
 import { type InvestigationPlanExecutor, isInvestigationPlanTask } from "./plan-executor.js";
 import { createInvestigationProgressReporter } from "./progress-reporter.js";
 import { buildInvestigationReportSubmission } from "./report-builder.js";
+import {
+  getInvestigationReportDeliveryFailure,
+  type InvestigationReportDeliveryFailure,
+  IsolatedInvestigationReportDeliveryError,
+} from "./report-delivery-error.js";
 import {
   type ClaimedInvestigationTask,
   type InvestigationClaimExecutor,
@@ -670,6 +675,10 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
       clearTimeout(deadline);
     }
 
+    let reportDeliveryStarted = false;
+    let reportDeliveryFailure: InvestigationReportDeliveryFailure | undefined;
+    let reportDeliveryError: unknown;
+    let cleanupAcknowledged = false;
     try {
       if (heartbeat.leaseLost) throw new InvestigationLeaseLost();
       const reportSignal = AbortSignal.timeout(this.options.terminalTimeoutMs ?? 60_000);
@@ -721,6 +730,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         outcome = "completed";
       }
       await progress.reportProgress("build_report", reportSignal);
+      reportDeliveryStarted = true;
       const reportUsage = await this.options.client.reportUsage?.(
         claim.task.id,
         { lease: claim.lease },
@@ -764,11 +774,22 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         reportSignal,
         heartbeat,
       );
+      reportDeliveryStarted = false;
       this.options.logger.info("Investigation report sealed.", {
         taskId: claim.task.id,
         attemptId: claim.attempt.id,
         outcome,
       });
+    } catch (error) {
+      if (
+        !reportDeliveryStarted ||
+        heartbeat.leaseLost ||
+        error instanceof InvestigationLeaseLost ||
+        (error instanceof InvestigationWorkerClientError && error.leaseLost)
+      )
+        throw error;
+      reportDeliveryError = error;
+      reportDeliveryFailure = getInvestigationReportDeliveryFailure(error);
     } finally {
       await heartbeat.stop();
       await progress.reportProgress(
@@ -789,15 +810,23 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
         } else {
           await this.options.onAttemptCleanupConfirmed?.();
           // Resource release is a separate original-owner receipt, never implied by Task completion.
-          await this.options.client.cleanup?.(
-            claim.task.id,
-            {
-              lease: claim.lease,
-              ownedProcessesStopped: true,
-              desktopRestored: true,
-            },
-            AbortSignal.timeout(this.options.terminalTimeoutMs ?? 60_000),
-          );
+          if (this.options.client.cleanup !== undefined) {
+            const acknowledged = await this.options.client.cleanup(
+              claim.task.id,
+              {
+                lease: claim.lease,
+                ownedProcessesStopped: true,
+                desktopRestored: true,
+                ...(reportDeliveryFailure === undefined ? {} : { reportDeliveryFailure }),
+              },
+              AbortSignal.timeout(this.options.terminalTimeoutMs ?? 60_000),
+            );
+            if (acknowledged?.released !== true || acknowledged.attemptId !== claim.attempt.id) {
+              // biome-ignore lint/correctness/noUnsafeFinally: An invalid cleanup acknowledgement must stop admission even after report failure.
+              throw new InvestigationWorkerClientError("invalid_response", false);
+            }
+            cleanupAcknowledged = true;
+          }
         }
       } catch (error) {
         // A released local guard remains released if only the Server acknowledgement was lost.
@@ -807,6 +836,11 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
       } finally {
         await progress.flush();
       }
+    }
+    if (reportDeliveryFailure !== undefined) {
+      if (cleanupConfirmed && cleanupAcknowledged && !heartbeat.leaseLost)
+        throw new IsolatedInvestigationReportDeliveryError(reportDeliveryFailure);
+      throw reportDeliveryError;
     }
   }
 

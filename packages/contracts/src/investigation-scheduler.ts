@@ -39,10 +39,19 @@ export const InvestigationSchedulerStatusSchema = object({
 });
 export type InvestigationSchedulerStatus = Static<typeof InvestigationSchedulerStatusSchema>;
 
+export const InvestigationReportDeliveryFailureSchema = object({
+  code: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_.:-]+(?![\\s\\S])" }),
+  retryable: Type.Boolean(),
+});
+export type InvestigationReportDeliveryFailure = Static<
+  typeof InvestigationReportDeliveryFailureSchema
+>;
+
 export const InvestigationCleanupRequestSchema = object({
   lease: InvestigationWorkerLeaseSchema,
   ownedProcessesStopped: Type.Literal(true),
   desktopRestored: Type.Literal(true),
+  reportDeliveryFailure: Type.Optional(InvestigationReportDeliveryFailureSchema),
 });
 export type InvestigationCleanupRequest = Static<typeof InvestigationCleanupRequestSchema>;
 

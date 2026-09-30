@@ -1648,6 +1648,16 @@ export class InvestigationService {
         "cleanup_not_confirmed",
         "Owned process termination and desktop restoration must both be confirmed.",
       );
+      requireCondition(
+        request.reportDeliveryFailure === undefined ||
+          record.attempt.state !== "running" ||
+          (checkpoint?.attemptId === record.attempt.id &&
+            checkpoint.leaseVersion === request.lease.fence &&
+            checkpoint.stopReason !== "continuing"),
+        409,
+        "report_execution_still_active",
+        "Report delivery recovery requires an accepted stopped checkpoint.",
+      );
       this.resourceScheduler.confirmCleanup({
         attemptId: record.attempt.id,
         taskId,
@@ -1655,6 +1665,32 @@ export class InvestigationService {
         fence: request.lease.fence,
       });
       recordInvestigationCleanup(this.store, taskId, record.attempt.id, this.time());
+      if (
+        request.reportDeliveryFailure !== undefined &&
+        record.attempt.state === "running" &&
+        task.state === "running" &&
+        checkpoint?.attemptId === record.attempt.id &&
+        checkpoint.leaseVersion === request.lease.fence &&
+        checkpoint.stopReason !== "continuing" &&
+        this.store.get("reports", record.reportId) === undefined
+      ) {
+        // A report can be retried from its accepted checkpoint after the error is corrected.
+        // Do not append diagnostics to, reopen, or charge a completed checkpoint.
+        const state = record.cancelRequested ? "cancelled" : "interrupted";
+        const at = this.time();
+        this.store.put("attempts", record.attempt.id, {
+          ...record,
+          attempt: {
+            ...record.attempt,
+            state,
+            finishedAt: at,
+            terminationReason: `report_delivery_failed:${request.reportDeliveryFailure.code}`,
+          },
+        });
+        const interrupted: InvestigationTaskV1 = { ...task, state, updatedAt: at };
+        this.store.put("tasks", taskId, interrupted);
+        this.options.onTaskStateChanged?.(interrupted);
+      }
       return { released: true as const, attemptId: record.attempt.id };
     });
   }

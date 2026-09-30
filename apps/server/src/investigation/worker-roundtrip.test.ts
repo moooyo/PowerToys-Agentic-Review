@@ -28,7 +28,10 @@ import type {
   ModelTurnRunner,
 } from "../../../worker/src/investigation/model-turn-runner.js";
 import type { InvestigationPlanExecutor } from "../../../worker/src/investigation/plan-executor.js";
-import { InvestigationWorkerShutdown } from "../../../worker/src/investigation/task-service.js";
+import {
+  InvestigationTaskService,
+  InvestigationWorkerShutdown,
+} from "../../../worker/src/investigation/task-service.js";
 import type { PreparedInvestigationWorkspace } from "../../../worker/src/investigation/workspace.js";
 import { buildInvestigationApp } from "./app.js";
 import { InvestigationStore } from "./store.js";
@@ -54,6 +57,8 @@ interface RecordedPart {
 interface TaskDetail {
   task: InvestigationTaskV1;
   checkpoint: InvestigationLoopCheckpointV1 | null;
+  attempts: Array<{ id: string; state: string; terminationReason: string | null }>;
+  resourceLeases: Array<{ attemptId: string; state: string }>;
 }
 
 beforeEach(() => {
@@ -95,7 +100,12 @@ function get(app: FastifyInstance, path: string) {
   return app.inject({ method: "GET", url: path, headers: { authorization: "operator" } });
 }
 
-async function startServer(databasePath: string, repositoryId: string, parts: RecordedPart[]) {
+async function startServer(
+  databasePath: string,
+  repositoryId: string,
+  parts: RecordedPart[],
+  configure?: (app: FastifyInstance, store: InvestigationStore) => void,
+) {
   const operator: InvestigationOperatorPrincipal = {
     id: "roundtrip-operator",
     displayName: "Synthetic roundtrip operator",
@@ -130,6 +140,7 @@ async function startServer(databasePath: string, repositoryId: string, parts: Re
       byteLength: Buffer.byteLength(JSON.stringify(part), "utf8"),
     });
   });
+  configure?.(app, store);
   const address = await app.listen({ host: "127.0.0.1", port: 0 });
   const expectedOrigin = new URL(address).origin;
   const localRequests: string[] = [];
@@ -309,6 +320,222 @@ async function requireClaim(
 }
 
 describe("investigation Worker and Server HTTP roundtrip", () => {
+  it("isolates a rejected report after cleanup, admits another task, and resumes delivery without reexecution", async () => {
+    const initial = createInvestigationFixture("bug", { findingCount: 0 });
+    const subject = initial.task.subjects.find((entry) => entry.id === initial.task.subjectRef);
+    if (subject === undefined) throw new Error("Expected the synthetic Issue snapshot.");
+    const item: InvestigationWorkItemRecord = {
+      ...initial.task.workItem,
+      repositoryId: initial.task.repository.id,
+      subject,
+      body: "Synthetic report delivery recovery; no upstream access or execution is authorized.",
+      state: "open",
+      updatedAt: "2026-09-15T08:00:00.000Z",
+    };
+    const directory = await mkdtemp(join(tmpdir(), "investigation-delivery-recovery-"));
+    directories.push(directory);
+    const cleanupReceipts: Array<{
+      path: string;
+      request: {
+        lease: { attemptId: string };
+        ownedProcessesStopped: boolean;
+        desktopRestored: boolean;
+        reportDeliveryFailure?: { code: string; retryable: boolean };
+      };
+    }> = [];
+    const cleanups = Array.from({ length: 3 }, () => Promise.withResolvers<void>());
+    let stoppedCheckpoint: InvestigationLoopCheckpointV1 | undefined;
+    let finalizeRejections = 0;
+    const finalizePaths: string[] = [];
+    const server = await startServer(
+      join(directory, "investigation.sqlite"),
+      initial.task.repository.id,
+      [],
+      (app, store) => {
+        app.addHook("preHandler", async (request, reply) => {
+          if (!request.url.endsWith("/finalize")) return;
+          finalizePaths.push(request.url);
+          if (finalizeRejections !== 0) return;
+          finalizeRejections += 1;
+          const { id } = request.params as { id: string };
+          stoppedCheckpoint = store.get<InvestigationLoopCheckpointV1>("checkpoints", id);
+          return reply.code(422).send({
+            code: "synthetic_finalize_rejection",
+            message: "Synthetic report delivery rejection.",
+            retryable: false,
+          });
+        });
+        app.addHook("onResponse", async (request, reply) => {
+          if (!request.url.endsWith("/cleanup") || reply.statusCode !== 200) return;
+          cleanupReceipts.push({
+            path: request.url,
+            request: structuredClone(request.body) as (typeof cleanupReceipts)[number]["request"],
+          });
+          cleanups[cleanupReceipts.length - 1]?.resolve();
+        });
+      },
+    );
+    expect((await post(server.app, "/api/repositories", initial.task.repository)).statusCode).toBe(
+      201,
+    );
+    expect((await post(server.app, "/api/work-items", item)).statusCode).toBe(201);
+    const createTask = async (idempotencyKey: string) => {
+      const response = await post(server.app, "/api/tasks", {
+        idempotencyKey,
+        workItemId: item.id,
+        kind: "issue-investigate",
+        executionMode: "snapshot_only",
+        budget: {
+          maxRounds: 2,
+          maxDurationMs: 120_000,
+          maxTokens: 10_000,
+          maxReportBytes: 4 * 1024 * 1024,
+        },
+      } satisfies InvestigationCreateTaskRequestV1);
+      expect(response.statusCode, response.body).toBe(201);
+      return response.json<InvestigationTaskV1>();
+    };
+    const first = await createTask("create-delivery-recovery-first");
+    const fakes = executionFakes();
+    const model: ModelTurnRunner = {
+      execute: vi.fn(async (input) => {
+        const analysis = discoveryAnalysis(input.task, initial.result);
+        analysis.summary =
+          "The complete synthetic snapshot was reviewed without retained findings.";
+        return modelResult(input, analysis, true);
+      }),
+    };
+    const loop = coordinator(server.client, fakes, model);
+    const claims: InvestigationClaim[] = [];
+    const service = new InvestigationTaskService({
+      client: server.client,
+      executor: {
+        execute: async (claim, signal) => {
+          claims.push(structuredClone(claim));
+          await loop.execute(claim, signal);
+        },
+      },
+      supportedKinds: ["issue-investigate"],
+      maximumConcurrentStaticTasks: 1,
+      claimPollMs: 1,
+      retryDelayMs: 1,
+      logger: fakes.logger,
+    });
+    const running = service.run();
+    const prematureExit = running.then(() => {
+      throw new Error("The Worker service stopped before the delivery recovery workflow finished.");
+    });
+    try {
+      await Promise.race([cleanups[0]!.promise, prematureExit]);
+      expect(finalizeRejections).toBe(1);
+      expect(stoppedCheckpoint?.stopReason).toBe("complete");
+      const interrupted = (await get(server.app, `/api/tasks/${first.id}`)).json<TaskDetail>();
+      expect(interrupted.task.state).toBe("interrupted");
+      expect(interrupted.task.latestReportRef).toBeNull();
+      expect(interrupted.checkpoint).toEqual(stoppedCheckpoint);
+      expect(interrupted.attempts).toEqual([
+        expect.objectContaining({
+          id: claims[0]!.attempt.id,
+          state: "interrupted",
+          terminationReason: "report_delivery_failed:synthetic_finalize_rejection",
+        }),
+      ]);
+      expect(interrupted.resourceLeases).toEqual([
+        expect.objectContaining({ attemptId: claims[0]!.attempt.id, state: "released" }),
+      ]);
+      expect(cleanupReceipts[0]?.request).toMatchObject({
+        ownedProcessesStopped: true,
+        desktopRestored: true,
+        reportDeliveryFailure: { code: "synthetic_finalize_rejection", retryable: false },
+      });
+      expect(server.store.get("reports", claims[0]!.reportId)).toBeUndefined();
+      expect(model.execute).toHaveBeenCalledTimes(1);
+      expect(fakes.prepare).toHaveBeenCalledTimes(1);
+      expect(fakes.workspace.cleanup).toHaveBeenCalledTimes(1);
+
+      const second = await createTask("create-delivery-recovery-second");
+      await Promise.race([cleanups[1]!.promise, prematureExit]);
+      const completedSecond = (await get(server.app, `/api/tasks/${second.id}`)).json<TaskDetail>();
+      expect(completedSecond.task.state).toBe("completed");
+      expect(completedSecond.resourceLeases.every((lease) => lease.state === "released")).toBe(
+        true,
+      );
+      expect(claims.map((claim) => claim.task.id)).toEqual([first.id, second.id]);
+      expect(model.execute).toHaveBeenCalledTimes(2);
+      expect(fakes.prepare).toHaveBeenCalledTimes(2);
+      expect(fakes.workspace.cleanup).toHaveBeenCalledTimes(2);
+      const beforeResume = (await get(server.app, `/api/tasks/${first.id}`)).json<TaskDetail>();
+      expect(beforeResume.checkpoint).toEqual(stoppedCheckpoint);
+
+      const resumed = await post(server.app, `/api/tasks/${first.id}/resume`, {
+        idempotencyKey: "resume-delivery-recovery-first",
+      });
+      expect(resumed.statusCode, resumed.body).toBe(200);
+      await Promise.race([cleanups[2]!.promise, prematureExit]);
+      service.requestDrain();
+      await running;
+      const completed = (await get(server.app, `/api/tasks/${first.id}`)).json<TaskDetail>();
+      expect(completed.task.state).toBe("completed");
+      expect(completed.checkpoint?.analysis).toEqual(stoppedCheckpoint!.analysis);
+      expect(completed.checkpoint?.runtime).toEqual(stoppedCheckpoint!.runtime);
+      expect(completed.resourceLeases).toHaveLength(2);
+      expect(completed.resourceLeases.every((lease) => lease.state === "released")).toBe(true);
+      expect(completed.attempts).toEqual([
+        expect.objectContaining({
+          id: claims[0]!.attempt.id,
+          state: "interrupted",
+          terminationReason: "report_delivery_failed:synthetic_finalize_rejection",
+        }),
+        expect.objectContaining({ id: claims[2]!.attempt.id, state: "completed" }),
+      ]);
+      expect(claims.map((claim) => claim.task.id)).toEqual([first.id, second.id, first.id]);
+      expect(claims[2]!.attempt.id).not.toBe(claims[0]!.attempt.id);
+      expect(claims[2]!.checkpoint?.stopReason).toBe("complete");
+      expect(model.execute).toHaveBeenCalledTimes(2);
+      expect(fakes.prepare).toHaveBeenCalledTimes(2);
+      expect(fakes.workspace.cleanup).toHaveBeenCalledTimes(2);
+      expect(fakes.planExecutor.execute).not.toHaveBeenCalled();
+      expect(fakes.processHost.start).not.toHaveBeenCalled();
+      expect(fakes.workspace.readSourceFile).not.toHaveBeenCalled();
+      expect(fakes.workspace.readPrDiffManifest).not.toHaveBeenCalled();
+      expect(cleanupReceipts).toHaveLength(3);
+      expect(cleanupReceipts.map((entry) => entry.request.lease.attemptId)).toEqual(
+        claims.map((claim) => claim.attempt.id),
+      );
+      expect(
+        cleanupReceipts
+          .slice(1)
+          .every((entry) => entry.request.reportDeliveryFailure === undefined),
+      ).toBe(true);
+      expect(finalizePaths).toEqual([
+        `/api/worker/tasks/${first.id}/finalize`,
+        `/api/worker/tasks/${second.id}/finalize`,
+        `/api/worker/tasks/${first.id}/finalize`,
+      ]);
+      const reportRef = completed.task.latestReportRef;
+      if (reportRef === null) throw new Error("Resumed delivery must publish its final report.");
+      expect(reportRef.id).not.toBe(claims[0]!.reportId);
+      const exported = await get(server.app, `/api/reports/${reportRef.id}/export`);
+      expect(exported.statusCode).toBe(200);
+      const report = exported.json<InvestigationResultV1>();
+      expect(Value.Check(InvestigationResultV1Schema, report)).toBe(true);
+      expect(report.outcome).toBe("completed");
+      expect(report.assessment).toEqual(stoppedCheckpoint!.analysis.assessment);
+      expect(fakes.logger.warn).toHaveBeenCalledWith(
+        "Investigation report delivery failed after confirmed cleanup.",
+        {
+          taskId: first.id,
+          attemptId: claims[0]!.attempt.id,
+          code: "synthetic_finalize_rejection",
+          retryable: false,
+        },
+      );
+      expect(fakes.logger.error).not.toHaveBeenCalled();
+    } finally {
+      await service.stop().catch(() => undefined);
+    }
+  }, 30_000);
+
   it("resumes 137 durable hypotheses after a Worker interruption and Server restart, then seals and pages the entire large report", async () => {
     const initial = createInvestigationFixture("bug", { findingCount, priority: "P2" });
     const lastFinding = initial.result.findings.at(-1);

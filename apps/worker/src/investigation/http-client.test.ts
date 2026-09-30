@@ -10,6 +10,7 @@ import type {
   InvestigationCheckpointRequest,
   InvestigationClaim,
   InvestigationClaimRequest,
+  InvestigationCleanupRequest,
   InvestigationFinalizeRequest,
   InvestigationHeartbeatRequest,
   InvestigationLoopCheckpointV1,
@@ -685,6 +686,76 @@ describe("Investigation HTTP client requests", () => {
     captured.request.respondJson({ released: true, attemptId });
     await expect(pending).resolves.toEqual({ released: true, attemptId });
   });
+
+  it.each([false, true])(
+    "posts bounded report delivery failure metadata during cleanup with retryable=%s",
+    async (retryable) => {
+      const fixture = createFixture();
+      const request = {
+        lease,
+        ownedProcessesStopped: true as const,
+        desktopRestored: true as const,
+        reportDeliveryFailure: { code: "invalid_logical_report_semantics", retryable },
+      };
+      const pending = fixture.client.cleanup!(taskId, request);
+      const captured = fixture.lastRequest();
+
+      expect(captured.url.pathname).toBe("/api/worker/tasks/task%3A1/cleanup");
+      expect(JSON.parse(Buffer.concat(captured.request.chunks).toString("utf8"))).toEqual(request);
+      captured.request.respondJson({ released: true, attemptId });
+
+      await expect(pending).resolves.toEqual({ released: true, attemptId });
+      expect(fixture.httpsRequest).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    "",
+    "a".repeat(129),
+    "report rejected",
+    "report\nrejected",
+    "report\n",
+    "report/422",
+    "é",
+  ])("rejects unsafe report delivery failure code %j before cleanup transport", async (code) => {
+    const fixture = createFixture();
+    const request = {
+      lease,
+      ownedProcessesStopped: true as const,
+      desktopRestored: true as const,
+      reportDeliveryFailure: { code, retryable: false },
+    };
+
+    expect((await rejectionOf(fixture.client.cleanup!(taskId, request))).code).toBe(
+      "invalid_request",
+    );
+
+    expect(fixture.httpsRequest).not.toHaveBeenCalled();
+    expect(fixture.httpRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { code: "invalid_report", retryable: "false" },
+    { code: "invalid_report", retryable: false, responseBody: "Synthetic private report." },
+  ])(
+    "rejects malformed delivery failure metadata before cleanup transport: %j",
+    async (failure) => {
+      const fixture = createFixture();
+      const request = {
+        lease,
+        ownedProcessesStopped: true,
+        desktopRestored: true,
+        reportDeliveryFailure: failure,
+      } as unknown as InvestigationCleanupRequest;
+
+      expect((await rejectionOf(fixture.client.cleanup!(taskId, request))).code).toBe(
+        "invalid_request",
+      );
+
+      expect(fixture.httpsRequest).not.toHaveBeenCalled();
+      expect(fixture.httpRequest).not.toHaveBeenCalled();
+    },
+  );
 
   it("reports fenced activity separately from heartbeat and accepts unknown progress times", async () => {
     const fixture = createFixture();

@@ -121,14 +121,14 @@ unrelated or incomplete schemas are rejected without deletion.
 
 The [production operations workflow](./deploy/operations/README.md) provides Windows hosting,
 administrator-only storage observations, explicit capacity thresholds, and a deployment acceptance
-checklist. The [four-GiB workflow handoff](./docs/handoff/2026-09-27-four-gib-workflow-acceptance.md)
+checklist. The historical [four-GiB workflow handoff](./docs/handoff/2026-09-27-four-gib-workflow-acceptance.md)
 records passed native lifecycle and Dashboard checks, isolated Scheduled Task hosting, cooperative
 shutdown, backup/restore, and bounded failure recovery. The subsequent
 [CI correction and production cutover](./docs/handoff/2026-09-27-ci-and-production-cutover.md)
-deployed release `a6ae2995407037683e5be120f76e928aad212c4b` after all three CI jobs passed.
-The Server, static Worker, and Dashboard relay are running with preserved accounts and retained
-data. VM reboot, real-application execution, live publication, and sustained capacity remain
-separate acceptance.
+records the September 27 deployment of `a6ae2995407037683e5be120f76e928aad212c4b` after all
+three CI jobs passed, preserving accounts and retained data. Those records describe their dated
+deployment and acceptance scopes, not the current deployment state. Later capabilities and the
+distinction between implementation and acceptance are summarized below.
 
 The Dashboard development server uses clearly labeled synthetic data, including PowerToys PR,
 Bug, Feature, incomplete-report, and page-two P0 examples:
@@ -177,11 +177,47 @@ See the [CI correction and deployment record](./docs/handoff/2026-09-27-ci-and-p
 
 ## Evidence and project status
 
+### Current capabilities
+
+Saved PR verification plans can contain structured PowerToys Run recipes. **Verify PR** prepares
+and confirms a linked `pr-verify` Task against the exact saved plan and original PR revision,
+including when the report omitted a next-action suggestion. The Worker executes supported
+Calculator and UnitConverter recipes directly, retaining individual check, assertion, media, and
+cleanup records. Unstructured plans still require explicit execution bindings; recipes do not
+turn arbitrary prose into executable commands. See the [recipe contract and limits](./deploy/worker/e2e-recipes.md).
+
+Source changes `6f0693e`, `61a114a`, and `df5f9e8` also cover bounded startup activation recovery,
+adoption of the latest verification rerun as a whole rather than mixed or older successful checks,
+and retention of a trusted parent plan in completed PR verification reports.
+
+Report delivery failures can now interrupt only the affected Task and Attempt while retaining the
+full stopped checkpoint. The Worker continues accepting work only after local cleanup and the
+Server acknowledgement succeed without lease loss; cleanup, lease, or uncertain-execution faults
+still drain it. Explicitly resuming a completed checkpoint retries delivery without repeating model
+or UI execution.
+
+Legacy POSIX database tests now assert exact Windows rejection without initialized state, while
+preserving POSIX recovery assertions and the current Windows investigation Server runtime. The
+[CI workflow](./.github/workflows/ci.yml) builds shared packages and the Server once on Linux,
+then runs three Server test shards alongside other checks. `Node Linux Checks` remains a strict
+aggregate gate, and complete Windows and Go checks remain enabled. The earlier `2b86cdc` baseline
+passed CI with a test-only database-startup deadline correction; that result does not certify these
+subsequent changes.
+
 Evidence retention defaults to 30 days, 1 GiB of resident original content, and 10,000 resident
 artifacts. Bounded cleanup preserves recovery and follow-up source dependencies. Current artifact
 availability is separate from immutable reports, and inherited patches retain their original
 producer identities in `sourceArtifacts`. See the [Server evidence instructions](./apps/server/README.md#evidence-retention-and-capacity)
 for configuration, HTTP availability responses, and physical SQLite storage limits.
+Administrator storage observations, explicit thresholds, and a bounded capacity observer are
+implemented. Sustained workload capacity remains a separate measured acceptance claim.
+
+### Historical acceptance
+
+The dated records below retain their original revisions, failures, and acceptance limits. Their
+held flags and deferred scenarios describe those runs, not current feature availability. Public
+source, tests, and runbooks do not make private deployment observations a publicly reproducible
+acceptance package.
 
 The 2026-09-19 acceptance covers complete pinned-checkout static review, invocation usage,
 static/E2E scheduling, independent PNG/MP4 publication and playback, managed recovery, and
@@ -212,7 +248,8 @@ that isolated operations acceptance.
 
 The subsequent production cutover preserved the original account identity and password, four
 Tasks, four report exports, and 47 evidence records. Persisted Server static concurrency and Worker
-concurrency are both one, with no active leases or new Tasks. A six-step read-only browser check
+concurrency were both one, with no active leases or new Tasks at that readback. A six-step read-only
+browser check
 and three inspected screenshots covered the running Dashboard. Its action-loading capture and
 unexercised media remain historical limits of that run. The subsequent
 [Dashboard interaction follow-up](./docs/handoff/2026-09-27-dashboard-interaction-acceptance.md)
@@ -223,10 +260,10 @@ business-state digests. A separate isolated phase passed seven steps and five re
 covering validation, retained drafts, same-key recovery after an injected 503, and a new edited
 preview while preserving the first intent. Confirmation stayed disabled and no external operation
 occurred. Temporary sessions, processes, tasks, and credentials were cleaned up. Outbound writes,
-media uploads, webhook intake, and E2E remain held. The current
+media uploads, webhook intake, and E2E stayed held during that acceptance. The current
 [implementation status](./docs/IMPLEMENTATION_STATUS.md) and
 [cutover record](./docs/handoff/2026-09-27-ci-and-production-cutover.md) preserve the exact scope
-and the remaining acceptance work.
+and distinguish later capabilities from that historical acceptance work.
 
 [Implementation Status](./docs/IMPLEMENTATION_STATUS.md) distinguishes this refactor from historical
 milestones. M39/M40 model workflows, M41 publication acceptance, M42 selected PowerToys tests, and

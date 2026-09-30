@@ -22,8 +22,8 @@ import {
 } from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
 import type { ProcessHostClient } from "../execution/process-host-protocol.js";
-import { InvestigationLeaseLost } from "./attempt-heartbeat.js";
-import type { InvestigationWorkerClient } from "./http-client.js";
+import { InvestigationAttemptHeartbeat, InvestigationLeaseLost } from "./attempt-heartbeat.js";
+import { type InvestigationWorkerClient, InvestigationWorkerClientError } from "./http-client.js";
 import {
   InvestigationLoopCoordinator,
   type InvestigationLoopCoordinatorOptions,
@@ -36,7 +36,10 @@ import type {
   ModelTurnRunner,
 } from "./model-turn-runner.js";
 import type { InvestigationPlanExecutor } from "./plan-executor.js";
-import { InvestigationWorkerShutdown } from "./task-service.js";
+import * as progressReporter from "./progress-reporter.js";
+import * as reportBuilder from "./report-builder.js";
+import { IsolatedInvestigationReportDeliveryError } from "./report-delivery-error.js";
+import { InvestigationTaskService, InvestigationWorkerShutdown } from "./task-service.js";
 import type { PreparedInvestigationWorkspace } from "./workspace.js";
 
 const recordedAt = "2026-09-15T04:00:00.000Z";
@@ -386,6 +389,18 @@ function attachPinnedDependency(f: ReturnType<typeof fixture>) {
   return { provenance, workspace };
 }
 
+function reportDeliveryFixture(options: Partial<InvestigationLoopCoordinatorOptions> = {}) {
+  const f = fixture(0, 8, "bug", options);
+  const failure = new InvestigationWorkerClientError("E2E_PLAN_REQUIRED", false, 422);
+  const finalize = vi.mocked(f.client.finalize).getMockImplementation()!;
+  vi.mocked(f.client.finalize).mockRejectedValue(failure);
+  const cleanup = vi.fn<NonNullable<InvestigationWorkerClient["cleanup"]>>(
+    async (_taskId, request) => ({ released: true, attemptId: request.lease.attemptId }),
+  );
+  f.client.cleanup = cleanup;
+  return { ...f, failure, finalize, cleanup };
+}
+
 describe("InvestigationLoopCoordinator", () => {
   it("registers trusted source provenance before model dispatch without consuming an analysis round", async () => {
     const f = fixture(0);
@@ -515,6 +530,355 @@ describe("InvestigationLoopCoordinator", () => {
     expect(confirmed).not.toHaveBeenCalled();
     expect(unconfirmed).toHaveBeenCalledWith("ATTEMPT_CLEANUP_UNCONFIRMED");
     expect(f.client.cleanup).not.toHaveBeenCalled();
+  });
+
+  describe("report delivery failure isolation", () => {
+    it("isolates a rejected final report only after ordered cleanup, acknowledgement, and progress flush", async () => {
+      const events: string[] = [];
+      const confirmed = vi.fn(async () => {
+        events.push("desktop_released");
+      });
+      const unconfirmed = vi.fn(async () => undefined);
+      const f = reportDeliveryFixture({
+        onAttemptCleanupConfirmed: confirmed,
+        onAttemptCleanupUnconfirmed: unconfirmed,
+      });
+      vi.mocked(f.client.finalize).mockImplementation(async () => {
+        events.push("finalize_rejected");
+        throw f.failure;
+      });
+      vi.mocked(f.workspace.cleanup).mockImplementation(async () => {
+        events.push("workspace_cleaned");
+      });
+      f.cleanup.mockImplementation(async (_taskId, request) => {
+        events.push("server_acknowledged");
+        expect(request).toEqual({
+          lease: f.claim.lease,
+          ownedProcessesStopped: true,
+          desktopRestored: true,
+          reportDeliveryFailure: { code: "E2E_PLAN_REQUIRED", retryable: false },
+        });
+        return { released: true, attemptId: f.claim.attempt.id };
+      });
+      const createProgress = progressReporter.createInvestigationProgressReporter;
+      const progressHook = vi
+        .spyOn(progressReporter, "createInvestigationProgressReporter")
+        .mockImplementation((options) => {
+          const reporter = createProgress(options);
+          return {
+            ...reporter,
+            flush: async () => {
+              await reporter.flush();
+              events.push("progress_flushed");
+            },
+          };
+        });
+      try {
+        const execution = f.coordinator.execute(f.claim, f.shutdown.signal);
+        await expect(execution).rejects.toBeInstanceOf(IsolatedInvestigationReportDeliveryError);
+        await expect(execution).rejects.toMatchObject({
+          code: "E2E_PLAN_REQUIRED",
+          retryable: false,
+        });
+        expect(events).toEqual([
+          "finalize_rejected",
+          "workspace_cleaned",
+          "desktop_released",
+          "server_acknowledged",
+          "progress_flushed",
+        ]);
+        expect(f.current().stopReason).toBe("complete");
+        expect(f.model.execute).toHaveBeenCalledOnce();
+        expect(unconfirmed).not.toHaveBeenCalled();
+      } finally {
+        progressHook.mockRestore();
+      }
+    });
+
+    it("redelivers the stopped checkpoint after an isolated failure without repeating model or workspace work", async () => {
+      const f = reportDeliveryFixture();
+      await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBeInstanceOf(
+        IsolatedInvestigationReportDeliveryError,
+      );
+      const stopped = structuredClone(f.current());
+      f.claim.checkpoint = stopped;
+      vi.mocked(f.client.finalize).mockImplementation(f.finalize);
+      vi.mocked(f.model.execute).mockClear();
+      vi.mocked(f.plan.execute).mockClear();
+      f.prepare.mockClear();
+      vi.mocked(f.workspace.cleanup).mockClear();
+      await f.coordinator.execute(f.claim, f.shutdown.signal);
+      expect(f.current()).toEqual(stopped);
+      expect(f.model.execute).not.toHaveBeenCalled();
+      expect(f.plan.execute).not.toHaveBeenCalled();
+      expect(f.prepare).not.toHaveBeenCalled();
+      expect(f.workspace.cleanup).not.toHaveBeenCalled();
+      expect(f.submissions[0]?.header.outcome).toBe("completed");
+      expect(f.cleanup).toHaveBeenLastCalledWith(
+        f.claim.task.id,
+        { lease: f.claim.lease, ownedProcessesStopped: true, desktopRestored: true },
+        expect.any(AbortSignal),
+      );
+    });
+
+    it("continues another task after the coordinator isolates a final report rejection", async () => {
+      const f = reportDeliveryFixture();
+      const next = structuredClone(f.claim);
+      next.task.id = "task-after-report-rejection";
+      next.attempt.id = "attempt-after-report-rejection";
+      next.attempt.taskId = next.task.id;
+      next.lease.attemptId = next.attempt.id;
+      next.checkpoint = null;
+      vi.mocked(f.client.claim)
+        .mockResolvedValueOnce(f.claim)
+        .mockResolvedValueOnce(next)
+        .mockRejectedValue(new Error("No further task should be claimed after draining."));
+      const executed: string[] = [];
+      const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const service = new InvestigationTaskService({
+        client: f.client,
+        supportedKinds: [f.claim.task.kind],
+        role: "static",
+        maximumConcurrentStaticTasks: 1,
+        logger,
+        executor: {
+          execute: async (claim, signal) => {
+            executed.push(claim.task.id);
+            if (claim.task.id === f.claim.task.id) await f.coordinator.execute(claim, signal);
+            else service.requestDrain();
+          },
+        },
+      });
+      await service.run();
+      expect(executed).toEqual([f.claim.task.id, next.task.id]);
+      expect(f.client.claim).toHaveBeenCalledTimes(2);
+      expect(f.client.finalize).toHaveBeenCalledOnce();
+      expect(f.cleanup).toHaveBeenCalledOnce();
+      expect(f.model.execute).toHaveBeenCalledOnce();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        label: "retryable usage request",
+        failure: new InvestigationWorkerClientError("usage_unavailable", true, 503),
+        expected: { code: "usage_unavailable", retryable: true },
+      },
+      {
+        label: "unsafe remote error code",
+        failure: new InvestigationWorkerClientError("unsafe\nresponse", true, 503),
+        expected: { code: "REPORT_DELIVERY_FAILED", retryable: false },
+      },
+      {
+        label: "untyped exception with claimed metadata",
+        failure: Object.assign(new Error("Synthetic private response body."), {
+          code: "untrusted_code",
+          retryable: true,
+        }),
+        expected: { code: "REPORT_DELIVERY_FAILED", retryable: false },
+      },
+      {
+        label: "plain object with claimed metadata",
+        failure: { code: "forged_code", retryable: true, message: "Synthetic private detail." },
+        expected: { code: "REPORT_DELIVERY_FAILED", retryable: false },
+      },
+    ])("retains only bounded typed failure metadata for $label", async ({ failure, expected }) => {
+      const f = reportDeliveryFixture();
+      f.client.reportUsage = vi.fn(async () => {
+        throw failure;
+      });
+      const execution = f.coordinator.execute(f.claim, f.shutdown.signal);
+      await expect(execution).rejects.toBeInstanceOf(IsolatedInvestigationReportDeliveryError);
+      await expect(execution).rejects.toMatchObject(expected);
+      expect(f.cleanup.mock.calls[0]?.[1]).toEqual({
+        lease: f.claim.lease,
+        ownedProcessesStopped: true,
+        desktopRestored: true,
+        reportDeliveryFailure: expected,
+      });
+      expect(f.client.uploadReportPart).not.toHaveBeenCalled();
+      expect(f.client.finalize).not.toHaveBeenCalled();
+    });
+
+    it("retains a typed report build failure after cleanup without leaking its details", async () => {
+      const f = reportDeliveryFixture();
+      const failure = new reportBuilder.InvestigationReportBuildError(
+        "INVALID_INPUT",
+        "Synthetic private build details.",
+      );
+      const buildHook = vi
+        .spyOn(reportBuilder, "buildInvestigationReportSubmission")
+        .mockImplementation(() => {
+          throw failure;
+        });
+      try {
+        const execution = f.coordinator.execute(f.claim, f.shutdown.signal);
+        await expect(execution).rejects.toBeInstanceOf(IsolatedInvestigationReportDeliveryError);
+        await expect(execution).rejects.toMatchObject({ code: "INVALID_INPUT", retryable: false });
+        expect(f.cleanup.mock.calls[0]?.[1]).toEqual({
+          lease: f.claim.lease,
+          ownedProcessesStopped: true,
+          desktopRestored: true,
+          reportDeliveryFailure: { code: "INVALID_INPUT", retryable: false },
+        });
+        expect(f.client.uploadReportPart).not.toHaveBeenCalled();
+        expect(f.client.finalize).not.toHaveBeenCalled();
+      } finally {
+        buildHook.mockRestore();
+      }
+    });
+
+    it("isolates a report part rejection before finalization after cleanup acknowledgement", async () => {
+      const f = reportDeliveryFixture();
+      vi.mocked(f.client.uploadReportPart).mockRejectedValue(f.failure);
+      await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBeInstanceOf(
+        IsolatedInvestigationReportDeliveryError,
+      );
+      expect(f.client.finalize).not.toHaveBeenCalled();
+      expect(f.workspace.cleanup).toHaveBeenCalledOnce();
+      expect(f.cleanup).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the original report failure fatal when no cleanup API can acknowledge release", async () => {
+      const confirmed = vi.fn(async () => undefined);
+      const f = reportDeliveryFixture({ onAttemptCleanupConfirmed: confirmed });
+      delete f.client.cleanup;
+      await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBe(f.failure);
+      expect(f.workspace.cleanup).toHaveBeenCalledOnce();
+      expect(confirmed).toHaveBeenCalledOnce();
+      expect(f.cleanup).not.toHaveBeenCalled();
+    });
+
+    it.each(["workspace", "acknowledgement"] as const)(
+      "keeps a %s cleanup failure fatal instead of isolating the report failure",
+      async (stage) => {
+        const confirmed = vi.fn(async () => undefined);
+        const unconfirmed = vi.fn(async () => undefined);
+        const f = reportDeliveryFixture({
+          onAttemptCleanupConfirmed: confirmed,
+          onAttemptCleanupUnconfirmed: unconfirmed,
+        });
+        const failure = new Error(`Synthetic ${stage} cleanup failure.`);
+        if (stage === "workspace") vi.mocked(f.workspace.cleanup).mockRejectedValue(failure);
+        else f.cleanup.mockRejectedValue(failure);
+        await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBe(failure);
+        expect(unconfirmed).toHaveBeenCalledWith("ATTEMPT_CLEANUP_UNCONFIRMED");
+        expect(confirmed).toHaveBeenCalledTimes(stage === "workspace" ? 0 : 1);
+        expect(f.cleanup).toHaveBeenCalledTimes(stage === "workspace" ? 0 : 1);
+      },
+    );
+
+    it.each(["wrong-attempt", "unreleased"] as const)(
+      "rejects a %s cleanup acknowledgement instead of isolating the report failure",
+      async (condition) => {
+        const unconfirmed = vi.fn(async () => undefined);
+        const f = reportDeliveryFixture({ onAttemptCleanupUnconfirmed: unconfirmed });
+        f.cleanup.mockResolvedValue({
+          released: condition !== "unreleased",
+          attemptId: condition === "wrong-attempt" ? "another-attempt" : f.claim.attempt.id,
+        } as Awaited<ReturnType<NonNullable<InvestigationWorkerClient["cleanup"]>>>);
+        const execution = f.coordinator.execute(f.claim, f.shutdown.signal);
+        await expect(execution).rejects.toBeInstanceOf(InvestigationWorkerClientError);
+        await expect(execution).rejects.toMatchObject({
+          code: "invalid_response",
+          retryable: false,
+        });
+        expect(unconfirmed).toHaveBeenCalledWith("ATTEMPT_CLEANUP_UNCONFIRMED");
+      },
+    );
+
+    it("keeps a progress flush failure fatal after the cleanup acknowledgement", async () => {
+      const f = reportDeliveryFixture();
+      const failure = new Error("Synthetic progress flush failure.");
+      const createProgress = progressReporter.createInvestigationProgressReporter;
+      const progressHook = vi
+        .spyOn(progressReporter, "createInvestigationProgressReporter")
+        .mockImplementation((options) => {
+          const reporter = createProgress(options);
+          return {
+            ...reporter,
+            flush: async () => {
+              await reporter.flush();
+              throw failure;
+            },
+          };
+        });
+      try {
+        await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBe(failure);
+        expect(f.cleanup).toHaveBeenCalledOnce();
+      } finally {
+        progressHook.mockRestore();
+      }
+    });
+
+    it("keeps best effort progress delivery failure separate from report isolation", async () => {
+      const f = reportDeliveryFixture();
+      f.client.progress = vi.fn(async () => {
+        throw new Error("Synthetic progress endpoint failure.");
+      });
+      await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBeInstanceOf(
+        IsolatedInvestigationReportDeliveryError,
+      );
+      expect(f.cleanup).toHaveBeenCalledOnce();
+    });
+
+    it("does not isolate a failed interrupt checkpoint before a stopped checkpoint was accepted", async () => {
+      const f = reportDeliveryFixture();
+      vi.mocked(f.model.execute).mockRejectedValue(new Error("Synthetic model failure."));
+      vi.mocked(f.client.checkpoint).mockRejectedValue(f.failure);
+      await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBe(f.failure);
+      expect(f.current().stopReason).toBe("continuing");
+      expect(f.cleanup.mock.calls[0]?.[1]).not.toHaveProperty("reportDeliveryFailure");
+      expect(f.client.uploadReportPart).not.toHaveBeenCalled();
+      expect(f.client.finalize).not.toHaveBeenCalled();
+    });
+
+    it("does not isolate report failure after the heartbeat loses lease ownership", async () => {
+      const unconfirmed = vi.fn(async () => undefined);
+      const f = reportDeliveryFixture({ onAttemptCleanupUnconfirmed: unconfirmed });
+      const leaseHook = vi
+        .spyOn(InvestigationAttemptHeartbeat.prototype, "leaseLost", "get")
+        .mockReturnValue(false);
+      f.client.reportUsage = vi.fn(async () => {
+        leaseHook.mockReturnValue(true);
+        throw f.failure;
+      });
+      try {
+        await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBe(f.failure);
+        expect(unconfirmed).toHaveBeenCalledWith("LEASE_LOST");
+        expect(f.cleanup).not.toHaveBeenCalled();
+      } finally {
+        leaseHook.mockRestore();
+      }
+    });
+
+    it.each([
+      new InvestigationLeaseLost(),
+      new InvestigationWorkerClientError("lease_lost", false, 409),
+    ])("keeps lease errors from finalization fatal", async (failure) => {
+      const f = reportDeliveryFixture();
+      vi.mocked(f.client.finalize).mockRejectedValue(failure);
+      await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBe(failure);
+      expect(f.cleanup.mock.calls[0]?.[1]).not.toHaveProperty("reportDeliveryFailure");
+    });
+
+    it("does not isolate a logging failure after the report was successfully finalized", async () => {
+      const failure = new Error("Synthetic report logging failure.");
+      const f = reportDeliveryFixture({
+        logger: {
+          debug: vi.fn(),
+          info: (message) => {
+            if (message === "Investigation report sealed.") throw failure;
+          },
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+      });
+      vi.mocked(f.client.finalize).mockImplementation(f.finalize);
+      await expect(f.coordinator.execute(f.claim, f.shutdown.signal)).rejects.toBe(failure);
+      expect(f.submissions).toHaveLength(1);
+      expect(f.cleanup.mock.calls[0]?.[1]).not.toHaveProperty("reportDeliveryFailure");
+    });
   });
 
   it("does not release a slot after a failed preparation also lost its owned cleanup", async () => {

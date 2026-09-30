@@ -11,8 +11,53 @@ permissions:
   contents: read
 
 jobs:
-  node-linux:
-    name: Node Linux Checks
+  node-linux-prepare:
+    name: Node Linux Test Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.20.x
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared dependencies once
+        run: pnpm run build:shared
+
+      - name: Build Server test runtime once
+        run: pnpm --filter @agentic-review/server build:only
+
+      - name: Share compiled test dependencies
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-linux-test-build
+          path: |
+            packages/contracts/dist
+            packages/domain/dist
+            packages/codex/dist
+            apps/server/dist
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  node-linux-other:
+    name: Node Linux Other Checks
+    needs: node-linux-prepare
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -35,20 +80,83 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Restore compiled test dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: node-linux-test-build
+          path: .
+
+      - name: Typecheck all workspace packages
+        run: pnpm -r --if-present typecheck:only
 
       - name: Test deferred operations tooling
         run: node --test deploy/operations/acceptance.test.mjs deploy/operations/capacity.test.mjs deploy/operations/observation-client.test.mjs deploy/operations/tests/windows-supervisor.test.mjs
 
-      - name: Test
-        run: pnpm test
+      - name: Test all packages except Server
+        run: pnpm --filter '!@agentic-review/server' -r --if-present test:only
 
-      - name: Build
-        run: pnpm build
+      - name: Build remaining applications
+        run: pnpm --filter './apps/*' --filter '!@agentic-review/server' -r --if-present build:only
 
       - name: Lint
         run: pnpm lint
+
+  node-linux-server:
+    name: Server Linux Tests (${{ matrix.shard }}/3)
+    needs: node-linux-prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.20.x
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Restore compiled test dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: node-linux-test-build
+          path: .
+
+      - name: Test Server shard
+        run: pnpm --filter @agentic-review/server test:only --shard=${{ matrix.shard }}/3
+
+  node-linux:
+    name: Node Linux Checks
+    needs: [node-linux-prepare, node-linux-other, node-linux-server]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every Linux check to succeed
+        env:
+          PREPARE_RESULT: ${{ needs.node-linux-prepare.result }}
+          OTHER_RESULT: ${{ needs.node-linux-other.result }}
+          SERVER_RESULT: ${{ needs.node-linux-server.result }}
+        run: |
+          if [ "$PREPARE_RESULT" != "success" ] || [ "$OTHER_RESULT" != "success" ] || [ "$SERVER_RESULT" != "success" ]; then
+            echo "Linux checks did not all pass: build=$PREPARE_RESULT other=$OTHER_RESULT server=$SERVER_RESULT"
+            exit 1
+          fi
 
   process-host-linux:
     name: ProcessHost Linux Checks

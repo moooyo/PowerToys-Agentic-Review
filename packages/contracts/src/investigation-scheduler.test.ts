@@ -33,4 +33,28 @@ describe("investigation scheduler contracts", () => {
     ])
       expect(Value.Check(InvestigationCleanupRequestSchema, invalid)).toBe(false);
   });
+
+  it("accepts a bounded report failure code without arbitrary response content", () => {
+    const request = {
+      lease: { attemptId: "attempt-1", fence: 2, leaseToken: "synthetic-lease" },
+      ownedProcessesStopped: true,
+      desktopRestored: true,
+      reportDeliveryFailure: { code: "invalid_logical_report_semantics", retryable: false },
+    };
+    expect(Value.Check(InvestigationCleanupRequestSchema, request)).toBe(true);
+    for (const failure of [
+      { code: "", retryable: false },
+      { code: "x".repeat(129), retryable: false },
+      { code: "response body\ncontents", retryable: false },
+      { code: "REPORT_DELIVERY_FAILED\n", retryable: false },
+      { code: "REPORT_DELIVERY_FAILED" },
+      { code: "REPORT_DELIVERY_FAILED", retryable: false, body: "untrusted response" },
+    ])
+      expect(
+        Value.Check(InvestigationCleanupRequestSchema, {
+          ...request,
+          reportDeliveryFailure: failure,
+        }),
+      ).toBe(false);
+  });
 });

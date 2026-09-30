@@ -291,6 +291,86 @@ describe("investigation resource scheduling", () => {
     expect(f.claim(undefined, f.worker, restarted)?.task.id).toBe("e2e-two");
   });
 
+  it.each(["complete", "blocked", "error"] as const)(
+    "retains the %s checkpoint and releases capacity after report delivery fails",
+    (stopReason) => {
+      const f = fixture();
+      f.enableE2e();
+      f.enqueue("undelivered", "pr-verify");
+      f.enqueue("next-task", "pr-verify");
+      const first = f.claim()!;
+      const checkpoint = { ...first.checkpoint!, stopReason };
+      f.store.put("checkpoints", first.task.id, checkpoint);
+      const request = {
+        lease: first.lease,
+        ownedProcessesStopped: true as const,
+        desktopRestored: true as const,
+        reportDeliveryFailure: { code: "invalid_logical_report_semantics", retryable: false },
+      };
+      expect(f.service.workerCleanup(f.worker, first.task.id, request)).toEqual({
+        released: true,
+        attemptId: first.attempt.id,
+      });
+      expect(f.store.get("tasks", first.task.id)).toMatchObject({ state: "interrupted" });
+      expect(f.store.get("attempts", first.attempt.id)).toMatchObject({
+        attempt: {
+          state: "interrupted",
+          terminationReason: "report_delivery_failed:invalid_logical_report_semantics",
+        },
+      });
+      expect(f.store.get("checkpoints", first.task.id)).toEqual(checkpoint);
+      expect(f.store.list("reports")).toEqual([]);
+      const next = f.claim()!;
+      expect(next.task.id).toBe("next-task");
+      const firstAttempt = f.store.get("attempts", first.attempt.id);
+      f.service.workerCleanup(f.worker, first.task.id, request);
+      expect(f.store.get("attempts", first.attempt.id)).toEqual(firstAttempt);
+      expect(f.store.get("tasks", next.task.id)).toMatchObject({ state: "running" });
+      expect(f.service.schedulerStatus(f.operator).occupiedE2e).toBe(1);
+    },
+  );
+
+  it("does not reinterpret a sealed report when its successful response was lost", () => {
+    const f = fixture();
+    f.enqueue("sealed");
+    const claim = f.claim()!;
+    const task = { ...claim.task, state: "completed" as const };
+    const stored = f.store.get<{ attempt: typeof claim.attempt }>("attempts", claim.attempt.id)!;
+    const record = { ...stored, attempt: { ...stored.attempt, state: "completed" as const } };
+    const report = createInvestigationPreview("pr", { findingCount: 0 }).result;
+    f.store.put("tasks", task.id, task);
+    f.store.put("attempts", claim.attempt.id, record);
+    f.store.put("reports", claim.reportId, report);
+    expect(
+      f.service.workerCleanup(f.worker, task.id, {
+        lease: claim.lease,
+        ownedProcessesStopped: true,
+        desktopRestored: true,
+        reportDeliveryFailure: { code: "HTTP_ERROR", retryable: true },
+      }).released,
+    ).toBe(true);
+    expect(f.store.get("tasks", task.id)).toEqual(task);
+    expect(f.store.get("attempts", claim.attempt.id)).toEqual(record);
+    expect(f.store.get("reports", claim.reportId)).toEqual(report);
+  });
+
+  it("does not accept report recovery for a checkpoint that can still execute", () => {
+    const f = fixture();
+    f.enableE2e();
+    f.enqueue("still-executing", "pr-verify");
+    const claim = f.claim()!;
+    f.service.cancelTask(f.operator, claim.task.id);
+    expect(() =>
+      f.service.workerCleanup(f.worker, claim.task.id, {
+        lease: claim.lease,
+        ownedProcessesStopped: true,
+        desktopRestored: true,
+        reportDeliveryFailure: { code: "REPORT_DELIVERY_FAILED", retryable: false },
+      }),
+    ).toThrow("stopped checkpoint");
+    expect(f.service.schedulerStatus(f.operator).occupiedE2e).toBe(1);
+  });
+
   it("releases expired static capacity while preserving execution quarantine", () => {
     const f = fixture(1);
     f.enableE2e();
