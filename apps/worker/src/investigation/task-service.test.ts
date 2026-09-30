@@ -5,7 +5,7 @@ import {
 } from "@agentic-review/contracts";
 import { createInvestigationCheckpoint } from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
-import type { InvestigationWorkerClient } from "./http-client.js";
+import { type InvestigationWorkerClient, InvestigationWorkerClientError } from "./http-client.js";
 import {
   type InvestigationClaimExecutor,
   InvestigationTaskService,
@@ -372,6 +372,41 @@ describe("InvestigationTaskService", () => {
       },
     );
     expect(JSON.stringify(f.logger.error.mock.calls)).not.toContain("sensitive upstream response");
+  });
+
+  it("retains safe terminal HTTP metadata without its message or arbitrary error fields", async () => {
+    const f = fixture();
+    const error = new InvestigationWorkerClientError(
+      "invalid_logical_report_semantics",
+      false,
+      422,
+    );
+    error.message = "Synthetic sensitive upstream response.";
+    Object.assign(error, { responseBody: "Synthetic private report.", credential: "secret" });
+    const execute = vi.fn<InvestigationClaimExecutor["execute"]>(async () => {
+      throw error;
+    });
+    const service = new InvestigationTaskService({
+      client: f.client,
+      executor: { execute },
+      supportedKinds: ["issue-investigate"],
+      logger: f.logger,
+    });
+    await expect(service.run()).rejects.toThrow(/terminal submission/);
+    await expect(service.stop()).rejects.toThrow(/terminal submission/);
+    expect(f.logger.error).toHaveBeenCalledWith(
+      "Investigation attempt could not complete its terminal submission.",
+      {
+        taskId: execute.mock.calls[0]![0].task.id,
+        attemptId: execute.mock.calls[0]![0].attempt.id,
+        code: "invalid_logical_report_semantics",
+        statusCode: 422,
+        retryable: false,
+      },
+    );
+    expect(JSON.stringify(f.logger.error.mock.calls)).not.toMatch(
+      /sensitive|private report|secret/,
+    );
   });
 
   it.each(["issue-investigate", "pr-e2e"] as const)(

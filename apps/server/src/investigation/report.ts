@@ -29,6 +29,7 @@ import {
   investigationContentDigest,
   investigationTaskBindingDigest,
   projectInvestigationNextActions,
+  projectInvestigationReportAssessment,
   projectInvestigationReportFindings,
   validateInvestigationNextActions,
 } from "@agentic-review/domain";
@@ -944,12 +945,6 @@ export function assembleInvestigationReport(
     );
   }
   requireEqual(
-    header.assessment,
-    analysis.assessment,
-    "report_assessment_mismatch",
-    "The report assessment must match the accepted checkpoint presentation.",
-  );
-  requireEqual(
     header.report.summary,
     analysis.summary,
     "report_summary_mismatch",
@@ -1004,6 +999,23 @@ export function assembleInvestigationReport(
       "Saved next actions must bind the current report version.",
     );
   }
+  analysis.assessment = projectInvestigationReportAssessment(
+    {
+      context: header.context,
+      report: { id: header.id, version: header.version },
+      assessment: analysis.assessment,
+      findings: projectedFindings.findings,
+      feedbackDrafts: analysis.feedbackDrafts,
+    },
+    analysis.nextActions,
+    collections.plans,
+  );
+  requireEqual(
+    header.assessment,
+    analysis.assessment,
+    "report_assessment_mismatch",
+    "The report assessment must match the accepted checkpoint presentation.",
+  );
   const projectedActions = projectInvestigationNextActions(
     {
       context: header.context,

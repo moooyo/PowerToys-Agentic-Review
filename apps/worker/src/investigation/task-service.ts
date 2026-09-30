@@ -6,7 +6,7 @@ import {
 } from "@agentic-review/contracts";
 import type { Logger } from "../logging/logger.js";
 import { delay } from "../util/async.js";
-import type { InvestigationWorkerClient } from "./http-client.js";
+import { type InvestigationWorkerClient, InvestigationWorkerClientError } from "./http-client.js";
 
 export type ClaimedInvestigationTask = NonNullable<InvestigationClaimResponse["claim"]>;
 export type InvestigationTaskPool = "static" | "e2e";
@@ -149,7 +149,7 @@ export class InvestigationTaskService {
       const pool = investigationTaskPool(claim.task.kind);
       const execution = Promise.resolve()
         .then(() => this.options.executor.execute(claim, this.#shutdown.signal))
-        .catch(() => {
+        .catch((error: unknown) => {
           // An executor owns durable termination. Never log model output, credentials, or server response bodies.
           this.#executionFailure ??= new Error(
             "Investigation attempt could not complete its terminal submission.",
@@ -157,7 +157,17 @@ export class InvestigationTaskService {
           this.requestDrain();
           this.options.logger.error(
             "Investigation attempt could not complete its terminal submission.",
-            { taskId, attemptId },
+            {
+              taskId,
+              attemptId,
+              ...(error instanceof InvestigationWorkerClientError
+                ? {
+                    code: error.code,
+                    ...(error.statusCode === undefined ? {} : { statusCode: error.statusCode }),
+                    retryable: error.retryable,
+                  }
+                : {}),
+            },
           );
         })
         .finally(() => {

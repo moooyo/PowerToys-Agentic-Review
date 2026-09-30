@@ -40,6 +40,7 @@ import {
   investigationContentDigest,
   investigationTaskBindingDigest,
   projectInvestigationNextActions,
+  projectInvestigationReportAssessment,
   projectInvestigationReportFindings,
 } from "@agentic-review/domain";
 import { Value } from "@sinclair/typebox/value";
@@ -196,6 +197,17 @@ export function buildInvestigationReportSubmission(
     analysis.findings,
     sourceReportRef,
     mergeDiagnostics(analysis.diagnostics, input.diagnostics ?? []),
+  );
+  analysis.assessment = projectInvestigationReportAssessment(
+    {
+      context,
+      report: sourceReportRef,
+      assessment: analysis.assessment,
+      findings: projectedFindings.findings,
+      feedbackDrafts: analysis.feedbackDrafts,
+    },
+    analysis.nextActions,
+    plans,
   );
   const { nextActions, diagnostics } = projectInvestigationNextActions(
     {
