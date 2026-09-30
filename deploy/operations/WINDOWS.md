@@ -106,6 +106,12 @@ For Codex Workers that need response-boundary token stop controls, set
 existing provider configuration. The default `exec` transport remains available
 for older CLIs and synthetic fixtures; its token usage arrives only at turn end.
 
+Native `pr-e2e` tasks also discover [bundled PowerToys Run recipes](../worker/e2e-recipes.md)
+from their repository and changed paths. A single `run-recipe` request performs the
+controlled build, query scenarios, assertions, screenshots and owned-process cleanup.
+The model reviews the receipts and any remaining PR coverage; no private helper path
+or additional Worker configuration is required.
+
 The app-server transport receives cumulative usage during an invocation and
 interrupts when the remaining task allowance is exhausted. The task deadline
 also covers preparation and cancellation has a bounded native teardown fallback.

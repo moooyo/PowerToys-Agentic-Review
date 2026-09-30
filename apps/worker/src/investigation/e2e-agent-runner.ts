@@ -17,6 +17,7 @@ import type {
 } from "../execution/process-host-protocol.js";
 import type { E2eBuildRecord, E2eMsbuildToolchain } from "./e2e-build.js";
 import { describeE2eAssertion, type E2eFeaturePlan } from "./e2e-feature-plan.js";
+import { listE2eRecipes } from "./e2e-recipes.js";
 import {
   type E2eToolReceipt,
   E2eToolServer,
@@ -681,6 +682,30 @@ If the original result cannot be recovered, report that blocker instead of repea
 Every response has id, status, observed, artifactRefs and immutable feature/build bindings.
 Use response ids in assertionReceiptIds and mediaReceiptIds. Build identity, scenarios and
 expected outcomes are generated from Worker records, never supplied in the final answer.
+
+Bundled recipes available for this repository and changed paths:
+${JSON.stringify(listE2eRecipes(input.input.task.repository.fullName, input.changedPaths))}
+When a listed recipe matches the required scenarios, prefer one run-recipe call. The Worker
+registers immutable assertions, performs one controlled build, operates the real product UI,
+captures a fresh screenshot for each successful state, and stops its owned application.
+No external script, private file path or separate tool server is needed.
+{"operation":"run-recipe","recipeId":"powertoys-calculator"}
+The Calculator recipe is an English-UI baseline for explicit/global arithmetic and complex
+results. It does not establish coverage of other behavior merely because a file path matches.
+For PR-specific PowerToys Run queries, supply complete scenarios before execution:
+{"operation":"run-recipe","recipeId":"powertoys-run-query","plugin":"UnitConverter","scenarios":[{"query":"replace with the actual query","feature":{"id":"conversion","title":"PR-specific conversion","paths":["actual/changed/plugin/file.cs"],"scenario":"Describe the exact behavior to verify.","userVisible":true,"assertions":[{"id":"result","kind":"ui","description":"Describe the expected result.","selector":{"name":"exact result row from the source or UI"},"assertion":{"property":"text","expected":"expected result","match":"contains"}}]}}]}
+Custom scenarios support Calculator or UnitConverter. Use requires with an earlier feature ID
+for an absence check's positive control. Use actual changed paths and expected behavior from
+the pinned PR, not the illustrative query/selector above. Include a query-value assertion when
+checking absence so an unchanged input cannot count as a pass.
+Recipe responses contain observed.features with the final assertionReceiptIds/mediaReceiptIds
+and observed.summary. Review those fresh results and use their real IDs in your final response.
+The run-recipe receipt itself is not an assertion. Uncovered PR changes still require additional
+scenarios or an explicit not_run/blocked outcome. These recipes use screenshots; retain that
+media limitation instead of repeating successful execution solely to add video.
+Repeated identical calls reuse the same recipe result. Different scenarios cannot replace an
+already-started recipe in this session. Wait on the original long-running request and recover
+its saved response; do not manually duplicate its build or UI work while it runs.
 
 Workflow:
 1. Inspect pinned source to identify the actual project and expected executable outputs.

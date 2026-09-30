@@ -11,6 +11,7 @@ import type {
   ProcessLaunchSpec,
 } from "../execution/process-host-protocol.js";
 import * as build from "./e2e-build.js";
+import * as recipes from "./e2e-recipes.js";
 import {
   type E2eToolReceipt,
   E2eToolServer,
@@ -22,7 +23,9 @@ import type { PreparedInvestigationWorkspace } from "./workspace.js";
 
 function fixture(
   onRuntimeObservation = vi.fn(async () => {}),
-  options: Pick<E2eToolServerOptions, "buildToolDigests" | "msbuildToolchain"> = {},
+  options: Partial<
+    Pick<E2eToolServerOptions, "buildToolDigests" | "msbuildToolchain" | "changedPaths">
+  > = {},
   controlDirectory = "C:\\Attempt\\control",
 ) {
   const { task, attempt } = createInvestigationPreview("pr");
@@ -101,6 +104,106 @@ function fixture(
 }
 
 describe("E2E tool authority", () => {
+  it("persists recipe child observations and reuses the result instead of repeating work", async () => {
+    const f = fixture(undefined, {
+      changedPaths: [
+        "src/modules/launcher/Plugins/Microsoft.PowerToys.Run.Plugin.Calculator/CalculateEngine.cs",
+      ],
+    });
+    const run = vi.spyOn(recipes, "runE2eRecipe").mockImplementation(async (plan, context) => {
+      await context.execute({ operation: "register-feature", feature: plan.scenarios[0]!.feature });
+      return {
+        recipeId: plan.id,
+        summary: "The prerequisite is unavailable.",
+        cleanupConfirmed: true,
+        features: [
+          {
+            featureId: plan.scenarios[0]!.feature.id,
+            outcome: "blocked",
+            reason: "No build.",
+            assertionReceiptIds: [],
+            mediaReceiptIds: [],
+            limitations: [],
+          },
+        ],
+      };
+    });
+    try {
+      const first = await f.server.execute({
+        operation: "run-recipe",
+        recipeId: "powertoys-calculator",
+      });
+      const second = await f.server.execute({
+        operation: "run-recipe",
+        recipeId: "powertoys-calculator",
+      });
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(first).toMatchObject({
+        operation: "run-recipe",
+        assertion: false,
+        status: "blocked",
+        observed: { reused: false },
+      });
+      expect(second).toMatchObject({ assertion: false, observed: { reused: true } });
+      expect(
+        f.server.receipts.filter((receipt) => receipt.operation === "register-feature"),
+      ).toHaveLength(1);
+      expect(f.onRuntimeObservation).toHaveBeenCalledTimes(3);
+      expect(f.server.features).toHaveLength(1);
+    } finally {
+      run.mockRestore();
+    }
+  });
+
+  it("does not replace a recipe's assertions after its first execution", async () => {
+    const changedPath =
+      "src/modules/launcher/Plugins/Microsoft.PowerToys.Run.Plugin.Calculator/CalculateEngine.cs";
+    const f = fixture(undefined, { changedPaths: [changedPath] });
+    const request = {
+      operation: "run-recipe",
+      recipeId: "powertoys-run-query",
+      plugin: "Calculator",
+      scenarios: [
+        {
+          query: "=2+2",
+          feature: {
+            id: "arithmetic",
+            title: "Arithmetic",
+            paths: [changedPath],
+            scenario: "Enter a sum.",
+            userVisible: true,
+            assertions: [
+              {
+                id: "query",
+                kind: "ui",
+                description: "The query is entered.",
+                selector: { automationId: "QueryTextBox" },
+                assertion: { property: "value", expected: "=2+2" },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const run = vi.spyOn(recipes, "runE2eRecipe").mockResolvedValue({
+      recipeId: "powertoys-run-query",
+      summary: "Blocked.",
+      features: [],
+      cleanupConfirmed: true,
+    });
+    try {
+      await f.server.execute(request);
+      const changed = structuredClone(request);
+      changed.scenarios[0]!.query = "=3+3";
+      const response = await f.server.execute(changed);
+      expect(response).toMatchObject({ status: "blocked", assertion: false });
+      expect(response.summary).toContain("already started with different scenarios");
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      run.mockRestore();
+    }
+  });
+
   it.skipIf(process.platform !== "win32")(
     "loads the exact authenticated HTTP transport from a private file without publishing it",
     async () => {

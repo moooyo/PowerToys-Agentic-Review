@@ -682,6 +682,36 @@ describe("E2E interruption recovery", () => {
     expect(prompt).not.toContain("synthetic-private-capability");
   });
 
+  it("discovers bundled recipes in the ordinary E2E prompt without private script paths", () => {
+    const f = recoveryFixture();
+    const prompt = createE2ePrompt({
+      snapshot: frozenInputFixture(f.input).snapshot,
+      input: {
+        ...f.input,
+        task: {
+          ...f.input.task,
+          repository: { ...f.input.task.repository, fullName: "microsoft/PowerToys" },
+        },
+      },
+      changedPaths: [
+        "src/modules/launcher/Plugins/Microsoft.PowerToys.Run.Plugin.Calculator/CalculateEngine.cs",
+      ],
+      mergeBaseSha: "d".repeat(40),
+      endpoint: "http://127.0.0.1:1234/tool",
+      capability: "private",
+      directory: "C:/Attempts/evidence",
+    });
+    const catalog = prompt
+      .split("Bundled recipes available for this repository and changed paths:\n")[1]!
+      .split("\n")[0]!;
+    expect(JSON.parse(catalog)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "powertoys-calculator" })]),
+    );
+    expect(prompt).toContain("The run-recipe receipt itself is not an assertion");
+    expect(prompt).not.toContain("calculator-worker-recipe.mjs");
+    expect(prompt).not.toContain("C:\\ARWork");
+  });
+
   it("discloses only HEAD inert links and blocks claims that require real link semantics", () => {
     const f = recoveryFixture();
     const sourceSha = f.input.workspace.sourceBinding!.sourceSha;

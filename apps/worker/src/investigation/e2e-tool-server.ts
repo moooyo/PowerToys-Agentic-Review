@@ -9,6 +9,7 @@ import type {
   InvestigationEvidenceV1,
   InvestigationTaskV1,
 } from "@agentic-review/contracts";
+import { investigationContentDigest } from "@agentic-review/domain";
 import {
   ManagedProcessRunError,
   ProductionManagedProcessRunner,
@@ -40,6 +41,7 @@ import {
   parseE2eDesktopResult,
 } from "./e2e-desktop-driver.js";
 import { type E2eFeaturePlan, parseE2eFeaturePlan } from "./e2e-feature-plan.js";
+import { prepareE2eRecipe, runE2eRecipe } from "./e2e-recipes.js";
 import type { ModelActivityObservation } from "./model-progress.js";
 import type { PreparedInvestigationWorkspace } from "./workspace.js";
 
@@ -124,6 +126,10 @@ export class E2eToolServer {
   readonly #features = new Map<string, E2eFeaturePlan>();
   readonly #builds = new Map<string, E2eBuildRecord>();
   readonly #artifacts: InvestigationArtifactV1[] = [];
+  readonly #recipeRuns = new Map<
+    string,
+    { digest: string; result: ReturnType<typeof runE2eRecipe> }
+  >();
   readonly #processes = new Map<string, OwnedProcess>();
   readonly #runner = new ProductionManagedProcessRunner();
   readonly #buildRunner = new ProductionManagedProcessRunner({ retainFailureOutput: true });
@@ -272,7 +278,37 @@ export class E2eToolServer {
     let assertion = false;
     const artifacts: InvestigationArtifactV1[] = [];
     try {
-      if (operation === "register-feature") {
+      if (operation === "run-recipe") {
+        const plan = prepareE2eRecipe(
+          input,
+          this.options.task.repository.fullName,
+          this.options.changedPaths,
+        );
+        const digest = investigationContentDigest(plan);
+        const previous = this.#recipeRuns.get(plan.id);
+        if (previous !== undefined && previous.digest !== digest)
+          throw new Error(
+            "A recipe already started with different scenarios. Its build and assertions cannot be replaced.",
+          );
+        const execution = previous ?? {
+          digest,
+          result: runE2eRecipe(plan, {
+            execute: (request) => this.execute(request),
+            signal: AbortSignal.any([this.options.signal, this.#toolLifetime.signal]),
+            environment: this.#environment(),
+          }),
+        };
+        this.#recipeRuns.set(plan.id, execution);
+        const result = await execution.result;
+        observed = { ...result, reused: previous !== undefined };
+        status = result.features.some((feature) => feature.outcome === "failed")
+          ? "failed"
+          : result.cleanupConfirmed &&
+              result.features.length > 0 &&
+              result.features.every((feature) => feature.outcome === "passed")
+            ? "passed"
+            : "blocked";
+      } else if (operation === "register-feature") {
         const feature = parseE2eFeaturePlan(input.feature, this.options.changedPaths);
         const previous = this.#features.get(feature.id);
         if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(feature))
