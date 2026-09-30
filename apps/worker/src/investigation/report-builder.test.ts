@@ -1601,9 +1601,19 @@ describe("investigation report builder", () => {
     );
   });
 
-  it("preserves a runtime validation check reference to the saved parent plan", () => {
+  it("binds a completed PR verification assessment to its saved parent plan without changing model conclusions", () => {
     const { input, parentPlan } = parentPlanFixture();
     const planRef = { ...input.task.planRef! };
+    const assessment = input.checkpoint.analysis.assessment;
+    if (assessment.kind !== "pr") throw new Error("Expected PR fixture.");
+    assessment.e2eAssessment = {
+      ...assessment.e2eAssessment,
+      level: "recommended",
+      rationale: "The saved runtime experiment is the relevant E2E verification scenario.",
+      planRef: null,
+    };
+    input.checkpoint.analysis.plans = [];
+    input.checkpoint.analysis.nextActions = [];
     input.checkpoint.runtime.artifacts = [
       {
         id: "artifact:parent-plan-check",
@@ -1650,14 +1660,26 @@ describe("investigation report builder", () => {
       },
     ];
     input.checkpoint = seal(input.checkpoint);
+    const original = structuredClone(input.checkpoint);
+    const modelAssessment = structuredClone(assessment);
 
     const submission = buildInvestigationReportSubmission({ ...input, parentPlan });
+    expect(submission.header.outcome).toBe("completed");
+    expect(submission.header.report.loop.stopReason).toBe("complete");
+    expect(submission.header.report.summary).toBe(original.analysis.summary);
+    expect(submission.header.assessment).toEqual({
+      ...modelAssessment,
+      e2eAssessment: { ...modelAssessment.e2eAssessment, planRef },
+    });
     expect(collectionItems(submission.parts, "validationChecks")).toEqual(
       input.checkpoint.runtime.checks,
     );
     expect(collectionItems(submission.parts, "validationChecks")[0]).toMatchObject({ planRef });
     expect(collectionItems(submission.parts, "plans")).toEqual([parentPlan]);
     expect(parentPlan.sourceReportRef.id).not.toBe(submission.header.id);
+    expect(collectionItems(submission.parts, "nextActions")).toEqual([]);
+    expect(input.checkpoint).toEqual(original);
+    expect(modelAssessment.e2eAssessment.planRef).toBeNull();
   });
 
   it.each(["issue-verify", "reproduction-setup", "issue-fix", "feature-implement"] as const)(

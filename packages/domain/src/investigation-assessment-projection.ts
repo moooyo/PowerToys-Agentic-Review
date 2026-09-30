@@ -10,13 +10,51 @@ import {
   validateInvestigationNextActions,
 } from "./investigation-policy.js";
 
-/** Resolve only a stale plan-kind link from an explicit, unambiguous accepted verification action. */
+/** Preserve trusted follow-up plan identity and resolve explicit accepted verification actions. */
 export function projectInvestigationReportAssessment(
   context: Omit<InvestigationNextActionResolutionContext, "nextActions">,
   proposals: readonly InvestigationNextActionDraft[],
   persistedPlans: readonly InvestigationPlanV1[],
+  trustedParentPlan?: InvestigationPlanV1 | null,
 ): InvestigationResultV1["assessment"] {
   const { assessment } = context;
+  const parentReport = context.context.parentReportRef;
+  const subject = context.context.subjects.find((entry) => entry.id === assessment.subjectRef);
+  if (
+    context.context.task.kind === "pr-verify" &&
+    context.context.task.parentTaskId !== null &&
+    assessment.kind === "pr" &&
+    assessment.e2eAssessment.level !== "not_needed" &&
+    assessment.e2eAssessment.planRef === null &&
+    assessment.subjectRef === context.context.task.subjectRef &&
+    subject?.kind === "original_pr" &&
+    subject.repositoryId === context.context.repository.id &&
+    subject.workItemId === context.context.workItem.id &&
+    trustedParentPlan !== undefined &&
+    trustedParentPlan !== null &&
+    trustedParentPlan.state === "saved" &&
+    trustedParentPlan.kind === "verification" &&
+    trustedParentPlan.subjectRef === assessment.subjectRef &&
+    parentReport !== null &&
+    trustedParentPlan.sourceReportRef.id === parentReport.id &&
+    trustedParentPlan.sourceReportRef.version === parentReport.version &&
+    trustedParentPlan.digest ===
+      investigationContentDigest(investigationPlanDigestPayload(trustedParentPlan)) &&
+    persistedPlans.some(
+      (plan) => investigationContentDigest(plan) === investigationContentDigest(trustedParentPlan),
+    )
+  )
+    return {
+      ...assessment,
+      e2eAssessment: {
+        ...assessment.e2eAssessment,
+        planRef: {
+          id: trustedParentPlan.id,
+          version: trustedParentPlan.version,
+          digest: trustedParentPlan.digest,
+        },
+      },
+    };
   if (
     assessment.kind !== "bug" ||
     assessment.bugAssessment.status !== "needs_verification" ||

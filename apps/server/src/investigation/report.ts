@@ -1009,6 +1009,7 @@ export function assembleInvestigationReport(
     },
     analysis.nextActions,
     collections.plans,
+    parentPlan,
   );
   requireEqual(
     header.assessment,

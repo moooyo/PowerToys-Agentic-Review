@@ -208,6 +208,7 @@ export function buildInvestigationReportSubmission(
     },
     analysis.nextActions,
     plans,
+    input.parentPlan,
   );
   const { nextActions, diagnostics } = projectInvestigationNextActions(
     {

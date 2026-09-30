@@ -368,8 +368,8 @@ function expectCode(run: () => unknown, code: string): void {
   }
 }
 
-function parentPlanFixture(repeatDraft: boolean) {
-  const { input, result } = fixture();
+function parentPlanFixture(repeatDraft: boolean, findingCount = 2) {
+  const { input, result } = fixture(findingCount);
   removePrSourceFixture(input, result);
   const parentPlan: InvestigationPlanV1 = structuredClone(result.plans[0]!);
   parentPlan.sourceReportRef = { id: "synthetic-parent-report", version: 2 };
@@ -1354,6 +1354,99 @@ describe("assembleInvestigationReport", () => {
       expect(assembled.plans).toEqual([parentPlan]);
       expect(assembled.plans[0]!.sourceReportRef.id).toBe("synthetic-parent-report");
     }
+  });
+
+  it("rebuilds completed PR verification with its trusted parent plan when the model omits that reference", () => {
+    const { input, result, parentPlan } = parentPlanFixture(false, 0);
+    if (input.checkpoint.analysis.assessment.kind !== "pr")
+      throw new Error("Expected a PR assessment.");
+    input.task.executionPolicy = {
+      ...input.task.executionPolicy,
+      mode: "execute",
+      allowRepositoryExecution: true,
+      authorizationRef: "synthetic-operator",
+    };
+    const log = "The synthetic saved-plan checks passed.\n";
+    const artifact = {
+      id: "synthetic-completed-verification-log",
+      taskId: input.task.id,
+      attemptId: input.attempt.id,
+      subjectRef: input.task.subjectRef,
+      kind: "log" as const,
+      name: "verification.log",
+      mediaType: "text/plain",
+      digest: createHash("sha256").update(log).digest("hex"),
+      byteLength: Buffer.byteLength(log),
+      availability: "available" as const,
+    };
+    input.checkpoint.runtime.artifacts.push(structuredClone(artifact));
+    result.artifacts.push(structuredClone(artifact));
+    result.report.collections.artifacts = result.artifacts.length;
+    const observation = {
+      id: "synthetic-completed-verification",
+      subjectRef: input.task.subjectRef,
+      source: "executor_observation" as const,
+      authority: "worker" as const,
+      summary: "The synthetic saved-plan checks passed.",
+      artifactRefs: [artifact.id],
+      evidenceRefs: [],
+      provenance: {
+        taskId: input.task.id,
+        attemptId: input.attempt.id,
+        producer: "e2e-tool-server",
+        recordedAt: input.checkpoint.recordedAt,
+      },
+    };
+    input.checkpoint.runtime.evidence.push(structuredClone(observation));
+    result.verificationEvidence.push(structuredClone(observation));
+    result.report.collections.verificationEvidence = result.verificationEvidence.length;
+    result.validation.checks = result.validation.checks.map((check) => ({
+      ...check,
+      status: "passed" as const,
+      executor: "e2e-tool-server",
+      evidenceRefs: [observation.id],
+      authoritativeAttemptId: input.attempt.id,
+    }));
+    result.validation.summary = "All synthetic saved-plan checks passed.";
+    input.checkpoint.runtime.checks = structuredClone(result.validation.checks);
+    const modelAssessment = {
+      ...structuredClone(input.checkpoint.analysis.assessment),
+      summary: "The model reviewed the recorded verification results.",
+      e2eAssessment: {
+        ...structuredClone(input.checkpoint.analysis.assessment.e2eAssessment),
+        level: "recommended" as const,
+        planRef: null,
+        rationale: "The model recommends retaining these recorded checks for review.",
+      },
+    };
+    input.checkpoint.analysis.assessment = structuredClone(modelAssessment);
+    result.assessment = {
+      ...structuredClone(modelAssessment),
+      e2eAssessment: {
+        ...structuredClone(modelAssessment.e2eAssessment),
+        planRef: { id: parentPlan.id, version: parentPlan.version, digest: parentPlan.digest },
+      },
+    };
+    input.checkpoint.taskBindingDigest = investigationTaskBindingDigest(input.task);
+    sealCheckpoint(input.checkpoint);
+    sealResult(result);
+    const checkpoint = structuredClone(input.checkpoint);
+    const assembled = assembleInvestigationReport({
+      ...submission(result, input.checkpoint, input.task, input.attempt),
+      parentPlan,
+    });
+    expect(assembled).toEqual(result);
+    expect(assembled.outcome).toBe("completed");
+    expect(assembled.report.completeness).toBe("complete");
+    expect(assembled.plans).toEqual([parentPlan]);
+    expect(validateInvestigationResult(assembled).errors).toEqual([]);
+    expect(assembled.assessment).toEqual({
+      ...modelAssessment,
+      e2eAssessment: { ...modelAssessment.e2eAssessment, planRef: input.task.planRef },
+    });
+    expect(input.checkpoint).toEqual(checkpoint);
+    expect(input.checkpoint.analysis.assessment).toEqual(modelAssessment);
+    expect(modelAssessment.e2eAssessment.planRef).toBeNull();
   });
 
   it("requires the trusted parent plan instead of accepting a wire-only parent record", () => {
