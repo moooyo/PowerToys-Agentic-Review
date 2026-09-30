@@ -5,6 +5,7 @@ import {
   PositiveIntegerSchema,
   Sha256Schema,
 } from "./common.js";
+import { InvestigationRecipeStepSchema } from "./investigation-recipes.js";
 
 const object = <T extends TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -28,6 +29,7 @@ export const InvestigationExecutablePlanStepSchema = object({
       expectedExitCode: Type.Integer({ minimum: 0, maximum: 255 }),
     }),
     object({ kind: Type.Literal("ui"), adapterId: EntityIdSchema, scenarioId: EntityIdSchema }),
+    object({ kind: Type.Literal("recipe"), recipe: InvestigationRecipeStepSchema }),
     object({
       kind: Type.Literal("model-edit"),
       allowedPaths: Type.Array(relativePath, { minItems: 1, maxItems: 512, uniqueItems: true }),

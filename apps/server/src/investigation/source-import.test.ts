@@ -883,7 +883,165 @@ function planFixture() {
   return { task, plan, actor, binding, result: fixture.result };
 }
 
+function recipePlanFixture() {
+  const fixture = planFixture();
+  const { task, plan } = fixture;
+  task.repository.fullName = "microsoft/PowerToys";
+  plan.prerequisites = [];
+  plan.steps = [
+    {
+      id: "convert-square-mile",
+      description: "Verify square-mile conversion in PowerToys Run.",
+      expectedObservation: "The query and converted result are visible.",
+      checkIds: ["query-visible", "result-visible"],
+      recipe: {
+        request: {
+          recipeId: "powertoys-run-query",
+          plugin: "UnitConverter",
+          scenarios: [
+            {
+              query: "%% 10 sqmi in sqkm",
+              feature: {
+                id: "square-mile",
+                title: "Square-mile conversion",
+                paths: [
+                  "src/modules/launcher/Plugins/Community.PowerToys.Run.Plugin.UnitConverter/InputInterpreter.cs",
+                ],
+                scenario: "Convert ten square miles to square kilometres.",
+                userVisible: true,
+                assertions: [
+                  {
+                    id: "query",
+                    kind: "ui",
+                    description: "The exact conversion query is entered.",
+                    selector: { automationId: "QueryTextBox" },
+                    assertion: {
+                      property: "value",
+                      expected: "%% 10 sqmi in sqkm",
+                      match: "equals",
+                    },
+                  },
+                  {
+                    id: "result",
+                    kind: "ui",
+                    description: "The square-kilometre result is visible.",
+                    selector: { name: "25.89988110336" },
+                    assertion: {
+                      property: "text",
+                      expected: "25.89988110336",
+                      match: "contains",
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        checks: [
+          {
+            checkId: "query-visible",
+            featureId: "square-mile",
+            assertionId: "query",
+            scenarioId: "sqmi-to-sqkm",
+          },
+          {
+            checkId: "result-visible",
+            featureId: "square-mile",
+            assertionId: "result",
+            scenarioId: "sqmi-to-sqkm",
+          },
+        ],
+      },
+    },
+  ];
+  const { digest: _digest, state: _state, sourceReportRef: _sourceReportRef, ...content } = plan;
+  plan.digest = createCanonicalResult(content).sha256;
+  task.planRef = { id: plan.id, version: plan.version, digest: plan.digest };
+  return {
+    ...fixture,
+    binding: {
+      ...fixture.binding,
+      planRef: task.planRef,
+      satisfiedPrerequisiteRefs: [],
+      steps: [{ ...fixture.binding.steps[0]!, stepId: plan.steps[0]!.id }],
+    },
+  };
+}
+
 describe("trusted plan execution registry", () => {
+  it("derives recipe operations from the complete saved plan without a deployment registry", () => {
+    const { task, plan, actor } = recipePlanFixture();
+    const original = structuredClone(plan);
+    const binding = bindInvestigationPlanExecution(task, plan, actor, []);
+    expect(binding).toMatchObject({
+      planRef: task.planRef,
+      subjectRef: task.subjectRef,
+      subjectRevisionKey: task.subjects[0]?.revisionKey,
+      authorizationRef: actor.id,
+      executionPolicyDigest: createCanonicalResult(task.executionPolicy).sha256,
+      satisfiedPrerequisiteRefs: [],
+    });
+    const operation = { kind: "recipe", recipe: plan.steps[0]!.recipe };
+    expect(binding?.steps).toEqual([
+      {
+        stepId: plan.steps[0]!.id,
+        operation,
+        digest: createCanonicalResult({ stepId: plan.steps[0]!.id, operation }).sha256,
+      },
+    ]);
+    expect(plan).toEqual(original);
+    expect(() =>
+      bindInvestigationPlanExecution(task, plan, { ...actor, allowRepositoryExecution: false }, []),
+    ).toThrow(expect.objectContaining({ code: "execution_not_authorized" }));
+  });
+
+  it("keeps explicit recipe-plan registrations authoritative and rejects ambiguous registrations", () => {
+    const { task, plan, actor, binding } = recipePlanFixture();
+    expect(
+      bindInvestigationPlanExecution(task, plan, actor, [binding])?.steps[0]?.operation,
+    ).toEqual(binding.steps[0]!.operation);
+    expect(() => bindInvestigationPlanExecution(task, plan, actor, [binding, binding])).toThrow(
+      expect.objectContaining({ code: "execution_binding_ambiguous" }),
+    );
+  });
+
+  it.each([
+    "task kind",
+    "source",
+    "repository",
+    "prerequisites",
+    "unstructured step",
+    "partial plan",
+    "check order",
+    "duplicate assertion",
+    "invalid recipe",
+  ])("does not infer a recipe binding with an unsupported %s", (change) => {
+    const { task, plan, actor } = recipePlanFixture();
+    const recipe = plan.steps[0]!.recipe!;
+    if (change === "task kind") task.kind = "issue-verify";
+    if (change === "source") task.subjects = [];
+    if (change === "repository") task.repository.fullName = "fixture/another-project";
+    if (change === "prerequisites")
+      plan.prerequisites = [
+        { id: "runtime", kind: "environment", description: "Provision a runtime." },
+      ];
+    if (change === "unstructured step") delete plan.steps[0]!.recipe;
+    if (change === "partial plan")
+      plan.steps.push({
+        id: "another-step",
+        description: "Unstructured verification.",
+        expectedObservation: "A result.",
+        checkIds: ["another-check"],
+      });
+    if (change === "check order") recipe.checks.reverse();
+    if (change === "duplicate assertion")
+      recipe.checks[1]!.assertionId = recipe.checks[0]!.assertionId;
+    if (change === "invalid recipe") Object.assign(recipe.request, { recipeId: "unknown-recipe" });
+    expect(() => bindInvestigationPlanExecution(task, plan, actor, [])).toThrow(
+      expect.objectContaining({ code: "execution_binding_missing" }),
+    );
+  });
+
   it("reads saved prerequisite acknowledgements without invoking execution or upstream requests", async () => {
     const { task, plan, actor, binding, result } = planFixture();
     plan.prerequisites = ["authorization", "information", "decision"].map((kind) => ({

@@ -4,6 +4,7 @@ import { createCanonicalResult } from "@agentic-review/codex";
 import {
   EntityIdSchema,
   GitObjectIdSchema,
+  getInvestigationRecipeStepIssues,
   type InvestigationExecutablePlanStep,
   InvestigationExecutablePlanStepSchema,
   type InvestigationInputSnapshotV1,
@@ -257,6 +258,52 @@ function matchingExecutionBindings(
   );
 }
 
+function resolveExecutionBindings(
+  repository: InvestigationRepositoryRecord,
+  profileRef: InvestigationTaskV1["profileRef"],
+  taskKind: InvestigationTaskV1["kind"],
+  subject: InvestigationSubjectV1 | undefined,
+  plan: InvestigationPlanV1,
+  registry: readonly InvestigationTrustedExecutionBinding[],
+): readonly InvestigationTrustedExecutionBinding[] {
+  const matches = matchingExecutionBindings(repository.id, profileRef, plan, registry);
+  if (matches.length > 0) return matches;
+  if (
+    taskKind !== "pr-verify" ||
+    subject?.kind !== "original_pr" ||
+    subject.id !== plan.subjectRef ||
+    !/^[A-Za-z0-9_.-]+\/PowerToys$/iu.test(repository.fullName) ||
+    plan.kind !== "verification" ||
+    plan.prerequisites.length !== 0 ||
+    plan.steps.length === 0
+  )
+    return [];
+  const steps: InvestigationTrustedExecutionBinding["steps"] = [];
+  for (const step of plan.steps) {
+    const recipe = step.recipe;
+    if (recipe === undefined) return [];
+    const executable = { stepId: step.id, operation: { kind: "recipe" as const, recipe } };
+    if (
+      !Value.Check(InvestigationExecutablePlanStepSchema, {
+        ...executable,
+        digest: createCanonicalResult(executable).sha256,
+      }) ||
+      getInvestigationRecipeStepIssues(recipe, step.checkIds).length > 0
+    )
+      return [];
+    steps.push(structuredClone(executable));
+  }
+  return [
+    {
+      repositoryId: repository.id,
+      planRef: { id: plan.id, version: plan.version, digest: plan.digest },
+      planKind: "verification",
+      satisfiedPrerequisiteRefs: [],
+      steps,
+    },
+  ];
+}
+
 export function bindInvestigationPlanExecution(
   task: InvestigationTaskV1,
   plan: InvestigationPlanV1 | null,
@@ -275,7 +322,14 @@ export function bindInvestigationPlanExecution(
     "The selected plan requires explicit source-execution authority.",
   );
   const planRef = { id: plan.id, version: plan.version, digest: plan.digest };
-  const matches = matchingExecutionBindings(task.repository.id, task.profileRef, plan, registry);
+  const matches = resolveExecutionBindings(
+    task.repository,
+    task.profileRef,
+    task.kind,
+    task.subjects.find((entry) => entry.id === task.subjectRef),
+    plan,
+    registry,
+  );
   requireCondition(
     matches.length === 1,
     409,
@@ -386,9 +440,11 @@ export class InvestigationSourceImporter {
       !report.plans.some((saved) => digest(saved) === digest(plan))
     )
       return [];
-    const matches = matchingExecutionBindings(
-      repository.id,
+    const matches = resolveExecutionBindings(
+      repository,
       report.context.profileRef,
+      workItem.kind === "pull_request" ? "pr-verify" : "issue-verify",
+      report.context.subjects.find((entry) => entry.id === plan.subjectRef),
       plan,
       this.#registry,
     );

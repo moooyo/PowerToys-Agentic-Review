@@ -71,6 +71,11 @@ import {
   type ProductionInvestigationPlanExecutorOptions,
 } from "./plan-executor.js";
 import {
+  createRecipePlanAdapter,
+  type InvestigationRecipePlanAdapter,
+  type RecipePlanAdapterOptions,
+} from "./recipe-plan-adapter.js";
+import {
   defaultInvestigationDesktopLockDirectory,
   type InvestigationWorkerRuntimeConfig,
 } from "./runtime-config.js";
@@ -125,6 +130,9 @@ export interface InvestigationRuntimeDependencies {
   ) => InvestigationModelUsageJournal;
   readonly createModelTurnRunner?: (options: ModelTurnRunnerOptions) => ModelTurnRunner;
   readonly createE2eAgentRunner?: (options: E2eAgentRunnerOptions) => E2eAgentRunner;
+  readonly createRecipePlanAdapter?: (
+    options: RecipePlanAdapterOptions,
+  ) => InvestigationRecipePlanAdapter;
   readonly createModelEditAdapter?: (
     options: ModelEditRunnerOptions,
   ) => InvestigationModelEditAdapter;
@@ -510,8 +518,7 @@ export async function createInvestigationExecutionRuntime(
     const modelTurnRunner = (dependencies.createModelTurnRunner ?? createModelTurnRunner)(
       modelOptions,
     );
-    const e2eAgentRunner = (dependencies.createE2eAgentRunner ?? createE2eAgentRunner)({
-      modelOptions,
+    const e2eToolOptions: Omit<RecipePlanAdapterOptions, "createTools"> = {
       ...(config.msbuildToolchain === undefined
         ? {}
         : { msbuildToolchain: config.msbuildToolchain }),
@@ -524,7 +531,6 @@ export async function createInvestigationExecutionRuntime(
           : { dotnet: config.executables.dotnet.sha256 }),
       },
       gitExecutablePath: binaries.gitPath,
-      processHost,
       environment: planEnvironment,
       processLimits: config.processLimits,
       powershellExecutablePath:
@@ -547,7 +553,15 @@ export async function createInvestigationExecutionRuntime(
       ...(binaries.executables.ffmpeg === undefined
         ? {}
         : { ffmpegExecutablePath: binaries.executables.ffmpeg }),
+    };
+    const e2eAgentRunner = (dependencies.createE2eAgentRunner ?? createE2eAgentRunner)({
+      ...e2eToolOptions,
+      modelOptions,
+      processHost,
     });
+    const recipeAdapter = (dependencies.createRecipePlanAdapter ?? createRecipePlanAdapter)(
+      e2eToolOptions,
+    );
     const modelEditAdapter = (dependencies.createModelEditAdapter ?? createModelEditAdapter)(
       modelOptions,
     );
@@ -572,6 +586,7 @@ export async function createInvestigationExecutionRuntime(
       processLimits: config.processLimits,
       modelEditAdapter,
       uiAdapters,
+      recipeAdapter,
     });
     const executor: InvestigationClaimExecutor = {
       async execute(claim, signal) {

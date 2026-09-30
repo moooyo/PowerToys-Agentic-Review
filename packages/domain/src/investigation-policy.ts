@@ -12,9 +12,11 @@ import type {
   InvestigationSubjectV1,
   InvestigationTaskV1,
 } from "@agentic-review/contracts";
+import { getInvestigationRecipeStepIssues } from "@agentic-review/contracts";
 
 import {
   assertInvestigationCheckpointIntegrity,
+  investigationContentDigest,
   investigationTaskBindingDigest,
 } from "./investigation-loop.js";
 import { appendInvestigationProjectionDiagnostic } from "./investigation-report-projection.js";
@@ -408,6 +410,85 @@ export interface InvestigationNextActionProjection {
   readonly diagnostics: InvestigationDiagnostic[];
 }
 
+/** Native preparation derives from saved plan facts without changing the original report. */
+function resolvePolicyNextActions(
+  input: InvestigationActionPolicyInput,
+  result: InvestigationResultV1,
+  plans: readonly InvestigationPlanV1[],
+): InvestigationNextActionV1[] {
+  const actions = validateInvestigationNextActions(result, plans)
+    .filter((entry) => entry.valid)
+    .map((entry) => entry.action);
+  if (
+    input.target.kind !== "pull_request" ||
+    result.context.workItem.kind !== "pull_request" ||
+    result.assessment.kind !== "pr"
+  )
+    return actions;
+  const subject = result.context.subjects.find(
+    (entry) => entry.id === result.assessment.subjectRef,
+  );
+  const planRef = result.assessment.e2eAssessment.planRef;
+  const plan = plans.find((entry) => sameRef(entry, planRef));
+  const reportedPlan = result.plans.find((entry) => sameRef(entry, planRef));
+  if (
+    subject?.kind !== "original_pr" ||
+    !matchesCurrentSubject(subject, input) ||
+    plan === undefined ||
+    reportedPlan === undefined ||
+    investigationContentDigest(reportedPlan) !== investigationContentDigest(plan) ||
+    plan.state !== "saved" ||
+    plan.kind !== "verification" ||
+    plan.subjectRef !== subject.id ||
+    plan.sourceReportRef.id !== result.report.id ||
+    plan.sourceReportRef.version !== result.report.version ||
+    plan.steps.length === 0 ||
+    plan.acceptanceCriteria.length === 0 ||
+    actions.some(
+      (action) =>
+        action.action === "reviews.verify" &&
+        action.subjectRef === subject.id &&
+        sameRef(action.planRef, planRef),
+    )
+  )
+    return actions;
+  const recipeSteps = plan.steps.filter((step) => step.recipe !== undefined);
+  const recipeScenarios = new Set(
+    recipeSteps.flatMap((step) => step.recipe!.checks.map((check) => check.scenarioId)),
+  );
+  if (
+    recipeSteps.some(
+      (step) => getInvestigationRecipeStepIssues(step.recipe!, step.checkIds).length > 0,
+    ) ||
+    (recipeSteps.length > 0 &&
+      result.assessment.e2eAssessment.scenarioIds.some((id) => !recipeScenarios.has(id)))
+  )
+    return actions;
+  const action: InvestigationNextActionV1 = {
+    id: `native-pr-verify:${investigationContentDigest({
+      reportRef: reportRef(result),
+      subjectRef: subject.id,
+      subjectRevisionKey: subject.revisionKey,
+      planRef,
+    })}`,
+    action: "reviews.verify",
+    taskKind: "pr-verify",
+    label: "Verify PR",
+    reason: "Run the saved verification plan against the original PR revision.",
+    recommended: ["required", "recommended"].includes(result.assessment.e2eAssessment.level),
+    subjectRef: subject.id,
+    planRef,
+    draftRef: null,
+    validationReportRef: null,
+    prerequisiteRefs: plan.prerequisites.map((entry) => entry.id),
+    sourceReportRef: { id: result.report.id, version: result.report.version },
+    state: "saved",
+  };
+  return validateInvestigationNextActions({ ...result, nextActions: [action] }, plans)[0]?.valid
+    ? [...actions, action]
+    : actions;
+}
+
 /**
  * Project accepted proposals without editing the checkpoint or granting invalid actions.
  * Rejected proposals remain complete canonical JSON in a non-executable diagnostic message.
@@ -737,55 +818,53 @@ export function evaluateInvestigationActions(
   const nextActions: ActionContextV1["nextActions"] =
     result === null
       ? []
-      : validateInvestigationNextActions(result, plans)
-          .filter((entry) => entry.valid)
-          .map(({ action }) => {
-            const guards = actionGuards(action.action);
+      : resolvePolicyNextActions(input, result, plans).map((action) => {
+          const guards = actionGuards(action.action);
+          guards.push(
+            guard(
+              "current_report_binding",
+              Boolean(reportCurrent),
+              "The saved action must bind to the current subject revision.",
+            ),
+          );
+          const plan = plans.find((entry) => sameRef(entry, action.planRef));
+          const needed = new Set([
+            ...action.prerequisiteRefs,
+            ...(plan?.prerequisites.map((entry) => entry.id) ?? []),
+          ]);
+          for (const id of needed)
             guards.push(
               guard(
-                "current_report_binding",
-                Boolean(reportCurrent),
-                "The saved action must bind to the current subject revision.",
+                `prerequisite:${id}`,
+                prerequisites.has(id),
+                `Prerequisite ${id} must be satisfied.`,
               ),
             );
-            const plan = plans.find((entry) => sameRef(entry, action.planRef));
-            const needed = new Set([
-              ...action.prerequisiteRefs,
-              ...(plan?.prerequisites.map((entry) => entry.id) ?? []),
-            ]);
-            for (const id of needed)
-              guards.push(
-                guard(
-                  `prerequisite:${id}`,
-                  prerequisites.has(id),
-                  `Prerequisite ${id} must be satisfied.`,
-                ),
-              );
-            if (action.action === "create-pr")
-              guards.push(
-                guard(
-                  "existing_verified_remote_branch",
-                  (input.verifiedRemoteBranchSubjectIds ?? []).includes(action.subjectRef),
-                  "An existing remote branch and its exact SHA must be independently verified.",
-                ),
-              );
-            const preparablePrerequisites = new Set(
-              (action.action === "start-task" || action.action === "reviews.verify"
-                ? (plan?.prerequisites ?? [])
-                : []
+          if (action.action === "create-pr")
+            guards.push(
+              guard(
+                "existing_verified_remote_branch",
+                (input.verifiedRemoteBranchSubjectIds ?? []).includes(action.subjectRef),
+                "An existing remote branch and its exact SHA must be independently verified.",
+              ),
+            );
+          const preparablePrerequisites = new Set(
+            (action.action === "start-task" || action.action === "reviews.verify"
+              ? (plan?.prerequisites ?? [])
+              : []
+            )
+              .filter(
+                (prerequisite) =>
+                  prerequisite.kind === "source" || prerequisite.kind === "environment",
               )
-                .filter(
-                  (prerequisite) =>
-                    prerequisite.kind === "source" || prerequisite.kind === "environment",
-                )
-                .map((prerequisite) => `prerequisite:${prerequisite.id}`),
-            );
-            const canPrepare = guards.every(
-              (entry) => entry.satisfied || preparablePrerequisites.has(entry.code),
-            );
-            const readyToExecute = guards.every((entry) => entry.satisfied);
-            return { ...action, allowed: readyToExecute, canPrepare, readyToExecute, guards };
-          });
+              .map((prerequisite) => `prerequisite:${prerequisite.id}`),
+          );
+          const canPrepare = guards.every(
+            (entry) => entry.satisfied || preparablePrerequisites.has(entry.code),
+          );
+          const readyToExecute = guards.every((entry) => entry.satisfied);
+          return { ...action, allowed: readyToExecute, canPrepare, readyToExecute, guards };
+        });
   let recommendation: ActionContextV1["recommendation"] = {
     action: "view-evidence",
     reason: "Inspect the report, diagnostics, and available evidence before continuing.",

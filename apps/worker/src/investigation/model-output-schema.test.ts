@@ -88,4 +88,35 @@ describe("strict model output schema projection", () => {
       createInvestigationModelOutputSchema(Type.Union([Type.String(), Type.Null()])),
     ).toThrow("object root");
   });
+
+  it("keeps both existing plans and structured recipe steps strict for model generation", () => {
+    const projected = createInvestigationModelOutputSchema(InvestigationModelTurnDeltaV1Schema);
+    type Schema = {
+      properties: Record<string, Schema>;
+      items: Schema;
+      anyOf: Schema[];
+      required: string[];
+    };
+    const analysis = (projected.properties as Record<string, Schema>).analysis!;
+    const plans = analysis.properties.plans!;
+    const branches = plans.items.properties.steps!.items.anyOf;
+    expect(branches).toHaveLength(2);
+    expect(branches[0]!.properties).not.toHaveProperty("recipe");
+    expect(branches[1]!.required).toContain("recipe");
+    const inspect = (value: unknown): void => {
+      if (value === null || typeof value !== "object") return;
+      const schema = value as Record<string, unknown>;
+      if (schema.type === "object") {
+        expect((schema.required as string[]).toSorted()).toEqual(
+          Object.keys(schema.properties as object).toSorted(),
+        );
+        expect(schema.additionalProperties).toBe(false);
+      }
+      for (const child of Object.values(value)) {
+        if (Array.isArray(child)) child.forEach(inspect);
+        else inspect(child);
+      }
+    };
+    inspect(plans);
+  });
 });

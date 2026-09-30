@@ -23,6 +23,10 @@ import {
   InvestigationModelOutputRejectionSchema,
 } from "./investigation-model-output.js";
 import {
+  getInvestigationRecipeStepIssues,
+  InvestigationRecipeStepSchema,
+} from "./investigation-recipes.js";
+import {
   InvestigationPrDiffManifestV1Schema,
   InvestigationSourceCoverageSchema,
   validateInvestigationSourceCoverage,
@@ -465,7 +469,13 @@ const planProperties = {
   rationale: text,
   prerequisites: Type.Array(InvestigationPrerequisiteSchema),
   steps: Type.Array(
-    object({ id: EntityIdSchema, description: text, expectedObservation: text, checkIds: ids }),
+    object({
+      id: EntityIdSchema,
+      description: text,
+      expectedObservation: text,
+      checkIds: ids,
+      recipe: Type.Optional(InvestigationRecipeStepSchema),
+    }),
     { minItems: 1 },
   ),
   acceptanceCriteria: Type.Array(text, { minItems: 1 }),
@@ -1925,6 +1935,14 @@ export function validateInvestigationResult(
       reportSource(plan.sourceReportRef, `/plans/${index}/sourceReportRef`);
     unique(plan.steps, `/plans/${index}/steps`);
     unique(plan.prerequisites, `/plans/${index}/prerequisites`);
+    plan.steps.forEach((step, stepIndex) => {
+      if (step.recipe === undefined) return;
+      const path = `/plans/${index}/steps/${stepIndex}/recipe`;
+      if (plan.kind !== "verification")
+        add(path, "RECIPE_PLAN_KIND_INVALID", "Bundled UI recipes require a verification plan.");
+      for (const message of getInvestigationRecipeStepIssues(step.recipe, step.checkIds))
+        add(path, "RECIPE_CHECK_BINDING_INVALID", message);
+    });
   });
   for (const [id, unit] of units) {
     subject(unit.subjectRef, `/report/coverage/includedUnits/${id}/subjectRef`);
@@ -2367,6 +2385,19 @@ export function validateInvestigationResult(
       assessment.e2eAssessment.prerequisiteRefs,
       "/assessment/e2eAssessment/prerequisiteRefs",
     );
+    if (savedPlan?.steps.some((step) => step.recipe !== undefined)) {
+      const scenarios = new Set(
+        savedPlan.steps.flatMap(
+          (step) => step.recipe?.checks.map((check) => check.scenarioId) ?? [],
+        ),
+      );
+      if (assessment.e2eAssessment.scenarioIds.some((id) => !scenarios.has(id)))
+        add(
+          "/assessment/e2eAssessment/scenarioIds",
+          "RECIPE_SCENARIO_BINDING_INVALID",
+          "Every assessed recipe scenario must be represented by saved checks.",
+        );
+    }
     if (
       result.report.completeness === "complete" &&
       assessment.e2eAssessment.level !== "not_needed" &&

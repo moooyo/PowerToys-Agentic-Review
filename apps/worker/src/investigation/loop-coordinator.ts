@@ -321,6 +321,22 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
                   },
                 });
               },
+              onRuntimeObservation: async (observation) => {
+                const runtime = checkpoint!.runtime;
+                const retained = new Set(runtime.artifacts.map((artifact) => artifact.id));
+                await uploadArtifacts(
+                  observation.artifacts.filter((artifact) => !retained.has(artifact.id)),
+                );
+                await accepted({
+                  kind: "execution",
+                  lease: claim.lease,
+                  execution: {
+                    ...runtime,
+                    evidence: mergeRecords(runtime.evidence, observation.evidence),
+                    artifacts: mergeRecords(runtime.artifacts, observation.artifacts),
+                  },
+                });
+              },
               onStepCompleted: async (event) => {
                 await uploadArtifacts([...event.artifacts]);
                 const runtime = checkpoint!.runtime;

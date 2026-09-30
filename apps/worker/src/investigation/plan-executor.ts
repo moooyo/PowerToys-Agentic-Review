@@ -18,6 +18,7 @@ import type {
   InvestigationWorkerLease,
 } from "@agentic-review/contracts";
 import {
+  getInvestigationRecipeStepIssues,
   InvestigationModelEditsV1Schema,
   InvestigationPlanExecutionBindingSchema,
   investigationCanonicalJson,
@@ -35,6 +36,10 @@ import {
   type ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
 import { ModelBudgetExceededError, type ModelInvocationBudget } from "./model-budget.js";
+import type {
+  InvestigationRecipeObservation,
+  InvestigationRecipePlanAdapter,
+} from "./recipe-plan-adapter.js";
 import type { PreparedInvestigationWorkspace } from "./workspace.js";
 
 export type {
@@ -67,6 +72,10 @@ export interface InvestigationPlanExecutorContext {
   readonly processHost: ProcessHostClient;
   readonly signal: AbortSignal;
   readonly onProgress?: () => void;
+  readonly onRuntimeObservation?: (observation: {
+    readonly evidence: readonly InvestigationEvidenceV1[];
+    readonly artifacts: readonly InvestigationArtifactV1[];
+  }) => Promise<void>;
   /** Persist before starting a step, so an interrupted side effect is never replayed silently. */
   readonly onStepStarted: (event: InvestigationPlanStepStarted) => Promise<void>;
   /** Persist before moving to the next step. */
@@ -152,6 +161,7 @@ export interface ProductionInvestigationPlanExecutorOptions {
   readonly processLimits: ProcessResourceLimits;
   readonly processRunner?: ManagedProcessRunner;
   readonly uiAdapters?: Readonly<Record<string, InvestigationUiPlanAdapter>>;
+  readonly recipeAdapter?: InvestigationRecipePlanAdapter;
   readonly modelEditAdapter?: InvestigationModelEditAdapter;
   readonly createId?: () => string;
   readonly now?: () => Date;
@@ -392,7 +402,9 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
         }
       }
       const observedSubjectRef = subjects.at(-1)?.id ?? execution.subjectRef;
-      const observedArtifacts: InvestigationArtifactV1[] = [];
+      const observedArtifacts: InvestigationArtifactV1[] = [
+        ...(observation.recipe?.artifacts ?? []),
+      ];
       for (const output of observation.artifacts ?? []) {
         observedArtifacts.push(
           await input.workspace.writeArtifact({ ...output, subjectRef: observedSubjectRef }),
@@ -430,7 +442,7 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
           ...patchArtifacts.map((entry) => entry.id),
           ...observedArtifacts.map((entry) => entry.id),
         ],
-        evidenceRefs: [],
+        evidenceRefs: observation.recipe?.evidence.map((entry) => entry.id) ?? [],
         provenance: {
           taskId: input.task.id,
           attemptId: input.attempt.id,
@@ -442,34 +454,40 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
         ...started,
         outcome: observation.outcome,
         validation: {
-          checks: step.checkIds.map((checkId) => ({
-            id: checkId,
-            scenarioId:
-              executable.operation.kind === "ui" ? executable.operation.scenarioId : step.id,
-            subjectRef: observedSubjectRef,
-            planRef: execution.planRef,
-            required: true,
-            description: step.description,
-            status:
-              executable.operation.kind === "model-edit" && observation.outcome === "completed"
-                ? "not_run"
-                : observation.status,
-            executor:
-              executable.operation.kind === "model-edit" && observation.outcome === "completed"
-                ? null
-                : evidence.provenance.producer,
-            evidenceRefs:
-              executable.operation.kind === "model-edit" && observation.outcome === "completed"
-                ? []
-                : [evidence.id],
-            authoritativeAttemptId:
-              executable.operation.kind === "model-edit" && observation.outcome === "completed"
-                ? null
-                : input.attempt.id,
-          })),
+          checks:
+            observation.recipe?.checks ??
+            step.checkIds.map((checkId, checkIndex) => ({
+              id: checkId,
+              scenarioId:
+                executable.operation.kind === "ui"
+                  ? executable.operation.scenarioId
+                  : executable.operation.kind === "recipe"
+                    ? executable.operation.recipe.checks[checkIndex]!.scenarioId
+                    : step.id,
+              subjectRef: observedSubjectRef,
+              planRef: execution.planRef,
+              required: true,
+              description: step.description,
+              status:
+                executable.operation.kind === "model-edit" && observation.outcome === "completed"
+                  ? "not_run"
+                  : observation.status,
+              executor:
+                executable.operation.kind === "model-edit" && observation.outcome === "completed"
+                  ? null
+                  : evidence.provenance.producer,
+              evidenceRefs:
+                executable.operation.kind === "model-edit" && observation.outcome === "completed"
+                  ? []
+                  : [evidence.id],
+              authoritativeAttemptId:
+                executable.operation.kind === "model-edit" && observation.outcome === "completed"
+                  ? null
+                  : input.attempt.id,
+            })),
           summary: observation.summary,
         },
-        verificationEvidence: [evidence],
+        verificationEvidence: [...(observation.recipe?.evidence ?? []), evidence],
         artifacts: [artifact, ...patchArtifacts, ...observedArtifacts],
         subjects,
         diagnostics:
@@ -484,6 +502,20 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
             : [],
         ...(observation.modelUsage === undefined ? {} : { modelUsage: observation.modelUsage }),
       };
+      if (executable.operation.kind === "recipe") {
+        const problem = validatePriorState(
+          {
+            ...input,
+            priorState: {
+              startedSteps: state.startedSteps,
+              completedSteps: [...state.completedSteps, event],
+            },
+          },
+          execution,
+          plan,
+        );
+        if (problem !== null) throw new Error(problem);
+      }
       await context.onStepCompleted(structuredClone(event));
       state.completedSteps.push(event);
       if (event.outcome !== "completed") return result(event.outcome);
@@ -545,8 +577,44 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
     readonly diagnosticCode?: string;
     readonly modelUsage?: { readonly tokens: number; readonly durationMs: number };
     readonly artifacts?: readonly InvestigationUiArtifact[];
+    readonly recipe?: InvestigationRecipeObservation;
   }> {
     const operation = step.operation;
+    if (operation.kind === "recipe") {
+      const adapter = this.options.recipeAdapter;
+      if (adapter === undefined || input.plan === null)
+        return {
+          status: "blocked",
+          outcome: "blocked",
+          summary: "The saved recipe adapter is unavailable.",
+          diagnosticCode: "PLAN_RECIPE_ADAPTER_UNAVAILABLE",
+          details: null,
+        };
+      const recipe = await adapter.execute(
+        {
+          task: input.task,
+          attempt: input.attempt,
+          plan: input.plan,
+          recipe: operation.recipe,
+          workspace: input.workspace,
+        },
+        context,
+      );
+      const blocked = recipe.checks.some(
+        (check) => check.status === "blocked" || check.status === "not_run",
+      );
+      return {
+        status: blocked
+          ? "blocked"
+          : recipe.checks.some((check) => check.status === "failed")
+            ? "failed"
+            : "passed",
+        outcome: blocked ? "blocked" : "completed",
+        summary: recipe.summary,
+        details: { recipeId: operation.recipe.request.recipeId },
+        recipe,
+      };
+    }
     if (operation.kind === "model-edit") {
       const adapter = this.options.modelEditAdapter;
       if (adapter === undefined)
@@ -874,6 +942,22 @@ function validatePlanBinding(
       "PLAN_MODEL_EDIT_NOT_AUTHORIZED",
       "Only implementation tasks may apply saved model edits.",
     );
+  for (const [index, step] of execution.steps.entries()) {
+    const saved = plan.steps[index]!;
+    if (
+      (step.operation.kind === "recipe" &&
+        (task.kind !== "pr-verify" ||
+          subject.kind !== "original_pr" ||
+          saved.recipe === undefined ||
+          !same(step.operation.recipe, saved.recipe) ||
+          getInvestigationRecipeStepIssues(step.operation.recipe, saved.checkIds).length > 0)) ||
+      (saved.recipe !== undefined && step.operation.kind !== "recipe")
+    )
+      return reject(
+        "PLAN_RECIPE_BINDING_INVALID",
+        "The recipe operation must preserve the saved PR verification step and exact check mappings.",
+      );
+  }
   if (isMutationTask(task) && !execution.steps.some((step) => step.operation.kind === "model-edit"))
     return reject(
       "PLAN_MODEL_EDIT_REQUIRED",
@@ -946,6 +1030,7 @@ function validatePriorState(
     const observedSubjectRef = event.subjects.at(-1)?.id ?? event.subjectRef;
     const checks = plan.steps[index]?.checkIds ?? [];
     const operation = execution.steps[index]?.operation;
+    const recipe = operation?.kind === "recipe" ? operation.recipe : undefined;
     const scenarioId = operation?.kind === "ui" ? operation.scenarioId : event.stepId;
     const producer = `saved-plan:${operation?.kind}`;
     const editObservationOnly = operation?.kind === "model-edit" && event.outcome === "completed";
@@ -961,20 +1046,29 @@ function validatePriorState(
     const validStatus = (status: string): boolean =>
       editObservationOnly
         ? status === "not_run"
-        : event.outcome === "completed"
-          ? status === "passed" || status === "failed"
-          : status === event.outcome;
+        : recipe !== undefined && event.outcome === "blocked"
+          ? ["passed", "failed", "blocked"].includes(status)
+          : event.outcome === "completed"
+            ? status === "passed" || status === "failed"
+            : status === event.outcome;
     if (
       event.validation.checks.length !== checks.length ||
       event.verificationEvidence.length === 0 ||
+      (recipe !== undefined &&
+        (event.outcome === "failed" ||
+          (event.outcome === "blocked" &&
+            !event.validation.checks.some((check) => check.status === "blocked")))) ||
       event.validation.checks.some(
         (check, checkIndex) =>
           check.id !== checks[checkIndex] ||
           check.subjectRef !== observedSubjectRef ||
           !same(check.planRef, event.planRef) ||
-          check.scenarioId !== scenarioId ||
+          check.scenarioId !== (recipe?.checks[checkIndex]?.scenarioId ?? scenarioId) ||
           !check.required ||
-          check.executor !== (editObservationOnly ? null : producer) ||
+          (recipe === undefined
+            ? check.executor !== (editObservationOnly ? null : producer)
+            : check.executor !== "e2e-tool-server" &&
+              !(check.status === "blocked" && check.executor === producer)) ||
           check.authoritativeAttemptId !== (editObservationOnly ? null : event.attemptId) ||
           !validStatus(check.status) ||
           (editObservationOnly
@@ -987,9 +1081,14 @@ function validatePriorState(
       event.verificationEvidence.some(
         (evidence) =>
           evidence.authority !== "worker" ||
-          evidence.source !== "executor_observation" ||
           evidence.subjectRef !== observedSubjectRef ||
-          evidence.provenance.producer !== producer ||
+          !(
+            (evidence.source === "executor_observation" &&
+              evidence.provenance.producer === producer) ||
+            (recipe !== undefined &&
+              evidence.provenance.producer === "e2e-tool-server" &&
+              ["executor_observation", "visual_observation"].includes(evidence.source))
+          ) ||
           evidence.provenance.taskId !== event.taskId ||
           evidence.provenance.attemptId !== event.attemptId ||
           evidence.artifactRefs.length === 0 ||
@@ -1007,6 +1106,21 @@ function validatePriorState(
       )
     )
       return "A prior completed step is missing authoritative observations or exact check and artifact bindings.";
+    if (
+      recipe !== undefined &&
+      event.validation.checks.some(
+        (check) =>
+          !check.evidenceRefs.every((ref) =>
+            event.verificationEvidence.some(
+              (evidence) =>
+                evidence.id === ref &&
+                evidence.source === "executor_observation" &&
+                evidence.provenance.producer === check.executor,
+            ),
+          ),
+      )
+    )
+      return "A saved recipe check must retain its own authoritative executor observation.";
   }
   if (state.startedSteps.some((event) => !seenCompleted.has(event.stepId)))
     return "A previous step may have executed before interruption; its effects require reconciliation before resuming.";
@@ -1060,6 +1174,7 @@ function rethrowUnconfirmedProcessCleanup(error: unknown): void {
       "code" in current &&
       (current.code === "SOURCE_PROCESS_CLEANUP_UNCONFIRMED" ||
         current.code === "UI_PROCESS_CLEANUP_UNCONFIRMED" ||
+        current.code === "E2E_CLEANUP_UNCONFIRMED" ||
         current.code === "MODEL_PROCESS_CLEANUP_UNCONFIRMED")
     )
       throw current;

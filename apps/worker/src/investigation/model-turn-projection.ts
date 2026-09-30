@@ -17,6 +17,8 @@ import {
   InvestigationNextActionDraftSchema,
   InvestigationPlanDraftSchema,
   InvestigationRecheckSchema,
+  InvestigationRecipeRequestSchema,
+  InvestigationRecipeStepSchema,
   type InvestigationRuntimeState,
   type InvestigationTaskV1,
   InvestigationVersionRefSchema,
@@ -37,6 +39,82 @@ import {
 
 const text = Type.String({ minLength: 1 });
 const objectOptions = { additionalProperties: false } as const;
+
+// Model objects are strict. Keep absence as an explicit union of closed object shapes,
+// while the storage contract retains its optional recipe field for existing plans.
+const queryRecipe = InvestigationRecipeRequestSchema.anyOf[1];
+const recipeScenario = queryRecipe.properties.scenarios.items;
+const recipeAssertion = recipeScenario.properties.feature.properties.assertions.items;
+const modelRecipeAssertion = Type.Object(
+  {
+    ...recipeAssertion.properties,
+    selector: Type.Union([
+      Type.Object({ name: text }, objectOptions),
+      Type.Object({ name: text, controlType: text }, objectOptions),
+      Type.Object({ automationId: text }, objectOptions),
+      Type.Object({ automationId: text, name: text }, objectOptions),
+    ]),
+    assertion: Type.Union([
+      Type.Object({ property: Type.Literal("exists"), expected: Type.Boolean() }, objectOptions),
+      Type.Object(
+        {
+          property: Type.Union([Type.Literal("text"), Type.Literal("value")]),
+          expected: text,
+          match: Type.Union([Type.Literal("equals"), Type.Literal("contains")]),
+        },
+        objectOptions,
+      ),
+    ]),
+  },
+  objectOptions,
+);
+const modelRecipeScenarioProperties = {
+  query: recipeScenario.properties.query,
+  feature: Type.Object(
+    {
+      ...recipeScenario.properties.feature.properties,
+      assertions: Type.Array(modelRecipeAssertion, { minItems: 1, maxItems: 64 }),
+    },
+    objectOptions,
+  ),
+};
+const modelRecipe = Type.Object(
+  {
+    ...InvestigationRecipeStepSchema.properties,
+    request: Type.Union([
+      InvestigationRecipeRequestSchema.anyOf[0],
+      Type.Object(
+        {
+          ...queryRecipe.properties,
+          scenarios: Type.Array(
+            Type.Union([
+              Type.Object(modelRecipeScenarioProperties, objectOptions),
+              Type.Object({ ...modelRecipeScenarioProperties, requires: text }, objectOptions),
+            ]),
+            { minItems: 1, maxItems: 8 },
+          ),
+        },
+        objectOptions,
+      ),
+    ]),
+  },
+  objectOptions,
+);
+const { recipe: _recipe, ...plainPlanStepProperties } =
+  InvestigationPlanDraftSchema.properties.steps.items.properties;
+const modelPlanDraft = Type.Object(
+  {
+    ...InvestigationPlanDraftSchema.properties,
+    steps: Type.Array(
+      Type.Union([
+        Type.Object(plainPlanStepProperties, objectOptions),
+        Type.Object({ ...plainPlanStepProperties, recipe: modelRecipe }, objectOptions),
+      ]),
+      { minItems: 1 },
+    ),
+  },
+  objectOptions,
+);
 
 /** Status-specific wire constraints supplement, never replace, ledger reference validation. */
 export const InvestigationModelCandidateSchema = Type.Union([
@@ -86,7 +164,7 @@ export const InvestigationModelTurnDeltaV1Schema = Type.Object(
         candidates: Type.Array(InvestigationModelCandidateSchema),
         rechecks: Type.Array(InvestigationRecheckSchema),
         evidence: Type.Array(InvestigationAnalysisEvidenceSchema),
-        plans: Type.Array(InvestigationPlanDraftSchema),
+        plans: Type.Array(modelPlanDraft),
         nextActions: Type.Array(InvestigationNextActionDraftSchema),
         feedbackDrafts: Type.Array(InvestigationFeedbackDraftSchema),
         diagnostics: Type.Array(InvestigationDiagnosticSchema),
@@ -103,8 +181,8 @@ export const InvestigationModelTurnDeltaV1Schema = Type.Object(
 type ModelTurnDeltaWire = Static<typeof InvestigationModelTurnDeltaV1Schema>;
 /** Callers reuse ledger records; runtime wire validation enforces their status-specific shape. */
 export type InvestigationModelTurnDeltaV1 = Omit<ModelTurnDeltaWire, "analysis"> & {
-  analysis: Omit<ModelTurnDeltaWire["analysis"], "candidates"> &
-    Pick<InvestigationAnalysisV1, "candidates">;
+  analysis: Omit<ModelTurnDeltaWire["analysis"], "candidates" | "plans"> &
+    Pick<InvestigationAnalysisV1, "candidates" | "plans">;
 };
 
 const collectionNames = [

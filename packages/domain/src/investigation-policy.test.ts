@@ -55,6 +55,13 @@ function approveAllowed(
   )!.allowed;
 }
 
+function verificationReportWithoutActions(): InvestigationResultV1 {
+  const { result } = createInvestigationFixture("pr", { findingCount: 0 });
+  result.nextActions = [];
+  result.report.collections.nextActions = 0;
+  return result;
+}
+
 describe("investigation action policy", () => {
   it("evaluates a P0 beyond the first 100 findings independently of selection", () => {
     const { result } = createInvestigationFixture("pr", { findingCount: 137, priority: "P2" });
@@ -217,6 +224,202 @@ describe("investigation action policy", () => {
       false,
     );
     expect(approveAllowed(result)).toBe(true);
+  });
+
+  it("derives a stable native verification action from the saved assessment plan without changing the report", () => {
+    const result = verificationReportWithoutActions();
+    const original = structuredClone(result);
+    const input = policyInput(result);
+    const context = evaluateInvestigationActions(input);
+    expect(context.nextActions).toHaveLength(1);
+    const action = context.nextActions[0]!;
+    expect(action).toMatchObject({
+      action: "reviews.verify",
+      taskKind: "pr-verify",
+      subjectRef: result.assessment.subjectRef,
+      planRef: {
+        id: result.plans[0]!.id,
+        version: result.plans[0]!.version,
+        digest: result.plans[0]!.digest,
+      },
+      sourceReportRef: { id: result.report.id, version: result.report.version },
+      prerequisiteRefs: result.plans[0]!.prerequisites.map((entry) => entry.id),
+      canPrepare: true,
+      readyToExecute: false,
+      allowed: false,
+    });
+    expect(action.guards).toContainEqual({
+      code: `prerequisite:${result.plans[0]!.prerequisites[0]!.id}`,
+      satisfied: false,
+      message: `Prerequisite ${result.plans[0]!.prerequisites[0]!.id} must be satisfied.`,
+    });
+    const ready = evaluateInvestigationActions({
+      ...input,
+      generatedAt: "2026-09-15T05:00:00.000Z",
+      satisfiedPrerequisiteIds: result.plans[0]!.prerequisites.map((entry) => entry.id),
+    }).nextActions[0]!;
+    expect(ready).toMatchObject({ id: action.id, allowed: true, readyToExecute: true });
+    expect(
+      evaluateInvestigationActions({ ...input, capabilities: [] }).nextActions[0],
+    ).toMatchObject({ id: action.id, allowed: false, canPrepare: false });
+    expect(result).toEqual(original);
+    expect(result.nextActions).toEqual([]);
+  });
+
+  it("reuses an existing valid verification action without deriving a duplicate", () => {
+    const { result } = createInvestigationFixture("pr", { findingCount: 0 });
+    const original = structuredClone(result);
+    const saved = result.nextActions.find((action) => action.action === "reviews.verify")!;
+    const actions = evaluateInvestigationActions(policyInput(result)).nextActions.filter(
+      (action) => action.action === "reviews.verify",
+    );
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject(saved);
+    expect(result).toEqual(original);
+  });
+
+  it("derives verification independently of a rejected proposal instead of reviving it", () => {
+    const result = verificationReportWithoutActions();
+    const native = evaluateInvestigationActions(policyInput(result)).nextActions[0]!;
+    const { result: proposed } = createInvestigationFixture("pr", { findingCount: 0 });
+    const rejected = proposed.nextActions.find((action) => action.action === "reviews.verify")!;
+    rejected.taskKind = "pr-e2e";
+    rejected.reason = "The rejected model proposal must remain unchanged.";
+    result.nextActions = [rejected];
+    result.report.collections.nextActions = 1;
+    const original = structuredClone(result);
+    const actions = evaluateInvestigationActions(policyInput(result)).nextActions;
+    expect(actions).toEqual([native]);
+    expect(actions[0]!.id).not.toBe(rejected.id);
+    expect(result).toEqual(original);
+  });
+
+  it("requires actual recipe check coverage without inventing coverage for legacy steps", () => {
+    const result = verificationReportWithoutActions();
+    if (result.assessment.kind !== "pr") throw new Error("Expected a PR assessment.");
+    const plan = result.plans[0]!;
+    const step = plan.steps[0]!;
+    const scenarioId = result.assessment.e2eAssessment.scenarioIds[0]!;
+    step.recipe = {
+      request: {
+        recipeId: "powertoys-run-query",
+        plugin: "UnitConverter",
+        scenarios: [
+          {
+            query: "10 sqmi in sqkm",
+            feature: {
+              id: "area-conversion",
+              title: "Convert square miles",
+              paths: ["src/modules/launcher/Plugins/Microsoft.PowerToys.Run.Plugin.UnitConverter"],
+              scenario: "Convert square miles to square kilometres.",
+              userVisible: true,
+              assertions: [
+                {
+                  id: "conversion-result",
+                  kind: "ui",
+                  description: "The conversion result is displayed.",
+                  selector: { automationId: "conversion-result" },
+                  assertion: { property: "exists", expected: true },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      checks: [
+        {
+          checkId: step.checkIds[0]!,
+          featureId: "area-conversion",
+          assertionId: "conversion-result",
+          scenarioId,
+        },
+      ],
+    };
+    const input = policyInput(result);
+    expect(evaluateInvestigationActions(input).nextActions).toHaveLength(1);
+    step.recipe.checks[0]!.scenarioId = "unrelated-scenario";
+    expect(evaluateInvestigationActions(input).nextActions).toEqual([]);
+    step.recipe.checks[0]!.scenarioId = scenarioId;
+    step.recipe.checks[0]!.checkId = "unsaved-check";
+    expect(evaluateInvestigationActions(input).nextActions).toEqual([]);
+    step.recipe.checks[0]!.checkId = step.checkIds[0]!;
+    plan.steps.push({
+      id: "legacy-step",
+      description: "Perform the additional manually bound check.",
+      expectedObservation: "The additional check passes.",
+      checkIds: ["legacy-check"],
+    });
+    expect(evaluateInvestigationActions(input).nextActions[0]).toMatchObject({
+      action: "reviews.verify",
+      canPrepare: true,
+      allowed: false,
+    });
+    result.assessment.e2eAssessment.scenarioIds.push("legacy-scenario");
+    expect(evaluateInvestigationActions(input).nextActions).toEqual([]);
+  });
+
+  it.each([
+    "stale revision",
+    "missing saved plan",
+    "plan absent from report",
+    "different plan digest",
+    "plan from the parent report",
+    "different report version",
+    "different subject",
+    "wrong plan kind",
+    "empty steps",
+    "empty acceptance criteria",
+  ])("does not derive native verification for a %s", (change) => {
+    const result = verificationReportWithoutActions();
+    if (result.assessment.kind !== "pr") throw new Error("Expected a PR assessment.");
+    const plan = result.plans[0]!;
+    let overrides: Partial<InvestigationActionPolicyInput> = {};
+    switch (change) {
+      case "stale revision":
+        overrides = { target: { ...policyInput(result).target, revisionKey: "new-revision" } };
+        break;
+      case "missing saved plan":
+        overrides = { persistedPlans: [] };
+        break;
+      case "plan absent from report":
+        overrides = { persistedPlans: result.plans };
+        result.plans = [];
+        result.report.collections.plans = 0;
+        break;
+      case "different plan digest":
+        result.assessment.e2eAssessment.planRef = {
+          id: plan.id,
+          version: plan.version,
+          digest: "f".repeat(64),
+        };
+        break;
+      case "plan from the parent report":
+        result.context.parentReportRef = {
+          id: "parent-report",
+          version: 1,
+          digest: "f".repeat(64),
+        };
+        plan.sourceReportRef = { id: "parent-report", version: 1 };
+        break;
+      case "different report version":
+        plan.sourceReportRef.version++;
+        break;
+      case "different subject":
+        plan.subjectRef = "another-subject";
+        break;
+      case "wrong plan kind":
+        plan.kind = "investigation";
+        break;
+      case "empty steps":
+        plan.steps = [];
+        break;
+      case "empty acceptance criteria":
+        plan.acceptanceCriteria = [];
+        break;
+    }
+    expect(
+      evaluateInvestigationActions({ ...policyInput(result), ...overrides }).nextActions,
+    ).toEqual([]);
   });
 
   it("does not synthesize feature implementation from ready without a saved plan", () => {

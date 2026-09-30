@@ -849,6 +849,61 @@ describe("investigation action preparation and confirmation", () => {
     expect(h.execute).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])(
+    "prepares a native PR verification from its saved assessment plan and rechecks revision changes=%s",
+    async (changeRevision) => {
+      const h = harness({
+        externalWrites: false,
+        resolvePlanPrerequisites: (_repository, _workItem, _report, plan) =>
+          plan.prerequisites.map((entry) => entry.id),
+        validateTaskAction: async () => [
+          { code: "task_execution_binding", satisfied: true, message: "Synthetic binding ready." },
+        ],
+      });
+      h.result.nextActions = [];
+      h.result.report.collections.nextActions = 0;
+      h.store.put("reports", h.result.report.id, h.result);
+      const original = structuredClone(h.result);
+      const context = await h.actions.actionContext(h.actor, h.workItem.id);
+      const action = context.nextActions.find((entry) => entry.action === "reviews.verify");
+      expect(action).toMatchObject({ taskKind: "pr-verify", canPrepare: true });
+      const request: InvestigationCreateActionIntentRequest = {
+        ...h.request("reviews.verify"),
+        nextActionId: action!.id,
+        payload: { kind: "task", taskKind: "pr-verify", planRef: action!.planRef! },
+      };
+      const intent = await h.actions.createIntent(h.actor, request);
+      if (changeRevision) {
+        h.target.headSha = "9".repeat(40);
+        h.target.revisionKey = "8".repeat(64);
+        await expect(
+          h.actions.confirmIntent(h.actor, intent.id, {
+            version: intent.version,
+            payloadDigest: intent.payloadDigest,
+          }),
+        ).rejects.toMatchObject({ code: "target_revision_changed" });
+        expect(h.createTask).not.toHaveBeenCalled();
+      } else {
+        const confirmed = await h.actions.confirmIntent(h.actor, intent.id, {
+          version: intent.version,
+          payloadDigest: intent.payloadDigest,
+        });
+        expect(confirmed).toMatchObject({ state: "succeeded" });
+        expect(h.createTask).toHaveBeenCalledWith(
+          h.actor,
+          expect.objectContaining({
+            kind: "pr-verify",
+            executionMode: "execute",
+            parentReportRef: request.reportRef,
+            planRef: action!.planRef,
+          }),
+        );
+      }
+      expect(h.store.get("reports", h.result.report.id)).toEqual(original);
+      expect(h.execute).not.toHaveBeenCalled();
+    },
+  );
+
   it("requires a saved next action and exact plan binding for follow-up execution", async () => {
     const h = harness({ kind: "feature", externalWrites: false });
     const action = h.result.nextActions.find((entry) => entry.action === "start-task")!;

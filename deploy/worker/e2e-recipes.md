@@ -1,5 +1,42 @@
 # Bundled PowerToys Run recipes
 
+## Verification from a report
+
+A PR review can save a structured `verification` plan with `recipe` on each step.
+The report exposes **Verify PR** for its exact saved assessment plan, including
+when the model omitted a next-action suggestion. Preview and confirmation use
+the existing task permissions and current-revision checks. The original report
+remains unchanged; the resulting `pr-verify` report links to its parent and plan.
+
+The Server can bind supported PowerToys recipes directly when all steps contain
+recipes and the plan has no external prerequisites. Explicit deployment execution
+bindings take precedence. An unstructured plan still needs its configured binding;
+the Server does not infer executable queries from prose.
+
+Each step contains `recipe.request` in the format below and a `recipe.checks` array:
+
+```json
+{
+  "checkId": "saved-check-id",
+  "featureId": "recipe-feature-id",
+  "assertionId": "recipe-assertion-id",
+  "scenarioId": "assessment-scenario-id"
+}
+```
+
+The mappings match the step's `checkIds` exactly in order, with one mapping per
+declared assertion. Checks of one feature share a scenario ID. Assessment scenario
+IDs must be covered by these mappings. Keep related queries in one step to reuse
+one build. Existing plans without a recipe remain readable.
+
+Enable `pr-verify` in the Worker's supported kinds alongside the normal E2E policy
+and execution permission. The saved-plan executor calls the recipe directly and
+persists its step and evidence records. The model only summarizes the observations
+after execution, avoiding repeated model polling while a build runs. Recovery
+does not repeat a started step whose completion was never recorded.
+
+## Independent E2E tasks
+
 Native `pr-e2e` tasks discover the recipes applicable to their repository and changed
 paths in the ordinary Worker prompt. No external script or historical evidence file
 is required. The configured model chooses the scenarios and reviews their results;

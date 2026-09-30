@@ -24,6 +24,11 @@ import type {
   InvestigationOutputJournal,
   InvestigationOutputJournalOptions,
 } from "./output-journal.js";
+import type { ProductionInvestigationPlanExecutorOptions } from "./plan-executor.js";
+import type {
+  InvestigationRecipePlanAdapter,
+  RecipePlanAdapterOptions,
+} from "./recipe-plan-adapter.js";
 import {
   createInvestigationExecutionRuntime,
   type InvestigationRuntimeDependencies,
@@ -100,6 +105,8 @@ function fixture() {
     usageJournal?: ModelUsageJournalOptions;
     modelEdit?: ModelTurnRunnerOptions;
     e2e?: E2eAgentRunnerOptions;
+    recipe?: RecipePlanAdapterOptions;
+    plan?: ProductionInvestigationPlanExecutorOptions;
     cleanupJournal?: AttemptCleanupJournalOptions;
     outputJournal?: InvestigationOutputJournalOptions;
   } = {};
@@ -149,6 +156,7 @@ function fixture() {
       events.push("coordinator.execute");
     }),
   };
+  const recipeAdapter: InvestigationRecipePlanAdapter = { execute: never };
   const service = {
     run: async () => {
       events.push("service.run");
@@ -201,11 +209,18 @@ function fixture() {
       captured.e2e = options;
       return { execute: never };
     },
+    createRecipePlanAdapter: (options) => {
+      captured.recipe = options;
+      return recipeAdapter;
+    },
     createModelEditAdapter: (options) => {
       captured.modelEdit = options;
       return { execute: never };
     },
-    createPlanExecutor: () => ({ execute: never }),
+    createPlanExecutor: (options) => {
+      captured.plan = options;
+      return { execute: never };
+    },
     createSourceMaterializer: (options) => {
       captured.source = options;
       return { materialize: never };
@@ -227,6 +242,7 @@ function fixture() {
     captured,
     host,
     coordinator,
+    recipeAdapter,
     service,
     dependencies,
     usageJournal,
@@ -261,7 +277,7 @@ function desktopGuardFixture(events: string[]): AttemptDesktopGuard {
 }
 
 describe("production investigation runtime composition", () => {
-  it("passes only deployment-pinned build tool identity and MSVC selection into the E2E runner", async () => {
+  it("shares deployment-pinned E2E tools with the saved recipe adapter and injects it into the plan executor", async () => {
     const f = fixture();
     const msbuildToolchain = { vcToolsVersion: "14.50.35717", platformToolset: "v145" as const };
     const msbuild = { path: "C:\\BuildTools\\MSBuild.exe", sha256: "d".repeat(64) };
@@ -283,6 +299,15 @@ describe("production investigation runtime composition", () => {
     expect(f.captured.e2e?.buildTools).toEqual({ msbuild: "D:\\VerifiedTools\\MSBuild.exe" });
     expect(f.captured.e2e?.buildToolDigests).toEqual({ msbuild: msbuild.sha256 });
     expect(f.captured.e2e?.environment).not.toHaveProperty("VCToolsVersion");
+    expect(f.captured.recipe).toMatchObject({
+      msbuildToolchain,
+      buildTools: { msbuild: "D:\\VerifiedTools\\MSBuild.exe" },
+      buildToolDigests: { msbuild: msbuild.sha256 },
+      gitExecutablePath: config.git.path,
+      processLimits: config.processLimits,
+    });
+    expect(f.captured.e2e).toMatchObject(f.captured.recipe!);
+    expect(f.captured.plan?.recipeAdapter).toBe(f.recipeAdapter);
     await runtime.stop();
   });
 

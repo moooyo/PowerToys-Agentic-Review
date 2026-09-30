@@ -3,7 +3,10 @@ import { createCanonicalResult } from "@agentic-review/codex";
 import {
   createInvestigationPreview as createInvestigationFixture,
   type InvestigationArtifactV1,
+  type InvestigationEvidenceV1,
   type InvestigationPlanExecutionBinding,
+  type InvestigationRecipeStep,
+  type InvestigationValidation,
   investigationCanonicalJson,
   investigationPlanDigestPayload,
 } from "@agentic-review/contracts";
@@ -23,6 +26,10 @@ import {
   type InvestigationPlanStepStarted,
   ProductionInvestigationPlanExecutor,
 } from "./plan-executor.js";
+import type {
+  InvestigationRecipeObservation,
+  InvestigationRecipePlanAdapter,
+} from "./recipe-plan-adapter.js";
 import type { PreparedInvestigationWorkspace } from "./workspace.js";
 
 const limits = {
@@ -259,6 +266,134 @@ function explicitIssueSourceFixture(
     },
   };
   return { ...f, snapshot, source, input: { ...f.input, workspace } };
+}
+
+function freezePlan(f: ReturnType<typeof fixture>): void {
+  f.plan.digest = createHash("sha256")
+    .update(investigationCanonicalJson(investigationPlanDigestPayload(f.plan)))
+    .digest("hex");
+  f.task.planRef = { id: f.plan.id, version: f.plan.version, digest: f.plan.digest };
+  f.execution.planRef = f.task.planRef;
+}
+
+function freezeRecipeStep(f: ReturnType<typeof fixture>, recipe: InvestigationRecipeStep): void {
+  const step = f.plan.steps[0]!;
+  step.recipe = structuredClone(recipe);
+  step.checkIds = recipe.checks.map((check) => check.checkId);
+  freezePlan(f);
+  const operation = { kind: "recipe" as const, recipe: structuredClone(recipe) };
+  f.execution.steps[0] = {
+    stepId: step.id,
+    operation,
+    digest: digestInvestigationExecutableStep({ stepId: step.id, operation }),
+  };
+}
+
+function recipeFixture(
+  statuses: InvestigationValidation["checks"][number]["status"][] = ["passed", "passed"],
+) {
+  const f = fixture();
+  const recipe: InvestigationRecipeStep = {
+    request: {
+      recipeId: "powertoys-run-query",
+      plugin: "UnitConverter",
+      scenarios: ["%% 1 sqm in sqft", "%% 1 sqft in sqm"].map((query, index) => ({
+        query,
+        feature: {
+          id: `conversion-${index}`,
+          title: `Area conversion ${index}`,
+          paths: [
+            "src/modules/launcher/Plugins/Community.PowerToys.Run.Plugin.UnitConverter/Main.cs",
+          ],
+          scenario: `Enter ${query} and observe its result.`,
+          userVisible: true,
+          assertions: [
+            {
+              id: "result",
+              kind: "ui",
+              description: "The expected conversion result is visible.",
+              selector: { automationId: "Result" },
+              assertion: { property: "text", expected: "converted value", match: "contains" },
+            },
+          ],
+        },
+      })),
+    },
+    checks: statuses.map((_, index) => ({
+      checkId: `conversion-check-${index}`,
+      featureId: `conversion-${index}`,
+      assertionId: "result",
+      scenarioId: `conversion-scenario-${index}`,
+    })),
+  };
+  freezeRecipeStep(f, recipe);
+  const artifacts: InvestigationArtifactV1[] = [];
+  const evidence: InvestigationEvidenceV1[] = [];
+  const checks: InvestigationValidation["checks"] = recipe.checks.map((mapping, index) => {
+    const assertionId = `assertion-${index}`;
+    const mediaId = `screenshot-${index}`;
+    const receiptArtifacts = [`${assertionId}.json`, `${mediaId}.json`, `${mediaId}.png`];
+    for (const id of receiptArtifacts) {
+      const bytes = Buffer.from(`Synthetic recipe artifact ${id}.`);
+      artifacts.push({
+        id,
+        taskId: f.task.id,
+        attemptId: f.input.attempt.id,
+        subjectRef: f.task.subjectRef,
+        kind: id.endsWith(".png") ? "image" : "log",
+        name: id,
+        mediaType: id.endsWith(".png") ? "image/png" : "application/json",
+        digest: createHash("sha256").update(bytes).digest("hex"),
+        byteLength: bytes.byteLength,
+        availability: "available",
+      });
+    }
+    for (const [id, source, artifactRefs] of [
+      [assertionId, "executor_observation", [receiptArtifacts[0]!]],
+      [mediaId, "visual_observation", receiptArtifacts.slice(1)],
+    ] as const) {
+      evidence.push({
+        id,
+        subjectRef: f.task.subjectRef,
+        source,
+        authority: "worker",
+        summary: `Synthetic recipe observation ${id}.`,
+        artifactRefs: [...artifactRefs],
+        evidenceRefs: [],
+        provenance: {
+          taskId: f.task.id,
+          attemptId: f.input.attempt.id,
+          producer: "e2e-tool-server",
+          recordedAt: "2026-09-15T01:00:00.000Z",
+        },
+      });
+    }
+    return {
+      id: mapping.checkId,
+      scenarioId: mapping.scenarioId,
+      subjectRef: f.task.subjectRef,
+      planRef: f.task.planRef,
+      required: true,
+      description: "Observe the saved area conversion assertion.",
+      status: statuses[index]!,
+      executor: "e2e-tool-server",
+      evidenceRefs: [assertionId],
+      authoritativeAttemptId: f.input.attempt.id,
+    };
+  });
+  const observation: InvestigationRecipeObservation = {
+    summary: "The saved area conversion scenarios were observed.",
+    checks,
+    evidence,
+    artifacts,
+  };
+  const executeRecipe = vi.fn<InvestigationRecipePlanAdapter["execute"]>(async () => observation);
+  const executor = new ProductionInvestigationPlanExecutor({
+    processLimits: limits,
+    processRunner: { run: f.run },
+    recipeAdapter: { execute: executeRecipe },
+  });
+  return { ...f, executor, recipe, observation, executeRecipe };
 }
 
 describe("ProductionInvestigationPlanExecutor", () => {
@@ -738,5 +873,225 @@ describe("ProductionInvestigationPlanExecutor", () => {
       scenarioId: "saved-ui-scenario",
     });
     expect(f.run).not.toHaveBeenCalled();
+  });
+
+  describe("saved recipe steps", () => {
+    it("persists individual assertion results and raw E2E evidence under the saved plan", async () => {
+      const f = recipeFixture(["failed", "passed"]);
+      const onRuntimeObservation = vi.fn(async () => undefined);
+      f.executeRecipe.mockImplementation(async () => {
+        expect(f.started).toHaveLength(1);
+        expect(f.completed).toHaveLength(0);
+        return f.observation;
+      });
+      const result = await f.executor.execute(f.input, { ...f.context, onRuntimeObservation });
+      expect(result.outcome).toBe("completed");
+      expect(result.validation.checks).toEqual(f.observation.checks);
+      expect(result.validation.checks.map((check) => check.evidenceRefs)).toEqual([
+        ["assertion-0"],
+        ["assertion-1"],
+      ]);
+      expect(result.verificationEvidence).toEqual(
+        expect.arrayContaining([...f.observation.evidence]),
+      );
+      expect(result.artifacts).toEqual(expect.arrayContaining([...f.observation.artifacts]));
+      expect(result.verificationEvidence).toContainEqual(
+        expect.objectContaining({
+          source: "executor_observation",
+          provenance: expect.objectContaining({ producer: "saved-plan:recipe" }),
+        }),
+      );
+      expect(f.executeRecipe).toHaveBeenCalledExactlyOnceWith(
+        {
+          task: f.task,
+          attempt: f.input.attempt,
+          plan: f.plan,
+          recipe: f.recipe,
+          workspace: f.workspace,
+        },
+        expect.objectContaining({
+          signal: f.context.signal,
+          processHost: f.processHost,
+          onRuntimeObservation,
+        }),
+      );
+      expect(f.completed[0]?.validation.checks).toEqual(f.observation.checks);
+      expect(f.run).not.toHaveBeenCalled();
+    });
+
+    it.each(["passed", "failed"] as const)(
+      "retains %s and blocked assertions when a recipe cannot finish and when it resumes",
+      async (status) => {
+        const f = recipeFixture([status, "blocked"]);
+        const first = await f.executor.execute(f.input, f.context);
+        expect(first.outcome).toBe("blocked");
+        expect(first.validation.checks.map((check) => check.status)).toEqual([status, "blocked"]);
+        f.executeRecipe.mockClear();
+        const resumed = await f.executor.execute(
+          { ...f.input, priorState: first.state },
+          f.context,
+        );
+        expect(resumed.outcome).toBe("blocked");
+        expect(resumed.validation.checks).toEqual(first.validation.checks);
+        expect(resumed.diagnostics.some((entry) => entry.code === "PLAN_RESUME_UNSAFE")).toBe(
+          false,
+        );
+        expect(f.executeRecipe).not.toHaveBeenCalled();
+      },
+    );
+
+    it("reuses completed recipe receipts from their original attempt without another build", async () => {
+      const f = recipeFixture();
+      const first = await f.executor.execute(f.input, f.context);
+      f.executeRecipe.mockClear();
+      const result = await f.executor.execute(
+        {
+          ...f.input,
+          attempt: { ...f.input.attempt, id: "next-recipe-attempt", number: 2 },
+          priorState: first.state,
+        },
+        f.context,
+      );
+      expect(result.outcome).toBe("completed");
+      expect(result.validation.checks).toEqual(f.observation.checks);
+      expect(result.verificationEvidence).toEqual(first.verificationEvidence);
+      expect(f.executeRecipe).not.toHaveBeenCalled();
+      expect(f.run).not.toHaveBeenCalled();
+    });
+
+    it("does not replay a recipe with a persisted start and no completed observation", async () => {
+      const f = recipeFixture();
+      const first = await f.executor.execute(f.input, f.context);
+      f.executeRecipe.mockClear();
+      const result = await f.executor.execute(
+        { ...f.input, priorState: { startedSteps: first.state.startedSteps, completedSteps: [] } },
+        f.context,
+      );
+      expect(result.outcome).toBe("blocked");
+      expect(result.diagnostics[0]?.code).toBe("PLAN_RESUME_UNSAFE");
+      expect(f.executeRecipe).not.toHaveBeenCalled();
+    });
+
+    it.each(["request", "check-order", "duplicate-assertion", "missing-declaration"])(
+      "rejects an invalid saved recipe %s before dispatch",
+      async (kind) => {
+        const f = recipeFixture();
+        if (kind === "request") {
+          const executable = f.execution.steps[0]!;
+          if (executable.operation.kind !== "recipe") throw new Error("Expected a recipe step.");
+          executable.operation.recipe.request = { recipeId: "powertoys-calculator" };
+          executable.digest = digestInvestigationExecutableStep({
+            stepId: executable.stepId,
+            operation: executable.operation,
+          });
+        } else if (kind === "check-order") {
+          f.plan.steps[0]!.checkIds.reverse();
+          freezePlan(f);
+        } else if (kind === "duplicate-assertion") {
+          f.recipe.checks[1]!.featureId = f.recipe.checks[0]!.featureId;
+          freezeRecipeStep(f, f.recipe);
+        } else {
+          delete f.plan.steps[0]!.recipe;
+          freezePlan(f);
+        }
+        const result = await f.executor.execute(f.input, f.context);
+        expect(result.outcome).toBe("blocked");
+        expect(result.diagnostics[0]?.code).toBe("PLAN_RECIPE_BINDING_INVALID");
+        expect(f.executeRecipe).not.toHaveBeenCalled();
+        expect(f.started).toHaveLength(0);
+      },
+    );
+
+    it("blocks a recipe whose configured adapter is unavailable", async () => {
+      const f = recipeFixture();
+      const executor = new ProductionInvestigationPlanExecutor({
+        processLimits: limits,
+        processRunner: { run: f.run },
+      });
+      const result = await executor.execute(f.input, f.context);
+      expect(result.outcome).toBe("blocked");
+      expect(result.validation.checks.map((check) => check.status)).toEqual(["blocked", "blocked"]);
+      expect(result.diagnostics[0]?.code).toBe("PLAN_RECIPE_ADAPTER_UNAVAILABLE");
+      expect(f.executeRecipe).not.toHaveBeenCalled();
+      expect(f.run).not.toHaveBeenCalled();
+    });
+
+    it.each(["check", "scenario", "plan", "attempt"])(
+      "rejects an adapter result with a different %s binding",
+      async (kind) => {
+        const f = recipeFixture();
+        const check = f.observation.checks[0]!;
+        if (kind === "check") check.id = "unmapped-check";
+        if (kind === "scenario") check.scenarioId = f.recipe.checks[1]!.scenarioId;
+        if (kind === "plan") check.planRef = null;
+        if (kind === "attempt") check.authoritativeAttemptId = "another-attempt";
+        await expect(f.executor.execute(f.input, f.context)).rejects.toThrow(
+          "A prior completed step is missing authoritative observations or exact check and artifact bindings.",
+        );
+        expect(f.started).toHaveLength(1);
+        expect(f.completed).toHaveLength(0);
+      },
+    );
+
+    it.each([
+      "authority",
+      "producer",
+      "source",
+      "attempt",
+      "artifact-subject",
+      "scenario",
+      "missing-assertion",
+      "mixed-screenshot",
+    ])("rejects a persisted recipe with an invalid %s observation", async (kind) => {
+      const f = recipeFixture();
+      const first = await f.executor.execute(f.input, f.context);
+      const prior = structuredClone(first.state);
+      const completed = prior.completedSteps[0]!;
+      const evidence = completed.verificationEvidence.find((entry) => entry.id === "assertion-0")!;
+      if (kind === "authority") evidence.authority = "model";
+      if (kind === "producer") evidence.provenance.producer = "saved-plan:recipe";
+      if (kind === "source") evidence.source = "reporter_statement";
+      if (kind === "attempt") evidence.provenance.attemptId = "another-attempt";
+      if (kind === "artifact-subject")
+        completed.artifacts.find((entry) => entry.id === evidence.artifactRefs[0])!.subjectRef =
+          "another-subject";
+      if (kind === "scenario")
+        completed.validation.checks[0]!.scenarioId = f.recipe.checks[1]!.scenarioId;
+      if (kind === "missing-assertion")
+        completed.validation.checks[0]!.evidenceRefs = ["screenshot-0"];
+      if (kind === "mixed-screenshot")
+        completed.validation.checks[0]!.evidenceRefs.push("screenshot-0");
+      f.executeRecipe.mockClear();
+      const result = await f.executor.execute({ ...f.input, priorState: prior }, f.context);
+      expect(result.outcome).toBe("blocked");
+      expect(result.diagnostics[0]?.code).toBe("PLAN_RESUME_UNSAFE");
+      expect(f.executeRecipe).not.toHaveBeenCalled();
+    });
+
+    it("does not grant ordinary command steps E2E receipt provenance", async () => {
+      const f = fixture();
+      const first = await f.executor.execute(f.input, f.context);
+      const prior = structuredClone(first.state);
+      const completed = prior.completedSteps[0]!;
+      completed.verificationEvidence[0]!.provenance.producer = "e2e-tool-server";
+      completed.verificationEvidence[0]!.source = "visual_observation";
+      completed.validation.checks[0]!.executor = "e2e-tool-server";
+      f.run.mockClear();
+      const result = await f.executor.execute({ ...f.input, priorState: prior }, f.context);
+      expect(result.outcome).toBe("blocked");
+      expect(result.diagnostics[0]?.code).toBe("PLAN_RESUME_UNSAFE");
+      expect(f.run).not.toHaveBeenCalled();
+    });
+
+    it("propagates uncertain recipe cleanup without recording a completed step", async () => {
+      const f = recipeFixture();
+      const fault = Object.assign(new Error("Recipe cleanup was not confirmed."), {
+        code: "E2E_CLEANUP_UNCONFIRMED",
+      });
+      f.executeRecipe.mockRejectedValueOnce(fault);
+      await expect(f.executor.execute(f.input, f.context)).rejects.toBe(fault);
+      expect(f.started).toHaveLength(1);
+      expect(f.completed).toHaveLength(0);
+    });
   });
 });
