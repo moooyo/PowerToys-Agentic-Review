@@ -948,7 +948,25 @@ export class InvestigationActions {
       const frozenIssueSource =
         taskActions.has(body.action) &&
         context.target.kind === "issue" &&
-        subject.kind === "source_commit" &&
+        (subject.kind === "source_commit" ||
+          (subject.kind === "local_patch" &&
+            body.payload.kind === "task" &&
+            ["issue-verify", "reproduction-setup"].includes(body.payload.taskKind) &&
+            data.report !== null &&
+            data.report.context.subjects.some(
+              (base) =>
+                base.id === subject.baseSubjectRef &&
+                base.kind === "source_commit" &&
+                base.commitSha === subject.baseSha,
+            ) &&
+            [...(data.report.artifacts ?? []), ...(data.report.context.sourceArtifacts ?? [])].some(
+              (artifact) =>
+                artifact.id === subject.artifactRef &&
+                artifact.kind === "patch" &&
+                artifact.subjectRef === subject.id &&
+                artifact.digest === subject.patchDigest &&
+                artifact.availability === "available",
+            ))) &&
         savedAction !== undefined &&
         data.report !== null &&
         data.report.context.subjects.some(
@@ -962,7 +980,7 @@ export class InvestigationActions {
         currentOriginal || frozenIssueSource,
         409,
         "action_subject_stale",
-        "The action must bind to the current original work item revision or its explicitly frozen issue source.",
+        "The action must bind to the current original work item revision or its explicitly frozen Issue source and retained patch artifact.",
       );
       if (
         frozenIssueSource &&

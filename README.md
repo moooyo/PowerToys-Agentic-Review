@@ -38,6 +38,10 @@ automatically queues a native Task. Delivery deduplication and durable recovery 
 identity across retries. This path does not poll GitHub; see the
 [receiver setup](./apps/server/README.md#listen-for-trusted-assignments).
 
+The intended PR entry point is a GitHub Code Review request, including a re-request
+after a repair. Assignment remains the temporary trigger for the current owned-PR
+setup; review-request intake has not yet been implemented.
+
 Trusted users can independently request a pinned PR E2E run with a new `@configured-account e2e`
 conversation comment when E2E intake is enabled. This creates a separate execution Task and progress
 comment. Static review capacity is configurable; all execution tasks share one global E2E slot,
@@ -178,6 +182,15 @@ See the [CI correction and deployment record](./docs/handoff/2026-09-27-ci-and-p
 ## Evidence and project status
 
 ### Current capabilities
+
+Saved Issue reproduction and verification plans can run through the existing controlled
+build, test, and UI tools without a per-plan execution registry entry. An operator selects
+the exact source commit; verification of a generated local patch uses that patch's own
+saved plan, base revision, digest, and artifact. Each Task has a separate source workspace
+and fresh build. Individual checks retain their real outcomes and evidence; headless checks
+use executed test logs and UI checks require matching media. External prerequisites remain
+explicit, and configured execution bindings take precedence. See the
+[saved Issue execution instructions](./apps/server/README.md#bind-saved-plans-to-trusted-executable-steps).
 
 Saved PR verification plans can contain structured PowerToys Run recipes. **Verify PR** prepares
 and confirms a linked `pr-verify` Task against the exact saved plan and original PR revision,

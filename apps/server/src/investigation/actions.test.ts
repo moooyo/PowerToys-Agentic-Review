@@ -7,6 +7,8 @@ import {
   type InvestigationCreateActionIntentRequest,
   type InvestigationCreateTaskRequestV1,
   type InvestigationTaskV1,
+  investigationPlanDigestPayload,
+  validateInvestigationResult,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import { Value } from "@sinclair/typebox/value";
@@ -29,7 +31,7 @@ afterEach(() => {
 
 function harness(
   options: {
-    kind?: "pr" | "feature";
+    kind?: "pr" | "bug" | "feature";
     externalWrites?: boolean;
     findingCount?: number;
     priority?: "P0" | "P1" | "P2";
@@ -114,6 +116,16 @@ function harness(
       principal: InvestigationOperatorPrincipal,
       request: InvestigationCreateTaskRequestV1,
     ): Promise<InvestigationTaskV1> => {
+      const parentReport = request.parentReportRef
+        ? store.get<typeof result>("reports", request.parentReportRef.id)
+        : undefined;
+      const selectedPlan = parentReport?.plans.find(
+        (plan) =>
+          request.planRef !== undefined &&
+          plan.id === request.planRef.id &&
+          plan.version === request.planRef.version &&
+          plan.digest === request.planRef.digest,
+      );
       const created: InvestigationTaskV1 = {
         ...task,
         id: "synthetic-follow-up",
@@ -122,6 +134,8 @@ function harness(
         parentTaskId: task.id,
         parentReportRef: request.parentReportRef ?? null,
         planRef: request.planRef ?? null,
+        subjectRef: selectedPlan?.subjectRef ?? task.subjectRef,
+        subjects: parentReport?.context.subjects ?? task.subjects,
       };
       store.insert("tasks", created.id, created);
       store.insert("idempotency", `task:${principal.id}:${request.idempotencyKey}`, {
@@ -205,6 +219,116 @@ function planPrerequisites(
   h.store.put("plans", `${h.result.report.id}:${plan.id}`, plan);
   h.store.put("reports", h.result.report.id, h.result);
   return action;
+}
+
+function patchVerificationAction(h: ReturnType<typeof harness>) {
+  const source = {
+    id: "synthetic-patch-base",
+    kind: "source_commit" as const,
+    repositoryId: h.task.repository.id,
+    workItemId: h.workItem.id,
+    revisionKey: "7".repeat(64),
+    commitSha: "8".repeat(40),
+  };
+  const patch = {
+    id: "synthetic-verified-patch",
+    kind: "local_patch" as const,
+    repositoryId: source.repositoryId,
+    workItemId: source.workItemId,
+    revisionKey: "9".repeat(64),
+    baseSubjectRef: source.id,
+    baseSha: source.commitSha,
+    patchDigest: "a".repeat(64),
+    artifactRef: "synthetic-retained-patch",
+  };
+  h.result.context.subjects.push(source, patch);
+  const artifact = {
+    id: patch.artifactRef,
+    taskId: h.task.id,
+    attemptId: h.result.context.attempt.id,
+    subjectRef: patch.id,
+    kind: "patch" as const,
+    name: "fix.patch",
+    mediaType: "text/x-diff",
+    digest: patch.patchDigest,
+    byteLength: 42,
+    availability: "available" as const,
+  };
+  h.result.artifacts.push(artifact);
+  h.result.report.collections.artifacts = h.result.artifacts.length;
+  const plan = h.result.plans[0]!;
+  plan.kind = "verification";
+  plan.subjectRef = patch.id;
+  plan.prerequisites = [];
+  const action = h.result.nextActions.find((entry) => entry.action === "start-task")!;
+  action.subjectRef = patch.id;
+  action.taskKind = "issue-verify";
+  action.prerequisiteRefs = [];
+  h.store.put("plans", `${h.result.report.id}:${plan.id}`, plan);
+  h.store.put("reports", h.result.report.id, h.result);
+  const request: InvestigationCreateActionIntentRequest = {
+    ...h.request("start-task"),
+    nextActionId: action.id,
+    subjectRef: patch.id,
+    payload: { kind: "task", taskKind: "issue-verify", planRef: action.planRef! },
+  };
+  return { action, source, patch, artifact, request };
+}
+
+function patchFixReportWithoutActions(h: ReturnType<typeof harness>) {
+  const originalSubjectRef = h.result.assessment.subjectRef;
+  const fixPlan = structuredClone(h.result.plans[0]!);
+  const { source, patch, artifact } = patchVerificationAction(h);
+  if (h.result.assessment.kind !== "bug") throw new Error("Expected a bug assessment.");
+  h.result.context.task.kind = "issue-fix";
+  h.result.context.task.subjectRef = source.id;
+  h.result.context.task.parentTaskId = "synthetic-parent-investigation";
+  h.result.context.parentReportRef = {
+    id: "synthetic-parent-report",
+    version: 1,
+    digest: "b".repeat(64),
+  };
+  h.result.assessment.subjectRef = source.id;
+  h.result.assessment.bugAssessment.status = "confirmed";
+  h.result.assessment.reproduction.planRef = null;
+  for (const evidence of h.result.verificationEvidence)
+    if (evidence.subjectRef === originalSubjectRef) evidence.subjectRef = source.id;
+  for (const entry of h.result.artifacts)
+    if (entry.subjectRef === originalSubjectRef) entry.subjectRef = source.id;
+  for (const unit of h.result.report.coverage.includedUnits)
+    if (unit.subjectRef === originalSubjectRef) unit.subjectRef = source.id;
+  for (const candidate of h.result.report.loop.candidates) {
+    candidate.subjectRef = source.id;
+    candidate.status = "confirmed";
+  }
+  for (const recheck of h.result.report.recheck.records) recheck.subjectRef = source.id;
+  fixPlan.kind = "fix";
+  fixPlan.subjectRef = source.id;
+  fixPlan.prerequisites = [];
+  fixPlan.sourceReportRef = { id: h.result.context.parentReportRef.id, version: 1 };
+  fixPlan.digest = investigationContentDigest(investigationPlanDigestPayload(fixPlan));
+  const fixPlanRef = { id: fixPlan.id, version: fixPlan.version, digest: fixPlan.digest };
+  for (const finding of h.result.findings) {
+    finding.subjectRef = source.id;
+    finding.confirmation.status = "confirmed";
+    finding.fixRecommendation.planRef = fixPlanRef;
+    for (const location of finding.locations) location.subjectRef = source.id;
+  }
+  for (const check of h.result.validation.checks) {
+    check.subjectRef = source.id;
+    check.planRef = fixPlanRef;
+  }
+  const patchPlan = h.result.plans[0]!;
+  patchPlan.id = "synthetic-generated-patch-verification";
+  patchPlan.digest = investigationContentDigest(investigationPlanDigestPayload(patchPlan));
+  h.result.plans = [fixPlan, patchPlan];
+  h.result.report.collections.plans = h.result.plans.length;
+  h.result.nextActions = [];
+  h.result.report.collections.nextActions = 0;
+  h.store.put("plans", `${h.result.report.id}:${fixPlan.id}`, fixPlan);
+  h.store.put("plans", `${h.result.report.id}:${patchPlan.id}`, patchPlan);
+  h.store.put("reports", h.result.report.id, h.result);
+  return { source, patch, artifact, patchPlan };
 }
 
 function storeVerificationChild(
@@ -1310,6 +1434,92 @@ describe("investigation action preparation and confirmation", () => {
       sourceCommit: source.commitSha,
     };
     expect((await h.actions.createIntent(h.actor, request)).state).toBe("prepared");
+    expect(h.createTask).not.toHaveBeenCalled();
+  });
+
+  it("prepares and dispatches the saved patch verification without external writes", async () => {
+    const h = harness({ kind: "bug", externalWrites: false });
+    const { request } = patchVerificationAction(h);
+    const intent = await h.actions.createIntent(h.actor, request);
+    expect(intent.state).toBe("prepared");
+    expect(
+      await h.actions.confirmIntent(h.actor, intent.id, {
+        version: intent.version,
+        payloadDigest: intent.payloadDigest,
+      }),
+    ).toMatchObject({ state: "succeeded", result: { taskId: "synthetic-follow-up" } });
+    expect(h.createTask).toHaveBeenCalledWith(
+      h.actor,
+      expect.objectContaining({
+        kind: "issue-verify",
+        parentReportRef: request.reportRef,
+        planRef: request.payload.kind === "task" ? request.payload.planRef : null,
+        executionMode: "execute",
+      }),
+    );
+    expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  it("dispatches native patch verification from a valid Issue fix report that omitted its next action", async () => {
+    const h = harness({ kind: "bug", findingCount: 1, externalWrites: false });
+    const { source, patch, patchPlan } = patchFixReportWithoutActions(h);
+    expect(validateInvestigationResult(h.result)).toEqual({ valid: true, errors: [] });
+    const context = await h.actions.actionContext(h.actor, h.workItem.id);
+    const action = context.nextActions.find(
+      (entry) => entry.taskKind === "issue-verify" && entry.subjectRef === patch.id,
+    )!;
+    expect(action).toBeDefined();
+    expect(action.subjectRef).not.toBe(source.id);
+    const request: InvestigationCreateActionIntentRequest = {
+      ...h.request("start-task"),
+      nextActionId: action.id,
+      subjectRef: patch.id,
+      payload: { kind: "task", taskKind: "issue-verify", planRef: action.planRef! },
+    };
+    const intent = await h.actions.createIntent(h.actor, request);
+    const completed = await h.actions.confirmIntent(h.actor, intent.id, {
+      version: intent.version,
+      payloadDigest: intent.payloadDigest,
+    });
+    expect(completed.state).toBe("succeeded");
+    expect(h.store.get<InvestigationTaskV1>("tasks", completed.result!.taskId!)).toMatchObject({
+      kind: "issue-verify",
+      subjectRef: patch.id,
+      planRef: { id: patchPlan.id, version: patchPlan.version, digest: patchPlan.digest },
+    });
+    expect(h.execute).not.toHaveBeenCalled();
+  });
+
+  it.each(["base revision", "artifact digest", "artifact availability", "artifact absent"])(
+    "refuses patch verification with invalid %s",
+    async (change) => {
+      const h = harness({ kind: "bug", externalWrites: false });
+      const { patch, request } = patchVerificationAction(h);
+      if (change === "base revision") patch.baseSha = "b".repeat(40);
+      const artifact = h.result.artifacts.find((entry) => entry.id === patch.artifactRef)!;
+      if (change === "artifact digest") artifact.digest = "b".repeat(64);
+      if (change === "artifact availability") artifact.availability = "missing";
+      if (change === "artifact absent") {
+        h.result.artifacts = h.result.artifacts.filter((entry) => entry.id !== patch.artifactRef);
+        h.result.report.collections.artifacts = h.result.artifacts.length;
+      }
+      h.store.put("reports", h.result.report.id, h.result);
+      await expect(h.actions.createIntent(h.actor, request)).rejects.toMatchObject({
+        code: "action_subject_stale",
+      });
+      expect(h.createTask).not.toHaveBeenCalled();
+      expect(h.execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not let a source SHA override the patch selected by the saved plan", async () => {
+    const h = harness({ kind: "bug", externalWrites: false });
+    const { request, source } = patchVerificationAction(h);
+    if (request.payload.kind !== "task") throw new Error("Expected a task payload.");
+    request.payload.sourceCommit = source.commitSha;
+    await expect(h.actions.createIntent(h.actor, request)).rejects.toMatchObject({
+      code: "saved_source_commit_changed",
+    });
     expect(h.createTask).not.toHaveBeenCalled();
   });
 

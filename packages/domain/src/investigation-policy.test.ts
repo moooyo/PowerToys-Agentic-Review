@@ -2,6 +2,8 @@ import {
   createInvestigationPreview as createInvestigationFixture,
   type InvestigationActionKind,
   type InvestigationResultV1,
+  investigationPlanDigestPayload,
+  validateInvestigationResult,
 } from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
 import { createInvestigationCheckpoint, investigationContentDigest } from "./investigation-loop.js";
@@ -62,7 +64,265 @@ function verificationReportWithoutActions(): InvestigationResultV1 {
   return result;
 }
 
+function issuePlanReportWithoutActions(
+  planKind: "verification" | "reproduction" = "reproduction",
+  sourceKind: "issue_snapshot" | "source_commit" | "local_patch" = "issue_snapshot",
+): InvestigationResultV1 {
+  const { result } = createInvestigationFixture("bug", { findingCount: 0 });
+  const plan = result.plans[0]!;
+  plan.kind = planKind;
+  plan.prerequisites = [];
+  result.nextActions = [];
+  result.report.collections.nextActions = 0;
+  if (sourceKind !== "issue_snapshot") {
+    const base = {
+      id: "native-issue-source",
+      kind: "source_commit" as const,
+      repositoryId: result.context.repository.id,
+      workItemId: result.context.workItem.id,
+      revisionKey: "7".repeat(64),
+      commitSha: "8".repeat(40),
+    };
+    result.context.subjects.push(base);
+    let selectedId = base.id;
+    if (sourceKind === "local_patch") {
+      selectedId = "native-issue-patch";
+      result.context.subjects.push({
+        id: selectedId,
+        kind: "local_patch",
+        repositoryId: base.repositoryId,
+        workItemId: base.workItemId,
+        revisionKey: "9".repeat(64),
+        baseSubjectRef: base.id,
+        baseSha: base.commitSha,
+        patchDigest: "a".repeat(64),
+        artifactRef: "native-issue-patch-artifact",
+      });
+    }
+    result.assessment.subjectRef = selectedId;
+    result.context.task.subjectRef = selectedId;
+    plan.subjectRef = selectedId;
+  }
+  return result;
+}
+
+function issueFixReportWithoutPatchAction(): InvestigationResultV1 {
+  const { result } = createInvestigationFixture("bug", { findingCount: 1 });
+  const original = result.context.subjects[0]!;
+  if (original.kind !== "issue_snapshot" || result.assessment.kind !== "bug")
+    throw new Error("Expected an Issue report.");
+  const snapshot = { ...original, id: "current-issue-snapshot" };
+  const base = {
+    id: original.id,
+    kind: "source_commit" as const,
+    repositoryId: original.repositoryId,
+    workItemId: original.workItemId,
+    revisionKey: "7".repeat(64),
+    commitSha: "8".repeat(40),
+  };
+  const patch = {
+    id: "native-issue-patch",
+    kind: "local_patch" as const,
+    repositoryId: base.repositoryId,
+    workItemId: base.workItemId,
+    revisionKey: "9".repeat(64),
+    baseSubjectRef: base.id,
+    baseSha: base.commitSha,
+    patchDigest: "a".repeat(64),
+    artifactRef: "native-issue-patch-artifact",
+  };
+  result.context.subjects = [snapshot, base, patch];
+  result.context.task.kind = "issue-fix";
+  result.context.task.subjectRef = base.id;
+  result.context.task.parentTaskId = "parent-issue-investigation";
+  result.context.parentReportRef = {
+    id: "parent-issue-report",
+    version: 1,
+    digest: "b".repeat(64),
+  };
+  result.assessment.subjectRef = base.id;
+  result.assessment.bugAssessment.status = "confirmed";
+  result.assessment.reproduction.planRef = null;
+  result.findings[0]!.confirmation.status = "confirmed";
+  result.report.loop.candidates[0]!.status = "confirmed";
+  const fixPlan = result.plans[0]!;
+  fixPlan.kind = "fix";
+  fixPlan.prerequisites = [];
+  fixPlan.sourceReportRef = { id: result.context.parentReportRef.id, version: 1 };
+  fixPlan.digest = investigationContentDigest(investigationPlanDigestPayload(fixPlan));
+  result.findings[0]!.fixRecommendation.planRef = {
+    id: fixPlan.id,
+    version: fixPlan.version,
+    digest: fixPlan.digest,
+  };
+  const patchPlan = {
+    ...structuredClone(fixPlan),
+    id: "generated-patch-verification",
+    kind: "verification" as const,
+    subjectRef: patch.id,
+    title: "Verify the generated patch",
+    steps: [
+      {
+        id: "generated-patch-behavior",
+        description: "Exercise the reported behavior against the freshly built patch.",
+        expectedObservation: "The patched product satisfies the recorded expected behavior.",
+        checkIds: ["generated-patch-check"],
+      },
+    ],
+    sourceReportRef: { id: result.report.id, version: result.report.version },
+  };
+  patchPlan.digest = investigationContentDigest(investigationPlanDigestPayload(patchPlan));
+  result.plans.push(patchPlan);
+  result.report.collections.plans = result.plans.length;
+  for (const check of result.validation.checks)
+    check.planRef = { id: fixPlan.id, version: fixPlan.version, digest: fixPlan.digest };
+  result.nextActions = [];
+  result.report.collections.nextActions = 0;
+  result.artifacts.push({
+    id: patch.artifactRef,
+    taskId: result.context.task.id,
+    attemptId: result.context.attempt.id,
+    subjectRef: patch.id,
+    kind: "patch",
+    name: "fix.patch",
+    mediaType: "text/x-diff",
+    digest: patch.patchDigest,
+    byteLength: 42,
+    availability: "available",
+  });
+  result.report.collections.artifacts = result.artifacts.length;
+  return result;
+}
+
 describe("investigation action policy", () => {
+  it("derives patch verification from an Issue fix report whose primary source remains the base commit", () => {
+    const result = issueFixReportWithoutPatchAction();
+    const original = structuredClone(result);
+    const patch = result.context.subjects.find((entry) => entry.kind === "local_patch")!;
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+    const context = evaluateInvestigationActions(policyInput(result));
+    expect(context.nextActions).toHaveLength(1);
+    const action = context.nextActions[0]!;
+    expect(action).toMatchObject({
+      action: "start-task",
+      taskKind: "issue-verify",
+      subjectRef: patch.id,
+      planRef: {
+        id: result.plans[1]!.id,
+        version: result.plans[1]!.version,
+        digest: result.plans[1]!.digest,
+      },
+      canPrepare: true,
+      readyToExecute: true,
+    });
+    expect(action.subjectRef).not.toBe(result.assessment.subjectRef);
+    result.nextActions = [{ ...action }];
+    result.report.collections.nextActions = 1;
+    expect(evaluateInvestigationActions(policyInput(result)).nextActions).toHaveLength(1);
+    result.nextActions = [];
+    result.report.collections.nextActions = 0;
+    expect(result).toEqual(original);
+  });
+
+  it.each([
+    "stale snapshot",
+    "base SHA",
+    "artifact digest",
+    "artifact availability",
+    "artifact producer",
+    "artifact attempt",
+    "plan from another report",
+    "missing checks",
+    "unsupported assessment",
+  ])("does not derive patch verification with invalid %s", (change) => {
+    const result = issueFixReportWithoutPatchAction();
+    const input = policyInput(result);
+    const patch = result.context.subjects.find((entry) => entry.kind === "local_patch")!;
+    if (patch.kind !== "local_patch") throw new Error("Expected a patch.");
+    const artifact = result.artifacts.find((entry) => entry.id === patch.artifactRef)!;
+    if (change === "stale snapshot") input.target.revisionKey = "different-snapshot";
+    if (change === "base SHA") patch.baseSha = "b".repeat(40);
+    if (change === "artifact digest") artifact.digest = "b".repeat(64);
+    if (change === "artifact availability") artifact.availability = "missing";
+    if (change === "artifact producer") artifact.taskId = "another-task";
+    if (change === "artifact attempt") artifact.attemptId = "another-attempt";
+    if (change === "plan from another report")
+      result.plans[1]!.sourceReportRef.id = "another-report";
+    if (change === "missing checks") result.plans[1]!.steps[0]!.checkIds = [];
+    if (change === "unsupported assessment" && result.assessment.kind === "bug")
+      result.assessment.bugAssessment.status = "needs_information";
+    expect(evaluateInvestigationActions(input).nextActions).toEqual([]);
+  });
+
+  it.each([
+    ["reproduction", "issue_snapshot"],
+    ["verification", "source_commit"],
+    ["verification", "local_patch"],
+  ] as const)(
+    "derives a native Issue %s action for %s without changing the report",
+    (planKind, sourceKind) => {
+      const result = issuePlanReportWithoutActions(planKind, sourceKind);
+      const original = structuredClone(result);
+      const input = policyInput(result);
+      const context = evaluateInvestigationActions(input);
+      expect(context.nextActions).toHaveLength(1);
+      const action = context.nextActions[0]!;
+      expect(action).toMatchObject({
+        action: "start-task",
+        taskKind: planKind === "reproduction" ? "reproduction-setup" : "issue-verify",
+        subjectRef: result.assessment.subjectRef,
+        planRef: result.assessment.kind === "bug" ? result.assessment.reproduction.planRef : null,
+        sourceReportRef: { id: result.report.id, version: result.report.version },
+        canPrepare: true,
+        readyToExecute: true,
+        allowed: true,
+      });
+      expect(evaluateInvestigationActions(input).nextActions[0]!.id).toBe(action.id);
+      expect(
+        evaluateInvestigationActions({ ...input, capabilities: [] }).nextActions[0],
+      ).toMatchObject({
+        id: action.id,
+        canPrepare: false,
+        allowed: false,
+      });
+      expect(result).toEqual(original);
+    },
+  );
+
+  it("keeps an existing saved Issue action without deriving a duplicate", () => {
+    const { result } = createInvestigationFixture("bug", { findingCount: 0 });
+    const saved = result.nextActions.find((action) => action.action === "start-task")!;
+    const actions = evaluateInvestigationActions(policyInput(result)).nextActions.filter(
+      (action) => action.action === "start-task",
+    );
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject(saved);
+  });
+
+  it.each([
+    "stale snapshot",
+    "missing saved plan",
+    "changed saved plan",
+    "different subject",
+    "wrong plan kind",
+    "different report",
+    "unsupported assessment",
+  ])("does not derive an Issue action for a %s", (change) => {
+    const result = issuePlanReportWithoutActions();
+    const input = { ...policyInput(result) };
+    const plan = result.plans[0]!;
+    if (change === "stale snapshot") input.target.revisionKey = "different-snapshot";
+    if (change === "missing saved plan") input.persistedPlans = [];
+    if (change === "changed saved plan")
+      input.persistedPlans = [{ ...plan, rationale: "A different saved plan." }];
+    if (change === "different subject") plan.subjectRef = "another-source";
+    if (change === "wrong plan kind") plan.kind = "fix";
+    if (change === "different report") plan.sourceReportRef.id = "another-report";
+    if (change === "unsupported assessment" && result.assessment.kind === "bug")
+      result.assessment.bugAssessment.status = "needs_information";
+    expect(evaluateInvestigationActions(input).nextActions).toEqual([]);
+  });
+
   it("evaluates a P0 beyond the first 100 findings independently of selection", () => {
     const { result } = createInvestigationFixture("pr", { findingCount: 137, priority: "P2" });
     result.findings[136]!.priority = "P0";

@@ -30,6 +30,7 @@ export const InvestigationExecutablePlanStepSchema = object({
     }),
     object({ kind: Type.Literal("ui"), adapterId: EntityIdSchema, scenarioId: EntityIdSchema }),
     object({ kind: Type.Literal("recipe"), recipe: InvestigationRecipeStepSchema }),
+    object({ kind: Type.Literal("agent-verify") }),
     object({
       kind: Type.Literal("model-edit"),
       allowedPaths: Type.Array(relativePath, { minItems: 1, maxItems: 512, uniqueItems: true }),

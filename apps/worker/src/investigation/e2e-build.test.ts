@@ -102,8 +102,18 @@ function sourceBinding() {
     revisionKey: `pr:${headSha}`,
     sourceSha: headSha,
     patchDigest: null as string | null,
-    artifactRef: null,
+    artifactRef: null as string | null,
     submodules: [] as BoundSubmodule[],
+  };
+}
+
+function patchBinding(patchDigest = "b".repeat(64)) {
+  return {
+    subjectRef: "subject-patch",
+    revisionKey: digest(`patch:${headSha}:${patchDigest}`),
+    sourceSha: headSha,
+    patchDigest,
+    artifactRef: "artifact-patch",
   };
 }
 
@@ -1072,6 +1082,15 @@ describe.skipIf(process.platform !== "win32")("E2E build provenance", () => {
       ],
     });
     expect(record.identity).toMatch(/^[a-f0-9]{64}$/u);
+    expect(record.sourceBinding).toEqual({
+      subjectRef: f.binding.subjectRef,
+      revisionKey: f.binding.revisionKey,
+      sourceSha: headSha,
+      patchDigest: null,
+      artifactRef: null,
+    });
+    expect(record.invocation?.sourceBinding).toEqual(record.sourceBinding);
+    expect(Object.isFrozen(record.sourceBinding)).toBe(true);
     expect(Object.isFrozen(record)).toBe(true);
     expect(Object.isFrozen(record.command)).toBe(true);
     expect(Object.isFrozen(record.artifacts)).toBe(true);
@@ -1182,13 +1201,127 @@ describe.skipIf(process.platform !== "win32")("E2E build provenance", () => {
     expect(f.run).not.toHaveBeenCalled();
   });
 
-  it("rejects a patched checkout instead of attributing it to the PR head", async () => {
+  it("builds verified patch edits and additions without deleting their source files", async () => {
+    const f = await fixture({ projectPath: "src/Added/Added.csproj" });
+    const binding = patchBinding();
+    Object.assign(f.binding, binding);
+    const patchedProject = projectContent.replace("net10.0", "net10.0-windows");
+    const addedSource = win32.join(f.sourceDirectory, "src", "Added", "Helper.cs");
+    await writeFile(f.projectPath, patchedProject);
+    await writeFile(addedSource, "public static class Helper {}\n");
+    f.assertSourceBinding.mockImplementation(async () => {
+      expect(await readFile(f.projectPath, "utf8")).toBe(patchedProject);
+      expect(await readFile(addedSource, "utf8")).toBe("public static class Helper {}\n");
+    });
+    const record = await performE2eBuild(f.input);
+    expect(f.cleanupRun).not.toHaveBeenCalled();
+    expect(f.run).toHaveBeenCalledOnce();
+    expect(f.run.mock.calls[0]![0].arguments).toContain("-target:Rebuild");
+    expect(record.headSha).toBe(headSha);
+    expect(record.projectDigest).toBe(digest(patchedProject));
+    expect(record.sourceBinding).toEqual(binding);
+    expect(record.invocation?.sourceBinding).toEqual(binding);
+    expect(Object.isFrozen(record.sourceBinding)).toBe(true);
+    await expect(validateE2eBuildArtifact(record, "App.exe")).resolves.toBe(record.artifacts[0]);
+  });
+
+  it("cleans pinned dependencies while preserving the patched root", async () => {
     const f = await fixture();
-    f.binding.patchDigest = "b".repeat(64);
+    Object.assign(f.binding, patchBinding());
+    const dependency = submodule("vendor/library");
+    await addSubmodules(f, [dependency]);
+    const record = await performE2eBuild(f.input);
+    expect(f.cleanupRun.mock.calls.map(([spec]) => spec.workingDirectory)).toEqual([
+      win32.join(f.sourceDirectory, dependency.path),
+    ]);
+    expect(f.cleanupRun.mock.calls[0]![0].arguments.slice(-4)).toEqual([
+      "clean",
+      "-ffdqx",
+      "--",
+      ".",
+    ]);
+    expect(record.sourceBinding?.patchDigest).toBe(f.binding.patchDigest);
+    expect(f.run).toHaveBeenCalledOnce();
+  });
+
+  it("rebuilds a patch into a fresh output tree on each attempt", async () => {
+    const f = await fixture({ repositoryOutputDirectory: "x64/Release" });
+    Object.assign(f.binding, patchBinding());
+    const nativeOutput = win32.join(f.sourceDirectory, "x64", "Release");
+    f.run.mockImplementation(async (spec) => {
+      expect(spec.arguments).toContain("-target:Rebuild");
+      await mkdir(nativeOutput, { recursive: true });
+      await writeFile(win32.join(nativeOutput, "App.exe"), artifactContent, { flag: "wx" });
+      return { exitCode: 0, stdout: "Build succeeded.", stderr: "" };
+    });
+    const first = await performE2eBuild(f.input);
+    const second = await performE2eBuild({ ...f.input, id: "build-2" });
+    expect(f.run).toHaveBeenCalledTimes(2);
+    expect(f.cleanupRun).not.toHaveBeenCalled();
+    expect(first.artifacts[0]!.path).not.toBe(second.artifacts[0]!.path);
+    expect(first.sourceBinding).toEqual(second.sourceBinding);
+    await expect(lstat(nativeOutput)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(validateE2eBuildArtifact(first, "App.exe")).resolves.toBe(first.artifacts[0]);
+    await expect(validateE2eBuildArtifact(second, "App.exe")).resolves.toBe(second.artifacts[0]);
+  });
+
+  it("records different patches on the same base independently of the project text", async () => {
+    const f = await fixture();
+    const firstBinding = patchBinding();
+    Object.assign(f.binding, firstBinding);
+    const first = await performE2eBuild(f.input);
+    const secondBinding = patchBinding("c".repeat(64));
+    Object.assign(f.binding, secondBinding);
+    const second = await performE2eBuild({ ...f.input, id: "build-2" });
+    expect(first.headSha).toBe(second.headSha);
+    expect(first.projectDigest).toBe(second.projectDigest);
+    expect(first.sourceBinding).toEqual(firstBinding);
+    expect(second.sourceBinding).toEqual(secondBinding);
+    expect(first.invocation?.sourceBinding).toEqual(firstBinding);
+    expect(second.invocation?.sourceBinding).toEqual(secondBinding);
+    expect(first.identity).not.toBe(second.identity);
+  });
+
+  it.each(["subjectRef", "revisionKey", "sourceSha", "patchDigest", "artifactRef"] as const)(
+    "rejects patch source %s drift during compilation",
+    async (field) => {
+      const f = await fixture();
+      Object.assign(f.binding, patchBinding());
+      f.run.mockImplementation(async (spec) => {
+        await writeOutputs(spec, f.input.request.outputs);
+        f.binding[field] = field === "sourceSha" ? "c".repeat(40) : "c".repeat(64);
+        return { exitCode: 0, stdout: "Build succeeded.", stderr: "" };
+      });
+      await expect(performE2eBuild(f.input)).rejects.toMatchObject({
+        code: "E2E_BUILD_SOURCE_INVALID",
+      });
+      expect(f.run).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["", "b".repeat(63), "g".repeat(64), `${"b".repeat(64)}\n`])(
+    "rejects malformed patch source digests before compilation: %j",
+    async (patchDigest) => {
+      const f = await fixture();
+      Object.assign(f.binding, patchBinding(patchDigest));
+      await expect(performE2eBuild(f.input)).rejects.toMatchObject({
+        code: "E2E_BUILD_SOURCE_INVALID",
+      });
+      expect(f.allProcessCalls).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a materialized patch that no longer matches its saved artifact", async () => {
+    const f = await fixture();
+    Object.assign(f.binding, patchBinding());
+    f.assertSourceBinding.mockRejectedValueOnce(
+      new Error("The verified local patch changed during validation."),
+    );
     await expect(performE2eBuild(f.input)).rejects.toMatchObject({
       code: "E2E_BUILD_SOURCE_INVALID",
     });
     expect(f.run).not.toHaveBeenCalled();
+    expect(f.cleanupRun).not.toHaveBeenCalled();
   });
 
   it("rejects source drift before starting a build", async () => {

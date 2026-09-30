@@ -420,6 +420,140 @@ function resolvePolicyNextActions(
     .filter((entry) => entry.valid)
     .map((entry) => entry.action);
   if (
+    input.target.kind === "issue" &&
+    result.context.workItem.kind === "issue" &&
+    result.assessment.kind === "bug" &&
+    ["needs_verification", "confirmed"].includes(result.assessment.bugAssessment.status)
+  ) {
+    const currentIssueSnapshot = result.context.subjects.some(
+      (entry) => entry.kind === "issue_snapshot" && matchesCurrentSubject(entry, input),
+    );
+    if (currentIssueSnapshot) {
+      for (const patch of result.context.subjects) {
+        if (patch.kind !== "local_patch") continue;
+        const base = result.context.subjects.find((entry) => entry.id === patch.baseSubjectRef);
+        const artifact = result.artifacts.find((entry) => entry.id === patch.artifactRef);
+        if (
+          base?.kind !== "source_commit" ||
+          base.commitSha !== patch.baseSha ||
+          artifact?.kind !== "patch" ||
+          artifact.subjectRef !== patch.id ||
+          artifact.digest !== patch.patchDigest ||
+          artifact.availability !== "available" ||
+          artifact.taskId !== result.context.task.id ||
+          !result.context.adoptedAttemptIds.includes(artifact.attemptId)
+        )
+          continue;
+        for (const patchPlan of plans) {
+          const patchPlanRef = {
+            id: patchPlan.id,
+            version: patchPlan.version,
+            digest: patchPlan.digest,
+          };
+          const reported = result.plans.find((entry) => sameRef(entry, patchPlanRef));
+          const checkIds = patchPlan.steps.flatMap((step) => step.checkIds);
+          if (
+            patchPlan.state !== "saved" ||
+            patchPlan.kind !== "verification" ||
+            patchPlan.subjectRef !== patch.id ||
+            patchPlan.sourceReportRef.id !== result.report.id ||
+            patchPlan.sourceReportRef.version !== result.report.version ||
+            reported === undefined ||
+            investigationContentDigest(reported) !== investigationContentDigest(patchPlan) ||
+            patchPlan.steps.length === 0 ||
+            patchPlan.steps.some((step) => step.checkIds.length === 0) ||
+            new Set(checkIds).size !== checkIds.length ||
+            patchPlan.acceptanceCriteria.length === 0 ||
+            actions.some(
+              (action) =>
+                action.action === "start-task" &&
+                action.taskKind === "issue-verify" &&
+                action.subjectRef === patch.id &&
+                sameRef(action.planRef, patchPlanRef),
+            )
+          )
+            continue;
+          const action: InvestigationNextActionV1 = {
+            id: `native-issue-plan:${investigationContentDigest({
+              reportRef: reportRef(result),
+              subjectRef: patch.id,
+              subjectRevisionKey: patch.revisionKey,
+              planRef: patchPlanRef,
+            })}`,
+            action: "start-task",
+            taskKind: "issue-verify",
+            label: "Verify saved patch",
+            reason:
+              "Run the saved verification plan against the exact patch produced by this report.",
+            recommended: true,
+            subjectRef: patch.id,
+            planRef: patchPlanRef,
+            draftRef: null,
+            validationReportRef: null,
+            prerequisiteRefs: patchPlan.prerequisites.map((entry) => entry.id),
+            sourceReportRef: { id: result.report.id, version: result.report.version },
+            state: "saved",
+          };
+          if (
+            validateInvestigationNextActions({ ...result, nextActions: [action] }, plans)[0]?.valid
+          )
+            actions.push(action);
+        }
+      }
+    }
+    const planRef = result.assessment.reproduction.planRef;
+    const plan = plans.find((entry) => sameRef(entry, planRef));
+    const reportedPlan = result.plans.find((entry) => sameRef(entry, planRef));
+    const subject = result.context.subjects.find(
+      (entry) => entry.id === result.assessment.subjectRef,
+    );
+    if (
+      !currentIssueSnapshot ||
+      subject === undefined ||
+      !["issue_snapshot", "source_commit", "local_patch"].includes(subject.kind) ||
+      plan === undefined ||
+      reportedPlan === undefined ||
+      investigationContentDigest(reportedPlan) !== investigationContentDigest(plan) ||
+      plan.state !== "saved" ||
+      !["verification", "reproduction"].includes(plan.kind) ||
+      plan.subjectRef !== subject.id ||
+      plan.sourceReportRef.id !== result.report.id ||
+      plan.sourceReportRef.version !== result.report.version ||
+      plan.steps.length === 0 ||
+      plan.acceptanceCriteria.length === 0 ||
+      actions.some(
+        (action) =>
+          action.action === "start-task" &&
+          action.subjectRef === subject.id &&
+          sameRef(action.planRef, planRef),
+      )
+    )
+      return actions;
+    const action: InvestigationNextActionV1 = {
+      id: `native-issue-plan:${investigationContentDigest({
+        reportRef: reportRef(result),
+        subjectRef: subject.id,
+        subjectRevisionKey: subject.revisionKey,
+        planRef,
+      })}`,
+      action: "start-task",
+      taskKind: plan.kind === "reproduction" ? "reproduction-setup" : "issue-verify",
+      label: plan.kind === "reproduction" ? "Reproduce Issue" : "Verify Issue",
+      reason: "Run the saved Issue plan against the explicitly selected source or retained patch.",
+      recommended: result.assessment.bugAssessment.status === "needs_verification",
+      subjectRef: subject.id,
+      planRef,
+      draftRef: null,
+      validationReportRef: null,
+      prerequisiteRefs: plan.prerequisites.map((entry) => entry.id),
+      sourceReportRef: { id: result.report.id, version: result.report.version },
+      state: "saved",
+    };
+    return validateInvestigationNextActions({ ...result, nextActions: [action] }, plans)[0]?.valid
+      ? [...actions, action]
+      : actions;
+  }
+  if (
     input.target.kind !== "pull_request" ||
     result.context.workItem.kind !== "pull_request" ||
     result.assessment.kind !== "pr"

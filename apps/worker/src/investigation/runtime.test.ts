@@ -7,6 +7,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { StdioProcessHostClientOptions } from "../execution/process-host-client.js";
 import type { Logger } from "../logging/logger.js";
 import type {
+  AgentVerificationPlanAdapter,
+  AgentVerificationPlanAdapterOptions,
+} from "./agent-verification-plan-adapter.js";
+import type {
   AttemptCleanupJournal,
   AttemptCleanupJournalOptions,
 } from "./attempt-cleanup-journal.js";
@@ -106,6 +110,7 @@ function fixture() {
     modelEdit?: ModelTurnRunnerOptions;
     e2e?: E2eAgentRunnerOptions;
     recipe?: RecipePlanAdapterOptions;
+    agentVerification?: AgentVerificationPlanAdapterOptions;
     plan?: ProductionInvestigationPlanExecutorOptions;
     cleanupJournal?: AttemptCleanupJournalOptions;
     outputJournal?: InvestigationOutputJournalOptions;
@@ -157,6 +162,7 @@ function fixture() {
     }),
   };
   const recipeAdapter: InvestigationRecipePlanAdapter = { execute: never };
+  const agentVerificationAdapter: AgentVerificationPlanAdapter = { execute: never };
   const service = {
     run: async () => {
       events.push("service.run");
@@ -213,6 +219,10 @@ function fixture() {
       captured.recipe = options;
       return recipeAdapter;
     },
+    createAgentVerificationPlanAdapter: (options) => {
+      captured.agentVerification = options;
+      return agentVerificationAdapter;
+    },
     createModelEditAdapter: (options) => {
       captured.modelEdit = options;
       return { execute: never };
@@ -243,6 +253,7 @@ function fixture() {
     host,
     coordinator,
     recipeAdapter,
+    agentVerificationAdapter,
     service,
     dependencies,
     usageJournal,
@@ -308,6 +319,10 @@ describe("production investigation runtime composition", () => {
     });
     expect(f.captured.e2e).toMatchObject(f.captured.recipe!);
     expect(f.captured.plan?.recipeAdapter).toBe(f.recipeAdapter);
+    expect(f.captured.agentVerification).toMatchObject(f.captured.recipe!);
+    expect(f.captured.agentVerification?.modelOptions).toBe(f.captured.model);
+    expect(f.captured.agentVerification?.modelOptions.usageJournal).toBe(f.usageJournal);
+    expect(f.captured.plan?.agentVerificationAdapter).toBe(f.agentVerificationAdapter);
     await runtime.stop();
   });
 

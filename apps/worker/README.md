@@ -174,6 +174,17 @@ UI registrations. A natural-language plan alone cannot run commands. Command, UI
 steps write start records before execution and retain actual outcomes, source identity, and
 artifacts afterward. An uncertain in-flight mutation is not automatically replayed.
 
+Saved Issue reproduction and verification can use the built-in `agent-verify` operation.
+Advertise `reproduction-setup` and `issue-verify` in the Worker's supported kinds and enable its
+normal Server-side execution permission. The Server binds eligible saved plans to controlled
+agent execution without a separate registry entry for each plan. Explicit bindings remain
+available for fixed workflows and external prerequisites. The agent inspects the selected
+commit or exact retained patch, then uses the same build, existing-test, application, and UI
+tools as native PR execution. Each Task uses a separate workspace and fresh build.
+Headless checks require real executed-test observations and retained logs; visible behavior
+requires registered UI assertions with matching screenshots or recording. Completed steps
+are recovered without rerunning them, and an uncertain started step requires explicit new work.
+
 UI adapter configuration is validated by `src/investigation/ui-plan-adapter.ts`. Web scenarios
 use pinned browser/driver files and an owned application origin. Windows desktop scenarios need
 an active, unlocked dedicated session and an exclusive desktop lock. Missing readiness or evidence

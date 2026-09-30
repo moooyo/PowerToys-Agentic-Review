@@ -15,6 +15,11 @@ import {
 import { verifyTrustedExecutionBinaries } from "../execution/trusted-binary.js";
 import type { Logger } from "../logging/logger.js";
 import {
+  type AgentVerificationPlanAdapter,
+  type AgentVerificationPlanAdapterOptions,
+  createAgentVerificationPlanAdapter,
+} from "./agent-verification-plan-adapter.js";
+import {
   type AttemptCleanupIdentity,
   type AttemptCleanupJournal,
   type AttemptCleanupJournalOptions,
@@ -133,6 +138,9 @@ export interface InvestigationRuntimeDependencies {
   readonly createRecipePlanAdapter?: (
     options: RecipePlanAdapterOptions,
   ) => InvestigationRecipePlanAdapter;
+  readonly createAgentVerificationPlanAdapter?: (
+    options: AgentVerificationPlanAdapterOptions,
+  ) => AgentVerificationPlanAdapter;
   readonly createModelEditAdapter?: (
     options: ModelEditRunnerOptions,
   ) => InvestigationModelEditAdapter;
@@ -562,6 +570,9 @@ export async function createInvestigationExecutionRuntime(
     const recipeAdapter = (dependencies.createRecipePlanAdapter ?? createRecipePlanAdapter)(
       e2eToolOptions,
     );
+    const agentVerificationAdapter = (
+      dependencies.createAgentVerificationPlanAdapter ?? createAgentVerificationPlanAdapter
+    )({ ...e2eToolOptions, modelOptions });
     const modelEditAdapter = (dependencies.createModelEditAdapter ?? createModelEditAdapter)(
       modelOptions,
     );
@@ -587,6 +598,7 @@ export async function createInvestigationExecutionRuntime(
       modelEditAdapter,
       uiAdapters,
       recipeAdapter,
+      agentVerificationAdapter,
     });
     const executor: InvestigationClaimExecutor = {
       async execute(claim, signal) {

@@ -576,9 +576,30 @@ commit is inferred.
 
 ## Bind saved plans to trusted executable steps
 
+Saved Issue reproduction and verification plans can run without a deployment registry entry.
+For `reproduction-setup` and `issue-verify`, the Server automatically binds each saved step to an
+`agent-verify` operation when the Task has an explicitly selected `source_commit` or retained
+`local_patch`, the plan has no outstanding prerequisites, every step has distinct validation
+check IDs, and no step contains a recipe. The Worker uses the existing controlled build, test,
+application, and desktop tools to execute the saved requirements against a fresh task workspace.
+This path supports any module that those tools can exercise; it does not require a module recipe.
+Unsupported runtime requirements remain blocked with their actual observations.
+
+An Issue snapshot plan still requires the operator to choose its full source commit SHA before
+execution. Patch verification uses the verification plan saved for that exact patch by its
+producing report. It retains the original patch digest, artifact, and base revision instead of
+rebinding an older plan to another subject. If an Issue assessment names a saved reproduction or
+verification plan but omits an action, the action context derives a preparation entry from that
+saved reference. A fix report also exposes its own saved verification plans for an available
+patch produced by that report, while its primary assessment remains bound to the original source.
+The original report remains unchanged. Repository execution permission and
+the normal action preview and confirmation still apply.
+
 `INVESTIGATION_EXECUTION_BINDINGS_PATH` references a deployment-owned JSON array. Each entry binds
 an exact repository and saved `planRef`, or a complete `profileRef` plus `planKind`, to fixed
-operations. A reference includes `id`, `version`, and `digest`. For example:
+operations. Explicit matching entries take precedence over automatic Issue and PR recipe bindings;
+multiple matching entries remain an error. A reference includes `id`, `version`, and `digest`.
+For example:
 
 ```json
 [

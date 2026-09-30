@@ -8,6 +8,16 @@ deadline correction changed tests only. See the [current CI workflow](../.github
 for the active gates. That prior result does not establish passing verification for subsequent
 implementation changes described here.
 
+- **Native Issue reproduction and patch verification:** saved reproduction and verification
+  plans can bind controlled agent steps without an execution registry entry for every plan.
+  The operator selects an exact source commit; generated-patch verification uses a saved plan
+  for the exact retained patch. Each check keeps its own tool observations and outcome,
+  including mixed results. Headless checks use executed-test logs; visible behavior requires
+  matching UI evidence. Each Task gets a separate source workspace and fresh build. Explicit
+  execution mappings take precedence and genuine external prerequisites remain required.
+  This capability does not change the current temporary assignment intake into Code Review
+  request intake. See the [Issue execution instructions](../apps/server/README.md#bind-saved-plans-to-trusted-executable-steps).
+
 - **Saved PR verification recipes (`6f0693e`):** a report's exact saved verification plan can
   expose **Verify PR** without a model-authored next-action suggestion. Preview and confirmation
   create a linked `pr-verify` Task against the original PR revision. Supported structured

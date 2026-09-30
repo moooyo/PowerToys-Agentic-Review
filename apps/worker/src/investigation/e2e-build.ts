@@ -17,7 +17,7 @@ import {
   type ProcessLaunchSpec,
   type ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
-import type { PreparedInvestigationWorkspace } from "./workspace.js";
+import type { InvestigationSourceBinding, PreparedInvestigationWorkspace } from "./workspace.js";
 
 export interface E2eMsbuildToolchain {
   readonly vcToolsVersion: string;
@@ -48,6 +48,11 @@ export function parseE2eMsbuildToolchain(value: unknown): E2eMsbuildToolchain {
   });
 }
 
+export type E2eBuildSourceBinding = Pick<
+  InvestigationSourceBinding,
+  "subjectRef" | "revisionKey" | "sourceSha" | "patchDigest" | "artifactRef"
+>;
+
 export interface E2eBuildInvocation {
   /** Verified build driver identity (MSBuild/dotnet), not an observed cl.exe version. */
   readonly compilerExecutable: string;
@@ -56,6 +61,7 @@ export interface E2eBuildInvocation {
   readonly projectPath: string;
   readonly projectDigest: string;
   readonly headSha: string;
+  readonly sourceBinding?: E2eBuildSourceBinding;
   readonly configuration: E2eBuildRequest["configuration"];
   readonly platform: E2eBuildRequest["platform"] | null;
   readonly command: readonly string[];
@@ -120,6 +126,7 @@ export interface E2eBuildArtifact {
 export interface E2eBuildRecord {
   readonly id: string;
   readonly headSha: string;
+  readonly sourceBinding?: E2eBuildSourceBinding;
   readonly projectPath: string;
   readonly projectDigest: string;
   readonly tool: E2eBuildRequest["tool"];
@@ -389,7 +396,7 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
       await lstat(nativeOutput);
       throw failure(
         "E2E_BUILD_SOURCE_INVALID",
-        "Repository build output must be absent after clean; existing or tracked output cannot be adopted.",
+        "Repository build output must be absent before compilation; existing or tracked output cannot be adopted.",
       );
     } catch (error) {
       if (!hasCode(error, "ENOENT")) throw error;
@@ -412,6 +419,7 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
     projectPath: request.projectPath,
     projectDigest: source.projectDigest,
     headSha: source.headSha,
+    sourceBinding: source.sourceBinding,
     configuration: request.configuration,
     platform: request.platform ?? null,
     command: Object.freeze([executable, ...args]),
@@ -426,7 +434,7 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
     limits: { ...input.limits },
   };
   assertValidProcessLaunchSpec(spec);
-  await assertSourceUnchanged(input, source.headSha, request.projectPath, source.projectDigest);
+  await assertSourceUnchanged(input, source);
   input.signal.throwIfAborted();
   const startedAtNs = await writeClockMarker(directory, "started");
   let result: Awaited<ReturnType<E2eBuildInput["run"]>>;
@@ -438,14 +446,14 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
   }
   input.signal.throwIfAborted();
   const completedAtNs = await writeClockMarker(directory, "completed");
-  await assertSourceUnchanged(input, source.headSha, request.projectPath, source.projectDigest);
+  await assertSourceUnchanged(input, source);
   if (result.exitCode !== 0) throw describeE2eBuildFailure(result, invocation);
   if (completedAtNs < startedAtNs)
     throw failure("E2E_BUILD_ARTIFACT_INVALID", "The build filesystem clock moved backwards.");
   await assertDirectoryIdentities(directoryIdentities);
   if (nativeOutput !== undefined) {
     await readOutputTree(nativeOutput);
-    await assertSourceUnchanged(input, source.headSha, request.projectPath, source.projectDigest);
+    await assertSourceUnchanged(input, source);
     // Both absolute paths are resolved descendants of this attempt's verified source/control roots.
     if (!within(source.sourceDirectory, nativeOutput) || !within(buildRoot, outputDirectory))
       throw failure(
@@ -453,7 +461,7 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
         "The repository output seal escaped its owned workspace.",
       );
     await rename(nativeOutput, outputDirectory);
-    await assertSourceUnchanged(input, source.headSha, request.projectPath, source.projectDigest);
+    await assertSourceUnchanged(input, source);
     for (const [path, identity] of await directoryChain(outputDirectory))
       directoryIdentities.set(path, identity);
   }
@@ -508,6 +516,7 @@ export async function performE2eBuild(input: E2eBuildInput): Promise<E2eBuildRec
   const fields = {
     id: input.id,
     headSha: source.headSha,
+    sourceBinding: source.sourceBinding,
     projectPath: request.projectPath,
     projectDigest: source.projectDigest,
     tool: request.tool,
@@ -799,8 +808,9 @@ async function readPinnedProject(input: E2eBuildInput, projectPath: string) {
     if (
       sourceDirectory === null ||
       sourceBinding === null ||
-      sourceBinding.patchDigest !== null ||
-      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(sourceBinding.sourceSha)
+      (sourceBinding.patchDigest !== null &&
+        !/^[a-f0-9]{64}(?![\s\S])/u.test(sourceBinding.patchDigest)) ||
+      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})(?![\s\S])/u.test(sourceBinding.sourceSha)
     )
       throw new Error("Unpinned source.");
     assertWindowsLocalAbsolutePath(sourceDirectory, "build source directory", false);
@@ -823,6 +833,13 @@ async function readPinnedProject(input: E2eBuildInput, projectPath: string) {
       sourceDirectory,
       projectPath,
       headSha: sourceBinding.sourceSha,
+      sourceBinding: Object.freeze({
+        subjectRef: sourceBinding.subjectRef,
+        revisionKey: sourceBinding.revisionKey,
+        sourceSha: sourceBinding.sourceSha,
+        patchDigest: sourceBinding.patchDigest,
+        artifactRef: sourceBinding.artifactRef,
+      }),
       projectDigest: project.digest,
       absoluteProjectPath,
     };
@@ -849,12 +866,18 @@ async function readPinnedProject(input: E2eBuildInput, projectPath: string) {
 
 async function assertSourceUnchanged(
   input: E2eBuildInput,
-  headSha: string,
-  projectPath: string,
-  digest: string,
+  source: Awaited<ReturnType<typeof readPinnedProject>>,
 ): Promise<void> {
-  const observed = await readPinnedProject(input, projectPath);
-  if (observed.headSha !== headSha || observed.projectDigest !== digest)
+  const observed = await readPinnedProject(input, source.projectPath);
+  if (
+    !samePath(observed.sourceDirectory, source.sourceDirectory) ||
+    observed.projectDigest !== source.projectDigest ||
+    observed.sourceBinding.subjectRef !== source.sourceBinding.subjectRef ||
+    observed.sourceBinding.revisionKey !== source.sourceBinding.revisionKey ||
+    observed.sourceBinding.sourceSha !== source.sourceBinding.sourceSha ||
+    observed.sourceBinding.patchDigest !== source.sourceBinding.patchDigest ||
+    observed.sourceBinding.artifactRef !== source.sourceBinding.artifactRef
+  )
     throw failure(
       "E2E_BUILD_SOURCE_INVALID",
       "The pinned source revision changed during the build.",
@@ -876,7 +899,7 @@ async function cleanBuildInputs(
     );
   }
   try {
-    await assertSourceUnchanged(input, source.headSha, source.projectPath, source.projectDigest);
+    await assertSourceUnchanged(input, source);
     const checkoutDirectories = boundBuildCheckoutDirectories(input, source.sourceDirectory);
     // Capture every checkout before any cleanup can replace a later dependency's directory.
     const sourceDirectories = new Map<string, BigIntStats>();
@@ -915,6 +938,12 @@ async function cleanBuildInputs(
       LANG: "C",
     };
     for (const checkoutDirectory of checkoutDirectories) {
+      // Patch additions are untracked; retain this freshly materialized root and rebuild it.
+      if (
+        source.sourceBinding.patchDigest !== null &&
+        samePath(checkoutDirectory, source.sourceDirectory)
+      )
+        continue;
       const spec: ProcessLaunchSpec = {
         executable: input.gitExecutablePath,
         arguments: [
@@ -954,13 +983,13 @@ async function cleanBuildInputs(
         limits: { ...input.limits },
       };
       assertValidProcessLaunchSpec(spec);
-      await assertSourceUnchanged(input, source.headSha, source.projectPath, source.projectDigest);
+      await assertSourceUnchanged(input, source);
       await assertDirectoryIdentities(sourceDirectories);
       input.signal.throwIfAborted();
       const result = await input.run(spec, input.signal);
       input.signal.throwIfAborted();
       await assertDirectoryIdentities(sourceDirectories);
-      await assertSourceUnchanged(input, source.headSha, source.projectPath, source.projectDigest);
+      await assertSourceUnchanged(input, source);
       if (result.exitCode !== 0) throw new Error("The owned source cleanup failed.");
     }
   } catch {
@@ -1580,6 +1609,7 @@ function buildIdentity(record: Omit<E2eBuildRecord, "identity">): string {
       schemaVersion: "InvestigationE2eBuildV1",
       id: record.id,
       headSha: record.headSha,
+      ...(record.sourceBinding === undefined ? {} : { sourceBinding: record.sourceBinding }),
       projectPath: record.projectPath,
       projectDigest: record.projectDigest,
       tool: record.tool,

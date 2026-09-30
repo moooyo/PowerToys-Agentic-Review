@@ -968,7 +968,164 @@ function recipePlanFixture() {
   };
 }
 
+function issueAgentPlanFixture(
+  taskKind: "issue-verify" | "reproduction-setup" = "issue-verify",
+  sourceKind: "source_commit" | "local_patch" = "source_commit",
+) {
+  const fixture = planFixture();
+  const { task, plan } = fixture;
+  task.kind = taskKind;
+  task.workItem.kind = "issue";
+  task.repository.fullName = "fixture/PowerToys";
+  const base = {
+    id: sourceKind === "local_patch" ? "issue-source-base" : task.subjectRef,
+    kind: "source_commit" as const,
+    repositoryId: task.repository.id,
+    workItemId: task.workItem.id,
+    revisionKey: "7".repeat(64),
+    commitSha: "8".repeat(40),
+  };
+  task.subjects =
+    sourceKind === "source_commit"
+      ? [base]
+      : [
+          base,
+          {
+            id: task.subjectRef,
+            kind: "local_patch",
+            repositoryId: task.repository.id,
+            workItemId: task.workItem.id,
+            revisionKey: "9".repeat(64),
+            baseSubjectRef: base.id,
+            baseSha: base.commitSha,
+            patchDigest: "a".repeat(64),
+            artifactRef: "issue-patch-artifact",
+          },
+        ];
+  plan.kind = taskKind === "issue-verify" ? "verification" : "reproduction";
+  plan.prerequisites = [];
+  plan.steps = [
+    {
+      id: "module-reported-behavior",
+      description: "Build and exercise the reported FancyZones behavior in the actual product.",
+      expectedObservation:
+        "The observed result is recorded with the exact source and runtime evidence.",
+      checkIds: ["reported-behavior", "existing-regression-test"],
+    },
+    {
+      id: "module-state-afterward",
+      description: "Inspect the actual product state after exercising the reported behavior.",
+      expectedObservation: "The state matches the saved acceptance criteria.",
+      checkIds: ["state-afterward"],
+    },
+  ];
+  const { digest: _digest, state: _state, sourceReportRef: _sourceReportRef, ...content } = plan;
+  plan.digest = createCanonicalResult(content).sha256;
+  task.planRef = { id: plan.id, version: plan.version, digest: plan.digest };
+  fixture.binding.planRef = task.planRef;
+  fixture.binding.planKind = plan.kind;
+  fixture.binding.satisfiedPrerequisiteRefs = [];
+  fixture.binding.steps = plan.steps.map((step) => ({
+    stepId: step.id,
+    operation: {
+      kind: "command",
+      executableId: "trusted-test-runner",
+      arguments: ["--fixed-scenario"],
+      workingDirectory: ".",
+      expectedExitCode: 0,
+    },
+  }));
+  return fixture;
+}
+
 describe("trusted plan execution registry", () => {
+  it.each([
+    ["issue-verify", "source_commit"],
+    ["reproduction-setup", "source_commit"],
+    ["issue-verify", "local_patch"],
+    ["reproduction-setup", "local_patch"],
+  ] as const)("derives generic %s operations on %s without a registry", (taskKind, sourceKind) => {
+    const { task, plan, actor } = issueAgentPlanFixture(taskKind, sourceKind);
+    const original = structuredClone(plan);
+    const binding = bindInvestigationPlanExecution(task, plan, actor, []);
+    const subject = task.subjects.find((entry) => entry.id === task.subjectRef)!;
+    expect(binding).toMatchObject({
+      planRef: task.planRef,
+      subjectRef: subject.id,
+      subjectRevisionKey: subject.revisionKey,
+      authorizationRef: actor.id,
+      executionPolicyDigest: createCanonicalResult(task.executionPolicy).sha256,
+      satisfiedPrerequisiteRefs: [],
+    });
+    expect(binding?.steps).toEqual(
+      plan.steps.map((step) => {
+        const operation = { kind: "agent-verify" };
+        return {
+          stepId: step.id,
+          operation,
+          digest: createCanonicalResult({ stepId: step.id, operation }).sha256,
+        };
+      }),
+    );
+    expect(plan).toEqual(original);
+  });
+
+  it("preserves explicit Issue operations and rejects ambiguous registrations", () => {
+    const { task, plan, actor, binding } = issueAgentPlanFixture();
+    expect(bindInvestigationPlanExecution(task, plan, actor, [binding])?.steps).toEqual(
+      binding.steps.map((step) => ({ ...step, digest: createCanonicalResult(step).sha256 })),
+    );
+    expect(() => bindInvestigationPlanExecution(task, plan, actor, [binding, binding])).toThrow(
+      expect.objectContaining({ code: "execution_binding_ambiguous" }),
+    );
+  });
+
+  it.each([
+    "task kind",
+    "work item kind",
+    "snapshot source",
+    "wrong plan kind",
+    "prerequisite",
+    "empty checks",
+    "duplicate checks",
+    "recipe step",
+  ])("does not infer Issue agent operations with an unsupported %s", (change) => {
+    const { task, plan, actor } = issueAgentPlanFixture();
+    if (change === "task kind") task.kind = "issue-fix";
+    if (change === "work item kind") task.workItem.kind = "pull_request";
+    if (change === "snapshot source")
+      task.subjects = [
+        {
+          id: task.subjectRef,
+          kind: "issue_snapshot",
+          repositoryId: task.repository.id,
+          workItemId: task.workItem.id,
+          revisionKey: "b".repeat(64),
+          snapshotDigest: "c".repeat(64),
+        },
+      ];
+    if (change === "wrong plan kind") plan.kind = "fix";
+    if (change === "prerequisite")
+      plan.prerequisites.push({
+        id: "required-diagnostics",
+        kind: "information",
+        description: "The reporter must supply a diagnostic file.",
+      });
+    if (change === "empty checks") plan.steps[1]!.checkIds = [];
+    if (change === "duplicate checks") plan.steps[1]!.checkIds = [plan.steps[0]!.checkIds[0]!];
+    if (change === "recipe step") plan.steps[0]!.recipe = recipePlanFixture().plan.steps[0]!.recipe;
+    expect(() => bindInvestigationPlanExecution(task, plan, actor, [])).toThrow(
+      expect.objectContaining({ code: "execution_binding_missing" }),
+    );
+  });
+
+  it("requires operator execution authority before deriving Issue agent operations", () => {
+    const { task, plan, actor } = issueAgentPlanFixture();
+    expect(() =>
+      bindInvestigationPlanExecution(task, plan, { ...actor, allowRepositoryExecution: false }, []),
+    ).toThrow(expect.objectContaining({ code: "execution_not_authorized" }));
+  });
+
   it("derives recipe operations from the complete saved plan without a deployment registry", () => {
     const { task, plan, actor } = recipePlanFixture();
     const original = structuredClone(plan);

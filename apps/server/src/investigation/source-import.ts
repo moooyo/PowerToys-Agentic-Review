@@ -262,12 +262,42 @@ function resolveExecutionBindings(
   repository: InvestigationRepositoryRecord,
   profileRef: InvestigationTaskV1["profileRef"],
   taskKind: InvestigationTaskV1["kind"],
+  workItemKind: InvestigationTaskV1["workItem"]["kind"],
   subject: InvestigationSubjectV1 | undefined,
   plan: InvestigationPlanV1,
   registry: readonly InvestigationTrustedExecutionBinding[],
 ): readonly InvestigationTrustedExecutionBinding[] {
   const matches = matchingExecutionBindings(repository.id, profileRef, plan, registry);
   if (matches.length > 0) return matches;
+  const issuePlanKind =
+    taskKind === "issue-verify"
+      ? "verification"
+      : taskKind === "reproduction-setup"
+        ? "reproduction"
+        : null;
+  const checkIds = plan.steps.flatMap((step) => step.checkIds);
+  if (
+    workItemKind === "issue" &&
+    issuePlanKind !== null &&
+    (subject?.kind === "source_commit" || subject?.kind === "local_patch") &&
+    plan.kind === issuePlanKind &&
+    plan.prerequisites.length === 0 &&
+    plan.steps.length > 0 &&
+    plan.steps.every((step) => step.recipe === undefined && step.checkIds.length > 0) &&
+    new Set(checkIds).size === checkIds.length
+  )
+    return [
+      {
+        repositoryId: repository.id,
+        planRef: { id: plan.id, version: plan.version, digest: plan.digest },
+        planKind: issuePlanKind,
+        satisfiedPrerequisiteRefs: [],
+        steps: plan.steps.map((step) => ({
+          stepId: step.id,
+          operation: { kind: "agent-verify" as const },
+        })),
+      },
+    ];
   if (
     taskKind !== "pr-verify" ||
     subject?.kind !== "original_pr" ||
@@ -326,6 +356,7 @@ export function bindInvestigationPlanExecution(
     task.repository,
     task.profileRef,
     task.kind,
+    task.workItem.kind,
     task.subjects.find((entry) => entry.id === task.subjectRef),
     plan,
     registry,
@@ -444,6 +475,7 @@ export class InvestigationSourceImporter {
       repository,
       report.context.profileRef,
       workItem.kind === "pull_request" ? "pr-verify" : "issue-verify",
+      workItem.kind,
       report.context.subjects.find((entry) => entry.id === plan.subjectRef),
       plan,
       this.#registry,

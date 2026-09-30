@@ -35,6 +35,7 @@ import {
   type ProcessHostClient,
   type ProcessResourceLimits,
 } from "../execution/process-host-protocol.js";
+import type { AgentVerificationPlanAdapter } from "./agent-verification-plan-adapter.js";
 import { ModelBudgetExceededError, type ModelInvocationBudget } from "./model-budget.js";
 import type {
   InvestigationRecipeObservation,
@@ -162,6 +163,7 @@ export interface ProductionInvestigationPlanExecutorOptions {
   readonly processRunner?: ManagedProcessRunner;
   readonly uiAdapters?: Readonly<Record<string, InvestigationUiPlanAdapter>>;
   readonly recipeAdapter?: InvestigationRecipePlanAdapter;
+  readonly agentVerificationAdapter?: AgentVerificationPlanAdapter;
   readonly modelEditAdapter?: InvestigationModelEditAdapter;
   readonly createId?: () => string;
   readonly now?: () => Date;
@@ -324,13 +326,16 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
               ),
               deadlineAtMs: context.invocationBudget.deadlineAtMs,
             };
-      if (executable.operation.kind === "model-edit") {
+      if (
+        executable.operation.kind === "model-edit" ||
+        executable.operation.kind === "agent-verify"
+      ) {
         if (invocationBudget !== undefined && invocationBudget.remainingTokens <= 0)
           throw new ModelBudgetExceededError("tokens");
         if (consumedTokens >= input.task.budget.maxTokens)
           return block(
             "PLAN_MODEL_TOKEN_BUDGET_EXCEEDED",
-            "The task has no model token budget remaining for this edit step.",
+            "The task has no model token budget remaining for this saved model step.",
           );
       }
       await input.workspace.assertIntegrity();
@@ -455,15 +460,28 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
         outcome: observation.outcome,
         validation: {
           checks:
-            observation.recipe?.checks ??
+            observation.recipe?.checks.map((check) =>
+              executable.operation.kind === "agent-verify" &&
+              check.status === "blocked" &&
+              check.executor === null
+                ? {
+                    ...check,
+                    executor: evidence.provenance.producer,
+                    evidenceRefs: [evidence.id],
+                    authoritativeAttemptId: input.attempt.id,
+                  }
+                : check,
+            ) ??
             step.checkIds.map((checkId, checkIndex) => ({
               id: checkId,
               scenarioId:
-                executable.operation.kind === "ui"
-                  ? executable.operation.scenarioId
-                  : executable.operation.kind === "recipe"
-                    ? executable.operation.recipe.checks[checkIndex]!.scenarioId
-                    : step.id,
+                executable.operation.kind === "agent-verify"
+                  ? checkId
+                  : executable.operation.kind === "ui"
+                    ? executable.operation.scenarioId
+                    : executable.operation.kind === "recipe"
+                      ? executable.operation.recipe.checks[checkIndex]!.scenarioId
+                      : step.id,
               subjectRef: observedSubjectRef,
               planRef: execution.planRef,
               required: true,
@@ -502,7 +520,7 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
             : [],
         ...(observation.modelUsage === undefined ? {} : { modelUsage: observation.modelUsage }),
       };
-      if (executable.operation.kind === "recipe") {
+      if (executable.operation.kind === "recipe" || executable.operation.kind === "agent-verify") {
         const problem = validatePriorState(
           {
             ...input,
@@ -514,8 +532,12 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
           execution,
           plan,
         );
-        if (problem !== null) throw new Error(problem);
+        if (problem !== null) {
+          await observation.markUsageDisposition?.("rejected");
+          throw new Error(problem);
+        }
       }
+      await observation.markUsageDisposition?.("accepted");
       await context.onStepCompleted(structuredClone(event));
       state.completedSteps.push(event);
       if (event.outcome !== "completed") return result(event.outcome);
@@ -578,8 +600,99 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
     readonly modelUsage?: { readonly tokens: number; readonly durationMs: number };
     readonly artifacts?: readonly InvestigationUiArtifact[];
     readonly recipe?: InvestigationRecipeObservation;
+    readonly markUsageDisposition?: (disposition: "accepted" | "rejected") => Promise<void>;
   }> {
     const operation = step.operation;
+    if (operation.kind === "agent-verify") {
+      const adapter = this.options.agentVerificationAdapter;
+      if (adapter === undefined || input.plan === null)
+        return {
+          status: "blocked",
+          outcome: "blocked",
+          summary: "The saved agent verification adapter is unavailable.",
+          diagnosticCode: "PLAN_AGENT_VERIFICATION_ADAPTER_UNAVAILABLE",
+          details: null,
+        };
+      const response = await adapter.execute(
+        {
+          task: input.task,
+          attempt: input.attempt,
+          plan: input.plan,
+          stepId: step.stepId,
+          workspace: input.workspace,
+        },
+        context,
+      );
+      context.signal.throwIfAborted();
+      const disposition = async (value: "accepted" | "rejected"): Promise<void> => {
+        if (response.usage.invocationId !== undefined)
+          await adapter.markUsageDisposition?.(response.usage.invocationId, value);
+      };
+      const blockUsage = (code: string, summary: string) => ({
+        status: "blocked" as const,
+        outcome: "blocked" as const,
+        diagnosticCode: code,
+        summary,
+        details: { usageSource: response.usage.source, observedSummary: response.summary },
+        recipe: {
+          summary,
+          checks: response.checks.map((check) => ({
+            ...check,
+            status: "blocked" as const,
+            executor: null,
+            evidenceRefs: [],
+            authoritativeAttemptId: null,
+          })),
+          evidence: response.evidence,
+          artifacts: response.artifacts,
+        },
+      });
+      if (
+        response.usage.source !== "cli" ||
+        response.usage.tokens === null ||
+        !Number.isSafeInteger(response.usage.tokens) ||
+        response.usage.tokens < 0 ||
+        !Number.isSafeInteger(response.durationMs) ||
+        response.durationMs < 0
+      ) {
+        await disposition("rejected");
+        return blockUsage(
+          "PLAN_MODEL_USAGE_UNAVAILABLE",
+          "The saved verification cannot be accepted because trusted model usage is unavailable.",
+        );
+      }
+      const modelUsage = { tokens: response.usage.tokens, durationMs: response.durationMs };
+      if (
+        (input.consumedTokens ?? 0) + modelUsage.tokens > input.task.budget.maxTokens ||
+        (context.invocationBudget !== undefined &&
+          modelUsage.tokens > context.invocationBudget.remainingTokens)
+      ) {
+        await disposition("rejected");
+        return {
+          ...blockUsage(
+            "PLAN_MODEL_TOKEN_BUDGET_EXCEEDED",
+            "The saved verification exceeded the remaining model token budget.",
+          ),
+          modelUsage,
+        };
+      }
+      const blocked = response.checks.some(
+        (check) => check.status === "blocked" || check.status === "not_run",
+      );
+      return {
+        status: blocked
+          ? "blocked"
+          : response.checks.some((check) => check.status === "failed")
+            ? "failed"
+            : "passed",
+        outcome: blocked ? "blocked" : "completed",
+        summary: response.summary,
+        details: { stepId: step.stepId },
+        recipe: response,
+        modelUsage,
+        markUsageDisposition: disposition,
+      };
+    }
     if (operation.kind === "recipe") {
       const adapter = this.options.recipeAdapter;
       if (adapter === undefined || input.plan === null)
@@ -945,6 +1058,17 @@ function validatePlanBinding(
   for (const [index, step] of execution.steps.entries()) {
     const saved = plan.steps[index]!;
     if (
+      step.operation.kind === "agent-verify" &&
+      (task.workItem.kind !== "issue" ||
+        !["issue-verify", "reproduction-setup"].includes(task.kind) ||
+        !["source_commit", "local_patch"].includes(subject.kind) ||
+        saved.checkIds.length === 0)
+    )
+      return reject(
+        "PLAN_AGENT_VERIFICATION_NOT_AUTHORIZED",
+        "Agent verification requires a saved Issue plan and an exact source commit or patch.",
+      );
+    if (
       (step.operation.kind === "recipe" &&
         (task.kind !== "pr-verify" ||
           subject.kind !== "original_pr" ||
@@ -1031,22 +1155,30 @@ function validatePriorState(
     const checks = plan.steps[index]?.checkIds ?? [];
     const operation = execution.steps[index]?.operation;
     const recipe = operation?.kind === "recipe" ? operation.recipe : undefined;
+    const agentVerification = operation?.kind === "agent-verify";
+    const toolVerification = recipe !== undefined || agentVerification;
     const scenarioId = operation?.kind === "ui" ? operation.scenarioId : event.stepId;
     const producer = `saved-plan:${operation?.kind}`;
     const editObservationOnly = operation?.kind === "model-edit" && event.outcome === "completed";
     if (
-      editObservationOnly &&
+      (editObservationOnly ||
+        (agentVerification &&
+          (event.outcome === "completed" ||
+            event.modelUsage !== undefined ||
+            event.validation.checks.some((check) => check.status !== "blocked")))) &&
       (event.modelUsage === undefined ||
         !Number.isSafeInteger(event.modelUsage.tokens) ||
         event.modelUsage.tokens < 0 ||
         !Number.isSafeInteger(event.modelUsage.durationMs) ||
         event.modelUsage.durationMs < 0)
     )
-      return "A prior model edit is missing its trusted model usage receipt.";
+      return agentVerification
+        ? "A prior agent verification is missing its trusted model usage receipt."
+        : "A prior model edit is missing its trusted model usage receipt.";
     const validStatus = (status: string): boolean =>
       editObservationOnly
         ? status === "not_run"
-        : recipe !== undefined && event.outcome === "blocked"
+        : toolVerification && event.outcome === "blocked"
           ? ["passed", "failed", "blocked"].includes(status)
           : event.outcome === "completed"
             ? status === "passed" || status === "failed"
@@ -1054,7 +1186,7 @@ function validatePriorState(
     if (
       event.validation.checks.length !== checks.length ||
       event.verificationEvidence.length === 0 ||
-      (recipe !== undefined &&
+      (toolVerification &&
         (event.outcome === "failed" ||
           (event.outcome === "blocked" &&
             !event.validation.checks.some((check) => check.status === "blocked")))) ||
@@ -1063,9 +1195,12 @@ function validatePriorState(
           check.id !== checks[checkIndex] ||
           check.subjectRef !== observedSubjectRef ||
           !same(check.planRef, event.planRef) ||
-          check.scenarioId !== (recipe?.checks[checkIndex]?.scenarioId ?? scenarioId) ||
+          check.scenarioId !==
+            (agentVerification
+              ? check.id
+              : (recipe?.checks[checkIndex]?.scenarioId ?? scenarioId)) ||
           !check.required ||
-          (recipe === undefined
+          (!toolVerification
             ? check.executor !== (editObservationOnly ? null : producer)
             : check.executor !== "e2e-tool-server" &&
               !(check.status === "blocked" && check.executor === producer)) ||
@@ -1085,7 +1220,7 @@ function validatePriorState(
           !(
             (evidence.source === "executor_observation" &&
               evidence.provenance.producer === producer) ||
-            (recipe !== undefined &&
+            (toolVerification &&
               evidence.provenance.producer === "e2e-tool-server" &&
               ["executor_observation", "visual_observation"].includes(evidence.source))
           ) ||
@@ -1107,7 +1242,7 @@ function validatePriorState(
     )
       return "A prior completed step is missing authoritative observations or exact check and artifact bindings.";
     if (
-      recipe !== undefined &&
+      toolVerification &&
       event.validation.checks.some(
         (check) =>
           !check.evidenceRefs.every((ref) =>
@@ -1120,7 +1255,20 @@ function validatePriorState(
           ),
       )
     )
-      return "A saved recipe check must retain its own authoritative executor observation.";
+      return agentVerification
+        ? "A saved agent verification check must retain its own authoritative executor observation."
+        : "A saved recipe check must retain its own authoritative executor observation.";
+    if (agentVerification) {
+      const claimedReceipts = new Set<string>();
+      for (const check of event.validation.checks) {
+        if (check.executor !== "e2e-tool-server") continue;
+        for (const ref of check.evidenceRefs) {
+          if (claimedReceipts.has(ref))
+            return "Distinct saved agent checks cannot share one executor assertion receipt.";
+          claimedReceipts.add(ref);
+        }
+      }
+    }
   }
   if (state.startedSteps.some((event) => !seenCompleted.has(event.stepId)))
     return "A previous step may have executed before interruption; its effects require reconciliation before resuming.";

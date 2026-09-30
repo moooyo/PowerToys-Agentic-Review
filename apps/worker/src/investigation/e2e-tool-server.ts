@@ -10,6 +10,7 @@ import type {
   InvestigationTaskV1,
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
+import { Value } from "@sinclair/typebox/value";
 import {
   ManagedProcessRunError,
   ProductionManagedProcessRunner,
@@ -40,7 +41,11 @@ import {
   parseE2eDesktopRequest,
   parseE2eDesktopResult,
 } from "./e2e-desktop-driver.js";
-import { type E2eFeaturePlan, parseE2eFeaturePlan } from "./e2e-feature-plan.js";
+import {
+  type E2eFeaturePlan,
+  E2eFeaturePlanSchema,
+  parseE2eFeaturePlan,
+} from "./e2e-feature-plan.js";
 import { prepareE2eRecipe, runE2eRecipe } from "./e2e-recipes.js";
 import type { ModelActivityObservation } from "./model-progress.js";
 import type { PreparedInvestigationWorkspace } from "./workspace.js";
@@ -78,6 +83,8 @@ export interface E2eToolServerOptions {
   readonly ffmpegExecutablePath?: string;
   readonly desktopDriverPath?: string;
   readonly changedPaths: readonly string[];
+  /** Issue verification registers paths from its pinned source rather than a PR diff. */
+  readonly sourcePathMode?: "source";
   readonly buildTools?: Readonly<Partial<Record<"msbuild" | "dotnet", string>>>;
   readonly buildToolDigests?: Readonly<Partial<Record<"msbuild" | "dotnet", string>>>;
   readonly msbuildToolchain?: E2eMsbuildToolchain;
@@ -309,7 +316,11 @@ export class E2eToolServer {
             ? "passed"
             : "blocked";
       } else if (operation === "register-feature") {
-        const feature = parseE2eFeaturePlan(input.feature, this.options.changedPaths);
+        const paths =
+          this.options.sourcePathMode === "source"
+            ? await this.#verifiedFeaturePaths(input.feature)
+            : this.options.changedPaths;
+        const feature = parseE2eFeaturePlan(input.feature, paths);
         const previous = this.#features.get(feature.id);
         if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(feature))
           throw new Error(
@@ -881,6 +892,42 @@ export class E2eToolServer {
     if (feature === undefined)
       throw new Error("Register the feature and its assertion specifications before execution.");
     return feature;
+  }
+
+  async #verifiedFeaturePaths(value: unknown): Promise<readonly string[]> {
+    if (!Value.Check(E2eFeaturePlanSchema, value))
+      throw new Error("The Issue feature must declare complete source paths and assertions.");
+    const subject = this.options.task.subjects.find(
+      (entry) => entry.id === this.options.task.subjectRef,
+    );
+    if (
+      this.options.task.workItem.kind !== "issue" ||
+      !["issue-verify", "reproduction-setup"].includes(this.options.task.kind) ||
+      (subject?.kind !== "source_commit" && subject?.kind !== "local_patch") ||
+      this.options.task.executionPolicy.mode !== "execute" ||
+      !this.options.task.executionPolicy.allowRepositoryExecution ||
+      this.options.task.executionPolicy.authorizationRef === null ||
+      !this.options.task.executionPolicy.allowedSubjectRefs.includes(subject.id)
+    )
+      throw new Error("Source-path feature registration requires authorized Issue verification.");
+    await this.options.workspace.assertSourceBinding();
+    for (const path of value.paths) {
+      if (
+        path.includes("\\") ||
+        path.includes(":") ||
+        path
+          .split("/")
+          .some(
+            (part) => part === "" || part === "." || part === ".." || part.toLowerCase() === ".git",
+          )
+      )
+        throw new Error("Issue feature paths must be exact repository-relative source files.");
+      const file = await this.options.workspace.readSourceFile(path);
+      if (file.path !== path || file.content === null || file.digest === null)
+        throw new Error("An Issue feature path is unavailable in the selected source.");
+    }
+    await this.options.workspace.assertSourceBinding();
+    return value.paths;
   }
   #build(ref: unknown): E2eBuildRecord {
     const build = this.#builds.get(string(ref, "buildRef"));

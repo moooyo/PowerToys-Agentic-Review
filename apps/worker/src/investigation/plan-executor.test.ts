@@ -16,6 +16,10 @@ import {
   type ManagedProcessRunner,
 } from "../execution/managed-process-runner.js";
 import type { ProcessHostClient } from "../execution/process-host-protocol.js";
+import type {
+  AgentVerificationObservation,
+  AgentVerificationPlanAdapter,
+} from "./agent-verification-plan-adapter.js";
 import { ModelBudgetExceededError } from "./model-budget.js";
 import {
   digestInvestigationExecutableStep,
@@ -394,6 +398,56 @@ function recipeFixture(
     recipeAdapter: { execute: executeRecipe },
   });
   return { ...f, executor, recipe, observation, executeRecipe };
+}
+
+function agentVerificationFixture(
+  statuses: InvestigationValidation["checks"][number]["status"][] = ["passed", "passed"],
+  kind: "issue-verify" | "reproduction-setup" = "issue-verify",
+) {
+  const f = recipeFixture(statuses);
+  const subject = f.task.subjects[0]!;
+  f.task.kind = kind;
+  f.task.workItem.kind = "issue";
+  f.task.subjects = [
+    {
+      id: subject.id,
+      repositoryId: f.task.repository.id,
+      workItemId: f.task.workItem.id,
+      kind: "source_commit",
+      revisionKey: subject.revisionKey,
+      commitSha: "b".repeat(40),
+    },
+  ];
+  f.plan.kind = kind === "issue-verify" ? "verification" : "reproduction";
+  delete f.plan.steps[0]!.recipe;
+  f.plan.steps[0]!.checkIds = statuses.map((_, index) => `agent-check-${index}`);
+  freezePlan(f);
+  const operation = { kind: "agent-verify" as const };
+  const stepId = f.plan.steps[0]!.id;
+  f.execution.steps[0] = {
+    stepId,
+    operation,
+    digest: digestInvestigationExecutableStep({ stepId, operation }),
+  };
+  const observation: AgentVerificationObservation = {
+    ...f.observation,
+    checks: f.observation.checks.map((check, index) => ({
+      ...check,
+      id: f.plan.steps[0]!.checkIds[index]!,
+      scenarioId: f.plan.steps[0]!.checkIds[index]!,
+      planRef: f.task.planRef,
+    })),
+    usage: { tokens: 120, source: "cli", invocationId: "agent-invocation" },
+    durationMs: 42,
+  };
+  const executeAgent = vi.fn<AgentVerificationPlanAdapter["execute"]>(async () => observation);
+  const markUsageDisposition = vi.fn(async () => undefined);
+  const executor = new ProductionInvestigationPlanExecutor({
+    processLimits: limits,
+    processRunner: { run: f.run },
+    agentVerificationAdapter: { execute: executeAgent, markUsageDisposition },
+  });
+  return { ...f, executor, observation, executeAgent, markUsageDisposition };
 }
 
 describe("ProductionInvestigationPlanExecutor", () => {
@@ -873,6 +927,332 @@ describe("ProductionInvestigationPlanExecutor", () => {
       scenarioId: "saved-ui-scenario",
     });
     expect(f.run).not.toHaveBeenCalled();
+  });
+
+  describe("saved agent verification steps", () => {
+    it.each(["issue-verify", "reproduction-setup"] as const)(
+      "executes %s with separate authoritative results for each saved check",
+      async (kind) => {
+        const f = agentVerificationFixture(["failed", "passed"], kind);
+        const invocationBudget = { remainingTokens: 200, deadlineAtMs: Date.now() + 10_000 };
+        const usageLease = { attemptId: f.input.attempt.id, fence: 1, leaseToken: "lease" };
+        const onRuntimeObservation = vi.fn(async () => undefined);
+        const onProgress = vi.fn();
+        f.executeAgent.mockImplementation(async () => {
+          expect(f.started).toHaveLength(1);
+          expect(f.completed).toHaveLength(0);
+          return f.observation;
+        });
+        const result = await f.executor.execute(f.input, {
+          ...f.context,
+          invocationBudget,
+          usageLease,
+          onRuntimeObservation,
+          onProgress,
+        });
+        expect(result.outcome).toBe("completed");
+        expect(result.validation.checks).toEqual(f.observation.checks);
+        expect(result.validation.checks.map((check) => check.evidenceRefs)).toEqual([
+          ["assertion-0"],
+          ["assertion-1"],
+        ]);
+        expect(f.executeAgent).toHaveBeenCalledExactlyOnceWith(
+          {
+            task: f.task,
+            attempt: f.input.attempt,
+            plan: f.plan,
+            stepId: f.plan.steps[0]!.id,
+            workspace: f.workspace,
+          },
+          expect.objectContaining({
+            processHost: f.processHost,
+            invocationBudget,
+            usageLease,
+            onRuntimeObservation,
+            onProgress,
+          }),
+        );
+        expect(f.completed[0]?.modelUsage).toEqual({ tokens: 120, durationMs: 42 });
+        expect(f.markUsageDisposition).toHaveBeenCalledExactlyOnceWith(
+          "agent-invocation",
+          "accepted",
+        );
+        expect(f.run).not.toHaveBeenCalled();
+      },
+    );
+
+    it("preserves observed results while recording an unexecuted check as blocked", async () => {
+      const f = agentVerificationFixture(["passed", "blocked"]);
+      const pending = f.observation.checks[1]!;
+      pending.executor = null;
+      pending.evidenceRefs = [];
+      pending.authoritativeAttemptId = null;
+      const result = await f.executor.execute(f.input, f.context);
+      expect(result.outcome).toBe("blocked");
+      expect(result.validation.checks.map((check) => check.status)).toEqual(["passed", "blocked"]);
+      expect(result.validation.checks[0]).toEqual(f.observation.checks[0]);
+      expect(result.validation.checks[1]).toMatchObject({
+        executor: "saved-plan:agent-verify",
+        authoritativeAttemptId: f.input.attempt.id,
+        evidenceRefs: [expect.any(String)],
+      });
+      f.executeAgent.mockClear();
+      const resumed = await f.executor.execute({ ...f.input, priorState: result.state }, f.context);
+      expect(resumed.validation.checks).toEqual(result.validation.checks);
+      expect(resumed.diagnostics.some((entry) => entry.code === "PLAN_RESUME_UNSAFE")).toBe(false);
+      expect(f.executeAgent).not.toHaveBeenCalled();
+    });
+
+    it("accepts headless checks with actual executor logs without visual artifacts", async () => {
+      const f = agentVerificationFixture();
+      f.executeAgent.mockResolvedValueOnce({
+        ...f.observation,
+        evidence: f.observation.evidence.filter((entry) => entry.source === "executor_observation"),
+        artifacts: f.observation.artifacts.filter((entry) => entry.id.startsWith("assertion-")),
+      });
+      const result = await f.executor.execute(f.input, f.context);
+      expect(result.outcome).toBe("completed");
+      expect(result.validation.checks).toEqual(f.observation.checks);
+      expect(result.artifacts.every((entry) => entry.kind === "log")).toBe(true);
+    });
+
+    it("retains the original attempt's evidence without replaying completed verification", async () => {
+      const f = agentVerificationFixture();
+      const first = await f.executor.execute(f.input, f.context);
+      f.executeAgent.mockClear();
+      const resumed = await f.executor.execute(
+        {
+          ...f.input,
+          attempt: { ...f.input.attempt, id: "next-agent-attempt", number: 2 },
+          priorState: first.state,
+        },
+        f.context,
+      );
+      expect(resumed.outcome).toBe("completed");
+      expect(resumed.validation.checks).toEqual(first.validation.checks);
+      expect(resumed.verificationEvidence).toEqual(first.verificationEvidence);
+      expect(f.executeAgent).not.toHaveBeenCalled();
+    });
+
+    it("does not replay an interrupted step with no completed observation", async () => {
+      const f = agentVerificationFixture();
+      const first = await f.executor.execute(f.input, f.context);
+      f.executeAgent.mockClear();
+      const result = await f.executor.execute(
+        { ...f.input, priorState: { startedSteps: first.state.startedSteps, completedSteps: [] } },
+        f.context,
+      );
+      expect(result.diagnostics[0]?.code).toBe("PLAN_RESUME_UNSAFE");
+      expect(f.executeAgent).not.toHaveBeenCalled();
+    });
+
+    it.each(["check", "scenario", "subject", "attempt", "missing-receipt"])(
+      "rejects an adapter result with an invalid %s binding",
+      async (kind) => {
+        const f = agentVerificationFixture();
+        const check = f.observation.checks[0]!;
+        if (kind === "check") check.id = "another-check";
+        if (kind === "scenario") check.scenarioId = "another-scenario";
+        if (kind === "subject") check.subjectRef = "another-subject";
+        if (kind === "attempt") check.authoritativeAttemptId = "another-attempt";
+        if (kind === "missing-receipt") check.evidenceRefs = [];
+        await expect(f.executor.execute(f.input, f.context)).rejects.toThrow(
+          "A prior completed step is missing authoritative observations or exact check and artifact bindings.",
+        );
+        expect(f.completed).toHaveLength(0);
+        expect(f.markUsageDisposition).toHaveBeenCalledExactlyOnceWith(
+          "agent-invocation",
+          "rejected",
+        );
+      },
+    );
+
+    it("does not copy one assertion receipt into multiple saved checks", async () => {
+      const f = agentVerificationFixture();
+      f.observation.checks[1]!.evidenceRefs = ["assertion-0"];
+      await expect(f.executor.execute(f.input, f.context)).rejects.toThrow(
+        "Distinct saved agent checks cannot share one executor assertion receipt.",
+      );
+      expect(f.completed).toHaveLength(0);
+      expect(f.markUsageDisposition).toHaveBeenCalledExactlyOnceWith(
+        "agent-invocation",
+        "rejected",
+      );
+    });
+
+    it.each(["scenario", "usage", "evidence-attempt", "artifact-subject", "visual-receipt"])(
+      "rejects persisted verification with an invalid %s observation",
+      async (kind) => {
+        const f = agentVerificationFixture();
+        const first = await f.executor.execute(f.input, f.context);
+        const prior = structuredClone(first.state);
+        const completed = prior.completedSteps[0]!;
+        if (kind === "scenario") completed.validation.checks[0]!.scenarioId = "another-check";
+        if (kind === "usage") delete completed.modelUsage;
+        if (kind === "evidence-attempt")
+          completed.verificationEvidence[0]!.provenance.attemptId = "another-attempt";
+        if (kind === "artifact-subject") completed.artifacts[1]!.subjectRef = "another-subject";
+        if (kind === "visual-receipt")
+          completed.validation.checks[0]!.evidenceRefs = ["screenshot-0"];
+        f.executeAgent.mockClear();
+        const result = await f.executor.execute({ ...f.input, priorState: prior }, f.context);
+        expect(result.diagnostics[0]?.code).toBe("PLAN_RESUME_UNSAFE");
+        expect(f.executeAgent).not.toHaveBeenCalled();
+      },
+    );
+
+    it("does not claim passed checks when trusted model usage is unavailable", async () => {
+      const f = agentVerificationFixture();
+      f.executeAgent.mockResolvedValueOnce({
+        ...f.observation,
+        usage: { tokens: null, source: "unavailable", invocationId: "agent-invocation" },
+      });
+      const result = await f.executor.execute(f.input, f.context);
+      expect(result.outcome).toBe("blocked");
+      expect(result.validation.checks.map((check) => check.status)).toEqual(["blocked", "blocked"]);
+      expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_USAGE_UNAVAILABLE");
+      expect(f.completed[0]?.modelUsage).toBeUndefined();
+      expect(f.markUsageDisposition).toHaveBeenCalledExactlyOnceWith(
+        "agent-invocation",
+        "rejected",
+      );
+    });
+
+    it("rejects a blocked checkpoint that retains passed checks without trusted usage", async () => {
+      const f = agentVerificationFixture(["passed", "blocked"]);
+      const first = await f.executor.execute(f.input, f.context);
+      const prior = structuredClone(first.state);
+      delete prior.completedSteps[0]!.modelUsage;
+      f.executeAgent.mockClear();
+      const result = await f.executor.execute({ ...f.input, priorState: prior }, f.context);
+      expect(result.outcome).toBe("blocked");
+      expect(result.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "PLAN_RESUME_UNSAFE" }),
+      );
+      expect(f.executeAgent).not.toHaveBeenCalled();
+    });
+
+    it("charges trusted usage but blocks results that exceed the remaining allowance", async () => {
+      const f = agentVerificationFixture();
+      const result = await f.executor.execute(f.input, {
+        ...f.context,
+        invocationBudget: { remainingTokens: 100, deadlineAtMs: Date.now() + 10_000 },
+      });
+      expect(result.outcome).toBe("blocked");
+      expect(result.validation.checks.map((check) => check.status)).toEqual(["blocked", "blocked"]);
+      expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_TOKEN_BUDGET_EXCEEDED");
+      expect(f.completed[0]?.modelUsage).toEqual({ tokens: 120, durationMs: 42 });
+      expect(f.markUsageDisposition).toHaveBeenCalledExactlyOnceWith(
+        "agent-invocation",
+        "rejected",
+      );
+    });
+
+    it("does not invoke the adapter after the model budget is exhausted", async () => {
+      const f = agentVerificationFixture();
+      await expect(
+        f.executor.execute(f.input, {
+          ...f.context,
+          invocationBudget: { remainingTokens: 0, deadlineAtMs: Date.now() + 10_000 },
+        }),
+      ).rejects.toBeInstanceOf(ModelBudgetExceededError);
+      expect(f.executeAgent).not.toHaveBeenCalled();
+      expect(f.started).toHaveLength(0);
+    });
+
+    it("deducts completed verification usage before admitting the next saved step", async () => {
+      const f = agentVerificationFixture();
+      f.task.budget.maxTokens = 120;
+      const nextStep = { ...f.plan.steps[0]!, id: "next-step", checkIds: ["next-check"] };
+      f.plan.steps.push(nextStep);
+      freezePlan(f);
+      for (const check of f.observation.checks) check.planRef = f.task.planRef;
+      const operation = { kind: "agent-verify" as const };
+      f.execution.steps.push({
+        stepId: nextStep.id,
+        operation,
+        digest: digestInvestigationExecutableStep({ stepId: nextStep.id, operation }),
+      });
+      const result = await f.executor.execute(f.input, f.context);
+      expect(result.outcome).toBe("blocked");
+      expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_TOKEN_BUDGET_EXCEEDED");
+      expect(f.executeAgent).toHaveBeenCalledTimes(1);
+      expect(f.started).toHaveLength(1);
+      expect(f.completed[0]?.modelUsage?.tokens).toBe(120);
+    });
+
+    it("blocks when the generic adapter is unavailable", async () => {
+      const f = agentVerificationFixture();
+      const executor = new ProductionInvestigationPlanExecutor({ processLimits: limits });
+      const result = await executor.execute(f.input, f.context);
+      expect(result.diagnostics[0]?.code).toBe("PLAN_AGENT_VERIFICATION_ADAPTER_UNAVAILABLE");
+      expect(result.validation.checks.map((check) => check.status)).toEqual(["blocked", "blocked"]);
+    });
+
+    it("requires Issue execution rather than substituting for an explicit PR recipe", async () => {
+      const f = agentVerificationFixture();
+      f.task.kind = "pr-verify";
+      f.task.workItem.kind = "pull_request";
+      const result = await f.executor.execute(f.input, f.context);
+      expect(result.diagnostics[0]?.code).toBe("PLAN_AGENT_VERIFICATION_NOT_AUTHORIZED");
+      expect(f.executeAgent).not.toHaveBeenCalled();
+    });
+
+    it("verifies the exact saved local patch subject without applying or capturing new edits", async () => {
+      const f = agentVerificationFixture();
+      const source = f.task.subjects[0]!;
+      const patch = {
+        id: "saved-patch-subject",
+        repositoryId: source.repositoryId,
+        workItemId: source.workItemId,
+        kind: "local_patch" as const,
+        revisionKey: "7".repeat(64),
+        baseSubjectRef: source.id,
+        baseSha: "b".repeat(40),
+        patchDigest: "8".repeat(64),
+        artifactRef: "saved-patch-artifact",
+      };
+      f.task.subjects.push(patch);
+      f.task.subjectRef = patch.id;
+      f.task.executionPolicy.allowedSubjectRefs.push(patch.id);
+      f.plan.subjectRef = patch.id;
+      freezePlan(f);
+      f.execution.subjectRef = patch.id;
+      f.execution.subjectRevisionKey = patch.revisionKey;
+      f.execution.executionPolicyDigest = createCanonicalResult(f.task.executionPolicy).sha256;
+      for (const check of f.observation.checks) {
+        check.subjectRef = patch.id;
+        check.planRef = f.task.planRef;
+      }
+      for (const evidence of f.observation.evidence) evidence.subjectRef = patch.id;
+      for (const artifact of f.observation.artifacts) artifact.subjectRef = patch.id;
+      const workspace = {
+        ...f.workspace,
+        sourceBinding: {
+          subjectRef: patch.id,
+          revisionKey: patch.revisionKey,
+          sourceSha: patch.baseSha,
+          patchDigest: patch.patchDigest,
+          artifactRef: patch.artifactRef,
+        },
+      };
+      const result = await f.executor.execute({ ...f.input, workspace }, f.context);
+      expect(result.outcome).toBe("completed");
+      expect(result.validation.checks.every((check) => check.subjectRef === patch.id)).toBe(true);
+      expect(f.workspace.applyEdits).not.toHaveBeenCalled();
+      expect(f.workspace.capturePatch).not.toHaveBeenCalled();
+    });
+
+    it("retains an uncertain cleanup failure without completing or passing the step", async () => {
+      const f = agentVerificationFixture();
+      const fault = Object.assign(new Error("Agent cleanup was not confirmed."), {
+        code: "E2E_CLEANUP_UNCONFIRMED",
+      });
+      f.executeAgent.mockRejectedValueOnce(fault);
+      await expect(f.executor.execute(f.input, f.context)).rejects.toBe(fault);
+      expect(f.started).toHaveLength(1);
+      expect(f.completed).toHaveLength(0);
+    });
   });
 
   describe("saved recipe steps", () => {

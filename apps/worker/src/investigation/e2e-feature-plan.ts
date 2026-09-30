@@ -2,7 +2,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { E2eDesktopRequestSchema, parseE2eDesktopRequest } from "./e2e-desktop-driver.js";
 
-const id = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" });
+const id = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" });
 const text = Type.String({ minLength: 1, maxLength: 4096, pattern: "\\S" });
 export const E2eFeaturePlanSchema = Type.Object(
   {

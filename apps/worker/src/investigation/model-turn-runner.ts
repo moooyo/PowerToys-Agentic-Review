@@ -1243,6 +1243,12 @@ export async function readFrozenModelInput(
 }
 
 function recipePlanGuidance(task: InvestigationTaskV1): string[] {
+  if (task.workItem.kind === "issue")
+    return [
+      "For runtime reproduction or verification, save concrete reproduction or verification steps with distinct checkIds, expectedObservation, and acceptanceCriteria. The authorized Issue executor can inspect the selected source and use native build, existing-test, and UI tools for any relevant module; do not invent a recipe or include executable commands in the plan. Keep genuine external prerequisites explicit. Normal configured Worker build/desktop availability is checked at execution time, not a prerequisite requiring a new per-plan registry entry.",
+      "For issue-fix results, a recorded local_patch is a proposed repair, not proof that the bug is fixed. When runtime verification remains, save a verification plan whose subjectRef is that exact runtime patch subject, with concrete repaired-behavior expectations and regression checks, and propose start-task with taskKind=issue-verify. Keep the original task and assessment subject unchanged. Never bind that patch verification to the unmodified source_commit or claim tests passed from edit completion alone.",
+      "For issue-verify and reproduction-setup, the saved steps have already run through the Worker. Summarize only their actual per-check observations. A reproduction check may deliberately observe the reported bug; its pass does not prove a repair. Headless test output and UI behavior have separate evidence requirements. Do not execute the plan again to complete report delivery.",
+    ];
   if (task.kind === "pr-verify")
     return [
       "The saved verification plan has already been executed by the Worker. Summarize its supplied per-check observations and evidence only. Do not run the recipe again, replace its check IDs, or propose a second execution to finalize this report.",

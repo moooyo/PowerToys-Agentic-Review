@@ -24,7 +24,10 @@ import type { PreparedInvestigationWorkspace } from "./workspace.js";
 function fixture(
   onRuntimeObservation = vi.fn(async () => {}),
   options: Partial<
-    Pick<E2eToolServerOptions, "buildToolDigests" | "msbuildToolchain" | "changedPaths">
+    Pick<
+      E2eToolServerOptions,
+      "buildToolDigests" | "msbuildToolchain" | "changedPaths" | "sourcePathMode"
+    >
   > = {},
   controlDirectory = "C:\\Attempt\\control",
 ) {
@@ -57,11 +60,39 @@ function fixture(
     terminateAll: async () => {},
     close: async () => {},
   };
-  const workspace = {
+  const unusedWorkspaceOperation = async (): Promise<never> => {
+    throw new Error("This synthetic tool fixture does not support that workspace operation.");
+  };
+  const workspace: PreparedInvestigationWorkspace = {
+    attemptDirectory: "C:\\Attempt",
+    modelInputDirectory: "C:\\Attempt\\input",
+    modelInputPath: "C:\\Attempt\\input\\snapshot.json",
+    modelInputDigest: "b".repeat(64),
     controlDirectory,
     sourceDirectory: "C:\\Attempt\\source",
     tempDirectory: "C:\\Attempt\\temp",
-    sourceBinding: { sourceSha: "a".repeat(40) },
+    sourceBinding: {
+      subjectRef: task.subjectRef,
+      revisionKey: task.subjects[0]!.revisionKey,
+      sourceSha: "a".repeat(40),
+      patchDigest: null,
+      artifactRef: null,
+    },
+    assertSourceBinding: vi.fn(async () => {}),
+    readSourceFile: vi.fn(async (path: string) => ({
+      path,
+      content: "Pinned Issue source.",
+      digest: createHash("sha256").update("Pinned Issue source.").digest("hex"),
+    })),
+    readArtifact: unusedWorkspaceOperation,
+    writePatchArtifact: unusedWorkspaceOperation,
+    resolveSourcePath: unusedWorkspaceOperation,
+    readPrDiffManifest: unusedWorkspaceOperation,
+    readPrDiffChunk: unusedWorkspaceOperation,
+    applyEdits: unusedWorkspaceOperation,
+    assertIntegrity: vi.fn(async () => {}),
+    capturePatch: unusedWorkspaceOperation,
+    cleanup: vi.fn(async () => {}),
     writeArtifact: async (
       input: Parameters<PreparedInvestigationWorkspace["writeArtifact"]>[0],
     ) => {
@@ -79,7 +110,7 @@ function fixture(
         availability: "available" as const,
       };
     },
-  } as PreparedInvestigationWorkspace;
+  };
   const server = new E2eToolServer({
     task,
     attempt,
@@ -100,10 +131,111 @@ function fixture(
     onRuntimeObservation,
     ...options,
   });
-  return { server, host, launches, onRuntimeObservation, artifactInputs };
+  return { server, host, launches, onRuntimeObservation, artifactInputs, task, workspace };
 }
 
 describe("E2E tool authority", () => {
+  it("registers Issue assertions against existing pinned source without requiring a PR diff", async () => {
+    const f = fixture(undefined, { sourcePathMode: "source", changedPaths: [] });
+    f.task.kind = "issue-verify";
+    f.task.workItem.kind = "issue";
+    f.task.executionPolicy = {
+      mode: "execute",
+      allowRepositoryExecution: true,
+      authorizationRef: "test-operator",
+      allowedSubjectRefs: [f.task.subjectRef],
+    };
+    const original = f.task.subjects.find((entry) => entry.id === f.task.subjectRef)!;
+    f.task.subjects = [
+      {
+        id: original.id,
+        repositoryId: f.task.repository.id,
+        workItemId: f.task.workItem.id,
+        revisionKey: original.revisionKey,
+        kind: "source_commit",
+        commitSha: "a".repeat(40),
+      },
+    ];
+    const feature = {
+      id: "repro:check",
+      title: "Reproduction",
+      paths: ["src/modules/other/Feature.cs"],
+      scenario: "Run the saved reproduction check.",
+      userVisible: false,
+      assertions: [
+        {
+          id: "assert:result",
+          kind: "process",
+          description: "The selected check completes.",
+          outputPath: "Checks.dll",
+          arguments: [],
+          expectedExitCode: 0,
+          expectedOutputContains: "Expected observation",
+        },
+      ],
+    };
+    const registered = await f.server.execute({ operation: "register-feature", feature });
+    expect(registered.status).toBe("passed");
+    expect(f.workspace.readSourceFile).toHaveBeenCalledWith(feature.paths[0]);
+    expect(f.workspace.assertSourceBinding).toHaveBeenCalledTimes(2);
+    expect(f.server.features).toEqual([feature]);
+  });
+
+  it("retains PR changed-path enforcement even when a source file is available", async () => {
+    const f = fixture();
+    const result = await f.server.execute({
+      operation: "register-feature",
+      feature: {
+        id: "unrelated",
+        title: "Unrelated",
+        paths: ["unchanged.cs"],
+        scenario: "An unrelated check.",
+        userVisible: false,
+        assertions: [
+          {
+            id: "result",
+            kind: "process",
+            description: "Result",
+            outputPath: "Checks.dll",
+            arguments: [],
+            expectedExitCode: 0,
+            expectedOutputContains: "Expected",
+          },
+        ],
+      },
+    });
+    expect(result.status).toBe("blocked");
+    expect(f.workspace.readSourceFile).not.toHaveBeenCalled();
+    expect(f.server.features).toEqual([]);
+  });
+
+  it("does not let a PR opt into Issue source-path registration", async () => {
+    const f = fixture(undefined, { sourcePathMode: "source" });
+    const result = await f.server.execute({
+      operation: "register-feature",
+      feature: {
+        id: "unrelated",
+        title: "Unrelated",
+        paths: ["unchanged.cs"],
+        scenario: "An unrelated check.",
+        userVisible: false,
+        assertions: [
+          {
+            id: "result",
+            kind: "process",
+            description: "Result",
+            outputPath: "Checks.dll",
+            arguments: [],
+            expectedExitCode: 0,
+            expectedOutputContains: "Expected",
+          },
+        ],
+      },
+    });
+    expect(result.status).toBe("blocked");
+    expect(f.workspace.readSourceFile).not.toHaveBeenCalled();
+  });
+
   it("persists recipe child observations and reuses the result instead of repeating work", async () => {
     const f = fixture(undefined, {
       changedPaths: [
