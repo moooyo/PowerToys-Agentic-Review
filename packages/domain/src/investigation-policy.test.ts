@@ -57,6 +57,106 @@ function approveAllowed(
   )!.allowed;
 }
 
+function namedReviewFixture(name: string, findingCount = 1) {
+  const original = createInvestigationFixture("pr", { findingCount, priority: "P0" });
+  const fixture = JSON.parse(
+    JSON.stringify(original).replaceAll("synthetic-pr-", `${name}-`),
+  ) as typeof original;
+  fixture.task.workItem.id = original.task.workItem.id;
+  fixture.result.context.workItem.id = original.task.workItem.id;
+  for (const subject of [...fixture.task.subjects, ...fixture.result.context.subjects])
+    subject.workItemId = original.task.workItem.id;
+  return fixture;
+}
+
+function rereviewFixture(
+  previous: InvestigationResultV1,
+  name: string,
+  disposition: "not_confirmed" | "still_present" = "not_confirmed",
+  findingCount = disposition === "still_present" ? previous.findings.length : 0,
+) {
+  const fixture = namedReviewFixture(name, findingCount);
+  const subject = previous.context.subjects.find(
+    (entry) => entry.id === previous.context.task.subjectRef,
+  );
+  if (subject?.kind !== "original_pr") throw new Error("Expected an original PR baseline.");
+  const baseline = {
+    reportRef: {
+      id: previous.report.id,
+      version: previous.report.version,
+      digest: previous.report.logicalContentDigest,
+    },
+    sourceTaskId: previous.context.task.id,
+    subject: structuredClone(subject),
+    findings: previous.findings.map(({ id, version, title }) => ({ id, version, title })),
+  };
+  fixture.task.reviewBaseline = structuredClone(baseline);
+  fixture.result.context.reviewBaseline = structuredClone(baseline);
+  const evidenceId = `${name}-rereview-evidence`;
+  fixture.result.verificationEvidence.push({
+    id: evidenceId,
+    subjectRef: fixture.task.subjectRef,
+    source: "static_analysis",
+    authority: "model",
+    summary: "The previous diagnosis was independently checked against the current frozen source.",
+    artifactRefs: [],
+    evidenceRefs: [fixture.result.verificationEvidence[0]!.id],
+    provenance: {
+      taskId: fixture.task.id,
+      attemptId: fixture.attempt.id,
+      producer: "synthetic-rereview",
+      recordedAt: "2026-10-01T02:00:00.000Z",
+    },
+  });
+  for (const [index, finding] of baseline.findings.entries()) {
+    fixture.result.report.loop.candidates.unshift({
+      id: `${name}-baseline-candidate-${index + 1}`,
+      subjectRef: fixture.task.subjectRef,
+      title: finding.title,
+      discoveredRound: 0,
+      status: disposition === "still_present" ? "merged" : "withdrawn",
+      findingId: null,
+      findingVersion: null,
+      mergedIntoCandidateId:
+        disposition === "still_present" ? `${name}-candidate-${index + 1}` : null,
+      rationale: "The current source evidence supports this explicit review conclusion.",
+      evidenceRefs: [evidenceId],
+      reviewBaselineFindingRef: { id: finding.id, version: finding.version },
+      reviewDisposition: disposition,
+    });
+  }
+  fixture.result.report.collections.candidates = fixture.result.report.loop.candidates.length;
+  fixture.result.report.collections.verificationEvidence =
+    fixture.result.verificationEvidence.length;
+  return fixture;
+}
+
+function reviewCheckpoint(fixture: ReturnType<typeof namedReviewFixture>) {
+  const { task, attempt, result } = fixture;
+  const checkpoint = createInvestigationCheckpoint({
+    task,
+    attemptId: attempt.id,
+    checkpointId: `${task.id}-accepted-checkpoint`,
+    leaseVersion: 1,
+    recordedAt: "2026-10-01T02:00:00.000Z",
+  });
+  checkpoint.analysis.findings = structuredClone(result.findings);
+  checkpoint.analysis.candidates = structuredClone(result.report.loop.candidates);
+  checkpoint.analysis.rechecks = structuredClone(result.report.recheck.records);
+  checkpoint.analysis.evidence = result.verificationEvidence
+    .filter((entry) => entry.source === "static_analysis")
+    .map((entry) => ({
+      id: entry.id,
+      subjectRef: entry.subjectRef,
+      source: "static_analysis" as const,
+      summary: entry.summary,
+      evidenceRefs: entry.evidenceRefs,
+    }));
+  const { digest: _digest, ...content } = checkpoint;
+  checkpoint.digest = investigationContentDigest(content);
+  return { task, checkpoint };
+}
+
 function verificationReportWithoutActions(): InvestigationResultV1 {
   const { result } = createInvestigationFixture("pr", { findingCount: 0 });
   result.nextActions = [];
@@ -409,6 +509,245 @@ describe("investigation action policy", () => {
     expect(context.hardContentBlockers[0]!.reportRef).toBeNull();
     expect(context.hardContentBlockers[0]!.checkpointRef?.digest).toBe(checkpoint.digest);
     expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(false);
+  });
+
+  it("adopts a same-SHA rereview rejecting the exact previous P0 without rewriting its history", () => {
+    const previous = namedReviewFixture("previous-review");
+    const current = rereviewFixture(previous.result, "current-review");
+    const original = structuredClone(previous);
+    expect(validateInvestigationResult(current.result)).toEqual({ valid: true, errors: [] });
+    const context = evaluateInvestigationActions({
+      ...policyInput(current.result),
+      validatedReports: [previous.result],
+      validatedCheckpoints: [reviewCheckpoint(previous)],
+    });
+    expect(context.hardContentBlockers).toEqual([]);
+    expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(true);
+    expect(previous).toEqual(original);
+  });
+
+  it.each([
+    "report id",
+    "report version",
+    "report digest",
+    "source task",
+    "source subject",
+    "source base SHA",
+    "finding id",
+    "finding version",
+    "finding title",
+    "failed review",
+    "partial review",
+    "truncated collection",
+    "pending disposition",
+    "unverified disposition",
+    "fixed without a new head",
+    "missing finding ref",
+    "non-review task",
+    "old SHA",
+    "missing fresh evidence",
+    "previous-task evidence",
+    "duplicate baseline candidate",
+  ])("retains the previous P0 when a rereview has a mismatched or incomplete %s", (change) => {
+    const previous = namedReviewFixture("previous-review");
+    const current = rereviewFixture(previous.result, "current-review");
+    const result = current.result;
+    const baseline = result.context.reviewBaseline!;
+    const candidate = result.report.loop.candidates[0]!;
+    if (change === "report id") baseline.reportRef.id = "unknown-report";
+    if (change === "report version") baseline.reportRef.version += 1;
+    if (change === "report digest") baseline.reportRef.digest = "f".repeat(64);
+    if (change === "source task") baseline.sourceTaskId = "unknown-source-task";
+    if (change === "source subject") baseline.subject.id = "different-baseline-subject";
+    if (change === "source base SHA") baseline.subject.baseSha = "f".repeat(40);
+    if (change === "finding id") {
+      baseline.findings[0]!.id = "different-baseline-finding";
+      candidate.reviewBaselineFindingRef!.id = baseline.findings[0]!.id;
+    }
+    if (change === "finding version") {
+      baseline.findings[0]!.version += 1;
+      candidate.reviewBaselineFindingRef!.version = baseline.findings[0]!.version;
+    }
+    if (change === "finding title") baseline.findings[0]!.title = "A different diagnosis";
+    if (change === "failed review") result.outcome = "failed";
+    if (change === "partial review") result.report.completeness = "partial";
+    if (change === "truncated collection") result.report.collections.candidates += 1;
+    if (change === "pending disposition") {
+      candidate.reviewDisposition = "pending";
+      candidate.status = "pending";
+    }
+    if (change === "unverified disposition") {
+      candidate.reviewDisposition = "unverified";
+      result.report.limitations.push({
+        id: "unverified-baseline-limitation",
+        description:
+          "The current source does not establish whether the previous diagnosis is valid.",
+        impact: "The previous P0 remains unresolved.",
+        evidenceRefs: [...candidate.evidenceRefs],
+      });
+      expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+    }
+    if (change === "fixed without a new head") candidate.reviewDisposition = "fixed";
+    if (change === "missing finding ref") delete candidate.reviewBaselineFindingRef;
+    if (change === "non-review task") result.context.task.kind = "pr-verify";
+    if (change === "old SHA") {
+      const subject = result.context.subjects[0]!;
+      if (subject.kind !== "original_pr") throw new Error("Expected an original PR subject.");
+      subject.headSha = "e".repeat(40);
+      subject.revisionKey = "e".repeat(64);
+    }
+    if (change === "missing fresh evidence")
+      candidate.evidenceRefs = [result.verificationEvidence[0]!.id];
+    if (change === "previous-task evidence")
+      result.verificationEvidence.at(-1)!.provenance.taskId = previous.task.id;
+    if (change === "duplicate baseline candidate") {
+      result.report.loop.candidates.push({ ...candidate, id: "duplicate-baseline-candidate" });
+      result.report.collections.candidates += 1;
+    }
+    const context = evaluateInvestigationActions({
+      ...policyInput(previous.result),
+      result,
+      validatedReports: [previous.result],
+      validatedCheckpoints: [reviewCheckpoint(previous)],
+    });
+    expect(context.hardContentBlockers).toHaveLength(2);
+    expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(false);
+  });
+
+  it("keeps a reconfirmed P0 and its previous diagnosis blocking approval", () => {
+    const previous = namedReviewFixture("previous-review");
+    const current = rereviewFixture(previous.result, "current-review", "still_present");
+    expect(validateInvestigationResult(current.result)).toEqual({ valid: true, errors: [] });
+    const context = evaluateInvestigationActions({
+      ...policyInput(current.result),
+      validatedReports: [previous.result],
+    });
+    expect(context.hardContentBlockers.map((entry) => entry.findingId)).toEqual([
+      previous.result.findings[0]!.id,
+      current.result.findings[0]!.id,
+    ]);
+    expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(false);
+  });
+
+  it("requires the actual baseline report before resolving an accepted checkpoint", () => {
+    const previous = namedReviewFixture("previous-review");
+    const current = rereviewFixture(previous.result, "current-review");
+    const context = evaluateInvestigationActions({
+      ...policyInput(current.result),
+      validatedCheckpoints: [reviewCheckpoint(previous)],
+    });
+    expect(context.hardContentBlockers).toHaveLength(1);
+    expect(context.hardContentBlockers[0]!.checkpointRef).not.toBeNull();
+    expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(false);
+  });
+
+  it("keeps a newly discovered P0 blocking after rejecting a previous diagnosis", () => {
+    const previous = namedReviewFixture("previous-review");
+    const current = rereviewFixture(previous.result, "current-review", "not_confirmed", 1);
+    expect(validateInvestigationResult(current.result)).toEqual({ valid: true, errors: [] });
+    const context = evaluateInvestigationActions({
+      ...policyInput(current.result),
+      validatedReports: [previous.result],
+      validatedCheckpoints: [reviewCheckpoint(previous), reviewCheckpoint(current)],
+    });
+    expect(context.hardContentBlockers).toHaveLength(2);
+    expect(
+      context.hardContentBlockers.every(
+        (entry) => entry.findingId === current.result.findings[0]!.id,
+      ),
+    ).toBe(true);
+    expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(false);
+  });
+
+  it("only resolves the precisely rechecked finding when another previous P0 remains", () => {
+    const previous = namedReviewFixture("previous-review", 2);
+    const current = rereviewFixture(previous.result, "current-review", "still_present");
+    const rejected = current.result.report.loop.candidates.find(
+      (entry) => entry.reviewBaselineFindingRef?.id === previous.result.findings[0]!.id,
+    )!;
+    rejected.status = "withdrawn";
+    rejected.reviewDisposition = "not_confirmed";
+    rejected.mergedIntoCandidateId = null;
+    expect(validateInvestigationResult(current.result)).toEqual({ valid: true, errors: [] });
+    const context = evaluateInvestigationActions({
+      ...policyInput(current.result),
+      validatedReports: [previous.result],
+    });
+    expect(
+      context.hardContentBlockers
+        .filter((entry) => entry.reportRef?.id === previous.result.report.id)
+        .map((entry) => entry.findingId),
+    ).toEqual([previous.result.findings[1]!.id]);
+    expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(false);
+  });
+
+  it("does not clear an independent task checkpoint or a different finding version", () => {
+    const previous = namedReviewFixture("previous-review");
+    const current = rereviewFixture(previous.result, "current-review");
+    const independent = reviewCheckpoint(namedReviewFixture("independent-review"));
+    const revised = reviewCheckpoint(previous);
+    revised.checkpoint.analysis.findings[0]!.version += 1;
+    revised.checkpoint.analysis.candidates[0]!.findingVersion =
+      revised.checkpoint.analysis.findings[0]!.version;
+    revised.checkpoint.analysis.rechecks[0]!.findingVersion += 1;
+    const { digest: _digest, ...content } = revised.checkpoint;
+    revised.checkpoint.digest = investigationContentDigest(content);
+    const changedSubject = structuredClone(previous);
+    const subject = changedSubject.task.subjects[0]!;
+    if (subject.kind !== "original_pr") throw new Error("Expected an original PR subject.");
+    subject.baseSha = "f".repeat(40);
+    const context = evaluateInvestigationActions({
+      ...policyInput(current.result),
+      validatedReports: [previous.result],
+      validatedCheckpoints: [
+        reviewCheckpoint(previous),
+        independent,
+        revised,
+        reviewCheckpoint(changedSubject),
+      ],
+    });
+    expect(context.hardContentBlockers).toHaveLength(3);
+    expect(context.hardContentBlockers.every((entry) => entry.reportRef === null)).toBe(true);
+    expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(false);
+  });
+
+  it.each([false, true])(
+    "resolves an exact carry-forward chain independently of report order (%s)",
+    (reverse) => {
+      const first = namedReviewFixture("first-review");
+      const second = rereviewFixture(first.result, "second-review", "still_present");
+      const third = rereviewFixture(second.result, "third-review");
+      const reports = [first.result, second.result];
+      if (reverse) reports.reverse();
+      expect(validateInvestigationResult(second.result)).toEqual({ valid: true, errors: [] });
+      expect(validateInvestigationResult(third.result)).toEqual({ valid: true, errors: [] });
+      const context = evaluateInvestigationActions({
+        ...policyInput(third.result),
+        validatedReports: reports,
+        validatedCheckpoints: [reviewCheckpoint(first), reviewCheckpoint(second)],
+      });
+      expect(context.hardContentBlockers).toEqual([]);
+      expect(context.fixedActions.find((entry) => entry.action === "approve")?.allowed).toBe(true);
+    },
+  );
+
+  it("keeps an exact rejected diagnosis resolved after another review with an empty baseline", () => {
+    const first = namedReviewFixture("first-review");
+    const second = rereviewFixture(first.result, "second-review");
+    const third = rereviewFixture(second.result, "third-review");
+    expect(validateInvestigationResult(third.result)).toEqual({ valid: true, errors: [] });
+    expect(
+      approveAllowed(third.result, {
+        validatedReports: [first.result, second.result],
+        validatedCheckpoints: [reviewCheckpoint(first)],
+      }),
+    ).toBe(true);
+  });
+
+  it("retains the old P0 when a later clean report has no exact rereview baseline", () => {
+    const previous = namedReviewFixture("previous-review");
+    const clean = namedReviewFixture("later-clean-review", 0);
+    expect(approveAllowed(clean.result, { validatedReports: [previous.result] })).toBe(false);
   });
 
   it("only defaults independently validated current confirmed original-PR suggestions", () => {

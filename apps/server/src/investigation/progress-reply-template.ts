@@ -58,6 +58,8 @@ export interface ProgressReplyContext {
 
 export interface InvestigationProgressTrigger {
   readonly eventName: "issues" | "pull_request" | "issue_comment";
+  /** Absence preserves the historical assignment trigger identity. */
+  readonly requestKind?: "review_request";
   readonly commandCommentId?: number;
   readonly actorUserId: number;
   readonly assigneeUserId: number;
@@ -70,7 +72,7 @@ export const defaultProgressReplyTemplates: ProgressReplyTemplates = Object.free
 
 {{trigger}}
 
-The assignment has been received for investigation. This comment will track its progress.
+The request has been received for investigation. This comment will track its progress.
 
 Last updated: {{updated_at}}
 `,
@@ -129,6 +131,8 @@ const legacyProgressReplyTemplates: ProgressReplyTemplates = {
   completed: `## Investigation completed\n\n{{trigger}}\n\nLast updated: {{updated_at}}\n\n{{result}}\n`,
 };
 
+const legacyAssignmentReceivedTemplate = `## {{status}}\n\n{{trigger}}\n\nThe assignment has been received for investigation. This comment will track its progress.\n\nLast updated: {{updated_at}}\n`;
+
 function invalid(message: string): never {
   throw new InvestigationRequestError(400, "progress_reply_template_invalid", message);
 }
@@ -146,7 +150,8 @@ export function validateProgressReplyTemplate(
   }
   // Only legacy built-in wording is normalized. Prepared deliveries never call this renderer again.
   const normalized =
-    template.replaceAll("\r\n", "\n") === legacyProgressReplyTemplates[stage]
+    template.replaceAll("\r\n", "\n") === legacyProgressReplyTemplates[stage] ||
+    (stage === "received" && template.replaceAll("\r\n", "\n") === legacyAssignmentReceivedTemplate)
       ? defaultProgressReplyTemplates[stage]
       : template;
   if (Buffer.byteLength(normalized, "utf8") > 12_000) {
@@ -263,6 +268,8 @@ function triggerText(trigger: InvestigationProgressTrigger): string {
     trigger === null ||
     typeof trigger !== "object" ||
     !["issues", "pull_request", "issue_comment"].includes(trigger.eventName) ||
+    (trigger.requestKind !== undefined &&
+      (trigger.requestKind !== "review_request" || trigger.eventName !== "pull_request")) ||
     !Number.isSafeInteger(trigger.actorUserId) ||
     trigger.actorUserId < 1 ||
     !Number.isSafeInteger(trigger.assigneeUserId) ||
@@ -281,6 +288,8 @@ function triggerText(trigger: InvestigationProgressTrigger): string {
       : `GitHub user ID ${id}`;
   if (trigger.eventName === "issue_comment")
     return `This E2E verification was requested by ${user(trigger.actorUserId, trigger.actorLogin)} in pull request comment ${trigger.commandCommentId}, mentioning ${user(trigger.assigneeUserId, trigger.assigneeLogin)} with the e2e command.`;
+  if (trigger.requestKind === "review_request")
+    return `This PR review was triggered when ${user(trigger.actorUserId, trigger.actorLogin)} requested a code review from ${user(trigger.assigneeUserId, trigger.assigneeLogin)}.`;
   const subject = trigger.eventName === "pull_request" ? "pull request" : "issue";
   const activity = trigger.eventName === "pull_request" ? "PR review" : "issue investigation";
   return `This ${activity} was triggered when ${user(trigger.actorUserId, trigger.actorLogin)} assigned the ${subject} to ${user(trigger.assigneeUserId, trigger.assigneeLogin)}.`;

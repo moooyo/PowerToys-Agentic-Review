@@ -2,6 +2,7 @@ import {
   createInvestigationPreview as createInvestigationFixture,
   type InvestigationAnalysisV1,
   type InvestigationLoopCheckpointV1,
+  type InvestigationReviewBaselineSnapshot,
   isCorrectableInvestigationModelOutputIssue,
 } from "@agentic-review/contracts";
 import {
@@ -150,6 +151,54 @@ function sourceContinuationFixture() {
   analysis.coverage.completedUnitRefs = chunks.map((unit) => unit.id);
   analysis.coverage.unresolvedUnitRefs = [metadata.id];
   return { ...f, metadata, chunks, candidate };
+}
+
+function reviewBaselineFixture(findingCount = 3, historicalDetailRepeats = 0) {
+  const f = fixture(0);
+  const historical = createInvestigationFixture("pr", { findingCount });
+  const subject = structuredClone(historical.task.subjects[0]!);
+  if (subject.kind !== "original_pr")
+    throw new Error("The historical review fixture must have an original PR subject.");
+  subject.id = "previous-native-review-subject";
+  subject.headSha = "7".repeat(40);
+  subject.revisionKey = "8".repeat(64);
+  const findings = structuredClone(historical.result.findings);
+  for (const finding of findings) {
+    finding.subjectRef = subject.id;
+    finding.locations = finding.locations.map((location) => ({
+      ...location,
+      subjectRef: subject.id,
+    }));
+    if (finding.feedbackDraft.suggestion !== null) {
+      finding.feedbackDraft.suggestion.subjectRef = subject.id;
+      finding.feedbackDraft.suggestion.headSha = subject.headSha;
+    }
+    finding.rootCause.explanation += " Historical root cause evidence is retained in full.".repeat(
+      historicalDetailRepeats,
+    );
+  }
+  const reviewBaseline: InvestigationReviewBaselineSnapshot = {
+    descriptor: {
+      reportRef: { id: "previous-native-review-report", version: 4, digest: "6".repeat(64) },
+      sourceTaskId: "previous-native-review-task",
+      subject,
+      findings: findings.map(({ id, version, title }) => ({ id, version, title })),
+    },
+    findings,
+  };
+  f.task.reviewBaseline = structuredClone(reviewBaseline.descriptor);
+  const checkpoint = createInvestigationCheckpoint({
+    task: f.task,
+    attemptId: f.attempt.id,
+    checkpointId: "review-baseline-projection-checkpoint",
+    leaseVersion: f.attempt.leaseVersion,
+    recordedAt: f.task.updatedAt,
+  });
+  checkpoint.analysis.evidence = structuredClone(f.checkpoint.analysis.evidence);
+  checkpoint.round = 1;
+  checkpoint.lastPhase = "discovery";
+  delete checkpoint.runtime.reviewMode;
+  return { task: f.task, attempt: f.attempt, checkpoint: seal(checkpoint), reviewBaseline };
 }
 
 function focusedSourceContinuationFixture() {
@@ -306,6 +355,18 @@ function outputFailure(
     return error as ModelOutputValidationError;
   }
   throw new Error("The synthetic delta must fail model output validation.");
+}
+
+function projectionInputFailure(
+  input: Parameters<typeof prepareModelTurnProjection>[0],
+): ModelTurnProjectionError {
+  try {
+    prepareModelTurnProjection(input);
+  } catch (error) {
+    expect(error).toBeInstanceOf(ModelTurnProjectionError);
+    return error as ModelTurnProjectionError;
+  }
+  throw new Error("The synthetic projection input must fail validation.");
 }
 
 function newIssueFinding(projection: ModelTurnProjection) {
@@ -2427,5 +2488,386 @@ describe("bounded investigation model context", () => {
       "src/first.ts",
       "src/second.ts",
     ]);
+  });
+});
+
+describe("bounded native review baseline context", () => {
+  it("keeps ordinary candidate wire objects closed while requiring baseline fields together", () => {
+    const ordinary = fixture(1).checkpoint.analysis.candidates[0]!;
+    expect(Object.hasOwn(ordinary, "reviewBaselineFindingRef")).toBe(false);
+    expect(Object.hasOwn(ordinary, "reviewDisposition")).toBe(false);
+    expect(Value.Check(InvestigationModelCandidateSchema, ordinary)).toBe(true);
+    const reviewBaselineFindingRef = { id: "previous-finding", version: 2 };
+    for (const reviewDisposition of [
+      "pending",
+      "fixed",
+      "still_present",
+      "not_confirmed",
+      "unverified",
+    ] as const)
+      expect(
+        Value.Check(InvestigationModelCandidateSchema, {
+          ...ordinary,
+          discoveredRound: 0,
+          reviewBaselineFindingRef,
+          reviewDisposition,
+        }),
+      ).toBe(true);
+    for (const partial of [
+      { reviewBaselineFindingRef },
+      { reviewDisposition: "pending" },
+      { reviewBaselineFindingRef, reviewDisposition: null },
+      { reviewBaselineFindingRef: null, reviewDisposition: "pending" },
+      { reviewBaselineFindingRef, reviewDisposition: "resolved" },
+    ])
+      expect(
+        Value.Check(InvestigationModelCandidateSchema, {
+          ...ordinary,
+          discoveredRound: 0,
+          ...partial,
+        }),
+      ).toBe(false);
+    expect(
+      Value.Check(InvestigationModelCandidateSchema, { ...ordinary, discoveredRound: 0 }),
+    ).toBe(false);
+    expect(
+      Value.Check(InvestigationModelCandidateSchema, {
+        ...ordinary,
+        discoveredRound: 1,
+        reviewBaselineFindingRef,
+        reviewDisposition: "pending",
+      }),
+    ).toBe(false);
+  });
+
+  it("omits baseline context entirely for an ordinary review", () => {
+    const projection = prepareModelTurnProjection({
+      ...fixture(1),
+      maximumContextBytes: 100 * 1024,
+    });
+    expect(Object.hasOwn(projection.context, "reviewBaseline")).toBe(false);
+    expect(Object.hasOwn(projection.context.counts, "baselineFindings")).toBe(false);
+  });
+
+  it("keeps every current diff chunk ahead of historical finding disposition", () => {
+    const f = reviewBaselineFixture(2);
+    const metadata: InvestigationAnalysisV1["coverage"]["includedUnits"][number] = {
+      id: "current-full-diff",
+      subjectRef: f.task.subjectRef,
+      kind: "full_diff",
+      paths: [],
+      requiredWork: "Review the entire current PR before completing the review.",
+      status: "pending",
+      evidenceRefs: [],
+    };
+    const chunks: InvestigationAnalysisV1["coverage"]["includedUnits"] = [
+      {
+        ...metadata,
+        id: "current-unrelated-diff-chunk",
+        kind: "pr_diff_chunk",
+        paths: ["src/unrelated-current.ts"],
+        requiredWork: "Review changed code outside every historical finding location.",
+      },
+      {
+        ...metadata,
+        id: "current-deleted-diff-chunk",
+        kind: "pr_diff_chunk",
+        paths: ["src/deleted-current.ts"],
+        requiredWork: "Review the deleted code using the current frozen base and head.",
+      },
+    ];
+    const coverage = {
+      ...f.checkpoint.analysis.coverage,
+      includedUnits: [metadata, ...chunks],
+      completedUnitRefs: [],
+      unresolvedUnitRefs: [metadata.id, ...chunks.map((unit) => unit.id)],
+    };
+    f.task.scope = structuredClone(coverage);
+    f.checkpoint.analysis.coverage = structuredClone(coverage);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 64 * 1024 });
+    expect(projection.selectedUnitIds).toEqual(chunks.map((unit) => unit.id));
+    expect(projection.selectedCandidateIds).toEqual([]);
+    expect(projection.context.counts.pendingDiffChunks).toBe(2);
+    expect(projection.context.reviewBaseline!.findings).toEqual([]);
+    expect(projection.context.reviewBaseline!.totalFindingCount).toBe(2);
+    expect(projection.baseAnalysis.coverage).toEqual(coverage);
+    expect(projection.context.subjects).toEqual(f.task.subjects);
+    const prematureCompletion = emptyDelta(projection);
+    prematureCompletion.analysis.coverageUnits = [{ ...metadata, status: "completed" }];
+    expect(() => mergeModelTurnDelta(projection, prematureCompletion)).toThrow(
+      /outside its supplied batch/u,
+    );
+    const delta = emptyDelta(projection);
+    delta.analysis.coverageUnits = chunks.map((unit) => ({ ...unit, status: "completed" }));
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.coverage.unresolvedUnitRefs).toEqual([metadata.id]);
+    expect(round.analysis.candidates).toEqual(f.checkpoint.analysis.candidates);
+    const checkpoint = seal({
+      ...f.checkpoint,
+      analysis: round.analysis,
+      round: round.round,
+      version: f.checkpoint.version + 1,
+    });
+    const next = prepareModelTurnProjection({ ...f, checkpoint, maximumContextBytes: 64 * 1024 });
+    expect(next.selectedUnitIds).toContain(metadata.id);
+    expect(next.selectedCandidateIds).toEqual(f.checkpoint.analysis.candidates.map(({ id }) => id));
+    expect(next.context.reviewBaseline!.findings).toEqual(f.reviewBaseline.findings);
+    expect(f.task.scope).toEqual(coverage);
+  });
+
+  it("supplies complete historical findings only for selected candidates while retaining the full ledger", () => {
+    const f = reviewBaselineFixture(8, 200);
+    const maximumContextBytes = 32 * 1024;
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes });
+    const selectedReferences = new Set(
+      projection.context.analysis.candidates.map(
+        (candidate) => candidate.reviewBaselineFindingRef!.id,
+      ),
+    );
+    const supplied = f.reviewBaseline.findings.filter((finding) =>
+      selectedReferences.has(finding.id),
+    );
+    const omitted = f.reviewBaseline.findings.filter(
+      (finding) => !selectedReferences.has(finding.id),
+    );
+    expect(projection.selectedCandidateIds.length).toBeGreaterThan(0);
+    expect(projection.selectedCandidateIds.length).toBeLessThan(f.reviewBaseline.findings.length);
+    expect(Buffer.byteLength(JSON.stringify(projection.context), "utf8")).toBeLessThanOrEqual(
+      maximumContextBytes,
+    );
+    expect(projection.context.reviewBaseline).toEqual({
+      reportRef: f.reviewBaseline.descriptor.reportRef,
+      sourceTaskId: f.reviewBaseline.descriptor.sourceTaskId,
+      subject: f.reviewBaseline.descriptor.subject,
+      totalFindingCount: f.reviewBaseline.findings.length,
+      findings: supplied,
+    });
+    expect(projection.context.analysis.findings).toEqual([]);
+    expect(projection.context.analysis.evidence).toEqual([]);
+    expect(projection.baseAnalysis.findings).toEqual([]);
+    expect(projection.baseAnalysis.candidates).toEqual(f.checkpoint.analysis.candidates);
+    expect(projection.context.subjects).not.toContainEqual(f.reviewBaseline.descriptor.subject);
+    expect(omitted.length).toBeGreaterThan(0);
+    for (const finding of omitted) {
+      expect(projection.context.reviewBaseline!.findings.map(({ id }) => id)).not.toContain(
+        finding.id,
+      );
+      expect(projection.baseAnalysis.candidates).toContainEqual(
+        expect.objectContaining({
+          reviewBaselineFindingRef: { id: finding.id, version: finding.version },
+          status: "pending",
+          reviewDisposition: "pending",
+        }),
+      );
+    }
+  });
+
+  it("processes many historical findings across bounded batches without dropping comparison detail", () => {
+    const f = reviewBaselineFixture(18, 120);
+    const maximumContextBytes = 32 * 1024;
+    let checkpoint = f.checkpoint;
+    const seen: string[] = [];
+    let batches = 0;
+    for (let turn = 0; turn < f.reviewBaseline.findings.length; turn += 1) {
+      const projection = prepareModelTurnProjection({ ...f, checkpoint, maximumContextBytes });
+      if (projection.selectedCandidateIds.length === 0) break;
+      batches += 1;
+      expect(Buffer.byteLength(JSON.stringify(projection.context), "utf8")).toBeLessThanOrEqual(
+        maximumContextBytes,
+      );
+      const selected = projection.context.analysis.candidates;
+      const selectedReferences = new Set(
+        selected.map((candidate) => candidate.reviewBaselineFindingRef!.id),
+      );
+      expect(projection.context.reviewBaseline!.findings).toEqual(
+        f.reviewBaseline.findings.filter((finding) => selectedReferences.has(finding.id)),
+      );
+      const delta = emptyDelta(projection);
+      delta.analysis.evidence = selected.map((candidate) => ({
+        id: `fresh-current-source-${candidate.id}`,
+        subjectRef: f.task.subjectRef,
+        source: "static_analysis",
+        summary:
+          "The current frozen source was independently checked and does not confirm the old diagnosis.",
+        evidenceRefs: [],
+      }));
+      delta.analysis.candidates = selected.map((candidate, index) => ({
+        ...candidate,
+        status: "withdrawn",
+        reviewDisposition: "not_confirmed",
+        rationale: "Fresh current-source evidence does not confirm the previous diagnosis.",
+        evidenceRefs: [delta.analysis.evidence[index]!.id],
+      }));
+      seen.push(...projection.context.reviewBaseline!.findings.map(({ id }) => id));
+      const round = mergeModelTurnDelta(projection, delta, { task: f.task });
+      const omitted = new Set(checkpoint.analysis.candidates.map(({ id }) => id));
+      for (const candidate of selected) omitted.delete(candidate.id);
+      for (const candidate of checkpoint.analysis.candidates.filter(({ id }) => omitted.has(id)))
+        expect(round.analysis.candidates).toContainEqual(candidate);
+      expect(round.analysis.candidates).toHaveLength(f.reviewBaseline.findings.length);
+      checkpoint = applyInvestigationLoopRound(checkpoint, round, {
+        recordedAt: checkpoint.recordedAt,
+        usage: { durationMs: 0, tokens: 0, reportBytes: 0 },
+      });
+    }
+    expect(batches).toBeGreaterThan(1);
+    expect(seen).toEqual(f.reviewBaseline.findings.map(({ id }) => id));
+    expect(new Set(seen).size).toBe(f.reviewBaseline.findings.length);
+    expect(
+      checkpoint.analysis.candidates.every(
+        (candidate) => candidate.reviewDisposition === "not_confirmed",
+      ),
+    ).toBe(true);
+    expect(checkpoint.analysis.findings).toEqual([]);
+    const finalProjection = prepareModelTurnProjection({ ...f, checkpoint, maximumContextBytes });
+    expect(finalProjection.phase).toBe("finalize");
+    expect(finalProjection.context.reviewBaseline!.findings).toEqual([]);
+    expect(finalProjection.context.reviewBaseline!.totalFindingCount).toBe(
+      f.reviewBaseline.findings.length,
+    );
+  });
+
+  it("rejects an oversized historical finding instead of truncating the comparison context", () => {
+    const f = reviewBaselineFixture(1, 30_000);
+    expect(projectionInputFailure({ ...f, maximumContextBytes: 32 * 1024 }).code).toBe(
+      "MODEL_INPUT_LIMIT_EXCEEDED",
+    );
+  });
+
+  it("rejects a task baseline without its complete snapshot and a snapshot without a task baseline", () => {
+    const f = reviewBaselineFixture();
+    expect(
+      projectionInputFailure({
+        task: f.task,
+        attempt: f.attempt,
+        checkpoint: f.checkpoint,
+        maximumContextBytes: 64 * 1024,
+      }).code,
+    ).toBe("MODEL_INPUT_INVALID");
+    const task = structuredClone(f.task);
+    delete task.reviewBaseline;
+    expect(projectionInputFailure({ ...f, task, maximumContextBytes: 64 * 1024 }).code).toBe(
+      "MODEL_INPUT_INVALID",
+    );
+  });
+
+  const invalidSnapshots: Array<[string, (snapshot: InvestigationReviewBaselineSnapshot) => void]> =
+    [
+      [
+        "a different report",
+        (snapshot) => {
+          snapshot.descriptor.reportRef.version += 1;
+        },
+      ],
+      [
+        "a different source task",
+        (snapshot) => {
+          snapshot.descriptor.sourceTaskId = "another-task";
+        },
+      ],
+      [
+        "a different frozen subject",
+        (snapshot) => {
+          snapshot.descriptor.subject.headSha = "9".repeat(40);
+        },
+      ],
+      [
+        "different descriptor finding metadata",
+        (snapshot) => {
+          snapshot.descriptor.findings[0]!.title = "A rewritten title";
+        },
+      ],
+      [
+        "a missing full finding",
+        (snapshot) => {
+          snapshot.findings.pop();
+        },
+      ],
+      [
+        "an extra full finding",
+        (snapshot) => {
+          snapshot.findings.push(structuredClone(snapshot.findings[0]!));
+        },
+      ],
+      [
+        "a different full finding ID",
+        (snapshot) => {
+          snapshot.findings[0]!.id = "another-finding";
+        },
+      ],
+      [
+        "a different full finding version",
+        (snapshot) => {
+          snapshot.findings[0]!.version += 1;
+        },
+      ],
+      [
+        "a different full finding title",
+        (snapshot) => {
+          snapshot.findings[0]!.title = "A rewritten title";
+        },
+      ],
+      [
+        "a full finding from another subject",
+        (snapshot) => {
+          snapshot.findings[0]!.subjectRef = "another-subject";
+        },
+      ],
+    ];
+  it.each(invalidSnapshots)("rejects %s in the complete baseline snapshot", (_label, mutate) => {
+    const f = reviewBaselineFixture();
+    const reviewBaseline = structuredClone(f.reviewBaseline);
+    mutate(reviewBaseline);
+    expect(
+      projectionInputFailure({ ...f, reviewBaseline, maximumContextBytes: 64 * 1024 }).code,
+    ).toBe("MODEL_INPUT_INVALID");
+  });
+
+  it.each(["replace", "change version", "remove"] as const)(
+    "rejects an attempt to %s an accepted candidate's historical finding reference",
+    (operation) => {
+      const f = reviewBaselineFixture(2);
+      const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 64 * 1024 });
+      const candidate = structuredClone(projection.context.analysis.candidates[0]!);
+      if (operation === "replace")
+        candidate.reviewBaselineFindingRef = {
+          id: f.reviewBaseline.findings[1]!.id,
+          version: f.reviewBaseline.findings[1]!.version,
+        };
+      else if (operation === "change version") candidate.reviewBaselineFindingRef!.version += 1;
+      else {
+        delete candidate.reviewBaselineFindingRef;
+        delete candidate.reviewDisposition;
+        expect(Value.Check(InvestigationModelCandidateSchema, candidate)).toBe(false);
+        candidate.discoveredRound = 1;
+      }
+      const delta = emptyDelta(projection);
+      delta.analysis.candidates = [candidate];
+      expect(Value.Check(InvestigationModelTurnDeltaV1Schema, delta)).toBe(true);
+      expect(safeModelOutputValidationIssue(outputFailure(projection, delta))!.rule).toBe(
+        "candidate_identity_changed",
+      );
+      expect(projection.baseAnalysis.candidates).toEqual(f.checkpoint.analysis.candidates);
+    },
+  );
+
+  it("preserves omitted visible and hidden pending candidates without inferring a fixed disposition", () => {
+    const f = reviewBaselineFixture(8, 200);
+    const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 32 * 1024 });
+    expect(projection.selectedCandidateIds.length).toBeGreaterThan(0);
+    expect(projection.selectedCandidateIds.length).toBeLessThan(f.reviewBaseline.findings.length);
+    const delta = emptyDelta(projection);
+    delta.analysis.summary = "The supplied batch contains no confirmed current finding.";
+    const round = mergeModelTurnDelta(projection, delta);
+    expect(round.analysis.candidates).toEqual(f.checkpoint.analysis.candidates);
+    expect(round.analysis.candidates.every((candidate) => candidate.status === "pending")).toBe(
+      true,
+    );
+    expect(
+      round.analysis.candidates.every((candidate) => candidate.reviewDisposition === "pending"),
+    ).toBe(true);
+    expect(round.analysis.findings).toEqual([]);
+    expect(round.continue).toBe(true);
+    expect(delta.analysis.candidates).toEqual([]);
   });
 });

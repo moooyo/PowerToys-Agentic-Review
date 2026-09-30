@@ -121,7 +121,7 @@ export function WebhookSettingsForm({
       await queryClient.cancelQueries({ queryKey: webhookSettingsQueryKey(repository.id) });
       if (!alive.current) return;
       acceptSettings(updated);
-      setMessage("Assignment webhook settings saved.");
+      setMessage("Review request and assignment webhook settings saved.");
     } catch (cause) {
       if (!alive.current) return;
       if (cause instanceof InvestigationHttpError && cause.status === 409) setConflict(true);
@@ -220,7 +220,7 @@ export function WebhookSettingsForm({
             Static investigations
           </Typography>
           <FormControlLabel
-            label="Listen for assignments"
+            label="Listen for review requests and assignments"
             labelPlacement="start"
             control={
               <Switch
@@ -232,7 +232,9 @@ export function WebhookSettingsForm({
             sx={{ width: "100%", justifyContent: "space-between" }}
           />
           <Typography variant="body2" color="text.secondary">
-            Trusted assignments start static PR reviews and Issue investigations.
+            Trusted Code Review requests and re-requests start PR reviews. Assignment remains a
+            temporary PR review trigger and starts Issue investigations. A push alone does not start
+            a review.
           </Typography>
         </Box>
         <Box className="repository-form-width">
@@ -257,7 +259,7 @@ export function WebhookSettingsForm({
         </Box>
         <Stack spacing={3} className="repository-form-width">
           <TextField
-            label="Assignment recipient ID"
+            label="Reviewer GitHub user ID"
             value={form.reviewerUserIdText}
             onChange={(event) => patch({ reviewerUserIdText: event.target.value })}
             inputRef={reviewerRef}
@@ -265,10 +267,13 @@ export function WebhookSettingsForm({
             fullWidth
             error={!!fieldErrors.reviewerUserIdText}
             slotProps={{ htmlInput: { inputMode: "numeric" } }}
-            helperText={fieldErrors.reviewerUserIdText ?? "Numeric GitHub user ID."}
+            helperText={
+              fieldErrors.reviewerUserIdText ??
+              "Numeric GitHub user ID for requested reviews, temporary assignments, and E2E mentions."
+            }
           />
           <TextField
-            label="Trusted GitHub user IDs"
+            label="Trusted requester GitHub user IDs"
             value={form.allowedActorUserIdsText}
             onChange={(event) => patch({ allowedActorUserIdsText: event.target.value })}
             inputRef={actorsRef}
@@ -280,7 +285,7 @@ export function WebhookSettingsForm({
             error={!!fieldErrors.allowedActorUserIdsText}
             helperText={
               fieldErrors.allowedActorUserIdsText ??
-              "Numeric IDs, separated by commas or new lines."
+              "Users allowed to request reviews, assign work, or request E2E. Numeric IDs, separated by commas or new lines."
             }
           />
         </Stack>

@@ -32,15 +32,24 @@ are not alternate production endpoints or migration inputs.
 
 ## Structured investigations
 
-Repositories can enable assignment Webhooks and configure a recipient plus trusted assigning
-GitHub user IDs in the Dashboard. A verified assignment imports a complete frozen source and
+Repositories can enable Code Review request and assignment Webhooks and configure a recipient
+plus trusted requesting GitHub user IDs in the Dashboard. A verified event imports complete frozen source and
 automatically queues a native Task. Delivery deduplication and durable recovery preserve its
 identity across retries. This path does not poll GitHub; see the
 [receiver setup](./apps/server/README.md#listen-for-trusted-assignments).
 
-The intended PR entry point is a GitHub Code Review request, including a re-request
-after a repair. Assignment remains the temporary trigger for the current owned-PR
-setup; review-request intake has not yet been implemented.
+PR reviews start on GitHub Code Review requests, including re-requests after a repair.
+Assignment remains the temporary alternative for the current owned-PR setup; Issue
+assignments continue to start investigations. A new request after a completed review
+starts a new Task even at the same commit. An active review at the same revision and
+recipient is reused, and redelivery of the same event never repeats execution.
+
+A requested review can freeze the previous complete original-PR report as a historical
+baseline. The Worker independently revisits every old finding against the current source
+while reviewing the complete current PR diff. Reports and replies distinguish fixed,
+still-present, rejected previous diagnoses, unverified, pending, and newly found issues.
+Historical evidence never certifies the new revision; a fix conclusion is static source
+analysis and does not establish passing runtime checks.
 
 Trusted users can independently request a pinned PR E2E run with a new `@configured-account e2e`
 conversation comment when E2E intake is enabled. This creates a separate execution Task and progress
@@ -54,7 +63,7 @@ new execution claims and requests cancellation, with cleanup confirmation shown 
 setting does not remove local shell access or screenshots. Static report images/videos cannot be
 published to GitHub. See [Worker controls](./apps/server/README.md#worker-execution-permission).
 
-**Webhooks** shows scoped assignment/E2E receipts, failure reasons, processing history, and linked
+**Webhooks** shows scoped review-request, assignment, and E2E receipts, failure reasons, processing history, and linked
 Tasks. A versioned, idempotent retry resumes failed intake and reattaches an already committed Task
 without repeating execution. A separate durable relay spool covers events received by a configured
 relay, with explicit versioned retry for failed deliveries and retained attempt history. It does
@@ -106,7 +115,7 @@ are rechecked before sending. See the
 [automatic reply setup](./apps/server/README.md#automatically-reply-with-investigation-results)
 and the [PR](./docs/templates/auto-reply-pr.md) and [Issue](./docs/templates/auto-reply-issue.md) templates.
 
-Repositories can also enable assignment progress comments. An accepted trusted assignment queues
+Repositories can also enable investigation progress comments. An accepted trusted review request or assignment queues
 an acknowledgement before the investigation input is imported. The same comment is updated when
 work starts, stops, or produces a complete conclusion. Every update identifies the AI assistant
 and verified publishing account. Template edits apply to subsequent new updates; prior attempts

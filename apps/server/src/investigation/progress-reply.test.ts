@@ -262,6 +262,28 @@ function harness(
 }
 
 describe("assignment progress comment outbox", () => {
+  it("uses reviewer admission for a code review request and only for the first comment", async () => {
+    const h = harness();
+    const reviewTrigger: InvestigationProgressTrigger = {
+      ...h.trigger,
+      requestKind: "review_request",
+    };
+    h.enqueue(h.task, reviewTrigger);
+    await h.run();
+    const first = h.mutations.mock.calls[0]![0];
+    expect(first).toMatchObject({ externalId: null, expectedReviewerUserId: 22 });
+    expect(first.expectedAssigneeUserId).toBeUndefined();
+    expect(first.body).toContain("requested a code review from GitHub user synthetic-worker");
+    expect(first.body).not.toContain("assigned the");
+    expect(() => h.enqueue()).toThrow("another progress comment");
+    h.transition("running");
+    await h.run();
+    const update = h.mutations.mock.calls.at(-1)![0];
+    expect(update.externalId).toBe("9001");
+    expect(update.expectedReviewerUserId).toBeUndefined();
+    expect(update.expectedAssigneeUserId).toBeUndefined();
+  });
+
   // Diagnostic identifiers are displayed literally after Markdown underscore escaping.
   const diagnosticText = (body: string | null) => body?.replaceAll("\\_", "_") ?? "";
   const sourceBlockers = [

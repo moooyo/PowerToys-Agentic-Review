@@ -76,7 +76,7 @@ beforeEach(() => {
   };
 });
 
-describe("repository assignment webhook settings", () => {
+describe("repository review request and assignment webhook settings", () => {
   it("does not query settings outside the current repository grants", () => {
     if (!context.session?.authenticated) throw new Error("An authenticated fixture is required.");
     context.session.user.isAdmin = true;
@@ -86,14 +86,17 @@ describe("repository assignment webhook settings", () => {
     expect(queryClient.getQueryCache().getAll()).toHaveLength(0);
   });
 
-  it("shows the selected repository, assignment rules, and unavailable receiver without blocking configuration", () => {
+  it("shows review request and temporary assignment rules without blocking configuration", () => {
     const queryClient = client();
     queryClient.setQueryData(webhookSettingsQueryKey(repository.id), settings);
     const html = renderPanel(queryClient);
     expect(html).toContain("Static investigations");
-    expect(html).toContain("Listen for assignments");
-    expect(html).toContain("Assignment recipient ID");
-    expect(html).toContain("Trusted GitHub user IDs");
+    expect(html).toContain("Listen for review requests and assignments");
+    expect(html).toContain("Code Review requests and re-requests");
+    expect(html).toContain("temporary PR review trigger");
+    expect(html).toContain("push alone does not");
+    expect(html).toContain("Reviewer GitHub user ID");
+    expect(html).toContain("Trusted requester GitHub user IDs");
     expect(html).toContain("/api/github/webhook");
     expect(html).toContain("receiver is not configured");
     expect(html).toContain("Save settings");
@@ -108,7 +111,7 @@ describe("repository assignment webhook settings", () => {
     const queryClient = client();
     queryClient.setQueryData(webhookSettingsQueryKey(repository.id), settings);
     const html = renderPanel(queryClient);
-    expect(html).toContain("Assignment recipient ID");
+    expect(html).toContain("Reviewer GitHub user ID");
     expect(html).toContain("Repository management permission is required");
     expect(html).not.toContain("Save settings");
   });
@@ -178,7 +181,7 @@ describe("webhook settings input and conflict recovery", () => {
       allowedActorUserIds: settings.allowedActorUserIds,
     });
     expect(() => webhookSettingsInput({ ...form, allowedActorUserIdsText: "" }, 0)).toThrow(
-      "trusted user",
+      "trusted requester",
     );
   });
   it("accepts numeric IDs separated by commas or new lines and deduplicates stable identity", () => {
@@ -206,7 +209,7 @@ describe("webhook settings input and conflict recovery", () => {
       { ...empty, enabled: true, allowedActorUserIdsText: "2001" },
     ]) {
       expect(() => webhookSettingsInput(form, 0)).toThrow(
-        "recipient and at least one trusted user",
+        "reviewer and at least one trusted requester",
       );
     }
     expect(() => webhookSettingsInput({ ...empty, reviewerUserIdText: "1001,1002" }, 0)).toThrow(

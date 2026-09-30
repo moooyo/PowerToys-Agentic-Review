@@ -24,6 +24,7 @@ import type {
   InvestigationReportPartRequest,
   InvestigationReportPartV1,
   InvestigationResultV1,
+  InvestigationReviewBaselineSnapshot,
   InvestigationSchedulerSettingsRequest,
   InvestigationSchedulerStatus,
   InvestigationSubjectV1,
@@ -40,11 +41,16 @@ import {
   EntityIdSchema,
   InvestigationCreateTaskRequestV1Schema,
   InvestigationInputSnapshotV1Schema,
+  InvestigationResultV1Schema,
+  InvestigationReviewBaselineSnapshotSchema,
+  InvestigationTaskV1Schema,
   investigationTaskRequiresE2e,
   isCorrectableInvestigationModelOutputIssue,
   isInvestigationStaticTaskKind,
   Sha256Schema,
   validateInvestigationAnalysisForTask,
+  validateInvestigationResult,
+  validateInvestigationReviewBaselineSnapshot,
   validateInvestigationSourceProvenance,
   validateInvestigationTask,
 } from "@agentic-review/contracts";
@@ -123,11 +129,19 @@ interface FrozenTaskInput {
   inputSnapshot: InvestigationInputSnapshotV1;
   plan: InvestigationPlanV1 | null;
   execution: InvestigationPlanExecutionBinding | null;
+  reviewBaseline?: InvestigationReviewBaselineSnapshot;
 }
 export type InvestigationPreparedTaskInput = FrozenTaskInput;
 export interface InvestigationImportedTaskSource {
   readonly workItem: InvestigationWorkItemRecord;
   readonly snapshotRef: { readonly id: string; readonly digest: string };
+}
+export interface InvestigationImportedTaskOptions {
+  readonly reviewRequest?: true;
+}
+interface ReviewBaselineSelectionRecord {
+  requestDigest: string;
+  snapshot: InvestigationReviewBaselineSnapshot | null;
 }
 const importedTaskSourceSchema = Type.Object(
   {
@@ -496,6 +510,7 @@ export class InvestigationService {
     source: InvestigationImportedTaskSource,
     beforePersist?: () => void,
     onPersisted?: (task: InvestigationTaskV1) => void,
+    options?: InvestigationImportedTaskOptions,
   ): Promise<InvestigationTaskV1> {
     if (!FormatRegistry.Has("date-time"))
       FormatRegistry.Set("date-time", (value) => Number.isFinite(Date.parse(value)));
@@ -526,6 +541,7 @@ export class InvestigationService {
       structuredClone(source),
       beforePersist,
       onPersisted,
+      options,
     );
   }
 
@@ -536,6 +552,7 @@ export class InvestigationService {
     importedSource?: InvestigationImportedTaskSource,
     beforePersist?: () => void,
     onPersisted?: (task: InvestigationTaskV1) => void,
+    importedOptions?: InvestigationImportedTaskOptions,
   ): Promise<InvestigationTaskV1> {
     this.permit(actor, "task:create");
     const key = `task:${actor.id}:${request.idempotencyKey}`;
@@ -573,6 +590,19 @@ export class InvestigationService {
         ? undefined
         : this.prepareImportedTaskSource(importedSource, registeredItem, repository);
     const item = importedSource?.workItem ?? registeredItem;
+    requireCondition(
+      importedOptions?.reviewRequest !== true ||
+        (importedSource !== undefined &&
+          request.kind === "pr-review" &&
+          item.kind === "pull_request"),
+      400,
+      "invalid_review_request_task",
+      "A review request can only create an imported original PR review.",
+    );
+    const reviewBaseline =
+      importedOptions?.reviewRequest === true
+        ? this.freezeReviewBaselineSelection(actor, request, repository, item)
+        : undefined;
     if (this.options.actionTransport !== undefined) {
       const current = await this.options.actionTransport.readTarget(repository, item, actor);
       requireCondition(
@@ -857,6 +887,9 @@ export class InvestigationService {
       planRef: request.planRef ?? null,
       subjectRef: subject.id,
       subjects,
+      ...(reviewBaseline === undefined
+        ? {}
+        : { reviewBaseline: structuredClone(reviewBaseline.descriptor) }),
       ...(sourceArtifacts.length === 0 ? {} : { sourceArtifacts }),
       scope,
       executionPolicy: {
@@ -892,7 +925,7 @@ export class InvestigationService {
       "invalid_task",
       taskValidation.errors.map((error) => error.message).join(" "),
     );
-    const input: InvestigationPreparedTaskInput =
+    const preparedInput: InvestigationPreparedTaskInput =
       importedInput !== undefined
         ? {
             inputSnapshot: {
@@ -920,6 +953,16 @@ export class InvestigationService {
               execution: null,
             }
           : await this.options.prepareTaskInput(task, item, plan, actor);
+    requireCondition(
+      preparedInput.reviewBaseline === undefined,
+      400,
+      "prepared_review_baseline_changed",
+      "Only the Server's frozen review request selection may supply a prior review baseline.",
+    );
+    const input: InvestigationPreparedTaskInput = {
+      ...preparedInput,
+      ...(reviewBaseline === undefined ? {} : { reviewBaseline: structuredClone(reviewBaseline) }),
+    };
     requireCondition(
       input.inputSnapshot.repositoryId === repository.id &&
         input.inputSnapshot.workItemId === item.id &&
@@ -973,6 +1016,7 @@ export class InvestigationService {
         return this.task(actor, concurrent.entityId);
       }
       if (importedSource !== undefined) this.requireImportedSourceCurrent(repository, item);
+      this.requireReviewBaselineCurrent(task, input.reviewBaseline);
       this.evidence.requireTaskSources(task, parent ?? null);
       beforePersist?.();
       if (request.expectedSubjectRevisionKey !== undefined) {
@@ -991,6 +1035,162 @@ export class InvestigationService {
       onPersisted?.(task);
       return task;
     });
+  }
+
+  private freezeReviewBaselineSelection(
+    actor: InvestigationOperatorPrincipal,
+    request: InvestigationCreateTaskRequestV1,
+    repository: InvestigationRepositoryRecord,
+    item: InvestigationWorkItemRecord,
+  ): InvestigationReviewBaselineSnapshot | undefined {
+    const key = `review-baseline:${actor.id}:${request.idempotencyKey}`;
+    const requestDigest = investigationContentDigest(request);
+    return this.store.transaction(() => {
+      const saved = this.store.get<ReviewBaselineSelectionRecord>("idempotency", key);
+      if (saved !== undefined) {
+        requireCondition(
+          saved.requestDigest === requestDigest,
+          409,
+          "idempotency_conflict",
+          "The review request changed after its prior report baseline was frozen.",
+        );
+        return saved.snapshot === null ? undefined : structuredClone(saved.snapshot);
+      }
+      const snapshots = this.store
+        .list<InvestigationResultV1>("reports")
+        .flatMap((report) => {
+          if (!Value.Check(InvestigationResultV1Schema, report)) return [];
+          const sourceTask = this.store.get<InvestigationTaskV1>("tasks", report.context.task.id);
+          const snapshot = this.reviewBaselineFromReport(report, sourceTask, repository, item);
+          return snapshot === undefined || sourceTask === undefined
+            ? []
+            : [{ snapshot, sealedAt: sourceTask.updatedAt, createdAt: sourceTask.createdAt }];
+        })
+        .sort(
+          (a, b) =>
+            b.sealedAt.localeCompare(a.sealedAt) ||
+            b.createdAt.localeCompare(a.createdAt) ||
+            b.snapshot.descriptor.reportRef.id.localeCompare(a.snapshot.descriptor.reportRef.id),
+        );
+      const snapshot = snapshots[0]?.snapshot;
+      this.store.insert("idempotency", key, {
+        requestDigest,
+        snapshot: snapshot ?? null,
+      } satisfies ReviewBaselineSelectionRecord);
+      return snapshot === undefined ? undefined : structuredClone(snapshot);
+    });
+  }
+
+  private reviewBaselineFromReport(
+    report: InvestigationResultV1,
+    sourceTask: InvestigationTaskV1 | undefined,
+    repository: InvestigationRepositoryRecord,
+    item: Pick<InvestigationWorkItemRecord, "id" | "kind" | "number">,
+  ): InvestigationReviewBaselineSnapshot | undefined {
+    if (
+      sourceTask === undefined ||
+      !Value.Check(InvestigationResultV1Schema, report) ||
+      !Value.Check(InvestigationTaskV1Schema, sourceTask) ||
+      !validateInvestigationTask(sourceTask).valid ||
+      !validateInvestigationResult(report).valid ||
+      sourceTask.kind !== "pr-review" ||
+      sourceTask.state !== "completed" ||
+      sourceTask.parentTaskId !== null ||
+      sourceTask.parentReportRef !== null ||
+      sourceTask.planRef !== null ||
+      sourceTask.executionPolicy.mode !== "source_read" ||
+      report.context.task.kind !== "pr-review" ||
+      report.context.task.parentTaskId !== null ||
+      report.context.parentReportRef !== null ||
+      report.outcome !== "completed" ||
+      report.report.delivery !== "final" ||
+      report.report.completeness !== "complete" ||
+      report.report.loop.stopReason !== "complete" ||
+      report.context.repository.id !== repository.id ||
+      report.context.repository.githubRepositoryId !== repository.githubRepositoryId ||
+      report.context.repository.fullName !== repository.fullName ||
+      sourceTask.repository.id !== repository.id ||
+      sourceTask.repository.githubRepositoryId !== repository.githubRepositoryId ||
+      sourceTask.repository.fullName !== repository.fullName ||
+      report.context.workItem.kind !== "pull_request" ||
+      item.kind !== "pull_request" ||
+      report.context.workItem.id !== item.id ||
+      report.context.workItem.number !== item.number ||
+      sourceTask.workItem.id !== item.id ||
+      sourceTask.workItem.kind !== "pull_request" ||
+      sourceTask.workItem.number !== item.number ||
+      report.context.task.id !== sourceTask.id ||
+      report.context.task.subjectRef !== sourceTask.subjectRef ||
+      sourceTask.latestReportRef?.id !== report.id ||
+      sourceTask.latestReportRef.version !== report.version ||
+      sourceTask.latestReportRef.digest !== report.report.logicalContentDigest
+    )
+      return undefined;
+    const subject = report.context.subjects.find(
+      (entry) => entry.id === report.context.task.subjectRef,
+    );
+    const taskSubject = sourceTask.subjects.find((entry) => entry.id === sourceTask.subjectRef);
+    if (
+      subject?.kind !== "original_pr" ||
+      taskSubject?.kind !== "original_pr" ||
+      subject.repositoryId !== repository.id ||
+      subject.workItemId !== item.id ||
+      investigationContentDigest(subject) !== investigationContentDigest(taskSubject) ||
+      subject.revisionKey !==
+        createHash("sha256").update(`${subject.baseSha}\0${subject.headSha}`).digest("hex")
+    )
+      return undefined;
+    const { logicalContentDigest, ...reportContent } = report.report;
+    if (logicalContentDigest !== investigationContentDigest({ ...report, report: reportContent }))
+      return undefined;
+    const snapshot: InvestigationReviewBaselineSnapshot = {
+      descriptor: {
+        reportRef: { id: report.id, version: report.version, digest: logicalContentDigest },
+        sourceTaskId: sourceTask.id,
+        subject: structuredClone(subject),
+        findings: report.findings.map(({ id, version, title }) => ({ id, version, title })),
+      },
+      findings: structuredClone(report.findings),
+    };
+    return validateInvestigationReviewBaselineSnapshot(snapshot).valid ? snapshot : undefined;
+  }
+
+  private requireReviewBaselineCurrent(
+    task: InvestigationTaskV1,
+    snapshot: InvestigationReviewBaselineSnapshot | undefined,
+  ): void {
+    requireCondition(
+      task.reviewBaseline === undefined
+        ? snapshot === undefined
+        : snapshot !== undefined &&
+            Value.Check(InvestigationReviewBaselineSnapshotSchema, snapshot) &&
+            validateInvestigationReviewBaselineSnapshot(snapshot).valid &&
+            investigationContentDigest(task.reviewBaseline) ===
+              investigationContentDigest(snapshot.descriptor),
+      409,
+      "review_baseline_mismatch",
+      "The task must preserve its complete frozen Server-selected prior review baseline.",
+    );
+    if (snapshot === undefined) return;
+    const report = this.store.get<InvestigationResultV1>(
+      "reports",
+      snapshot.descriptor.reportRef.id,
+    );
+    const sourceTask = this.store.get<InvestigationTaskV1>(
+      "tasks",
+      snapshot.descriptor.sourceTaskId,
+    );
+    const current =
+      report === undefined
+        ? undefined
+        : this.reviewBaselineFromReport(report, sourceTask, task.repository, task.workItem);
+    requireCondition(
+      current !== undefined &&
+        investigationContentDigest(current) === investigationContentDigest(snapshot),
+      409,
+      "review_baseline_changed",
+      "The prior review report and full finding snapshot must still match the frozen baseline.",
+    );
   }
 
   private prepareImportedTaskSource(
@@ -1850,6 +2050,8 @@ export class InvestigationService {
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
         .find((entry) => availablePools[investigationResourcePool(entry)]);
       if (task === undefined) return { claim: null };
+      const input = this.required<FrozenTaskInput>("idempotency", `input:${task.id}`);
+      this.requireReviewBaselineCurrent(task, input.reviewBaseline);
       const number = this.attempts(task.id).length + 1;
       const attempt: InvestigationAttemptV1 = {
         schemaVersion: "InvestigationAttemptV1",
@@ -1902,7 +2104,6 @@ export class InvestigationService {
       this.store.put("tasks", task.id, running);
       this.store.put("checkpoints", task.id, checkpoint);
       beginInvestigationProgress(this.store, task.id, attempt.id);
-      const input = this.required<FrozenTaskInput>("idempotency", `input:${task.id}`);
       this.options.onTaskStateChanged?.(running);
       return {
         claim: {
@@ -2647,6 +2848,7 @@ export class InvestigationService {
       .list<InvestigationReportPartV1>("reportParts", (part) => part.reportId === record.reportId)
       .sort((a, b) => a.sequence - b.sequence);
     const frozenInput = this.required<FrozenTaskInput>("idempotency", `input:${task.id}`);
+    this.requireReviewBaselineCurrent(task, frozenInput.reviewBaseline);
     if (frozenInput.plan !== null) {
       const parent =
         task.parentReportRef === null

@@ -10,6 +10,8 @@ import {
   type InvestigationLoopRoundV1,
   InvestigationModelEditsV1Schema,
   type InvestigationModelInvocationReceipt,
+  type InvestigationReviewBaselineSnapshot,
+  type InvestigationTaskV1,
 } from "@agentic-review/contracts";
 import {
   applyInvestigationSourceCoverage,
@@ -145,7 +147,7 @@ function fixture(
   } = {},
 ) {
   const synthetic = createInvestigationFixture("bug", { findingCount: settings.findingCount ?? 1 });
-  const task = {
+  const task: InvestigationTaskV1 = {
     ...synthetic.task,
     executionPolicy: { ...synthetic.task.executionPolicy, mode: "snapshot_only" as const },
     scope: {
@@ -680,7 +682,135 @@ function useLocalCheckout(p: ReturnType<typeof prChunkFixture>): void {
   );
 }
 
+function attachReviewBaseline(
+  p: ReturnType<typeof prChunkFixture>,
+): InvestigationReviewBaselineSnapshot {
+  const current = p.task.subjects.find((subject) => subject.id === p.task.subjectRef)!;
+  if (current.kind !== "original_pr") throw new Error("The fixture requires a pinned PR subject.");
+  const subject = {
+    ...current,
+    id: "previous-review-source",
+    headSha: "a".repeat(40),
+    revisionKey: hash("previous-review-source"),
+  };
+  const findings = structuredClone(p.pr.result.findings).map((finding) => ({
+    ...finding,
+    subjectRef: subject.id,
+    locations: finding.locations.map((location) => ({ ...location, subjectRef: subject.id })),
+    feedbackDraft: {
+      ...finding.feedbackDraft,
+      suggestion:
+        finding.feedbackDraft.suggestion === null
+          ? null
+          : {
+              ...finding.feedbackDraft.suggestion,
+              subjectRef: subject.id,
+              headSha: subject.headSha,
+            },
+    },
+  }));
+  const reviewBaseline: InvestigationReviewBaselineSnapshot = {
+    descriptor: {
+      reportRef: {
+        id: "previous-native-review",
+        version: 1,
+        digest: hash("previous-native-review"),
+      },
+      sourceTaskId: "previous-review-task",
+      subject,
+      findings: findings.map(({ id, version, title }) => ({ id, version, title })),
+    },
+    findings,
+  };
+  (p.task as InvestigationTaskV1).reviewBaseline = reviewBaseline.descriptor;
+  useLocalCheckout(p);
+  return reviewBaseline;
+}
+
 describe("investigation model turn runner", () => {
+  it("supplies full historical findings separately while rereviewing the complete current PR", async () => {
+    const p = prChunkFixture({ findingCount: 3, status: "modified" });
+    const reviewBaseline = attachReviewBaseline(p);
+    const prepared = await makePrompt(
+      { ...p.input, reviewBaseline },
+      p.f.io,
+      128 * 1024,
+      1024 * 1024,
+    );
+    const context = JSON.parse(
+      prepared.prompt
+        .split("<local_source_review_context>\n")[1]!
+        .split("\n</local_source_review_context>")[0]!,
+    );
+    expect(context.turn.reviewBaseline).toEqual({
+      reportRef: reviewBaseline.descriptor.reportRef,
+      sourceTaskId: reviewBaseline.descriptor.sourceTaskId,
+      subject: reviewBaseline.descriptor.subject,
+      totalFindingCount: 3,
+      findings: reviewBaseline.findings,
+    });
+    expect(context.turn.analysis.findings).toEqual([]);
+    expect(context.turn.analysis.evidence).toEqual([]);
+    expect(context.turn.analysis.rechecks).toEqual([]);
+    expect(context.turn.analysis.candidates).toHaveLength(3);
+    expect(
+      context.turn.analysis.candidates.every(
+        (candidate: { subjectRef: string }) => candidate.subjectRef === p.task.subjectRef,
+      ),
+    ).toBe(true);
+    expect(context.workspace.headSha).toBe(p.manifest.headSha);
+    expect(context.initialDiff.complete).toBe(true);
+    expect(
+      context.turn.analysis.coverageUnits.some(
+        (unit: { requiredWork: string }) =>
+          unit.requiredWork === "Review the complete frozen PR diff.",
+      ),
+    ).toBe(true);
+    expect(prepared.prompt).toContain("Review the complete current merge-base-to-head PR diff");
+    expect(prepared.prompt).toContain(
+      "Omitted candidates remain pending; omission never means fixed",
+    );
+    expect(prepared.prompt).toContain("never copy them into current analysis");
+    expect(prepared.prompt).toContain("current head differs from the prior head");
+    expect(prepared.prompt).toContain("Use not_confirmed");
+    expect(prepared.prompt).toContain("Do not restore dependencies, build, run tests");
+    expect(p.f.start).not.toHaveBeenCalled();
+    const result = await p.f.runner.execute({ ...p.input, reviewBaseline });
+    expect(
+      result.round.analysis.candidates.every(
+        (candidate) => candidate.reviewDisposition === "pending",
+      ),
+    ).toBe(true);
+    const schemaWrite = vi
+      .mocked(p.f.io.writeExclusiveUtf8)
+      .mock.calls.find(([path]) => path.endsWith("round-schema.json"))!;
+    const schema = JSON.parse(schemaWrite[1]);
+    expect(
+      schema.properties.analysis.properties.candidates.items.anyOf.some(
+        (branch: { properties: Record<string, unknown> }) =>
+          Object.hasOwn(branch.properties, "reviewBaselineFindingRef"),
+      ),
+    ).toBe(true);
+  });
+
+  it.each(["missing", "different report", "incomplete findings"] as const)(
+    "rejects a %s rereview baseline before invoking a model",
+    async (mode) => {
+      const p = prChunkFixture({ findingCount: 2 });
+      const reviewBaseline = attachReviewBaseline(p);
+      const changed = structuredClone(reviewBaseline);
+      if (mode === "different report") changed.descriptor.reportRef.id = "another-review";
+      if (mode === "incomplete findings") changed.findings.pop();
+      await expect(
+        p.f.runner.execute({
+          ...p.input,
+          ...(mode === "missing" ? {} : { reviewBaseline: changed }),
+        }),
+      ).rejects.toMatchObject({ code: "MODEL_INPUT_INVALID" });
+      expect(p.f.start).not.toHaveBeenCalled();
+    },
+  );
+
   it("lets a fresh snapshot-only issue finish in its first static invocation", async () => {
     const f = fixture({ findingCount: 0 });
     f.round.continue = false;
@@ -688,6 +818,16 @@ describe("investigation model turn runner", () => {
     expect(result.round.phase).toBe("discovery");
     expect(result.round.continue).toBe(false);
     expect(f.start).toHaveBeenCalledOnce();
+    const schemaWrite = vi
+      .mocked(f.io.writeExclusiveUtf8)
+      .mock.calls.find(([path]) => path.endsWith("round-schema.json"))!;
+    const schema = JSON.parse(schemaWrite[1]);
+    expect(
+      schema.properties.analysis.properties.candidates.items.anyOf.every(
+        (branch: { properties: Record<string, unknown> }) =>
+          !Object.hasOwn(branch.properties, "reviewBaselineFindingRef"),
+      ),
+    ).toBe(true);
     const prompt = f.start.mock.calls[0]![0].standardInput!;
     expect(prompt).toContain("no separate finalize invocation is required");
     expect(prompt).toContain("Do not guess a repository branch or source revision");

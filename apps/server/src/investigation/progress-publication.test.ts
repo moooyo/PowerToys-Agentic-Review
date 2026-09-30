@@ -39,7 +39,9 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function harness(options: { kind?: "pr" | "bug"; preTask?: boolean; e2e?: boolean } = {}) {
+function harness(
+  options: { kind?: "pr" | "bug"; preTask?: boolean; e2e?: boolean; reviewRequest?: boolean } = {},
+) {
   const fixture = createInvestigationPreview(options.kind ?? "pr", { findingCount: 0 });
   if (options.e2e) {
     fixture.task.kind = "pr-e2e";
@@ -85,6 +87,7 @@ function harness(options: { kind?: "pr" | "bug"; preTask?: boolean; e2e?: boolea
         ? "pull_request"
         : "issues",
     ...(options.e2e ? { commandCommentId: 901 } : {}),
+    ...(options.reviewRequest ? { requestKind: "review_request" as const } : {}),
     actorUserId: 11,
     assigneeUserId: 22,
     actorLogin: "synthetic-assigner",
@@ -260,6 +263,7 @@ function harness(options: { kind?: "pr" | "bug"; preTask?: boolean; e2e?: boolea
   return {
     actor,
     admission,
+    trigger,
     task,
     store,
     clock,
@@ -284,6 +288,63 @@ function harness(options: { kind?: "pr" | "bug"; preTask?: boolean; e2e?: boolea
 }
 
 describe("durable assignment comment publication", () => {
+  it("keeps a review request through task attachment without requiring it for later updates", async () => {
+    const h = harness({ preTask: true, reviewRequest: true });
+    h.enqueueAssignment();
+    expect(() =>
+      h.publisher.enqueueAssignment({
+        ...h.admission,
+        trigger: { eventName: "pull_request", actorUserId: 11, assigneeUserId: 22 },
+      }),
+    ).toThrow("another comment scope");
+    await h.run();
+    const first = h.dispatches.mock.calls[0]![0];
+    expect(first).toMatchObject({ externalId: null, expectedReviewerUserId: 22 });
+    expect(first.expectedAssigneeUserId).toBeUndefined();
+    expect(first.body).toContain("requested a code review from");
+    h.control.assignmentAuthorized = false;
+    h.attachTask();
+    await h.run();
+    const update = h.dispatches.mock.calls.at(-1)![0];
+    expect(update).toMatchObject({ externalId: "9001", previousBody: first.body });
+    expect(update.expectedReviewerUserId).toBeUndefined();
+    expect(h.summary().state).toBe("synced");
+  });
+
+  it("denies a first review request dispatch if its local admission is revoked", async () => {
+    const h = harness({ preTask: true, reviewRequest: true });
+    h.enqueueAssignment();
+    h.control.beforeDispatch = () => {
+      h.control.assignmentAuthorized = false;
+    };
+    await h.run();
+    expect(h.dispatches).not.toHaveBeenCalled();
+    expect(h.summary()).toMatchObject({
+      state: "paused",
+      reasonCode: "review_request_not_current",
+      nextAttemptAt: null,
+    });
+  });
+
+  it.each([
+    ["source_review_request_missing", "code review request is no longer current"],
+    ["source_review_request_stale", "pull request is no longer open"],
+    ["source_review_request_revision_changed", "pull request base or head changed"],
+    ["source_review_request_target_changed", "pull request identity changed"],
+  ])("publishes a cancelled review with recovery wording for %s", async (code, message) => {
+    const h = harness({ preTask: true, reviewRequest: true });
+    h.enqueueAssignment();
+    await h.run();
+    h.publisher.updateAssignment(h.admission.id, "cancelled", code);
+    await h.run();
+    const body = h.dispatches.mock.calls.at(-1)![0].body;
+    expect(body).toContain("Static review cancelled");
+    expect(body).toContain(message);
+    expect(body).toContain("Request a code review again on the current open pull request");
+    expect(body).toContain("No automatic continuation is scheduled");
+    expect(body).not.toContain("Static review failed");
+  });
+
   it("keeps the accepted E2E command comment through preparation and task attachment", async () => {
     const h = harness({ preTask: true, e2e: true });
     h.enqueueAssignment();

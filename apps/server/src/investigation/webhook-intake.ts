@@ -33,6 +33,8 @@ const activeCyclePrefix = "webhook:active-cycle:";
 const maximumPending = 1_000;
 
 interface Assignment {
+  /** Absence preserves the historical assignment admission identity. */
+  readonly requestKind?: "review_request";
   readonly repository: InvestigationRepositoryRecord;
   readonly kind: "pull_request" | "issue";
   readonly number: number;
@@ -135,6 +137,7 @@ function progressTrigger(assignment: Assignment): InvestigationProgressTrigger {
     eventName: assignment.kind === "issue" ? "issues" : "pull_request",
     actorUserId: assignment.actorUserId,
     assigneeUserId: assignment.assigneeUserId,
+    ...(assignment.requestKind === undefined ? {} : { requestKind: assignment.requestKind }),
     ...(assignment.actorLogin === undefined ? {} : { actorLogin: assignment.actorLogin }),
     ...(assignment.assigneeLogin === undefined ? {} : { assigneeLogin: assignment.assigneeLogin }),
   };
@@ -332,7 +335,10 @@ export class InvestigationWebhookIntake {
     if (input.eventName !== "issues" && input.eventName !== "pull_request")
       return { status: "ignored", reason: "unsupported_event" };
     const payload = object(input.payload);
-    if (payload.action !== "assigned") return { status: "ignored", reason: "unsupported_action" };
+    const reviewRequested =
+      input.eventName === "pull_request" && payload.action === "review_requested";
+    if (payload.action !== "assigned" && !reviewRequested)
+      return { status: "ignored", reason: "unsupported_action" };
     const remoteRepository = object(payload.repository);
     const githubRepositoryId = positiveId(remoteRepository.id);
     const binding = this.#bindings().find((entry) => {
@@ -348,7 +354,9 @@ export class InvestigationWebhookIntake {
     });
     if (binding === undefined) return { status: "ignored", reason: "repository_not_configured" };
     const sender = object(payload.sender);
-    const assignee = object(payload.assignee);
+    if (reviewRequested && (payload.requested_reviewer == null || payload.requested_team != null))
+      return { status: "ignored", reason: "unsupported_review_target" };
+    const assignee = object(reviewRequested ? payload.requested_reviewer : payload.assignee);
     const actorUserId = positiveId(sender.id);
     const assigneeUserId = positiveId(assignee.id);
     if (
@@ -357,7 +365,10 @@ export class InvestigationWebhookIntake {
       assigneeUserId !== binding.reviewerUserId ||
       !binding.allowedActorUserIds.includes(actorUserId)
     )
-      return { status: "ignored", reason: "assignment_not_authorized" };
+      return {
+        status: "ignored",
+        reason: reviewRequested ? "review_request_not_authorized" : "assignment_not_authorized",
+      };
     const item = object(input.eventName === "issues" ? payload.issue : payload.pull_request);
     if (item.state !== "open") return { status: "ignored", reason: "work_item_not_open" };
     requireCondition(
@@ -366,18 +377,22 @@ export class InvestigationWebhookIntake {
       "invalid_assignment",
       "An Issue event cannot identify a pull request.",
     );
+    const recipients = reviewRequested ? item.requested_reviewers : item.assignees;
     requireCondition(
-      Array.isArray(item.assignees) &&
-        item.assignees.some(
+      Array.isArray(recipients) &&
+        recipients.some(
           (value) =>
             value !== null &&
             typeof value === "object" &&
             "id" in value &&
-            value.id === assigneeUserId,
+            value.id === assigneeUserId &&
+            (!reviewRequested || ("type" in value && value.type === "User")),
         ),
       400,
       "invalid_assignment",
-      "The assigned user must belong to the event's current assignees.",
+      reviewRequested
+        ? "The requested reviewer must belong to the event's current user review requests."
+        : "The assigned user must belong to the event's current assignees.",
     );
     requireCondition(
       typeof item.updated_at === "string" &&
@@ -401,6 +416,7 @@ export class InvestigationWebhookIntake {
         "The PR base repository must match the configured target.",
       );
     const assignmentIdentity: Assignment = {
+      ...(reviewRequested ? { requestKind: "review_request" as const } : {}),
       repository,
       kind: input.eventName === "issues" ? "issue" : "pull_request",
       number: positiveId(item.number),
@@ -418,7 +434,13 @@ export class InvestigationWebhookIntake {
       ...(assigneeLogin === undefined ? {} : { assigneeLogin }),
     };
     const receiptId = `${deliveryPrefix}${input.deliveryId}`;
-    const semanticKey = `${assignmentPrefix}${investigationContentDigest(assignmentIdentity)}`;
+    // GitHub redeliveries retain their delivery ID. A fresh review request can have an unchanged
+    // updated_at and commit pair, so only assignments use the historical payload identity.
+    const semanticKey = `${assignmentPrefix}${investigationContentDigest(
+      reviewRequested
+        ? { requestKind: "review_request", deliveryId: input.deliveryId }
+        : assignmentIdentity,
+    )}`;
     const result = this.options.store.transaction(() => {
       const previous = this.options.store.get<InvestigationWebhookReceipt>(
         "idempotency",
@@ -717,6 +739,10 @@ export class InvestigationWebhookIntake {
               "source_assignment_stale",
               "source_assignment_revision_changed",
               "source_assignment_target_changed",
+              "source_review_request_missing",
+              "source_review_request_stale",
+              "source_review_request_revision_changed",
+              "source_review_request_target_changed",
             ].includes(receipt.reason ?? "");
           this.options.onAssignmentChanged?.(
             this.#admission(receipt),
@@ -880,6 +906,9 @@ export class InvestigationWebhookIntake {
       const expectation = {
         githubWorkItemId: receipt.assignment.githubWorkItemId,
         assigneeUserId: receipt.assignment.assigneeUserId,
+        ...(receipt.assignment.requestKind === undefined
+          ? {}
+          : { requestKind: receipt.assignment.requestKind }),
         ...(receipt.assignment.baseSha === undefined
           ? {}
           : { baseSha: receipt.assignment.baseSha, headSha: receipt.assignment.headSha! }),
@@ -961,6 +990,7 @@ export class InvestigationWebhookIntake {
           );
           notified = true;
         },
+        receipt.assignment.requestKind === "review_request" ? { reviewRequest: true } : undefined,
       );
       if (!notified)
         this.options.store.transaction(() => {

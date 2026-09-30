@@ -11,6 +11,7 @@ import {
   type InvestigationCreateTaskRequestV1,
   type InvestigationFindingsPageV1,
   type InvestigationHeartbeatResponse,
+  type InvestigationInputSnapshotV1,
   type InvestigationLoopCheckpointV1,
   type InvestigationModelInvocationReceipt,
   type InvestigationOutputBatchRequest,
@@ -20,6 +21,7 @@ import {
   type InvestigationTaskV1,
   type InvestigationUsageSummary,
   unavailableInvestigationTokenUsage,
+  validateInvestigationResult,
 } from "@agentic-review/contracts";
 import { investigationContentDigest, projectRecordedE2eAnalysis } from "@agentic-review/domain";
 import type { FastifyInstance } from "fastify";
@@ -29,9 +31,10 @@ import {
   type InvestigationEvidencePolicy,
   InvestigationEvidenceStore,
 } from "../../dist/investigation/evidence-store.js";
-import type {
-  InvestigationPreparedTaskInput,
-  InvestigationServiceOptions,
+import {
+  type InvestigationPreparedTaskInput,
+  InvestigationService,
+  type InvestigationServiceOptions,
 } from "../../dist/investigation/service.js";
 import { InvestigationStore } from "../../dist/investigation/store.js";
 import type {
@@ -3093,5 +3096,265 @@ describe("pre-dispatch proof against missing usage", () => {
       completeness: "unavailable",
       usage: { totalTokens: null },
     });
+  });
+});
+
+describe("Server-frozen review request baselines", () => {
+  function importedSource(store: InvestigationStore, item: InvestigationWorkItemRecord) {
+    const source = structuredClone(item);
+    if (source.subject.kind !== "original_pr") throw new Error("Expected a synthetic PR.");
+    source.subject.revisionKey = createHash("sha256")
+      .update(`${source.subject.baseSha}\0${source.subject.headSha}`)
+      .digest("hex");
+    store.put("workItems", source.id, source);
+    const inputSnapshot: InvestigationInputSnapshotV1 = {
+      schemaVersion: "InvestigationInputSnapshotV1",
+      repositoryId: source.repositoryId,
+      workItemId: source.id,
+      subjectRef: source.subject.id,
+      subjectRevisionKey: source.subject.revisionKey,
+      title: source.title,
+      body: source.body,
+      comments: [{ id: "synthetic-comment", body: "Complete frozen review request context." }],
+      source: null,
+    };
+    const digest = investigationContentDigest(inputSnapshot);
+    const snapshotRef = { id: `snapshot:${digest}`, digest };
+    store.put("sourceSnapshots", snapshotRef.id, { ...snapshotRef, inputSnapshot });
+    return { workItem: source, snapshotRef };
+  }
+
+  function saveReview(
+    store: InvestigationStore,
+    key: string,
+    findingCount = 2,
+    mutate?: (data: ReturnType<typeof createInvestigationFixture>) => void,
+  ) {
+    const original = createInvestigationFixture("pr", { findingCount });
+    const data = JSON.parse(
+      JSON.stringify(original)
+        .replaceAll(original.task.id, `synthetic-review-task-${key}`)
+        .replaceAll(original.result.id, `synthetic-review-report-${key}`),
+    ) as typeof original;
+    const subject = data.task.subjects.find((entry) => entry.id === data.task.subjectRef);
+    if (subject?.kind !== "original_pr") throw new Error("Expected a synthetic PR source.");
+    subject.revisionKey = createHash("sha256")
+      .update(`${subject.baseSha}\0${subject.headSha}`)
+      .digest("hex");
+    data.result.context.subjects = [structuredClone(subject)];
+    mutate?.(data);
+    const { logicalContentDigest: _digest, ...report } = data.result.report;
+    data.result.report.logicalContentDigest = investigationContentDigest({
+      ...data.result,
+      report,
+    });
+    data.task.latestReportRef = {
+      id: data.result.id,
+      version: data.result.version,
+      digest: data.result.report.logicalContentDigest,
+    };
+    store.put("tasks", data.task.id, data.task);
+    store.put("reports", data.result.id, data.result);
+    return data;
+  }
+
+  function serviceFor(
+    store: InvestigationStore,
+    options: Partial<InvestigationServiceOptions> = {},
+  ) {
+    let sequence = 0;
+    return new InvestigationService({
+      store,
+      now: () => new Date(startedAt),
+      idFactory: () => `synthetic-review-generated-${++sequence}`,
+      ...options,
+    });
+  }
+
+  it("keeps a first review request and the temporary assignment entry point as independent root reviews", async () => {
+    const { store, item, operator } = await harness();
+    const service = serviceFor(store);
+    const source = importedSource(store, item);
+    const first = await service.createImportedTask(
+      operator,
+      { workItemId: item.id, kind: "pr-review", idempotencyKey: "first-review-request" },
+      source,
+      undefined,
+      undefined,
+      { reviewRequest: true },
+    );
+    expect(first.reviewBaseline).toBeUndefined();
+    saveReview(store, "previous");
+    const assigned = await service.createImportedTask(
+      operator,
+      { workItemId: item.id, kind: "pr-review", idempotencyKey: "temporary-assignment" },
+      source,
+    );
+    expect(assigned.reviewBaseline).toBeUndefined();
+    expect(first).toMatchObject({ parentTaskId: null, parentReportRef: null, planRef: null });
+    expect(assigned).toMatchObject({ parentTaskId: null, parentReportRef: null, planRef: null });
+  });
+
+  it.each(["same SHA", "new SHA"])(
+    "freezes all 137 saved findings for a %s re-request without inheriting old execution evidence",
+    async (revision) => {
+      const { app, store, item, operator } = await harness();
+      const previous = saveReview(store, "previous", 137);
+      expect(validateInvestigationResult(previous.result)).toEqual({ valid: true, errors: [] });
+      const current = structuredClone(item);
+      if (revision === "new SHA" && current.subject.kind === "original_pr") {
+        current.subject.id = "synthetic-current-pr-subject";
+        current.subject.headSha = "9".repeat(40);
+      }
+      const source = importedSource(store, current);
+      const task = await serviceFor(store).createImportedTask(
+        operator,
+        { workItemId: item.id, kind: "pr-review", idempotencyKey: "rerequest" },
+        source,
+        undefined,
+        undefined,
+        { reviewRequest: true },
+      );
+      expect(task.reviewBaseline?.reportRef).toEqual(previous.task.latestReportRef);
+      expect(task.reviewBaseline?.findings).toHaveLength(137);
+      expect(task.subjects).toEqual([source.workItem.subject]);
+      expect(task.sourceArtifacts).toBeUndefined();
+      expect(task).toMatchObject({ parentTaskId: null, parentReportRef: null, planRef: null });
+      const claimed = await claim(app);
+      expect(claimed.task.id).toBe(task.id);
+      expect(claimed.reviewBaseline?.findings).toEqual(previous.result.findings);
+      expect(claimed.reviewBaseline?.findings.at(-1)).toEqual(previous.result.findings.at(-1));
+      expect(claimed.plan).toBeNull();
+      expect(claimed.execution).toBeNull();
+      expect(claimed.checkpoint?.round).toBe(0);
+      expect(claimed.checkpoint?.analysis.candidates).toHaveLength(137);
+      expect(
+        claimed.checkpoint?.analysis.candidates.every(
+          (candidate) =>
+            candidate.subjectRef === task.subjectRef &&
+            candidate.reviewDisposition === "pending" &&
+            candidate.discoveredRound === 0 &&
+            candidate.evidenceRefs.length === 0,
+        ),
+      ).toBe(true);
+      expect(claimed.checkpoint?.analysis.findings).toEqual([]);
+      expect(claimed.checkpoint?.analysis.evidence).toEqual([]);
+      expect(claimed.checkpoint?.runtime.evidence).toEqual([]);
+      expect(claimed.checkpoint?.runtime.artifacts).toEqual([]);
+    },
+  );
+
+  it("selects the latest eligible complete original PR review and excludes unrelated, partial, verification, and invalid reports", async () => {
+    const { store, item, operator } = await harness();
+    saveReview(store, "older", 1);
+    const valid = saveReview(store, "latest-valid", 2, ({ task }) => {
+      task.updatedAt = "2026-09-15T02:00:04.000Z";
+    });
+    saveReview(store, "other-pr", 3, ({ task, result }) => {
+      task.workItem.number += 1;
+      result.context.workItem.number += 1;
+      task.updatedAt = "2026-09-15T02:00:05.000Z";
+    });
+    saveReview(store, "partial", 4, ({ task, result }) => {
+      task.state = "interrupted";
+      task.updatedAt = "2026-09-15T02:00:06.000Z";
+      result.outcome = "interrupted";
+      result.report.delivery = "checkpoint";
+      result.report.completeness = "partial";
+      result.report.loop.stopReason = "interrupted";
+    });
+    saveReview(store, "verification", 5, ({ task, result }) => {
+      task.kind = "pr-verify";
+      task.updatedAt = "2026-09-15T02:00:07.000Z";
+      result.context.task.kind = "pr-verify";
+    });
+    saveReview(store, "missing-recheck", 6, ({ task, result }) => {
+      task.updatedAt = "2026-09-15T02:00:08.000Z";
+      result.report.recheck.records.pop();
+    });
+    const task = await serviceFor(store).createImportedTask(
+      operator,
+      { workItemId: item.id, kind: "pr-review", idempotencyKey: "eligible-baseline" },
+      importedSource(store, item),
+      undefined,
+      undefined,
+      { reviewRequest: true },
+    );
+    expect(task.reviewBaseline?.reportRef.id).toBe(valid.result.id);
+  });
+
+  it.each([false, true])(
+    "keeps the initial baseline selection after preparation failure when a baseline exists=%s",
+    async (hasBaseline) => {
+      const { store, item, operator } = await harness();
+      const original = hasBaseline ? saveReview(store, "initial", 2) : undefined;
+      const service = serviceFor(store);
+      const source = importedSource(store, item);
+      const request = { workItemId: item.id, kind: "pr-review" as const, idempotencyKey: "retry" };
+      await expect(
+        service.createImportedTask(
+          operator,
+          request,
+          source,
+          () => {
+            throw new Error("Synthetic interrupted intake persistence.");
+          },
+          undefined,
+          { reviewRequest: true },
+        ),
+      ).rejects.toThrow("Synthetic interrupted intake persistence.");
+      saveReview(store, "arrived-after-failure", 3, ({ task }) => {
+        task.updatedAt = "2026-09-15T02:00:09.000Z";
+      });
+      const task = await service.createImportedTask(
+        operator,
+        request,
+        source,
+        undefined,
+        undefined,
+        { reviewRequest: true },
+      );
+      expect(task.reviewBaseline?.reportRef.id).toBe(original?.result.id);
+      saveReview(store, "arrived-after-commit", 4, ({ task }) => {
+        task.updatedAt = "2026-09-15T02:00:10.000Z";
+      });
+      const recovered = await service.createImportedTask(
+        operator,
+        request,
+        source,
+        undefined,
+        undefined,
+        { reviewRequest: true },
+      );
+      expect(recovered).toEqual(task);
+    },
+  );
+
+  it("rejects a changed full baseline snapshot before a worker can claim it", async () => {
+    const { app, store, item, operator } = await harness();
+    saveReview(store, "baseline", 2);
+    const task = await serviceFor(store).createImportedTask(
+      operator,
+      { workItemId: item.id, kind: "pr-review", idempotencyKey: "tampered-baseline" },
+      importedSource(store, item),
+      undefined,
+      undefined,
+      { reviewRequest: true },
+    );
+    const input = store.get<InvestigationPreparedTaskInput>("idempotency", `input:${task.id}`);
+    if (input?.reviewBaseline === undefined)
+      throw new Error("Expected a frozen full review baseline.");
+    input.reviewBaseline.findings[0]!.rootCause.explanation = "An injected different root cause.";
+    store.put("idempotency", `input:${task.id}`, input);
+    const response = await post(
+      app,
+      "/api/worker/claims",
+      { supportedKinds: ["pr-review"] },
+      "worker",
+    );
+    expect(response.statusCode).toBe(409);
+    expect(response.json().code).toBe("review_baseline_changed");
+    expect(store.get<InvestigationTaskV1>("tasks", task.id)?.state).toBe("queued");
+    expect(store.list("attempts")).toEqual([]);
   });
 });

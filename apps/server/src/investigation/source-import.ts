@@ -159,6 +159,8 @@ export interface InvestigationSourceImportOptions {
 }
 
 export interface InvestigationSourceImportExpectation {
+  /** A user review request; absent for the temporary assignment entry point. */
+  readonly requestKind?: "review_request";
   readonly githubWorkItemId: number;
   readonly assigneeUserId: number;
   readonly baseSha?: string;
@@ -182,6 +184,7 @@ export interface InvestigationPullRequestRevision {
 
 const sourceImportExpectationSchema = Type.Object(
   {
+    requestKind: Type.Optional(Type.Literal("review_request")),
     githubWorkItemId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     assigneeUserId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     baseSha: Type.Optional(GitObjectIdSchema),
@@ -1041,12 +1044,13 @@ export class InvestigationSourceImporter {
   ): void {
     requireCondition(
       Value.Check(sourceImportExpectationSchema, expectation) &&
+        (expectation.requestKind !== "review_request" || kind === "pull_request") &&
         (kind === "pull_request"
           ? expectation.baseSha !== undefined && expectation.headSha !== undefined
           : expectation.baseSha === undefined && expectation.headSha === undefined),
       400,
       "invalid_source_expectation",
-      "Assignment imports require positive numeric identities and the exact PR base/head revision.",
+      "Webhook imports require positive numeric identities, a valid request kind, and the exact PR base/head revision.",
     );
   }
 
@@ -1055,42 +1059,48 @@ export class InvestigationSourceImporter {
     request: { kind: "pull_request" | "issue"; number: number },
     expectation: InvestigationSourceImportExpectation,
   ): void {
+    const reviewRequested = expectation.requestKind === "review_request";
+    const codePrefix = reviewRequested ? "source_review_request" : "source_assignment";
     requireCondition(
       upstream.id === expectation.githubWorkItemId &&
         upstream.number === request.number &&
         (request.kind !== "issue" || upstream.pull_request === undefined),
       409,
-      "source_assignment_target_changed",
-      "The current upstream identity differs from the assigned work item.",
+      `${codePrefix}_target_changed`,
+      "The current upstream identity differs from the requested work item.",
     );
     requireCondition(
       upstream.state === "open" &&
         (request.kind !== "pull_request" ||
           (upstream.merged_at == null && upstream.merged !== true)),
       409,
-      "source_assignment_stale",
-      "The assigned work item is no longer open.",
+      `${codePrefix}_stale`,
+      "The requested work item is no longer open.",
     );
+    const recipients = reviewRequested ? upstream.requested_reviewers : upstream.assignees;
     requireCondition(
-      Array.isArray(upstream.assignees) &&
-        upstream.assignees.some(
+      Array.isArray(recipients) &&
+        recipients.some(
           (entry: unknown) =>
             typeof entry === "object" &&
             entry !== null &&
             "id" in entry &&
-            entry.id === expectation.assigneeUserId,
+            entry.id === expectation.assigneeUserId &&
+            (!reviewRequested || ("type" in entry && entry.type === "User")),
         ),
       409,
-      "source_assignment_missing",
-      "The configured reviewer is no longer assigned to this work item.",
+      `${codePrefix}_missing`,
+      reviewRequested
+        ? "The configured reviewer no longer has a requested code review on this PR."
+        : "The configured reviewer is no longer assigned to this work item.",
     );
     if (request.kind === "pull_request")
       requireCondition(
         object(upstream.base).sha === expectation.baseSha &&
           object(upstream.head).sha === expectation.headSha,
         409,
-        "source_assignment_revision_changed",
-        "The PR base/head revision changed after the assignment event.",
+        `${codePrefix}_revision_changed`,
+        "The PR base/head revision changed after the request event.",
       );
   }
 

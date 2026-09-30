@@ -12,7 +12,10 @@ import type {
   InvestigationSubjectV1,
   InvestigationTaskV1,
 } from "@agentic-review/contracts";
-import { getInvestigationRecipeStepIssues } from "@agentic-review/contracts";
+import {
+  getInvestigationRecipeStepIssues,
+  validateInvestigationResult,
+} from "@agentic-review/contracts";
 
 import {
   assertInvestigationCheckpointIntegrity,
@@ -227,6 +230,138 @@ function validFindingRecheck(
   return [...recheck.evidenceRefs, ...finding.confirmation.evidenceRefs].every(
     (id) => evidence.get(id)?.subjectRef === finding.subjectRef,
   );
+}
+
+function reportFindingKey(
+  result: InvestigationResultV1,
+  finding: { id: string; version: number },
+): string {
+  return JSON.stringify([reportRef(result), finding.id, finding.version]);
+}
+
+function checkpointFindingKey(
+  taskId: string,
+  finding: { id: string; version: number },
+  subject: InvestigationSubjectV1,
+): string {
+  return JSON.stringify([taskId, finding.id, finding.version, investigationContentDigest(subject)]);
+}
+
+/** A completed exact rereview replaces only the previous diagnoses it actually rechecked. */
+function resolvedReviewBaselineFindings(
+  input: InvestigationActionPolicyInput,
+  reports: readonly InvestigationResultV1[],
+): { reportFindings: ReadonlySet<string>; checkpointFindings: ReadonlySet<string> } {
+  const reportFindings = new Set<string>();
+  const successors = new Map<string, Set<string>>();
+  for (const review of reports) {
+    const baseline = review.context.reviewBaseline;
+    const currentSubject = review.context.subjects.find(
+      (subject) => subject.id === review.context.task.subjectRef,
+    );
+    if (
+      baseline === undefined ||
+      review.context.task.kind !== "pr-review" ||
+      review.context.task.parentTaskId !== null ||
+      review.context.parentReportRef !== null ||
+      review.outcome !== "completed" ||
+      review.report.completeness !== "complete" ||
+      currentSubject?.kind !== "original_pr" ||
+      !matchesCurrentSubject(currentSubject, input)
+    )
+      continue;
+    try {
+      if (!validateInvestigationResult(review).valid) continue;
+    } catch {
+      continue;
+    }
+    const previous = reports.find(
+      (report) =>
+        sameRef(reportRef(report), baseline.reportRef) &&
+        report.context.task.id === baseline.sourceTaskId &&
+        report.context.task.kind === "pr-review" &&
+        report.context.task.subjectRef === baseline.subject.id &&
+        report.context.subjects.some(
+          (subject) =>
+            subject.id === baseline.subject.id &&
+            subject.kind === "original_pr" &&
+            investigationContentDigest(subject) === investigationContentDigest(baseline.subject),
+        ) &&
+        report.findings.length === baseline.findings.length &&
+        report.findings.every(
+          (finding, index) =>
+            finding.subjectRef === baseline.subject.id &&
+            finding.id === baseline.findings[index]?.id &&
+            finding.version === baseline.findings[index]?.version &&
+            finding.title === baseline.findings[index]?.title,
+        ),
+    );
+    if (previous === undefined) continue;
+    const candidates = new Map(
+      review.report.loop.candidates.map((candidate) => [candidate.id, candidate]),
+    );
+    for (const candidate of review.report.loop.candidates) {
+      const ref = candidate.reviewBaselineFindingRef;
+      if (ref === undefined) continue;
+      const previousKey = reportFindingKey(previous, ref);
+      if (
+        candidate.reviewDisposition === "fixed" ||
+        candidate.reviewDisposition === "not_confirmed"
+      ) {
+        reportFindings.add(previousKey);
+      } else if (candidate.reviewDisposition === "still_present") {
+        let retained = candidate;
+        const visited = new Set<string>();
+        while (retained.status === "merged" && !visited.has(retained.id)) {
+          visited.add(retained.id);
+          const target =
+            retained.mergedIntoCandidateId === null
+              ? undefined
+              : candidates.get(retained.mergedIntoCandidateId);
+          if (target === undefined) break;
+          retained = target;
+        }
+        const finding = review.findings.find(
+          (entry) =>
+            entry.id === retained.findingId &&
+            entry.version === retained.findingVersion &&
+            entry.subjectRef === currentSubject.id,
+        );
+        if (
+          retained.status === "confirmed" &&
+          finding?.confirmation.status === "confirmed" &&
+          validFindingRecheck(review, finding)
+        ) {
+          const replacements = successors.get(previousKey) ?? new Set<string>();
+          replacements.add(reportFindingKey(review, finding));
+          successors.set(previousKey, replacements);
+        }
+      }
+    }
+  }
+  // A later rereview can resolve a diagnosis carried forward through several reports.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [previous, replacements] of successors) {
+      if (
+        !reportFindings.has(previous) &&
+        [...replacements].some((key) => reportFindings.has(key))
+      ) {
+        reportFindings.add(previous);
+        changed = true;
+      }
+    }
+  }
+  const checkpointFindings = new Set<string>();
+  for (const report of reports) {
+    for (const finding of report.findings) {
+      const subject = report.context.subjects.find((entry) => entry.id === finding.subjectRef);
+      if (subject?.kind === "original_pr" && reportFindings.has(reportFindingKey(report, finding)))
+        checkpointFindings.add(checkpointFindingKey(report.context.task.id, finding, subject));
+    }
+  }
+  return { reportFindings, checkpointFindings };
 }
 
 function planSourceIsBound(
@@ -787,6 +922,7 @@ export function evaluateInvestigationActions(
       report.context.workItem.id === input.workItemId,
   );
   const hardContentBlockers: ActionContextV1["hardContentBlockers"] = [];
+  const reviewResolutions = resolvedReviewBaselineFindings(input, validReports);
   const blockingKeys = new Set<string>();
   for (const report of validReports) {
     for (const finding of report.findings) {
@@ -799,6 +935,7 @@ export function evaluateInvestigationActions(
         finding.priority !== "P0" ||
         finding.confirmation.status !== "confirmed" ||
         resolvedInSelectedReport ||
+        reviewResolutions.reportFindings.has(reportFindingKey(report, finding)) ||
         subject === undefined ||
         subject.kind !== "original_pr" ||
         !matchesCurrentSubject(subject, input) ||
@@ -852,6 +989,10 @@ export function evaluateInvestigationActions(
         finding.priority !== "P0" ||
         finding.confirmation.status !== "confirmed" ||
         resolvedInSelectedReport ||
+        (subject !== undefined &&
+          reviewResolutions.checkpointFindings.has(
+            checkpointFindingKey(task.id, finding, subject),
+          )) ||
         subject?.kind !== "original_pr" ||
         !matchesCurrentSubject(subject, input) ||
         recheck === undefined ||

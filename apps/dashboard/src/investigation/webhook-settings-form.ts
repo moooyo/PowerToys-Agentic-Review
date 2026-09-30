@@ -73,7 +73,7 @@ export function webhookSettingsFieldErrors(
   try {
     if (form.reviewerUserIdText.trim()) parseGitHubUserId(form.reviewerUserIdText.trim());
     else if (intakeEnabled)
-      errors.reviewerUserIdText = "Choose an assignment recipient before enabling intake.";
+      errors.reviewerUserIdText = "Choose a reviewer GitHub user ID before enabling intake.";
   } catch (cause) {
     errors.reviewerUserIdText =
       cause instanceof Error ? cause.message : "Enter a numeric GitHub user ID.";
@@ -100,9 +100,7 @@ export function webhookSettingsInput(
     (form.enabled || form.e2eEnabled === true) &&
     (reviewerUserId === null || allowedActorUserIds.length === 0)
   ) {
-    throw new Error(
-      "Choose a recipient and at least one trusted user before enabling assignments.",
-    );
+    throw new Error("Choose a reviewer and at least one trusted requester before enabling intake.");
   }
   return {
     version,

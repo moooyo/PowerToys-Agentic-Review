@@ -58,6 +58,7 @@ interface UpstreamTarget {
   comments: number;
   updated_at: string;
   assignees: Identity[];
+  requested_reviewers?: Identity[];
   base?: { sha: string; repo: { id: number } };
   head?: { sha: string };
   review_comments?: number;
@@ -69,7 +70,9 @@ interface AssignmentPayload {
   action: string;
   repository: { id: number; full_name: string };
   sender: Identity;
-  assignee: Identity;
+  assignee?: Identity;
+  requested_reviewer?: Identity | null;
+  requested_team?: { id: number } | null;
   issue?: UpstreamTarget;
   pull_request?: UpstreamTarget;
 }
@@ -108,6 +111,7 @@ async function databasePath(): Promise<string> {
 function harness(
   options: {
     kind?: "issue" | "pull_request";
+    requestKind?: "review_request";
     path?: string;
     now?: number;
     config?: InvestigationWebhookConfig;
@@ -120,6 +124,7 @@ function harness(
   } = {},
 ) {
   const kind = options.kind ?? "issue";
+  const requestKind = options.requestKind;
   const store = new InvestigationStore(options.path);
   stores.push(store);
   if (!store.has("repositories", repository.id))
@@ -141,6 +146,7 @@ function harness(
           head: { sha: "a".repeat(40) },
           review_comments: 1,
           merged_at: null,
+          requested_reviewers: [reviewer],
         }),
   };
   const comments = [{ id: 201, body: "Complete conversation comment" }];
@@ -228,10 +234,12 @@ function harness(
     } = {},
   ): InvestigationWebhookDeliveryInput {
     const payload: AssignmentPayload = {
-      action: "assigned",
+      action: requestKind === "review_request" ? "review_requested" : "assigned",
       repository: { id: repository.githubRepositoryId, full_name: repository.fullName },
       sender: { id: 44, login: "trusted-maintainer", type: "User" },
-      assignee: structuredClone(reviewer),
+      ...(requestKind === "review_request"
+        ? { requested_reviewer: structuredClone(reviewer), requested_team: null }
+        : { assignee: structuredClone(reviewer) }),
       ...(kind === "issue"
         ? { issue: structuredClone(upstream) }
         : { pull_request: structuredClone(upstream) }),
@@ -269,7 +277,351 @@ async function run(intake: InvestigationWebhookIntake): Promise<void> {
   await intake.drain();
 }
 
-describe("durable assignment-only Webhook intake", () => {
+describe("durable user review-request Webhook intake", () => {
+  it("creates a frozen root review for the requested reviewer without an assignment", async () => {
+    const accepted =
+      vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
+    const test = harness({
+      kind: "pull_request",
+      requestKind: "review_request",
+      onAssignmentAccepted: accepted,
+    });
+    test.upstream.assignees = [];
+    const creating = vi.spyOn(test.service, "createImportedTask");
+    const event = test.delivery();
+    expect(test.intake.accept(event)).toEqual({ status: "accepted" });
+    expect(accepted).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        expectedAssigneeUserId: 55,
+        baseSha: "b".repeat(40),
+        headSha: "a".repeat(40),
+        trigger: {
+          eventName: "pull_request",
+          requestKind: "review_request",
+          actorUserId: 44,
+          assigneeUserId: 55,
+          actorLogin: "trusted-maintainer",
+          assigneeLogin: "configured-reviewer",
+        },
+      }),
+    );
+    await run(test.intake);
+    const task = test.tasks()[0]!;
+    expect(test.tasks()).toHaveLength(1);
+    expect(task).toMatchObject({
+      kind: "pr-review",
+      parentTaskId: null,
+      parentReportRef: null,
+      executionPolicy: { mode: "source_read" },
+      subjects: [{ kind: "original_pr", baseSha: "b".repeat(40), headSha: "a".repeat(40) }],
+    });
+    const input = test.store.get<{ inputSnapshot: InvestigationInputSnapshotV1 }>(
+      "idempotency",
+      `input:${task.id}`,
+    )!;
+    expect(input.inputSnapshot.comments.map((comment) => comment.body)).toEqual([
+      "Complete conversation comment",
+      "Complete inline review comment",
+      "Complete review summary",
+    ]);
+    expect(test.receipt()).toMatchObject({ state: "completed", taskId: task.id });
+    expect(creating.mock.calls[0]?.[5]).toEqual({ reviewRequest: true });
+    expect(
+      test.calls.filter((call) => call.path === "/repos/fixture/webhook/pulls/7"),
+    ).toHaveLength(3);
+    expect(test.calls.every((call) => call.method === "GET")).toBe(true);
+    expect(test.store.list("actionIntents")).toEqual([]);
+  });
+
+  it("starts another completed-review cycle at identical commits and source timestamps", async () => {
+    const test = harness({ kind: "pull_request", requestKind: "review_request" });
+    const original = test.delivery();
+    test.intake.accept(original);
+    await run(test.intake);
+    const first = test.tasks()[0]!;
+    test.store.put("tasks", first.id, { ...first, state: "completed" });
+    const requestedAgain = test.delivery({ id: "review-request-again" });
+    expect(requestedAgain.payload).toEqual(original.payload);
+    expect(test.intake.accept(requestedAgain)).toEqual({ status: "accepted" });
+    expect(test.intake.accept(original)).toEqual({ status: "duplicate", taskId: first.id });
+    await test.intake.drain();
+    expect(test.tasks()).toHaveLength(2);
+    const second = test.tasks().find((task) => task.id !== first.id)!;
+    expect(second.subjects).toEqual(first.subjects);
+    expect(test.receipt("review-request-again")).toMatchObject({
+      canonicalReceiptId: "webhook:delivery:review-request-again",
+      state: "completed",
+      taskId: second.id,
+    });
+    expect(test.intake.accept(requestedAgain)).toEqual({ status: "duplicate", taskId: second.id });
+  });
+
+  it("joins a fresh request to the same active review without importing source again", async () => {
+    const accepted =
+      vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
+    const test = harness({
+      kind: "pull_request",
+      requestKind: "review_request",
+      onAssignmentAccepted: accepted,
+    });
+    const firstDelivery = test.delivery();
+    test.intake.accept(firstDelivery);
+    expect(test.intake.accept(test.delivery({ id: "while-preparing" }))).toEqual({
+      status: "duplicate",
+    });
+    await run(test.intake);
+    const task = test.tasks()[0]!;
+    const reads = test.calls.length;
+    test.comments[0]!.body = "The existing progress reply changed the conversation.";
+    test.upstream.updated_at = new Date(startedAt + 1_000).toISOString();
+    expect(test.intake.accept(test.delivery({ id: "while-running" }))).toEqual({
+      status: "duplicate",
+      taskId: task.id,
+    });
+    await test.intake.drain();
+    expect(test.tasks().map((entry) => entry.id)).toEqual([task.id]);
+    expect(test.calls).toHaveLength(reads);
+    expect(accepted).toHaveBeenCalledOnce();
+  });
+
+  it("joins the active assignment fallback and allows a later explicit review cycle", async () => {
+    const test = harness({ kind: "pull_request", requestKind: "review_request" });
+    test.intake.accept(
+      test.delivery({
+        id: "assignment-fallback",
+        mutate: (payload) => {
+          payload.action = "assigned";
+          payload.assignee = { id: 55, login: "configured-reviewer", type: "User" };
+        },
+      }),
+    );
+    await run(test.intake);
+    const first = test.tasks()[0]!;
+    expect(test.intake.accept(test.delivery())).toEqual({ status: "duplicate", taskId: first.id });
+    expect(test.receipt().canonicalReceiptId).toBe("webhook:delivery:assignment-fallback");
+    test.store.put("tasks", first.id, { ...first, state: "completed" });
+    expect(test.intake.accept(test.delivery({ id: "review-after-fallback" }))).toEqual({
+      status: "accepted",
+    });
+    await test.intake.drain();
+    expect(test.tasks()).toHaveLength(2);
+  });
+
+  it("uses the static intake switch even when E2E remains enabled", async () => {
+    const test = harness({
+      kind: "pull_request",
+      requestKind: "review_request",
+      settings: {
+        bindings: () =>
+          configuration().bindings.map((binding) => ({
+            ...binding,
+            assignmentsEnabled: false,
+            e2eEnabled: true,
+          })),
+      },
+    });
+    expect(test.intake.accept(test.delivery())).toEqual({
+      status: "ignored",
+      reason: "repository_not_configured",
+    });
+    await run(test.intake);
+    expect(test.calls).toEqual([]);
+    expect(test.tasks()).toEqual([]);
+  });
+
+  it("starts the new revision only after its explicit review request", async () => {
+    const test = harness({ kind: "pull_request", requestKind: "review_request" });
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    test.upstream.head!.sha = "c".repeat(40);
+    expect(
+      test.intake.accept(
+        test.delivery({
+          id: "push-only",
+          mutate: (payload) => {
+            payload.action = "synchronize";
+          },
+        }),
+      ),
+    ).toEqual({ status: "ignored", reason: "unsupported_action" });
+    await test.intake.drain();
+    expect(test.tasks()).toHaveLength(1);
+    expect(test.intake.accept(test.delivery({ id: "requested-new-head" }))).toEqual({
+      status: "accepted",
+    });
+    await test.intake.drain();
+    expect(test.tasks()).toHaveLength(2);
+    expect(test.receipt("requested-new-head").admission?.headSha).toBe("c".repeat(40));
+  });
+
+  it.each([
+    {
+      name: "untrusted requester",
+      mutate: (payload: AssignmentPayload) => {
+        payload.sender.id = 99;
+      },
+    },
+    {
+      name: "bot requester",
+      mutate: (payload: AssignmentPayload) => {
+        payload.sender.type = "Bot";
+      },
+    },
+    {
+      name: "other numeric reviewer",
+      mutate: (payload: AssignmentPayload) => {
+        payload.requested_reviewer!.id = 99;
+      },
+    },
+    {
+      name: "bot reviewer",
+      mutate: (payload: AssignmentPayload) => {
+        payload.requested_reviewer!.type = "Bot";
+      },
+    },
+  ])("ignores $name without reading source", async ({ mutate }) => {
+    const test = harness({ kind: "pull_request", requestKind: "review_request" });
+    expect(test.intake.accept(test.delivery({ mutate }))).toEqual({
+      status: "ignored",
+      reason: "review_request_not_authorized",
+    });
+    await run(test.intake);
+    expect(test.calls).toEqual([]);
+    expect(test.tasks()).toEqual([]);
+  });
+
+  it.each(["missing user", "team"])("ignores a %s review target", async (target) => {
+    const test = harness({ kind: "pull_request", requestKind: "review_request" });
+    expect(
+      test.intake.accept(
+        test.delivery({
+          mutate: (payload) => {
+            payload.requested_reviewer = null;
+            if (target === "team") payload.requested_team = { id: 999 };
+          },
+        }),
+      ),
+    ).toEqual({ status: "ignored", reason: "unsupported_review_target" });
+    await run(test.intake);
+    expect(test.calls).toEqual([]);
+    expect(test.tasks()).toEqual([]);
+  });
+
+  it.each([[], [{ id: 55, login: "configured-reviewer", type: "Bot" }]])(
+    "requires the current user request list to contain the requested reviewer",
+    (requestedReviewers) => {
+      const test = harness({ kind: "pull_request", requestKind: "review_request" });
+      expect(() =>
+        test.intake.accept(
+          test.delivery({
+            mutate: (payload) => {
+              payload.pull_request!.requested_reviewers = requestedReviewers;
+            },
+          }),
+        ),
+      ).toThrow(expect.objectContaining({ code: "invalid_assignment" }));
+      expect(test.calls).toEqual([]);
+      expect(test.tasks()).toEqual([]);
+    },
+  );
+
+  it("cancels preparation when the user review request is removed after import", async () => {
+    const changed = vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentChanged"]>>();
+    const test = harness({
+      kind: "pull_request",
+      requestKind: "review_request",
+      onAssignmentChanged: changed,
+    });
+    const importing = test.importer.importWorkItem.bind(test.importer);
+    vi.spyOn(test.importer, "importWorkItem").mockImplementationOnce(async (...args) => {
+      const source = await importing(...args);
+      test.upstream.requested_reviewers = [];
+      return source;
+    });
+    test.intake.accept(test.delivery());
+    await run(test.intake);
+    expect(test.tasks()).toEqual([]);
+    expect(test.receipt()).toMatchObject({
+      state: "failed",
+      reason: "source_review_request_missing",
+    });
+    expect(changed).toHaveBeenLastCalledWith(
+      test.receipt().admission,
+      "cancelled",
+      "source_review_request_missing",
+    );
+  });
+
+  it("retries a failed received review request without creating another Task", async () => {
+    const test = harness({
+      kind: "pull_request",
+      requestKind: "review_request",
+      maximumAttempts: 1,
+    });
+    vi.spyOn(test.importer, "importWorkItem").mockRejectedValueOnce(
+      new Error("Synthetic source interruption"),
+    );
+    const original = test.delivery();
+    test.intake.accept(original);
+    await run(test.intake);
+    expect(test.receipt()).toMatchObject({ state: "failed", taskId: null });
+    expect(test.intake.accept(original)).toEqual({ status: "accepted" });
+    await test.intake.drain();
+    expect(test.tasks()).toHaveLength(1);
+    expect(test.receipt().state).toBe("completed");
+    expect(test.intake.accept(original)).toMatchObject({ status: "duplicate" });
+  });
+
+  it("recovers a persisted review request after a database restart", async () => {
+    const path = await databasePath();
+    const first = harness({ path, kind: "pull_request", requestKind: "review_request" });
+    first.upstream.assignees = [];
+    first.intake.accept(first.delivery());
+    await first.intake.stop();
+    first.store.close();
+    const second = harness({ path, kind: "pull_request", requestKind: "review_request" });
+    second.upstream.assignees = [];
+    await run(second.intake);
+    const task = second.tasks()[0]!;
+    expect(second.tasks()).toHaveLength(1);
+    expect(second.receipt()).toMatchObject({ state: "completed", taskId: task.id });
+    expect(second.intake.accept(second.delivery())).toEqual({
+      status: "duplicate",
+      taskId: task.id,
+    });
+  });
+
+  it("recovers a committed review Task after response loss without source reads or another Task", async () => {
+    const path = await databasePath();
+    const first = harness({ path, kind: "pull_request", requestKind: "review_request" });
+    const create = first.service.createImportedTask.bind(first.service);
+    vi.spyOn(first.service, "createImportedTask").mockImplementationOnce(async (...args) => {
+      await create(...args);
+      throw new Error("Synthetic response loss after review Task commit");
+    });
+    first.intake.accept(first.delivery());
+    await run(first.intake);
+    const taskId = first.tasks()[0]!.id;
+    expect(first.receipt()).toMatchObject({ state: "source_ready", taskId: null });
+    await first.intake.stop();
+    first.store.close();
+    const second = harness({
+      path,
+      kind: "pull_request",
+      requestKind: "review_request",
+      now: startedAt + retryDelayMs,
+    });
+    second.upstream.requested_reviewers = [];
+    const creating = vi.spyOn(second.service, "createImportedTask");
+    await run(second.intake);
+    expect(creating).not.toHaveBeenCalled();
+    expect(second.calls).toEqual([]);
+    expect(second.tasks().map((task) => task.id)).toEqual([taskId]);
+    expect(second.receipt()).toMatchObject({ state: "completed", taskId });
+  });
+});
+
+describe("durable assignment fallback Webhook intake", () => {
   it("enrolls an authorized admission atomically before any source import or Task exists", () => {
     const accepted =
       vi.fn<NonNullable<InvestigationWebhookIntakeOptions["onAssignmentAccepted"]>>();
@@ -557,7 +909,7 @@ describe("durable assignment-only Webhook intake", () => {
       test.delivery({
         mutate: (payload) => {
           payload.sender.login = "@unexpected-mention";
-          payload.assignee.login = "invalid\nmarkdown";
+          payload.assignee!.login = "invalid\nmarkdown";
         },
       }),
     );
@@ -578,7 +930,7 @@ describe("durable assignment-only Webhook intake", () => {
           id: "renamed-identities-delivery",
           mutate: (payload) => {
             payload.sender.login = "renamed-maintainer";
-            payload.assignee.login = "renamed-reviewer";
+            payload.assignee!.login = "renamed-reviewer";
           },
         }),
       ),
@@ -653,6 +1005,7 @@ describe("durable assignment-only Webhook intake", () => {
         actionCapabilities: [],
         allowRepositoryExecution: false,
       });
+      expect(create.mock.calls[0]?.[5]).toBeUndefined();
       const input = test.store.get<{ inputSnapshot: InvestigationInputSnapshotV1 }>(
         "idempotency",
         `input:${task!.id}`,
@@ -701,7 +1054,7 @@ describe("durable assignment-only Webhook intake", () => {
       name: "different assignee",
       reason: "assignment_not_authorized",
       mutate: (payload: AssignmentPayload) => {
-        payload.assignee.id = 99;
+        payload.assignee!.id = 99;
       },
     },
     {

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import {
   createInvestigationPreview,
   type InvestigationResultV1,
+  type InvestigationReviewDisposition,
   type InvestigationUsageSummary,
 } from "@agentic-review/contracts";
 import { describe, expect, it } from "vitest";
@@ -75,6 +76,65 @@ function recordModels(report: InvestigationResultV1, models: Array<string | null
   }));
 }
 
+function reviewComparisonFixture(): InvestigationResultV1 {
+  const report = preview("pr", 2);
+  const subject = report.context.subjects[0];
+  if (subject?.kind !== "original_pr") throw new Error("The fixture requires a PR subject.");
+  const dispositions: InvestigationReviewDisposition[] = [
+    "still_present",
+    "fixed",
+    "not_confirmed",
+    "unverified",
+  ];
+  report.context.reviewBaseline = {
+    reportRef: { id: "private-prior-report", version: 2, digest: "a".repeat(64) },
+    sourceTaskId: "private-prior-task",
+    subject: {
+      ...subject,
+      id: "private-prior-subject",
+      revisionKey: "8".repeat(64),
+      headSha: "8".repeat(40),
+    },
+    findings: dispositions.map((_, index) => ({
+      id: `private-old-finding-${index + 1}`,
+      version: 1,
+      title: `Previously retained finding ${index + 1}`,
+    })),
+  };
+  const evidence = report.verificationEvidence.find((entry) => entry.source === "static_analysis");
+  if (!evidence) throw new Error("The fixture requires current static evidence.");
+  report.report.loop.candidates[0] = {
+    ...report.report.loop.candidates[0]!,
+    discoveredRound: 0,
+    reviewBaselineFindingRef: { id: "private-old-finding-1", version: 1 },
+    reviewDisposition: "still_present",
+  };
+  for (let index = 1; index < dispositions.length; index += 1) {
+    report.report.loop.candidates.push({
+      id: `private-review-candidate-${index}`,
+      subjectRef: subject.id,
+      discoveredRound: 0,
+      title: `Previously retained finding ${index + 1}`,
+      status: "withdrawn",
+      findingId: null,
+      findingVersion: null,
+      mergedIntoCandidateId: null,
+      reviewBaselineFindingRef: { id: `private-old-finding-${index + 1}`, version: 1 },
+      reviewDisposition: dispositions[index]!,
+      rationale: `The current source records the ${dispositions[index]} conclusion.`,
+      evidenceRefs: [evidence.id],
+    });
+  }
+  report.report.limitations.push({
+    id: "private-review-limitation",
+    description: "The current source does not establish the remaining path.",
+    impact: "The fourth previous finding remains unverified.",
+    evidenceRefs: [evidence.id],
+  });
+  report.findings[1]!.title = "A newly discovered cancellation path";
+  return report;
+}
+
 function expectCode(operation: () => unknown, code: string): void {
   let thrown: unknown;
   try {
@@ -87,6 +147,51 @@ function expectCode(operation: () => unknown, code: string): void {
 }
 
 describe("automatic reply templates", () => {
+  it("summarizes a root re-review and retains every previous finding's conclusion in details", () => {
+    const report = reviewComparisonFixture();
+    const body = render(report);
+    expect(body).toContain("Re-review of previous report");
+    expect(body).toContain("8".repeat(40));
+    expect(body).toContain("b".repeat(40));
+    expect(body).toContain("**Previous findings:** 4");
+    expect(body).toContain("Fixed in reviewed code: 1");
+    expect(body).toContain("Still present: 1");
+    expect(body).toContain("Earlier conclusion not confirmed: 1");
+    expect(body).toContain("Unverified: 1");
+    expect(body).toContain("Pending: 0");
+    expect(body).toContain("**New findings:** 1");
+    for (let index = 1; index <= 4; index += 1)
+      expect(body).toContain(`Previously retained finding ${index}`);
+    expect(body).toContain("A newly discovered cancellation path");
+    expect(body).toContain("not a runtime test result");
+    expect(body).toContain("not counted as a fix");
+    expect(body).not.toContain("private-prior-report");
+    expect(body).not.toContain("private-old-finding");
+    expect(renderAutomaticReplySummary(report, verifiedIdentity)).toContain("Unverified: 1");
+  });
+
+  it("does not count an omitted previous finding as fixed in public summaries", () => {
+    const report = reviewComparisonFixture();
+    report.report.loop.candidates = report.report.loop.candidates.filter(
+      (candidate) => candidate.reviewDisposition !== "fixed",
+    );
+    const body = render(report);
+    expect(body).toContain("Fixed in reviewed code: 0");
+    expect(body).toContain("Pending: 1");
+    expect(body).toContain("Previously retained finding 2");
+    expect(body).toContain("has not been rechecked against the current PR source");
+  });
+
+  it("blocks an oversized complete comparison instead of truncating previous conclusions", () => {
+    const report = reviewComparisonFixture();
+    const candidate = report.report.loop.candidates.find(
+      (entry) => entry.reviewDisposition === "fixed",
+    );
+    if (!candidate) throw new Error("The fixture requires a fixed previous candidate.");
+    candidate.rationale = "Current source rationale. ".repeat(3_000);
+    expectCode(() => render(report), "automatic_reply_too_large");
+  });
+
   it.each([
     [
       "pr",

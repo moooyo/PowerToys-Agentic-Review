@@ -75,6 +75,8 @@ export interface InvestigationProgressCommentRequest {
   readonly previousBody: string | null;
   /** Revalidate this assignment only when publishing the first conversation comment. */
   readonly expectedAssigneeUserId?: number;
+  /** Revalidate this PR review request only when publishing the first conversation comment. */
+  readonly expectedReviewerUserId?: number;
 }
 
 export interface InvestigationProgressCommentDelivery {

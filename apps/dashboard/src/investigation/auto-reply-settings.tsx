@@ -94,7 +94,7 @@ const previewTokens: Record<string, string> = {
   details: "[Scope, evidence, validation, limitations, and full findings]",
   next_steps: "[Recommended next steps]",
   status: "[Current investigation status]",
-  trigger: "[Assignment trigger and requester]",
+  trigger: "[Code Review request or assignment trigger and requester]",
   updated_at: "[Recorded update time]",
   failure: "[Reason the investigation stopped]",
   result: "[Full PR or Issue investigation reply]",
@@ -462,7 +462,7 @@ export function AutoReplySettingsForm({
             sx={{ width: "100%", justifyContent: "space-between" }}
           />
           <FormControlLabel
-            label="Post assignment progress"
+            label="Post investigation progress"
             labelPlacement="start"
             control={
               <Switch
@@ -474,7 +474,7 @@ export function AutoReplySettingsForm({
             sx={{ width: "100%", justifyContent: "space-between" }}
           />
           <Typography variant="body2" color="text.secondary">
-            Updates one comment as assignment work progresses.
+            Updates one comment as review request or assignment work progresses.
           </Typography>
           {fieldErrors.progressEnabled && (
             <Alert severity="error">{fieldErrors.progressEnabled}</Alert>
@@ -716,7 +716,9 @@ export function AutoReplySettingsForm({
         <DialogContent>
           <DialogContentText>
             Save these templates and authorize future conclusion comments
-            {authorization?.form.progressEnabled ? " and assignment progress comment updates" : ""}{" "}
+            {authorization?.form.progressEnabled
+              ? " and investigation progress comment updates"
+              : ""}{" "}
             in {repository.fullName}. These publications do not ask for per-report confirmation.
             Existing comments are not rewritten by saving.
           </DialogContentText>
@@ -810,7 +812,7 @@ function ReplyDeliveryList({
     return (
       <Typography variant="body2" color="text.secondary">
         {progress
-          ? "No assignment progress deliveries recorded."
+          ? "No investigation progress deliveries recorded."
           : "No automatic reply deliveries recorded."}
       </Typography>
     );

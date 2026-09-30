@@ -32,6 +32,7 @@ export * from "./investigation-output.js";
 export * from "./investigation-preview.js";
 export * from "./investigation-progress.js";
 export * from "./investigation-recipes.js";
+export * from "./investigation-review-comparison.js";
 export * from "./investigation-scheduler.js";
 export * from "./investigation-source.js";
 export * from "./investigation-usage.js";

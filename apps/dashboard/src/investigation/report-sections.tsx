@@ -1,10 +1,12 @@
-import type {
-  InvestigationAssessment,
-  InvestigationEvidenceV1,
-  InvestigationFindingV1,
-  InvestigationReportMetadata,
-  InvestigationSubjectV1,
-  InvestigationValidation,
+import {
+  deriveInvestigationReviewComparison,
+  type InvestigationAssessment,
+  type InvestigationEvidenceV1,
+  type InvestigationFindingV1,
+  type InvestigationReportMetadata,
+  type InvestigationResultV1,
+  type InvestigationSubjectV1,
+  type InvestigationValidation,
 } from "@agentic-review/contracts";
 import ExpandMoreRounded from "@mui/icons-material/ExpandMoreRounded";
 import {
@@ -24,6 +26,7 @@ import {
   Typography,
 } from "@mui/material";
 import { type ReactNode, useId, useState } from "react";
+import { Link } from "react-router-dom";
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -33,6 +36,167 @@ export function Section({ title, children }: { title: string; children: ReactNod
       </Typography>
       {children}
     </Paper>
+  );
+}
+
+const reviewComparisonLabels = {
+  fixed: "Fixed in reviewed code",
+  still_present: "Still present",
+  not_confirmed: "Earlier conclusion not confirmed",
+  unverified: "Unverified",
+  pending: "Pending",
+} as const;
+const reviewComparisonChipSx = {
+  maxWidth: "100%",
+  height: "auto",
+  "& .MuiChip-label": { whiteSpace: "normal", py: 0.5 },
+} as const;
+
+function reportFindingUrl(reportId: string, findingId?: string): string {
+  const params = new URLSearchParams({ reportId });
+  if (findingId) params.set("findingId", findingId);
+  return `/reports?${params.toString()}`;
+}
+
+export function ReviewComparisonPanel({ result }: { result: InvestigationResultV1 }) {
+  const detailsId = useId();
+  const comparison = deriveInvestigationReviewComparison(result);
+  if (comparison === null) return null;
+  const newFindings = result.findings.filter((finding) =>
+    comparison.newFindingIds.includes(finding.id),
+  );
+  return (
+    <Section title="Re-review of previous report">
+      <Stack spacing={2}>
+        <Stack
+          direction="row"
+          spacing={1}
+          useFlexGap
+          sx={{ flexWrap: "wrap", alignItems: "center" }}
+        >
+          <Button component={Link} to={reportFindingUrl(comparison.baselineReportRef.id)}>
+            Open previous report
+          </Button>
+          <Typography variant="body2" color="text.secondary">
+            Saved version {comparison.baselineReportRef.version}
+          </Typography>
+        </Stack>
+        <Box sx={{ overflowWrap: "anywhere" }}>
+          <Typography variant="body2">Previous head: {comparison.baselineHeadSha}</Typography>
+          <Typography variant="body2">
+            Reviewed head: {comparison.currentHeadSha ?? "Unavailable"}
+          </Typography>
+        </Box>
+        <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+          {Object.entries(reviewComparisonLabels).map(([status, label]) => (
+            <Chip
+              key={status}
+              size="small"
+              variant="outlined"
+              label={`${label}: ${comparison.findings.filter((finding) => finding.status === status).length}`}
+              sx={reviewComparisonChipSx}
+            />
+          ))}
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`New findings: ${newFindings.length}`}
+            sx={reviewComparisonChipSx}
+          />
+        </Stack>
+        <Typography variant="body2" color="text.secondary">
+          Fixed reflects inspection of the reviewed code, not a runtime test result. An earlier
+          conclusion that is not confirmed is not counted as a fix. Pending and unverified findings
+          remain unresolved by this review.
+        </Typography>
+        {comparison.findings.length === 0 ? (
+          <Typography variant="body2">
+            The previous report contained no retained findings.
+          </Typography>
+        ) : (
+          <Accordion variant="outlined" disableGutters>
+            <AccordionSummary
+              id={`${detailsId}-summary`}
+              aria-controls={`${detailsId}-details`}
+              expandIcon={<ExpandMoreRounded />}
+            >
+              <Typography>Previous findings ({comparison.findings.length})</Typography>
+            </AccordionSummary>
+            <AccordionDetails id={`${detailsId}-details`}>
+              <Stack spacing={3}>
+                {comparison.findings.map((finding) => (
+                  <Box
+                    key={`${finding.baselineFindingRef.id}:${finding.baselineFindingRef.version}`}
+                  >
+                    <Typography
+                      component="h3"
+                      variant="subtitle2"
+                      sx={{ overflowWrap: "anywhere" }}
+                    >
+                      {finding.title}
+                    </Typography>
+                    <Chip
+                      size="small"
+                      label={reviewComparisonLabels[finding.status]}
+                      sx={{ ...reviewComparisonChipSx, my: 1 }}
+                    />
+                    <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
+                      {finding.rationale || "No completed re-review rationale was recorded."}
+                    </Typography>
+                    <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", mt: 1 }}>
+                      <Button
+                        component={Link}
+                        to={reportFindingUrl(
+                          comparison.baselineReportRef.id,
+                          finding.baselineFindingRef.id,
+                        )}
+                      >
+                        Original finding
+                      </Button>
+                      {finding.currentFindingRef && (
+                        <Button
+                          component={Link}
+                          to={reportFindingUrl(result.report.id, finding.currentFindingRef.id)}
+                        >
+                          Current finding
+                        </Button>
+                      )}
+                      {finding.evidenceRefs.length > 0 && (
+                        <Button
+                          component={Link}
+                          to={`${reportFindingUrl(result.report.id)}&section=evidence`}
+                        >
+                          Supporting evidence ({finding.evidenceRefs.length})
+                        </Button>
+                      )}
+                    </Stack>
+                  </Box>
+                ))}
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+        )}
+        {newFindings.length > 0 && (
+          <Box>
+            <Typography component="h3" variant="subtitle2">
+              New findings
+            </Typography>
+            <Stack sx={{ alignItems: "flex-start" }}>
+              {newFindings.map((finding) => (
+                <Button
+                  key={finding.id}
+                  component={Link}
+                  to={reportFindingUrl(result.report.id, finding.id)}
+                  sx={{ maxWidth: "100%", overflowWrap: "anywhere" }}
+                >
+                  {finding.title}
+                </Button>
+              ))}
+            </Stack>
+          </Box>
+        )}
+      </Stack>
+    </Section>
   );
 }
 

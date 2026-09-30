@@ -445,6 +445,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             task: claim.task,
             attempt: claim.attempt,
             checkpoint,
+            ...(claim.reviewBaseline === undefined ? {} : { reviewBaseline: claim.reviewBaseline }),
             signal: executionSignal,
             workspace,
             onUsage: observeUsage,

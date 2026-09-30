@@ -19,12 +19,16 @@ import {
   InvestigationRecheckSchema,
   InvestigationRecipeRequestSchema,
   InvestigationRecipeStepSchema,
+  InvestigationReviewBaselineFindingRefSchema,
+  type InvestigationReviewBaselineSnapshot,
+  InvestigationReviewDispositionSchema,
   type InvestigationRuntimeState,
   type InvestigationTaskV1,
   InvestigationVersionRefSchema,
   isCorrectableInvestigationModelOutputIssue,
   PositiveIntegerSchema,
   validateInvestigationAnalysisForTask,
+  validateInvestigationReviewBaselineSnapshot,
 } from "@agentic-review/contracts";
 import { createInvestigationCheckpoint, investigationContentDigest } from "@agentic-review/domain";
 import { type Static, Type } from "@sinclair/typebox";
@@ -117,34 +121,53 @@ const modelPlanDraft = Type.Object(
 );
 
 /** Status-specific wire constraints supplement, never replace, ledger reference validation. */
-export const InvestigationModelCandidateSchema = Type.Union([
-  Type.Object(
-    {
-      ...InvestigationCandidateSchema.properties,
-      status: Type.Union([Type.Literal("confirmed"), Type.Literal("unresolved")]),
-      findingId: EntityIdSchema,
-      findingVersion: PositiveIntegerSchema,
-      mergedIntoCandidateId: Type.Null(),
-    },
-    objectOptions,
-  ),
-  Type.Object(
-    {
-      ...InvestigationCandidateSchema.properties,
-      status: Type.Union([Type.Literal("pending"), Type.Literal("withdrawn")]),
-      mergedIntoCandidateId: Type.Null(),
-    },
-    objectOptions,
-  ),
-  Type.Object(
-    {
-      ...InvestigationCandidateSchema.properties,
-      status: Type.Literal("merged"),
-      mergedIntoCandidateId: EntityIdSchema,
-    },
-    objectOptions,
-  ),
-]);
+const {
+  reviewBaselineFindingRef: _reviewBaselineFindingRef,
+  reviewDisposition: _reviewDisposition,
+  ...ordinaryCandidateProperties
+} = InvestigationCandidateSchema.properties;
+const candidateStatusProperties = [
+  {
+    status: Type.Union([Type.Literal("confirmed"), Type.Literal("unresolved")]),
+    findingId: EntityIdSchema,
+    findingVersion: PositiveIntegerSchema,
+    mergedIntoCandidateId: Type.Null(),
+  },
+  {
+    status: Type.Union([Type.Literal("pending"), Type.Literal("withdrawn")]),
+    findingId: InvestigationCandidateSchema.properties.findingId,
+    findingVersion: InvestigationCandidateSchema.properties.findingVersion,
+    mergedIntoCandidateId: Type.Null(),
+  },
+  {
+    status: Type.Literal("merged"),
+    findingId: InvestigationCandidateSchema.properties.findingId,
+    findingVersion: InvestigationCandidateSchema.properties.findingVersion,
+    mergedIntoCandidateId: EntityIdSchema,
+  },
+] as const;
+export const InvestigationModelCandidateSchema = Type.Union(
+  candidateStatusProperties.flatMap((statusProperties) => [
+    Type.Object(
+      {
+        ...ordinaryCandidateProperties,
+        ...statusProperties,
+        discoveredRound: PositiveIntegerSchema,
+      },
+      objectOptions,
+    ),
+    Type.Object(
+      {
+        ...ordinaryCandidateProperties,
+        ...statusProperties,
+        discoveredRound: Type.Literal(0),
+        reviewBaselineFindingRef: InvestigationReviewBaselineFindingRefSchema,
+        reviewDisposition: InvestigationReviewDispositionSchema,
+      },
+      objectOptions,
+    ),
+  ]),
+);
 
 /** Model updates are bounded independently of the complete Worker-owned ledger. */
 export const InvestigationModelTurnDeltaV1Schema = Type.Object(
@@ -233,6 +256,14 @@ export interface ModelTurnProjectionContext {
     readonly remaining: InvestigationLoopCheckpointV1["consumed"];
   };
   readonly subjects: InvestigationTaskV1["subjects"];
+  /** Historical findings are context only; their references are never current evidence. */
+  readonly reviewBaseline?: {
+    readonly reportRef: InvestigationReviewBaselineSnapshot["descriptor"]["reportRef"];
+    readonly sourceTaskId: string;
+    readonly subject: InvestigationReviewBaselineSnapshot["descriptor"]["subject"];
+    readonly totalFindingCount: number;
+    readonly findings: InvestigationReviewBaselineSnapshot["findings"];
+  };
   readonly counts: Readonly<Record<string, number>>;
   /** Source dependencies are readable context, not editable coverage selections. */
   readonly sourceCoverage: {
@@ -307,9 +338,20 @@ export function prepareModelTurnProjection(input: {
   readonly task: InvestigationTaskV1;
   readonly attempt: InvestigationAttemptV1;
   readonly checkpoint: InvestigationLoopCheckpointV1 | null;
+  readonly reviewBaseline?: InvestigationReviewBaselineSnapshot;
   readonly maximumContextBytes: number;
 }): ModelTurnProjection {
   const { task, attempt, checkpoint, maximumContextBytes } = input;
+  if (
+    (task.reviewBaseline === undefined) !== (input.reviewBaseline === undefined) ||
+    (input.reviewBaseline !== undefined &&
+      (!validateInvestigationReviewBaselineSnapshot(input.reviewBaseline).valid ||
+        !same(task.reviewBaseline, input.reviewBaseline.descriptor)))
+  )
+    throw new ModelTurnProjectionError(
+      "MODEL_INPUT_INVALID",
+      "The complete review baseline must match the task's frozen report and finding references.",
+    );
   if (!Number.isSafeInteger(maximumContextBytes) || maximumContextBytes < 1)
     throw new ModelTurnProjectionError(
       "MODEL_INPUT_INVALID",
@@ -396,6 +438,14 @@ export function prepareModelTurnProjection(input: {
     pendingDiffChunks: pendingDiffChunks.length,
     candidates: baseAnalysis.candidates.length,
     pendingCandidates: pending.candidates.length,
+    ...(input.reviewBaseline === undefined
+      ? {}
+      : {
+          baselineFindings: input.reviewBaseline.findings.length,
+          pendingBaselineFindings: baseAnalysis.candidates.filter(
+            (candidate) => candidate.reviewDisposition === "pending",
+          ).length,
+        }),
     findings: baseAnalysis.findings.length,
     pendingFindings: pending.findings.length,
     rechecks: baseAnalysis.rechecks.length,
@@ -486,6 +536,23 @@ export function prepareModelTurnProjection(input: {
         ).values(),
       ].filter((subject) => subjectIds.has(subject.id)),
       counts,
+      ...(input.reviewBaseline === undefined
+        ? {}
+        : {
+            reviewBaseline: {
+              reportRef: structuredClone(input.reviewBaseline.descriptor.reportRef),
+              sourceTaskId: input.reviewBaseline.descriptor.sourceTaskId,
+              subject: structuredClone(input.reviewBaseline.descriptor.subject),
+              totalFindingCount: input.reviewBaseline.findings.length,
+              findings: input.reviewBaseline.findings.filter((finding) =>
+                collections.candidates.some(
+                  (candidate) =>
+                    candidate.reviewBaselineFindingRef?.id === finding.id &&
+                    candidate.reviewBaselineFindingRef.version === finding.version,
+                ),
+              ),
+            },
+          }),
       sourceCoverage: { digest: investigationContentDigest(sourceUnits), units: sourceUnits },
       analysis: {
         ...collections,
@@ -696,7 +763,11 @@ export function mergeModelTurnDelta(
           const current = value as InvestigationAnalysisV1["candidates"][number];
           if (
             previous.subjectRef !== current.subjectRef ||
-            previous.discoveredRound !== current.discoveredRound
+            previous.discoveredRound !== current.discoveredRound ||
+            !same(
+              previous.reviewBaselineFindingRef ?? null,
+              current.reviewBaselineFindingRef ?? null,
+            )
           )
             issues.add("candidate_identity_changed", path);
         }
@@ -1011,6 +1082,7 @@ function pendingRecords(
       .filter(
         (candidate) =>
           candidate.status === "pending" ||
+          candidate.reviewDisposition === "pending" ||
           ((candidate.status === "withdrawn" || candidate.status === "merged") &&
             (candidate.evidenceRefs.length === 0 ||
               candidate.evidenceRefs.some(

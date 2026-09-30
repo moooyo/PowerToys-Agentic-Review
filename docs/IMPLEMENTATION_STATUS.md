@@ -8,6 +8,17 @@ deadline correction changed tests only. See the [current CI workflow](../.github
 for the active gates. That prior result does not establish passing verification for subsequent
 implementation changes described here.
 
+- **Code Review request intake and rereview:** signed `pull_request.review_requested` events
+  create native source-reading PR reviews, with assignment retained as an alternative. Redelivery
+  recovers its original Task; a separate request after a terminal review can start another Task at
+  the same SHA. A review can freeze every finding from its previous complete original-PR report,
+  independently revisit them on the current source, and still review the whole current PR diff.
+  Typed dispositions drive report and reply comparisons, including explicit pending work and new
+  findings. Historical evidence is never adopted as current proof, and static fix conclusions do
+  not claim runtime validation. Precise completed comparisons also supersede their resolved prior
+  P0 records without changing immutable reports. See the
+  [receiver instructions](../apps/server/README.md#listen-for-trusted-assignments).
+
 - **Native Issue reproduction and patch verification:** saved reproduction and verification
   plans can bind controlled agent steps without an execution registry entry for every plan.
   The operator selects an exact source commit; generated-patch verification uses a saved plan

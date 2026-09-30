@@ -134,8 +134,14 @@ describe("webhook event management", () => {
     expect(webhookReasonDescription("source_assignment_missing")).toBe(
       "The configured reviewer is no longer assigned to this work item.",
     );
+    expect(webhookReasonDescription("source_review_request_missing")).toBe(
+      "The configured reviewer is no longer requested for this pull request.",
+    );
+    expect(webhookReasonDescription("source_review_request_revision_changed")).toBe(
+      "The pull request revision changed after the review request. Request review again for the new revision.",
+    );
     expect(webhookReasonDescription("webhook_authorization_revoked")).toBe(
-      "Repository intake settings no longer authorize this assignment.",
+      "Repository intake settings no longer authorize this request.",
     );
     expect(webhookReasonDescription("duplicate_assignment")).toBe(
       "The canonical event already represents this assignment.",
@@ -850,7 +856,7 @@ describe("webhook event management", () => {
         </QueryClientProvider>
       </MemoryRouter>,
     );
-    expect(html).toContain("Assignment intake is paused");
+    expect(html).toContain("Review request and assignment intake is paused");
     expect(html).toContain("Event history");
     expect(html).toContain("taskId=existing-task");
     expect(html).toMatch(/datetime="2026-09-19T02:00:00\.000Z"/i);

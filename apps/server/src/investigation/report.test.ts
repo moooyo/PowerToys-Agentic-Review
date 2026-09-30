@@ -19,6 +19,7 @@ import {
   investigationContentDigest,
   investigationTaskBindingDigest,
   projectInvestigationNextActions,
+  projectInvestigationReportAssessment,
   projectInvestigationReportFindings,
 } from "@agentic-review/domain";
 import { describe, expect, it } from "vitest";
@@ -480,6 +481,147 @@ function derivedPatchFixture() {
 }
 
 describe("assembleInvestigationReport", () => {
+  it("seals the Server-selected review descriptor into the header, export, and logical digest", () => {
+    const { input, result } = fixture(0);
+    const subject = input.task.subjects.find((entry) => entry.id === input.task.subjectRef);
+    if (subject?.kind !== "original_pr") throw new Error("Expected the synthetic PR source.");
+    input.task.reviewBaseline = {
+      reportRef: { id: "synthetic-previous-report", version: 2, digest: "7".repeat(64) },
+      sourceTaskId: "synthetic-previous-task",
+      subject: structuredClone(subject),
+      findings: [],
+    };
+    input.checkpoint.runtime.reviewBaseline = structuredClone(input.task.reviewBaseline);
+    input.checkpoint.taskBindingDigest = investigationTaskBindingDigest(input.task);
+    result.context.reviewBaseline = structuredClone(input.task.reviewBaseline);
+    sealCheckpoint(input.checkpoint);
+    sealResult(result);
+    const assembled = assembleInvestigationReport(
+      submission(result, input.checkpoint, input.task, input.attempt),
+    );
+    expect(assembled.context.reviewBaseline).toEqual(input.task.reviewBaseline);
+    expect(reportHeader(assembled).context.reviewBaseline).toEqual(input.task.reviewBaseline);
+    expect(assembled).toEqual(result);
+  });
+
+  it("rejects a prior review descriptor injected by the worker rather than frozen in the task", () => {
+    const { input } = fixture(0);
+    const subject = input.task.subjects.find((entry) => entry.id === input.task.subjectRef);
+    if (subject?.kind !== "original_pr") throw new Error("Expected the synthetic PR source.");
+    input.header.context.reviewBaseline = {
+      reportRef: { id: "synthetic-injected-report", version: 1, digest: "7".repeat(64) },
+      sourceTaskId: "synthetic-injected-task",
+      subject: structuredClone(subject),
+      findings: [],
+    };
+    expectCode(() => assembleInvestigationReport(input), "report_context_mismatch");
+    delete input.header.context.reviewBaseline;
+    input.checkpoint.runtime.reviewBaseline = {
+      reportRef: { id: "synthetic-injected-report", version: 1, digest: "7".repeat(64) },
+      sourceTaskId: "synthetic-injected-task",
+      subject: structuredClone(subject),
+      findings: [],
+    };
+    sealCheckpoint(input.checkpoint);
+    expectCode(() => assembleInvestigationReport(input), "checkpoint_review_baseline_mismatch");
+  });
+
+  it.each(["cancelled", "interrupted"] as const)(
+    "retains pending previous findings in a round-zero %s partial report",
+    (outcome) => {
+      const { task, attempt, result } = createInvestigationFixture("pr", {
+        findingCount: 0,
+        outcome: "blocked",
+      });
+      const subject = task.subjects.find((entry) => entry.id === task.subjectRef);
+      if (subject?.kind !== "original_pr") throw new Error("Expected the synthetic PR source.");
+      task.reviewBaseline = {
+        reportRef: { id: "synthetic-previous-report", version: 1, digest: "7".repeat(64) },
+        sourceTaskId: "synthetic-previous-task",
+        subject: structuredClone(subject),
+        findings: [
+          { id: "synthetic-previous-finding", version: 1, title: "Previous cancellation defect" },
+        ],
+      };
+      task.scope.includedUnits = task.scope.includedUnits.map((unit) => ({
+        ...unit,
+        status: "pending",
+        evidenceRefs: [],
+      }));
+      task.scope.completedUnitRefs = [];
+      task.scope.unresolvedUnitRefs = task.scope.includedUnits.map((unit) => unit.id);
+      const checkpoint = createInvestigationCheckpoint({
+        task,
+        attemptId: attempt.id,
+        checkpointId: result.report.loop.checkpointId,
+        leaseVersion: attempt.leaseVersion,
+        recordedAt: "2026-09-15T02:00:03.000Z",
+      });
+      checkpoint.stopReason = outcome;
+      sealCheckpoint(checkpoint);
+      const presentation = projectInvestigationCheckpointPresentation(task, checkpoint);
+      result.context.reviewBaseline = structuredClone(task.reviewBaseline);
+      result.outcome = outcome;
+      result.report.summary = presentation.summary;
+      result.report.coverage = structuredClone(checkpoint.analysis.coverage);
+      result.report.recheck = {
+        finalFindingCount: 0,
+        validFinalVersionRecheckCount: 0,
+        pendingFindingIds: [],
+        records: [],
+      };
+      result.report.loop = {
+        checkpointId: checkpoint.id,
+        checkpointVersion: checkpoint.version,
+        completedRounds: 0,
+        candidates: structuredClone(checkpoint.analysis.candidates),
+        stopReason: outcome,
+        budget: structuredClone(checkpoint.budget),
+        consumed: structuredClone(checkpoint.consumed),
+      };
+      result.report.limitations = [];
+      result.report.collections = {
+        findings: 0,
+        verificationEvidence: 0,
+        artifacts: 0,
+        plans: 0,
+        nextActions: 0,
+        candidates: 1,
+        rechecks: 0,
+      };
+      result.findings = [];
+      result.verificationEvidence = [];
+      result.artifacts = [];
+      result.plans = [];
+      result.nextActions = [];
+      result.feedbackDrafts = [];
+      result.diagnostics = [];
+      result.validation.checks = [];
+      result.assessment = projectInvestigationReportAssessment(
+        {
+          context: result.context,
+          report: { id: result.id, version: result.version },
+          assessment: presentation.assessment,
+          findings: [],
+          feedbackDrafts: [],
+        },
+        [],
+        [],
+        null,
+      );
+      sealResult(result);
+      const assembled = assembleInvestigationReport(submission(result, checkpoint, task, attempt));
+      expect(assembled.report.loop.completedRounds).toBe(0);
+      expect(assembled.report.loop.candidates).toHaveLength(1);
+      expect(assembled.report.loop.candidates[0]).toMatchObject({
+        discoveredRound: 0,
+        reviewDisposition: "pending",
+      });
+      expect(assembled.report.completeness).toBe("partial");
+      expect(assembled.context.subjects).toEqual(task.subjects);
+    },
+  );
+
   it("seals the deterministic partial E2E presentation without adopting unaccepted analysis", () => {
     const { task, attempt, result } = createInvestigationFixture("pr", {
       findingCount: 0,

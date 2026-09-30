@@ -155,6 +155,159 @@ function harness(
 describe("investigation progress comment transport", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("creates a review request acknowledgement without an assignment", async () => {
+    const fixture = harness();
+    fixture.gets.set(`${basePath}/pulls/7`, {
+      id: 701,
+      number: 7,
+      locked: false,
+      user: { id: 99 },
+      assignees: [],
+      requested_reviewers: [{ id: publisherId, type: "User" }],
+    });
+    const beforeDispatch = vi.fn();
+    expect(
+      await fixture.transport.publishProgressComment(
+        { ...createRequest(), expectedReviewerUserId: publisherId },
+        repository,
+        workItem("pull_request"),
+        actor,
+        beforeDispatch,
+      ),
+    ).toMatchObject({ state: "succeeded", effect: "applied", reasonCode: "comment_created" });
+    expect(beforeDispatch).toHaveBeenCalledOnce();
+    expect(fixture.mutations()).toHaveLength(1);
+  });
+
+  it("does not POST when a code review request is removed during the final target read", async () => {
+    const fixture = harness({
+      onRead: (request) => {
+        if (request.path === `${basePath}/pulls/7`)
+          fixture.gets.set(request.path, {
+            id: 701,
+            number: 7,
+            locked: false,
+            user: { id: 99 },
+            assignees: [{ id: publisherId }],
+            requested_reviewers: [],
+          });
+      },
+    });
+    fixture.gets.set(`${basePath}/pulls/7`, {
+      id: 701,
+      number: 7,
+      locked: false,
+      user: { id: 99 },
+      requested_reviewers: [{ id: publisherId, type: "User" }],
+    });
+    const beforeDispatch = vi.fn();
+    expect(
+      await fixture.transport.publishProgressComment(
+        { ...createRequest(), expectedReviewerUserId: publisherId },
+        repository,
+        workItem("pull_request"),
+        actor,
+        beforeDispatch,
+      ),
+    ).toMatchObject({
+      state: "failed",
+      effect: "not_sent",
+      retryable: false,
+      reasonCode: "review_request_not_current",
+    });
+    expect(beforeDispatch).not.toHaveBeenCalled();
+    expect(fixture.mutations()).toHaveLength(0);
+  });
+
+  it("freezes the expected reviewer before asynchronous preflight", async () => {
+    const request = { ...createRequest(), expectedReviewerUserId: publisherId };
+    const fixture = harness({
+      onRead: () => {
+        request.expectedReviewerUserId = publisherId + 1;
+      },
+    });
+    fixture.gets.set(`${basePath}/pulls/7`, {
+      id: 701,
+      number: 7,
+      locked: false,
+      user: { id: 99 },
+      requested_reviewers: [{ id: publisherId, type: "User" }],
+    });
+    expect(
+      await fixture.transport.publishProgressComment(
+        request,
+        repository,
+        workItem("pull_request"),
+        actor,
+      ),
+    ).toMatchObject({ state: "succeeded", effect: "applied" });
+    expect(fixture.mutations()).toHaveLength(1);
+  });
+
+  it("updates an existing progress comment after the code review request is complete", async () => {
+    const fixture = harness();
+    fixture.gets.set(`${basePath}/pulls/7`, {
+      id: 701,
+      number: 7,
+      locked: false,
+      user: { id: 99 },
+      requested_reviewers: [],
+    });
+    expect(
+      await fixture.transport.publishProgressComment(
+        { ...updateRequest(), expectedReviewerUserId: publisherId },
+        repository,
+        workItem("pull_request"),
+        actor,
+      ),
+    ).toMatchObject({ state: "succeeded", effect: "applied", reasonCode: "comment_updated" });
+    expect(fixture.mutations()).toHaveLength(1);
+    expect(fixture.mutations()[0]!.method).toBe("PATCH");
+  });
+
+  it("reconciles a created progress comment after the code review request is complete", async () => {
+    const fixture = harness();
+    fixture.gets.set(`${basePath}/issues/7/comments?per_page=100&page=1`, [comment()]);
+    expect(
+      await fixture.transport.reconcileProgressComment(
+        { ...createRequest(), expectedReviewerUserId: publisherId },
+        repository,
+        workItem("pull_request"),
+        actor,
+      ),
+    ).toMatchObject({ state: "succeeded", effect: "applied", reasonCode: "comment_reconciled" });
+    expect(fixture.mutations()).toHaveLength(0);
+  });
+
+  it.each([
+    undefined,
+    [],
+    [{ id: publisherId + 1, type: "User" }],
+    [{ id: publisherId, type: "Team" }],
+  ])("refuses a first comment without the configured requested reviewer %j", async (reviewers) => {
+    const fixture = harness();
+    fixture.gets.set(`${basePath}/pulls/7`, {
+      id: 701,
+      number: 7,
+      locked: false,
+      user: { id: 99 },
+      requested_reviewers: reviewers,
+    });
+    expect(
+      await fixture.transport.publishProgressComment(
+        { ...createRequest(), expectedReviewerUserId: publisherId },
+        repository,
+        workItem("pull_request"),
+        actor,
+      ),
+    ).toMatchObject({
+      state: "failed",
+      effect: "not_sent",
+      reasonCode: "review_request_not_current",
+    });
+    expect(fixture.mutations()).toHaveLength(0);
+  });
+
   it.each(["pull_request", "issue"] as const)(
     "creates one conversation comment for a %s",
     async (kind) => {

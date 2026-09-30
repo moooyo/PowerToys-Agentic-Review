@@ -1036,6 +1036,72 @@ describe("InvestigationLoopCoordinator", () => {
     });
   });
 
+  it("forwards the frozen prior findings without accepting their evidence as current analysis", async () => {
+    const f = fixture(0, 8, "pr");
+    const previous = createInvestigationFixture("pr", { findingCount: 2 });
+    const previousSubject = previous.task.subjects.find(
+      (subject) => subject.id === previous.task.subjectRef,
+    )!;
+    if (previousSubject.kind !== "original_pr")
+      throw new Error("The fixture requires a PR source.");
+    f.claim.task.reviewBaseline = {
+      reportRef: { id: "previous-native-review", version: 1, digest: "a".repeat(64) },
+      sourceTaskId: "previous-review-task",
+      subject: previousSubject,
+      findings: previous.result.findings.map(({ id, version, title }) => ({ id, version, title })),
+    };
+    f.claim.reviewBaseline = {
+      descriptor: structuredClone(f.claim.task.reviewBaseline),
+      findings: structuredClone(previous.result.findings),
+    };
+    const checkpoint = createInvestigationCheckpoint({
+      task: f.claim.task,
+      attemptId: f.claim.attempt.id,
+      checkpointId: "rereview-checkpoint",
+      leaseVersion: f.claim.attempt.leaseVersion,
+      recordedAt,
+    });
+    f.claim.checkpoint = checkpoint;
+    f.replaceCurrent(checkpoint);
+    const content = {
+      schemaVersion: "InvestigationPrDiffManifestV1" as const,
+      subjectRef: f.claim.task.subjectRef,
+      baseSha: previousSubject.baseSha,
+      headSha: previousSubject.headSha,
+      mergeBaseSha: previousSubject.baseSha,
+      files: [],
+      chunks: [],
+    };
+    vi.mocked(f.workspace.readPrDiffManifest).mockResolvedValue({
+      ...content,
+      digest: investigationContentDigest(content),
+    });
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      expect(input.reviewBaseline).toEqual(f.claim.reviewBaseline);
+      expect(input.checkpoint?.analysis.findings).toEqual([]);
+      expect(input.checkpoint?.analysis.evidence).toEqual([]);
+      expect(input.checkpoint?.analysis.rechecks).toEqual([]);
+      expect(input.checkpoint?.analysis.candidates).toHaveLength(2);
+      expect(
+        input.checkpoint?.analysis.candidates.every(
+          (candidate) =>
+            candidate.reviewDisposition === "pending" &&
+            candidate.subjectRef === input.task.subjectRef,
+        ),
+      ).toBe(true);
+      throw new Error("Synthetic model failure leaves the rereview pending.");
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledOnce();
+    expect(f.current().round).toBe(0);
+    expect(
+      f
+        .current()
+        .analysis.candidates.every((candidate) => candidate.reviewDisposition === "pending"),
+    ).toBe(true);
+    expect(f.submissions[0]?.header.outcome).toBe("failed");
+  });
+
   it("blocks a PR when its real complete diff cannot be provided", async () => {
     const f = fixture(0, 8, "pr");
     vi.mocked(f.workspace.readPrDiffManifest).mockRejectedValue(

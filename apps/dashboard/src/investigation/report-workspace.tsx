@@ -47,6 +47,7 @@ import {
 } from "./report-draft-store";
 import { findingViewParameters } from "./report-findings";
 import { ReportFindingsReader } from "./report-findings-reader";
+import { ReviewComparisonPanel } from "./report-sections";
 import { assertActionContext, assertReportBindings, selectionContext } from "./report-state";
 import { ReviewQueueBar, type ReviewRecord } from "./review-navigation";
 import { sessionIdentity, useInvestigationSession } from "./session";
@@ -570,6 +571,7 @@ function BoundReportWorkspace({
           {workItem.error.message}
         </Alert>
       )}
+      {result && <ReviewComparisonPanel result={result} />}
       <Box className="report-tabs-row" sx={{ borderBottom: 1, borderColor: "divider" }}>
         <Tabs
           value={tab}

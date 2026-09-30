@@ -177,15 +177,15 @@ describe("repository automatic reply configuration", () => {
     expect(html).toContain("Reply templates");
     expect(html).toContain("Edit templates");
     expect(html).not.toContain("<textarea");
-    expect(html).toContain("Post assignment progress");
-    expect(html).toContain("Updates one comment as assignment work progresses");
+    expect(html).toContain("Post investigation progress");
+    expect(html).toContain("Updates one comment as review request or assignment work progresses");
     expect(html).not.toContain("Received progress template</textarea>");
     expect(html).toContain("publisher is not configured");
     expect(html).toContain("Save settings");
     expect(html).toContain("View comment deliveries");
     expect(html).toContain("/comments?repositoryId=repo-selected");
     expect(html).not.toContain("Recent automatic replies");
-    expect(html).not.toContain("Recent assignment progress");
+    expect(html).not.toContain("Recent investigation progress");
     expect(html).not.toContain("Confirm publication");
     expect(html).not.toContain("Approve");
     expect(html).not.toContain("Merge");
@@ -269,7 +269,7 @@ describe("repository automatic reply configuration", () => {
     expect(html).toContain("View comment deliveries");
   });
 
-  it("requires enabled automatic replies and current authorization to toggle assignment progress", () => {
+  it("requires enabled automatic replies and current authorization to toggle investigation progress", () => {
     for (const [enabled, canManage, canAuthorize, expectedDisabled] of [
       [false, true, true, true],
       [true, false, true, true],

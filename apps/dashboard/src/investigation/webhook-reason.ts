@@ -12,6 +12,13 @@ const descriptions: Readonly<Record<string, string>> = {
   source_assignment_missing: "The configured reviewer is no longer assigned to this work item.",
   source_assignment_revision_changed:
     "The pull request revision changed after the assignment event.",
+  source_review_request_target_changed:
+    "The current pull request no longer matches the requested review.",
+  source_review_request_stale: "The pull request is no longer open for review.",
+  source_review_request_missing:
+    "The configured reviewer is no longer requested for this pull request.",
+  source_review_request_revision_changed:
+    "The pull request revision changed after the review request. Request review again for the new revision.",
   source_account_mismatch:
     "GitHub read access uses a different account than the configured identity.",
   source_repository_mismatch: "The GitHub repository no longer matches its registered identity.",
@@ -19,7 +26,7 @@ const descriptions: Readonly<Record<string, string>> = {
   source_kind_mismatch: "The imported source has a different work item type.",
   work_item_identity_conflict: "More than one saved work item matches this source.",
   webhook_preparation_failed: "Event preparation could not complete.",
-  webhook_authorization_revoked: "Repository intake settings no longer authorize this assignment.",
+  webhook_authorization_revoked: "Repository intake settings no longer authorize this request.",
   webhook_task_missing: "The task recorded for this event is unavailable.",
   webhook_task_conflict: "The saved task request no longer matches this event.",
   webhook_claim_lost: "This event's handling session is no longer current.",
@@ -30,8 +37,11 @@ const descriptions: Readonly<Record<string, string>> = {
   duplicate_comment: "The canonical event already represents this command comment.",
   unsupported_event: "This event type is not handled by the configured intake.",
   unsupported_action: "This event action is not handled by the configured intake.",
-  repository_not_configured: "Assignment intake is not enabled for this repository.",
+  repository_not_configured:
+    "Review request and assignment intake is not enabled for this repository.",
   assignment_not_authorized: "The assignment does not match the permitted reviewer and requester.",
+  review_request_not_authorized:
+    "The review request does not match the permitted reviewer and requester.",
   work_item_not_open: "The source work item was not open when the event was received.",
   e2e_preparation_failed: "E2E request preparation could not complete.",
   e2e_authorization_revoked: "Repository settings no longer authorize this E2E request.",

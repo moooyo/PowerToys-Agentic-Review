@@ -1,4 +1,5 @@
 import {
+  deriveInvestigationReviewComparison,
   describeInvestigationE2eBlocker,
   EntityIdSchema,
   type InvestigationAssessment,
@@ -264,7 +265,7 @@ function stripUnsafeControlCharacters(value: string): string {
 export function redactAbsolutePosixPaths(value: string): string {
   // A zero-width boundary lets the complete quoted-path branch win at the same start offset.
   return value.replace(
-    /(?<url>https?:\/\/[^\s"`<>]+)|(?<quote>["'`])\/(?!\/)(?:\\[^\r\n]|(?!\k<quote>)[^\\\r\n])*\k<quote>|(?<prefix>(?<=^|[\s(\[{:;,=>])(?:[*_~`]{1,3}|["'])?)\/(?!\/)[^\s"'`<>|;,\])}]+/giu,
+    /(?<url>https?:\/\/[^\s"`<>]+)|(?<quote>["'`])\/(?!\/)(?:\\[^\r\n]|(?!\k<quote>)[^\\\r\n])*\k<quote>|(?<prefix>(?<=^|[\s([{:;,=>])(?:[*_~`]{1,3}|["'])?)\/(?!\/)[^\s"'`<>|;,\])}]+/giu,
     (
       match: string,
       url: string | undefined,
@@ -917,7 +918,61 @@ class ReplySections {
   }
 
   summary(): string {
-    return this.brief(this.report.report.summary, 500);
+    return [this.brief(this.report.report.summary, 500), this.reviewComparisonSummary()]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  private reviewComparisonSummary(): string {
+    const comparison = deriveInvestigationReviewComparison(this.report);
+    if (comparison === null) return "";
+    const count = (value: string) =>
+      comparison.findings.filter((finding) => finding.status === value).length;
+    return [
+      "### Re-review of previous report",
+      `Previous head: ${this.text(comparison.baselineHeadSha)}. Reviewed head: ${this.text(comparison.currentHeadSha ?? "Unavailable")}.`,
+      `**Previous findings:** ${comparison.findings.length}. Fixed in reviewed code: ${count("fixed")} · Still present: ${count("still_present")} · Earlier conclusion not confirmed: ${count("not_confirmed")} · Unverified: ${count("unverified")} · Pending: ${count("pending")}.`,
+      `**New findings:** ${comparison.newFindingIds.length}.`,
+      "Fixed reflects static code inspection, not a runtime test result. An earlier conclusion that is not confirmed is not counted as a fix. Pending and unverified findings remain unresolved by this review.",
+    ].join("\n\n");
+  }
+
+  private reviewComparisonDetails(): string {
+    const comparison = deriveInvestigationReviewComparison(this.report);
+    if (comparison === null) return "";
+    const labels = {
+      fixed: "Fixed in reviewed code",
+      still_present: "Still present",
+      not_confirmed: "Earlier conclusion not confirmed",
+      unverified: "Unverified",
+      pending: "Pending",
+    } as const;
+    const previous = comparison.findings.map((finding, index) =>
+      [
+        `#### Previous finding ${index + 1}: ${this.text(finding.title)}`,
+        this.field("Re-review result", labels[finding.status]),
+        this.field(
+          "Rationale",
+          finding.rationale || "No completed re-review rationale was recorded.",
+        ),
+        this.evidence(finding.evidenceRefs),
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    );
+    const newFindings = this.report.findings.filter((finding) =>
+      comparison.newFindingIds.includes(finding.id),
+    );
+    return [
+      "### Re-review of previous report",
+      comparison.findings.length === 0
+        ? "The previous report contained no retained findings."
+        : previous.join("\n\n"),
+      this.list(
+        "New findings",
+        newFindings.map((finding) => finding.title),
+      ) || "No new retained findings were recorded.",
+    ].join("\n\n");
   }
 
   private fullSummary(): string {
@@ -1183,6 +1238,7 @@ class ReplySections {
       this.assessment(),
       "### Full summary",
       this.fullSummary(),
+      this.reviewComparisonDetails(),
       ...(this.report.context.task.kind === "pr-e2e"
         ? ["### Runtime feature coverage", this.e2eCoverage()]
         : []),
@@ -1197,7 +1253,9 @@ class ReplySections {
       "### Limitations",
       this.limitations(),
       "</details>",
-    ].join("\n\n");
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
 }
 

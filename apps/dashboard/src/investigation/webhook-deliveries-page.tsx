@@ -936,7 +936,7 @@ function WebhookIntakeNotice({
     retry: false,
   });
   return query.data?.repositoryId === repositoryId && !query.data.enabled ? (
-    <Alert severity="info">Assignment intake is paused.</Alert>
+    <Alert severity="info">Review request and assignment intake is paused.</Alert>
   ) : null;
 }
 
@@ -1114,7 +1114,7 @@ export function WebhookDeliveryDetails({ deliveryId }: { deliveryId: string }) {
                 <dd>{delivery.actorUserId}</dd>
               </div>
               <div>
-                <dt>Assigned reviewer GitHub ID</dt>
+                <dt>Recipient GitHub ID</dt>
                 <dd>{delivery.assigneeUserId}</dd>
               </div>
               <div>

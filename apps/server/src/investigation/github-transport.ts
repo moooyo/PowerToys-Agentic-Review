@@ -176,6 +176,9 @@ const progressRequest = (
     ...(request.expectedAssigneeUserId === undefined
       ? {}
       : { expectedAssigneeUserId: positiveId(request.expectedAssigneeUserId) }),
+    ...(request.expectedReviewerUserId === undefined
+      ? {}
+      : { expectedReviewerUserId: positiveId(request.expectedReviewerUserId) }),
   };
   if (
     typeof frozen.marker !== "string" ||
@@ -333,6 +336,18 @@ export class InvestigationGitHubTransport
           ))
       )
         throw new GitHubActionFailure("assignment_not_current");
+      if (
+        frozen.externalId === null &&
+        frozen.expectedReviewerUserId !== undefined &&
+        (workItem.kind !== "pull_request" ||
+          !Array.isArray(remote.value.requested_reviewers) ||
+          !remote.value.requested_reviewers.some(
+            (reviewer) =>
+              object(reviewer).id === frozen?.expectedReviewerUserId &&
+              object(reviewer).type === "User",
+          ))
+      )
+        throw new GitHubActionFailure("review_request_not_current");
       if (alreadyPublished)
         return progressDelivery(
           "succeeded",

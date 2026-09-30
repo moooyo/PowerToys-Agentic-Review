@@ -164,6 +164,7 @@ export function publicationReason(code: string | null): string | null {
       "repository_identity_changed",
       "work_item_identity_changed",
       "assignment_not_current",
+      "review_request_not_current",
       "github_conversation_locked",
     ].includes(code)
   )
@@ -311,6 +312,25 @@ export function stoppedCopy(
       nextStep:
         "A repository operator can explicitly resume the task after an eligible worker is available.",
     };
+  if (status === "cancelled" && reasonCode?.startsWith("source_review_request_")) {
+    const cancellations: Readonly<Record<string, string>> = {
+      source_review_request_missing:
+        "The review was cancelled because the code review request is no longer current.",
+      source_review_request_stale:
+        "The review was cancelled because the pull request is no longer open.",
+      source_review_request_revision_changed:
+        "The review was cancelled because the pull request base or head changed after the code review request.",
+      source_review_request_target_changed:
+        "The review was cancelled because the pull request identity changed after the code review request.",
+    };
+    const failure = cancellations[reasonCode];
+    if (failure !== undefined)
+      return {
+        failure,
+        nextStep:
+          "Request a code review again on the current open pull request to start a new review. No automatic continuation is scheduled.",
+      };
+  }
   if (status === "cancelled")
     return {
       failure: "The investigation was cancelled before completion.",
@@ -389,6 +409,7 @@ export function problemState(code: string): PublicationState {
       "repository_identity_changed",
       "work_item_identity_changed",
       "assignment_not_current",
+      "review_request_not_current",
       "github_conversation_locked",
       "transport_unavailable",
     ].includes(code)

@@ -186,6 +186,9 @@ export function buildInvestigationReportSubmission(
       ? {}
       : { modelExecutions: structuredClone(checkpoint.runtime.modelExecutions) }),
     subjects: runtime.subjects,
+    ...(task.reviewBaseline === undefined
+      ? {}
+      : { reviewBaseline: structuredClone(task.reviewBaseline) }),
     ...(task.sourceArtifacts === undefined
       ? {}
       : { sourceArtifacts: structuredClone(task.sourceArtifacts) }),
@@ -354,7 +357,8 @@ export function buildInvestigationReportSubmission(
 function validateInput(input: BuildInvestigationReportSubmissionInput): void {
   if (
     !Value.Check(InvestigationTaskV1Schema, input.task) ||
-    (input.task.sourceArtifacts !== undefined && !validateInvestigationTask(input.task).valid) ||
+    ((input.task.sourceArtifacts !== undefined || input.task.reviewBaseline !== undefined) &&
+      !validateInvestigationTask(input.task).valid) ||
     !Value.Check(InvestigationAttemptV1Schema, input.attempt) ||
     !Value.Check(InvestigationLoopCheckpointV1Schema, input.checkpoint) ||
     !Value.Check(EntityIdSchema, input.reportId) ||
@@ -404,6 +408,8 @@ function validateInput(input: BuildInvestigationReportSubmissionInput): void {
       investigationContentDigest(task.profileRef) ||
     investigationContentDigest(checkpoint.promptRef) !==
       investigationContentDigest(task.promptRef) ||
+    investigationContentDigest(checkpoint.runtime.reviewBaseline ?? null) !==
+      investigationContentDigest(task.reviewBaseline ?? null) ||
     investigationContentDigest(checkpoint.budget) !== investigationContentDigest(task.budget)
   ) {
     throw new InvestigationReportBuildError(

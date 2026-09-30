@@ -72,6 +72,7 @@ function harness(
       ? {
           base: { sha: "b".repeat(40), repo: { id: 123 } },
           head: { sha },
+          requested_reviewers: [{ id: 55, login: "configured-operator", type: "User" }],
           review_comments: 1,
           merged_at: null,
         }
@@ -588,6 +589,10 @@ function webhookExpectation(kind: "issue" | "pull_request") {
   };
 }
 
+function reviewRequestExpectation() {
+  return { ...webhookExpectation("pull_request"), requestKind: "review_request" as const };
+}
+
 describe("assignment-bound Webhook source import", () => {
   it.each(["issue", "pull_request"] as const)(
     "imports an open assigned %s whose identity and revision match the event",
@@ -843,6 +848,271 @@ describe("assignment-bound Webhook source import", () => {
           method: "GET",
         },
       ]);
+      expect(store.list("workItems")).toEqual([]);
+      expect(store.list("sourceSnapshots")).toEqual([]);
+    },
+  );
+});
+
+describe("review-request-bound Webhook source import", () => {
+  it.each([
+    { assignment: "no assigned users", assignees: [] },
+    { assignment: "no assignee field", assignees: undefined },
+  ])("imports the complete requested PR review with $assignment", async ({ assignees }) => {
+    const { importer, store, calls, upstream } = harness({
+      kind: "pull_request",
+      override: (path, _ordinal, source) =>
+        path === "/repos/fixture/repository/pulls/7"
+          ? Response.json({ ...source, assignees })
+          : undefined,
+    });
+    const imported = await importer.importWorkItem(
+      operator,
+      repository.id,
+      { kind: "pull_request", number: 7 },
+      reviewRequestExpectation(),
+    );
+    expect(imported.commentsCount).toBe(103);
+    expect(imported.workItem).toMatchObject({
+      kind: "pull_request",
+      number: 7,
+      state: "open",
+      body: upstream.body,
+      subject: { baseSha: "b".repeat(40), headSha: sha },
+    });
+    expect(store.get("workItems", imported.workItem.id)).toEqual(imported.workItem);
+    const snapshot = store.get<{ inputSnapshot: InvestigationInputSnapshotV1 }>(
+      "sourceSnapshots",
+      imported.snapshotRef.id,
+    );
+    expect(snapshot?.inputSnapshot.body).toBe(upstream.body);
+    expect(snapshot?.inputSnapshot.comments).toHaveLength(103);
+    expect(snapshot?.inputSnapshot.comments.slice(-3)).toEqual([
+      { id: "issue-comment:101", body: "Complete comment 101" },
+      { id: "review-comment:301", body: "Full inline review feedback" },
+      { id: "review:401", body: "Full overall review feedback" },
+    ]);
+    expect(calls.filter((call) => call.path === "/repos/fixture/repository/pulls/7")).toHaveLength(
+      2,
+    );
+    expect(calls.every((call) => call.method === "GET")).toBe(true);
+  });
+
+  const staleReviewTargets = [
+    {
+      change: "removed review request",
+      patch: { requested_reviewers: [] },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "missing reviewer data",
+      patch: { requested_reviewers: undefined },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "non-array reviewer data",
+      patch: { requested_reviewers: { id: 55, type: "User" } },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "another numeric reviewer with the same login",
+      patch: { requested_reviewers: [{ id: 99, login: "configured-operator", type: "User" }] },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "nonnumeric reviewer identity",
+      patch: { requested_reviewers: [{ id: "55", login: "configured-operator", type: "User" }] },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "bot reviewer identity",
+      patch: { requested_reviewers: [{ id: 55, login: "configured-operator", type: "Bot" }] },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "team-shaped reviewer identity",
+      patch: { requested_reviewers: [{ id: 55, login: "configured-operator", type: "Team" }] },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "reviewer identity without a user type",
+      patch: { requested_reviewers: [{ id: 55, login: "configured-operator" }] },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "null reviewer entry",
+      patch: { requested_reviewers: [null] },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "team request without a user review request",
+      patch: {
+        requested_reviewers: [],
+        requested_teams: [{ id: 55, slug: "configured-operator" }],
+      },
+      code: "source_review_request_missing",
+    },
+    {
+      change: "another work item ID",
+      patch: { id: 88 },
+      code: "source_review_request_target_changed",
+    },
+    {
+      change: "another work item number",
+      patch: { number: 8 },
+      code: "source_review_request_target_changed",
+    },
+    { change: "closed PR", patch: { state: "closed" }, code: "source_review_request_stale" },
+    {
+      change: "merge timestamp",
+      patch: { merged_at: "2026-09-15T10:01:00.000Z" },
+      code: "source_review_request_stale",
+    },
+    { change: "merged flag", patch: { merged: true }, code: "source_review_request_stale" },
+    {
+      change: "base SHA",
+      patch: { base: { sha: "c".repeat(40), repo: { id: 123 } } },
+      code: "source_review_request_revision_changed",
+    },
+    {
+      change: "head SHA",
+      patch: { head: { sha: "c".repeat(40) } },
+      code: "source_review_request_revision_changed",
+    },
+  ];
+  it.each(
+    [1, 2].flatMap((ordinal) => staleReviewTargets.map((target) => ({ ordinal, ...target }))),
+  )(
+    "rejects $change on review source read $ordinal without saving partial input",
+    async ({ ordinal, patch, code }) => {
+      const endpoint = "/repos/fixture/repository/pulls/7";
+      const { importer, store, calls } = harness({
+        kind: "pull_request",
+        comments: 1,
+        override: (path, observedOrdinal, upstream) =>
+          path === endpoint && observedOrdinal === ordinal
+            ? Response.json({ ...upstream, ...patch })
+            : undefined,
+      });
+      await expect(
+        importer.importWorkItem(
+          operator,
+          repository.id,
+          { kind: "pull_request", number: 7 },
+          reviewRequestExpectation(),
+        ),
+      ).rejects.toMatchObject(
+        ordinal === 1 && patch.number !== undefined
+          ? { code: "source_target_mismatch", statusCode: 502 }
+          : { code, statusCode: 409 },
+      );
+      expect(store.list("workItems")).toEqual([]);
+      expect(store.list("sourceSnapshots")).toEqual([]);
+      expect(calls.filter((call) => call.path === endpoint)).toHaveLength(ordinal);
+      if (ordinal === 1)
+        expect(calls.filter((call) => call.path.includes("/comments?"))).toHaveLength(0);
+      expect(calls.every((call) => call.method === "GET")).toBe(true);
+    },
+  );
+
+  it("uses the requested reviewer numeric identity when the login changes between reads", async () => {
+    const { importer, calls } = harness({
+      kind: "pull_request",
+      comments: 1,
+      override: (path, ordinal, upstream) =>
+        path === "/repos/fixture/repository/pulls/7" && ordinal === 2
+          ? Response.json({
+              ...upstream,
+              requested_reviewers: [{ id: 55, login: "renamed-configured-operator", type: "User" }],
+            })
+          : undefined,
+    });
+    const imported = await importer.importWorkItem(
+      operator,
+      repository.id,
+      { kind: "pull_request", number: 7 },
+      reviewRequestExpectation(),
+    );
+    expect(imported.workItem.state).toBe("open");
+    expect(calls.filter((call) => call.path === "/repos/fixture/repository/pulls/7")).toHaveLength(
+      2,
+    );
+  });
+
+  it("rechecks a requested review without assignment, comments, or source persistence", async () => {
+    const { importer, store, calls, upstream } = harness({ kind: "pull_request", comments: 1 });
+    upstream.assignees = [];
+    await expect(
+      importer.verifyAssignment(
+        operator,
+        repository.id,
+        { kind: "pull_request", number: 7 },
+        reviewRequestExpectation(),
+      ),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual([
+      { path: "/user", method: "GET" },
+      { path: "/repos/fixture/repository", method: "GET" },
+      { path: "/repos/fixture/repository/pulls/7", method: "GET" },
+    ]);
+    expect(store.list("workItems")).toEqual([]);
+    expect(store.list("sourceSnapshots")).toEqual([]);
+  });
+
+  it.each([
+    { change: "removed", requested_reviewers: [] },
+    {
+      change: "replaced by another numeric reviewer with the same login",
+      requested_reviewers: [{ id: 99, login: "configured-operator", type: "User" }],
+    },
+  ])("rejects a $change review request on the final execution recheck", async (change) => {
+    const { importer, store, calls } = harness({
+      kind: "pull_request",
+      comments: 1,
+      override: (path, ordinal, upstream) =>
+        path === "/repos/fixture/repository/pulls/7" && ordinal === 3
+          ? Response.json({ ...upstream, requested_reviewers: change.requested_reviewers })
+          : undefined,
+    });
+    await importer.importWorkItem(
+      operator,
+      repository.id,
+      { kind: "pull_request", number: 7 },
+      reviewRequestExpectation(),
+    );
+    const workItems = store.list("workItems");
+    const snapshots = store.list("sourceSnapshots");
+    const importCalls = calls.length;
+    await expect(
+      importer.verifyAssignment(
+        operator,
+        repository.id,
+        { kind: "pull_request", number: 7 },
+        reviewRequestExpectation(),
+      ),
+    ).rejects.toMatchObject({ code: "source_review_request_missing", statusCode: 409 });
+    expect(calls.slice(importCalls)).toEqual([
+      { path: "/user", method: "GET" },
+      { path: "/repos/fixture/repository", method: "GET" },
+      { path: "/repos/fixture/repository/pulls/7", method: "GET" },
+    ]);
+    expect(store.list("workItems")).toEqual(workItems);
+    expect(store.list("sourceSnapshots")).toEqual(snapshots);
+  });
+
+  it.each(["importWorkItem", "verifyAssignment"] as const)(
+    "rejects an Issue review request expectation in %s before reading source",
+    async (method) => {
+      const { importer, store, calls } = harness({ comments: 1 });
+      await expect(
+        importer[method](
+          operator,
+          repository.id,
+          { kind: "issue", number: 7 },
+          { ...webhookExpectation("issue"), requestKind: "review_request" },
+        ),
+      ).rejects.toMatchObject({ code: "invalid_source_expectation", statusCode: 400 });
+      expect(calls).toHaveLength(0);
       expect(store.list("workItems")).toEqual([]);
       expect(store.list("sourceSnapshots")).toEqual([]);
     },

@@ -502,7 +502,7 @@ describe("assignment progress reply templates", () => {
       expect(render(stage)).not.toContain("{{");
       expect(render(stage)).not.toContain("agentic-review-progress:");
     }
-    expect(render("received")).toContain("assignment has been received");
+    expect(render("received")).toContain("request has been received");
     expect(render("received")).not.toContain("task has been queued");
     expect(render("started")).toContain("Work has started");
     expect(render("failed")).toContain("could not finish");
@@ -582,6 +582,31 @@ describe("assignment progress reply templates", () => {
         }),
       ).toThrow("exact assignment or E2E command trigger identity");
     }
+  });
+
+  it("describes code review requests without assignment wording", () => {
+    const reviewTrigger: InvestigationProgressTrigger = {
+      ...trigger,
+      requestKind: "review_request",
+    };
+    const body = renderProgressReply({
+      stage: "received",
+      template: defaultProgressReplyTemplates.received,
+      trigger: reviewTrigger,
+      updatedAt: timestamp,
+    });
+    expect(body).toContain("requested a code review from GitHub user review-bot");
+    expect(body).toContain("request has been received for investigation");
+    expect(body).not.toContain("assigned the");
+    for (const eventName of ["issues", "issue_comment"] as const)
+      expect(() =>
+        renderProgressReply({
+          stage: "received",
+          template: defaultProgressReplyTemplates.received,
+          trigger: { ...reviewTrigger, eventName, commandCommentId: 987 },
+          updatedAt: timestamp,
+        }),
+      ).toThrow("exact assignment or E2E command trigger identity");
   });
 
   it("renders a separate E2E command identity and pinned pull request scope", () => {
@@ -704,6 +729,12 @@ describe("assignment progress reply templates", () => {
     expect(validateProgressReplyTemplate(oldReceived, "received")).toBe(
       defaultProgressReplyTemplates.received,
     );
+    const assignmentReceived =
+      "## {{status}}\n\n{{trigger}}\n\nThe assignment has been received for investigation. This comment will track its progress.\n\nLast updated: {{updated_at}}\n";
+    expect(validateProgressReplyTemplate(assignmentReceived, "received")).toBe(
+      defaultProgressReplyTemplates.received,
+    );
+    expect(assignmentReceived).toContain("The assignment has been received");
     expect(validateProgressReplyTemplate(oldFailed.replaceAll("\n", "\r\n"), "failed")).toBe(
       defaultProgressReplyTemplates.failed,
     );

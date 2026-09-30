@@ -569,6 +569,66 @@ function expectBuildError(
 beforeAll(() => registerWorkerContractFormats());
 
 describe("investigation report builder", () => {
+  it.each(["cancelled", "interrupted"] as const)(
+    "preserves a frozen review baseline and every pending candidate in a round-zero %s report",
+    (outcome) => {
+      const input = fixture({ findingCount: 0 });
+      const subject = input.task.subjects.find((entry) => entry.id === input.task.subjectRef);
+      if (subject?.kind !== "original_pr") throw new Error("Expected the synthetic PR subject.");
+      input.task.reviewBaseline = {
+        reportRef: { id: "report:previous-review", version: 2, digest: "7".repeat(64) },
+        sourceTaskId: "task:previous-review",
+        subject: { ...subject, id: "subject:previous-review", headSha: "8".repeat(40) },
+        findings: Array.from({ length: 137 }, (_, index) => ({
+          id: `previous-finding:${index}`,
+          version: 2,
+          title: `Previous cancellation defect ${index}`,
+        })),
+      };
+      const checkpoint = createInvestigationCheckpoint({
+        task: input.task,
+        attemptId: input.attempt.id,
+        checkpointId: input.checkpoint.id,
+        leaseVersion: input.attempt.leaseVersion,
+        recordedAt,
+      });
+      checkpoint.stopReason = outcome;
+      const submission = buildInvestigationReportSubmission({
+        ...input,
+        checkpoint: seal(checkpoint),
+        outcome,
+        maximumPartItems: 17,
+      });
+      expect(submission.header.context.reviewBaseline).toEqual(input.task.reviewBaseline);
+      expect(submission.header.context.reviewBaseline).not.toBe(input.task.reviewBaseline);
+      expect(submission.header.context.subjects).toEqual(input.task.subjects);
+      expect(submission.header.context.parentReportRef).toBeNull();
+      expect(submission.header.report.loop.completedRounds).toBe(0);
+      expect(submission.header.report.completeness).toBe("partial");
+      expect(collectionItems(submission.parts, "candidates")).toEqual(
+        checkpoint.analysis.candidates,
+      );
+      expect(collectionItems(submission.parts, "candidates")).toHaveLength(137);
+      expect(collectionItems(submission.parts, "findings")).toEqual([]);
+      expect(collectionItems(submission.parts, "verificationEvidence")).toEqual([]);
+      expect(submission.manifest.collections.candidates).toBe(137);
+    },
+  );
+
+  it("rejects a prior review descriptor injected into the checkpoint runtime", () => {
+    const input = fixture();
+    const subject = input.task.subjects.find((entry) => entry.id === input.task.subjectRef);
+    if (subject?.kind !== "original_pr") throw new Error("Expected the synthetic PR subject.");
+    input.checkpoint.runtime.reviewBaseline = {
+      reportRef: { id: "report:injected", version: 1, digest: "7".repeat(64) },
+      sourceTaskId: "task:injected",
+      subject,
+      findings: [],
+    };
+    input.checkpoint = seal(input.checkpoint);
+    expectBuildError(() => buildInvestigationReportSubmission(input), "INVALID_INPUT");
+  });
+
   it("reports persisted E2E results as partial when budget exhaustion precedes analysis adoption", () => {
     const input = fixture({ allowExecution: true, findingCount: 0 });
     input.task.kind = "pr-e2e";

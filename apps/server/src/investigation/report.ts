@@ -352,7 +352,8 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
   const { task, attempt, checkpoint, header, manifest, parts } = input;
   requireCondition(
     Value.Check(InvestigationTaskV1Schema, task) &&
-      (task.sourceArtifacts === undefined || validateInvestigationTask(task).valid) &&
+      ((task.sourceArtifacts === undefined && task.reviewBaseline === undefined) ||
+        validateInvestigationTask(task).valid) &&
       Value.Check(InvestigationAttemptV1Schema, attempt) &&
       Value.Check(InvestigationLoopCheckpointV1Schema, checkpoint) &&
       Value.Check(InvestigationReportHeaderV1Schema, header) &&
@@ -433,6 +434,12 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
     "checkpoint_budget_mismatch",
     "The frozen investigation budget cannot change during report assembly.",
   );
+  requireEqual(
+    checkpoint.runtime.reviewBaseline ?? null,
+    task.reviewBaseline ?? null,
+    "checkpoint_review_baseline_mismatch",
+    "The accepted checkpoint must retain the task's frozen prior review descriptor.",
+  );
   if (checkpoint.runtime.sourceProvenance !== undefined) {
     const validation = validateInvestigationSourceProvenance(
       checkpoint.runtime.sourceProvenance,
@@ -473,6 +480,7 @@ function validateInput(input: AssembleInvestigationReportInput): InvestigationPl
         ? {}
         : { modelExecutions: checkpoint.runtime.modelExecutions }),
       subjects: reportSubjects(task, checkpoint),
+      ...(task.reviewBaseline === undefined ? {} : { reviewBaseline: task.reviewBaseline }),
       ...(task.sourceArtifacts === undefined ? {} : { sourceArtifacts: task.sourceArtifacts }),
       profileRef: task.profileRef,
       promptRef: task.promptRef,

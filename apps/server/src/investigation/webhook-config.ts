@@ -6,7 +6,7 @@ export interface InvestigationWebhookBinding {
   readonly reviewerUserId: number;
   readonly allowedActorUserIds: readonly number[];
   readonly e2eEnabled?: boolean;
-  /** Internal effective setting; deployment bindings enable assignments by default. */
+  /** Internal effective setting for static review requests and assignment fallback. */
   readonly assignmentsEnabled?: boolean;
 }
 

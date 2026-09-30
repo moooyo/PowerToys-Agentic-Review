@@ -71,7 +71,7 @@ export function autoReplySettingsFieldErrors(
   const errors: Partial<Record<AutoReplyTemplateKey | "progressEnabled", string>> = {};
   if (form.progressEnabled && !form.enabled)
     errors.progressEnabled =
-      "Assignment progress comments require automatic replies to be enabled.";
+      "Investigation progress comments require automatic replies to be enabled.";
   for (const key of ["pullRequest", "issue", ...autoReplyProgressStages] as const) {
     try {
       if (key === "pullRequest" || key === "issue")
@@ -159,7 +159,7 @@ export function autoReplySettingsInput(
   validateAutoReplyTemplate(form.pullRequestTemplate, "PR reply template", "pullRequest");
   validateAutoReplyTemplate(form.issueTemplate, "Issue reply template", "issue");
   if (form.progressEnabled && !form.enabled) {
-    throw new Error("Assignment progress comments require automatic replies to be enabled.");
+    throw new Error("Investigation progress comments require automatic replies to be enabled.");
   }
   for (const stage of autoReplyProgressStages) {
     validateAutoReplyProgressTemplate(form.progressTemplates[stage], stage);

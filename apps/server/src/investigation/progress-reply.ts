@@ -146,6 +146,7 @@ function sameTrigger(
 ): boolean {
   return (
     left.eventName === right.eventName &&
+    left.requestKind === right.requestKind &&
     left.actorUserId === right.actorUserId &&
     left.assigneeUserId === right.assigneeUserId &&
     left.commandCommentId === right.commandCommentId
@@ -1976,8 +1977,10 @@ export class InvestigationProgressReplies {
               : { headSha: record.desired.context.scope.headSha }),
           }),
         403,
-        "progress_reply_assignment_not_current",
-        "The accepted assignment no longer has its local admission grant.",
+        record.trigger.requestKind === "review_request"
+          ? "progress_reply_review_request_not_current"
+          : "progress_reply_assignment_not_current",
+        "The accepted request no longer has its local admission grant.",
       );
     }
     return record;
@@ -2109,7 +2112,10 @@ export class InvestigationProgressReplies {
           ...(record.confirmed === null &&
           !record.resultOnly &&
           record.desired.context.mode !== "e2e"
-            ? { expectedAssigneeUserId: record.trigger.assigneeUserId }
+            ? record.trigger.requestKind === "review_request" &&
+              record.target.kind === "pull_request"
+              ? { expectedReviewerUserId: record.trigger.assigneeUserId }
+              : { expectedAssigneeUserId: record.trigger.assigneeUserId }
             : {}),
         },
         attemptId: null,

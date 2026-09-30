@@ -327,14 +327,14 @@ live-test scope still follows [AGENTS.md](../../AGENTS.md).
 
 ### Track assignment tasks in one progress comment
 
-Enable **Publish assignment task progress** in the repository's automatic reply settings
-to queue an acknowledgement when an authorized assignment is durably accepted, before source import
+Enable **Publish investigation task progress** in the repository's automatic reply settings
+to queue an acknowledgement when an authorized review request or assignment is durably accepted, before source import
 and Task creation. The acknowledgement
-identifies who assigned the PR or Issue and who received the assignment. When a Worker claims the
+identifies who requested the review or assigned the work item and the configured recipient. When a Worker claims the
 Task, the Server edits that comment to show that work has started. Failed, blocked, interrupted,
 and cancelled Tasks update it with a public status explanation. A complete result replaces the
 same comment with the configured PR or Issue conclusion, including its full collapsed details.
-Assignment Tasks enrolled in this workflow do not create an additional conclusion comment.
+Intake Tasks enrolled in this workflow do not create an additional conclusion comment.
 Manually created Tasks continue to use the existing conclusion-only workflow.
 
 Four English narrative templates are editable independently. Each listed placeholder is required
@@ -416,8 +416,9 @@ subscribe to **Issues** and **Pull requests**. The receiver validates the raw pa
 HMAC. Browser cookies and Origin headers do not authenticate this endpoint.
 
 In the Dashboard's repository settings, select which registered repositories listen for
-assignments, the recipient's numeric GitHub user ID, and the trusted assigning user IDs.
-Only a trusted `User` assigning an open PR or Issue to that recipient starts an investigation.
+Code Review requests and assignments, the recipient's numeric GitHub user ID, and trusted requesting user IDs.
+Only a trusted `User` requesting review of an open PR from that configured `User`, or assigning
+an open PR or Issue to that recipient, starts an investigation. Team review requests are not supported.
 User IDs remain stable across login renames. Repository management permission and exact repository
 scope are required to change these settings; administrator status alone grants neither. Settings
 are versioned, persisted, and rechecked during preparation. They can be saved before the receiver
@@ -432,21 +433,26 @@ variant, with entries such as
 `{"repositoryId":"repo-example","reviewerUserId":12345678,"allowedActorUserIds":[23456789]}`.
 Saved repository settings override those defaults. No repository is watched by default.
 
-Assignment intake handles `issues.assigned` and `pull_request.assigned`; review requests, pushes,
-and edits do not start assignment Tasks. Independently enabled [trusted PR E2E commands](#trusted-pr-e2e-commands)
+Static intake handles `pull_request.review_requested`, `issues.assigned`, and `pull_request.assigned`.
+Requesting review again triggers another review; a push, edit, or conversation comment does not.
+PR assignment remains a temporary alternative. Independently enabled [trusted PR E2E commands](#trusted-pr-e2e-commands)
 use new `issue_comment` events to create separate execution Tasks. There is no periodic GitHub
 discovery or polling. Reads occur to prepare a received event, retry that event, or serve an
 explicit import. The configurable payload limit defaults to 2 MiB through
 `INVESTIGATION_GITHUB_WEBHOOK_MAXIMUM_BYTES`.
 
-After checking the exact repository and assignment grant, the Server durably records the event
+After checking the exact repository and requesting user's grant, the Server durably records the event
 and returns HTTP `202`. Background processing imports complete input and atomically creates an
 ordinary `pr-review` (`source_read`) or `issue-investigate` (`snapshot_only`) Task. It verifies that
-the same upstream item is still open and assigned, and that a PR still has the signed event's
-base/head SHAs. Assignment intake never grants repository execution or a GitHub write capability.
+the same upstream item is still open and has the requested reviewer or assignee, and that a PR
+still has the signed event's base/head SHAs. Static intake grants neither repository execution
+nor a GitHub write capability.
 
-Delivery ID plus payload digest prevent replay conflicts; equivalent assignment events and
-the same actor/recipient's identical frozen input also share the original Task. The exact imported
+Delivery ID plus payload digest prevent replay conflicts. [GitHub redelivery retains the original
+delivery ID](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks).
+A separate Code Review request after a terminal Task can create a new Task even with
+the same SHA and timestamp; an active Task for the same revision and recipient is reused.
+Equivalent assignment events retain their original deduplication rules. The exact imported
 snapshot and Task request are saved before Task creation, so service restart cannot substitute a
 later comment snapshot or create a second Task after an uncertain local commit. Processing uses
 durable leases and renewals. The inbox admits at most 1,000 pending events and returns HTTP `503`
@@ -454,6 +460,17 @@ when full. Transient processing failures retry the received event up to three at
 canonical record can be retried through the scoped controls below or by explicitly redelivering
 the same GitHub delivery. Unsupported or
 unauthorized events return `ignored` without importing source or creating a Task.
+
+For requested PR reviews, the Server freezes the most recent complete, completed native
+`pr-review` report for that exact repository and PR. The new Task keeps its current source
+and root identity; its `reviewBaseline` is separate from saved-plan parent reports. The complete
+previous finding collection is frozen without pagination or a top-k limit, and retry keeps the
+same baseline, including an initially absent baseline. The Worker rechecks each finding with
+fresh current-source evidence and still reviews the whole current PR diff. Comparison results
+are explicit: fixed, still present, previous diagnosis not confirmed, unverified, or pending.
+An incomplete old finding remains pending rather than becoming a fix. The report and conclusion
+comment show both old-finding outcomes and newly discovered findings; static fix conclusions
+do not claim runtime verification.
 
 An HTTP `202` response with `accepted` or `duplicate` identifies committed intake or its existing
 receipt, not Task creation, execution, or completed investigation. An `ignored` response can come

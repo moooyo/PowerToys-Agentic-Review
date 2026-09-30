@@ -148,6 +148,34 @@ export const InvestigationSubjectV1Schema = Type.Union([
 ]);
 export type InvestigationSubjectV1 = Static<typeof InvestigationSubjectV1Schema>;
 
+export const InvestigationReviewBaselineFindingRefSchema = object({
+  id: EntityIdSchema,
+  version: PositiveIntegerSchema,
+});
+export type InvestigationReviewBaselineFindingRef = Static<
+  typeof InvestigationReviewBaselineFindingRefSchema
+>;
+/** A previous native review is comparison context, never an inherited execution source. */
+export const InvestigationReviewBaselineDescriptorSchema = object({
+  reportRef: InvestigationReportRefSchema,
+  sourceTaskId: EntityIdSchema,
+  subject: InvestigationSubjectV1Schema.anyOf[0],
+  findings: Type.Array(
+    object({ ...InvestigationReviewBaselineFindingRefSchema.properties, title: text }),
+  ),
+});
+export type InvestigationReviewBaselineDescriptor = Static<
+  typeof InvestigationReviewBaselineDescriptorSchema
+>;
+export const InvestigationReviewDispositionSchema = Type.Union([
+  Type.Literal("pending"),
+  Type.Literal("fixed"),
+  Type.Literal("still_present"),
+  Type.Literal("not_confirmed"),
+  Type.Literal("unverified"),
+]);
+export type InvestigationReviewDisposition = Static<typeof InvestigationReviewDispositionSchema>;
+
 const sourceProvenanceCommit = Type.String({
   minLength: 40,
   maxLength: 40,
@@ -263,6 +291,7 @@ export const InvestigationTaskV1Schema = object({
   workItem: InvestigationWorkItemSchema,
   parentTaskId: nullableId,
   parentReportRef: Type.Union([InvestigationReportRefSchema, Type.Null()]),
+  reviewBaseline: Type.Optional(InvestigationReviewBaselineDescriptorSchema),
   planRef: Type.Union([InvestigationVersionRefSchema, Type.Null()]),
   subjectRef: EntityIdSchema,
   subjects: Type.Array(InvestigationSubjectV1Schema, { minItems: 1 }),
@@ -422,6 +451,14 @@ export const InvestigationFindingV1Schema = object({
   feedbackDraft: InvestigationFeedbackDraftSchema,
 });
 export type InvestigationFindingV1 = Static<typeof InvestigationFindingV1Schema>;
+/** The complete saved findings remain outside the current evidence and subject ledgers. */
+export const InvestigationReviewBaselineSnapshotSchema = object({
+  descriptor: InvestigationReviewBaselineDescriptorSchema,
+  findings: Type.Array(InvestigationFindingV1Schema),
+});
+export type InvestigationReviewBaselineSnapshot = Static<
+  typeof InvestigationReviewBaselineSnapshotSchema
+>;
 export const InvestigationRecheckSchema = object({
   id: EntityIdSchema,
   findingId: EntityIdSchema,
@@ -437,7 +474,9 @@ export const InvestigationCandidateSchema = object({
   id: EntityIdSchema,
   subjectRef: EntityIdSchema,
   title: text,
-  discoveredRound: PositiveIntegerSchema,
+  discoveredRound: NonNegativeIntegerSchema,
+  reviewBaselineFindingRef: Type.Optional(InvestigationReviewBaselineFindingRefSchema),
+  reviewDisposition: Type.Optional(InvestigationReviewDispositionSchema),
   status: Type.Union([
     Type.Literal("pending"),
     Type.Literal("confirmed"),
@@ -734,6 +773,7 @@ export const InvestigationResultContextSchema = object({
   profileRef: InvestigationVersionRefSchema,
   promptRef: InvestigationVersionRefSchema,
   parentReportRef: Type.Union([InvestigationReportRefSchema, Type.Null()]),
+  reviewBaseline: Type.Optional(InvestigationReviewBaselineDescriptorSchema),
 });
 export type InvestigationResultContext = Static<typeof InvestigationResultContextSchema>;
 export const InvestigationResultV1Schema = object({
@@ -802,6 +842,7 @@ export type InvestigationUnacceptedModelUsage = Static<
   typeof InvestigationUnacceptedModelUsageSchema
 >;
 export const InvestigationRuntimeStateSchema = object({
+  reviewBaseline: Type.Optional(InvestigationReviewBaselineDescriptorSchema),
   e2eExecution: Type.Optional(InvestigationE2eExecutionSchema),
   e2e: Type.Optional(InvestigationE2eResultSchema),
   sourceProvenance: Type.Optional(InvestigationSourceProvenanceSchema),
@@ -1194,6 +1235,7 @@ export const InvestigationClaimSchema = object({
   inputSnapshot: InvestigationInputSnapshotV1Schema,
   plan: Type.Union([InvestigationPlanV1Schema, Type.Null()]),
   execution: Type.Union([InvestigationPlanExecutionBindingSchema, Type.Null()]),
+  reviewBaseline: Type.Optional(InvestigationReviewBaselineSnapshotSchema),
 });
 export type InvestigationClaim = Static<typeof InvestigationClaimSchema>;
 export const InvestigationClaimResponseSchema = object({
@@ -1355,6 +1397,274 @@ export interface InvestigationSemanticIssue {
 export interface InvestigationSemanticValidation {
   valid: boolean;
   errors: InvestigationSemanticIssue[];
+}
+
+export function validateInvestigationReviewBaselineDescriptor(
+  descriptor: InvestigationReviewBaselineDescriptor,
+): InvestigationSemanticValidation {
+  const errors: InvestigationSemanticIssue[] = [];
+  if (!Value.Check(InvestigationReviewBaselineDescriptorSchema, descriptor))
+    return {
+      valid: false,
+      errors: [
+        {
+          path: "",
+          code: "INVALID_REVIEW_BASELINE",
+          message:
+            "A review baseline must preserve the complete immutable native review descriptor.",
+        },
+      ],
+    };
+  const ids = new Set<string>();
+  for (const [index, finding] of descriptor.findings.entries()) {
+    if (ids.has(finding.id))
+      errors.push({
+        path: `/findings/${index}/id`,
+        code: "DUPLICATE_REVIEW_BASELINE_FINDING",
+        message: "Every previous finding must appear exactly once in the review baseline.",
+      });
+    ids.add(finding.id);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+/** Structural identity checks do not replace the Server's exact sealed-report lookup. */
+export function validateInvestigationReviewBaselineSnapshot(
+  snapshot: InvestigationReviewBaselineSnapshot,
+): InvestigationSemanticValidation {
+  if (!Value.Check(InvestigationReviewBaselineSnapshotSchema, snapshot))
+    return {
+      valid: false,
+      errors: [
+        {
+          path: "",
+          code: "INVALID_REVIEW_BASELINE_SNAPSHOT",
+          message: "The review baseline must contain every complete saved finding.",
+        },
+      ],
+    };
+  const errors = validateInvestigationReviewBaselineDescriptor(snapshot.descriptor).errors.map(
+    (issue) => ({ ...issue, path: `/descriptor${issue.path}` }),
+  );
+  if (snapshot.findings.length !== snapshot.descriptor.findings.length)
+    errors.push({
+      path: "/findings",
+      code: "REVIEW_BASELINE_FINDINGS_MISMATCH",
+      message:
+        "The complete baseline findings must match the descriptor without paging or truncation.",
+    });
+  for (const [index, finding] of snapshot.findings.entries()) {
+    const ref = snapshot.descriptor.findings[index];
+    if (
+      ref === undefined ||
+      finding.id !== ref.id ||
+      finding.version !== ref.version ||
+      finding.title !== ref.title ||
+      finding.ordinal !== index ||
+      finding.subjectRef !== snapshot.descriptor.subject.id ||
+      finding.locations.some((location) => location.subjectRef !== finding.subjectRef) ||
+      (finding.feedbackDraft.suggestion !== null &&
+        (finding.feedbackDraft.suggestion.subjectRef !== finding.subjectRef ||
+          finding.feedbackDraft.suggestion.headSha !== snapshot.descriptor.subject.headSha))
+    )
+      errors.push({
+        path: `/findings/${index}`,
+        code: "REVIEW_BASELINE_FINDING_MISMATCH",
+        message:
+          "A baseline finding must retain its exact saved identity, title, ordinal, and original PR subject.",
+      });
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+export interface InvestigationReviewBaselineCandidateInput {
+  baseline?: InvestigationReviewBaselineDescriptor;
+  subjectRef: string;
+  headSha: string | null;
+  candidates: readonly InvestigationCandidate[];
+  findings: readonly InvestigationFindingV1[];
+  evidence: readonly { id: string; subjectRef: string; source: string }[];
+  limitations: readonly Static<typeof InvestigationLimitationSchema>[];
+  complete?: boolean;
+}
+
+/** Baseline conclusions must come from the current source ledger, not the previous report. */
+export function validateInvestigationReviewBaselineCandidates(
+  input: InvestigationReviewBaselineCandidateInput,
+): InvestigationSemanticValidation {
+  const errors: InvestigationSemanticIssue[] = [];
+  const add = (path: string, code: string, message: string) => errors.push({ path, code, message });
+  const expected = new Map(input.baseline?.findings.map((finding) => [finding.id, finding]) ?? []);
+  const seen = new Set<string>();
+  const candidates = new Map(input.candidates.map((candidate) => [candidate.id, candidate]));
+  const findings = new Map(input.findings.map((finding) => [finding.id, finding]));
+  const evidence = new Map(input.evidence.map((entry) => [entry.id, entry]));
+  for (const [index, candidate] of input.candidates.entries()) {
+    const path = `/candidates/${index}`;
+    const ref = candidate.reviewBaselineFindingRef;
+    const disposition = candidate.reviewDisposition;
+    if (ref === undefined && disposition === undefined) {
+      if (candidate.discoveredRound === 0)
+        add(
+          path,
+          "BASELINE_CANDIDATE_REQUIRED",
+          "Only a frozen baseline candidate may originate at round zero.",
+        );
+      continue;
+    }
+    const previous = ref === undefined ? undefined : expected.get(ref.id);
+    if (
+      input.baseline === undefined ||
+      ref === undefined ||
+      disposition === undefined ||
+      previous?.version !== ref.version ||
+      candidate.subjectRef !== input.subjectRef ||
+      candidate.discoveredRound !== 0 ||
+      seen.has(ref.id)
+    ) {
+      add(
+        path,
+        "REVIEW_BASELINE_CANDIDATE_MISMATCH",
+        "Each frozen previous finding requires exactly one round-zero candidate on the current PR source.",
+      );
+      continue;
+    }
+    seen.add(ref.id);
+    if (disposition === "pending") {
+      if (candidate.status !== "pending")
+        add(
+          path,
+          "REVIEW_DISPOSITION_MISMATCH",
+          "A pending review disposition must remain a pending candidate.",
+        );
+      if (input.complete)
+        add(
+          path,
+          "PENDING_REVIEW_BASELINE_FINDING",
+          "Every previous finding requires an explicit current-source conclusion before completion.",
+        );
+      continue;
+    }
+    if (
+      candidate.evidenceRefs.length === 0 ||
+      candidate.evidenceRefs.some((id) => evidence.get(id)?.subjectRef !== input.subjectRef) ||
+      !candidate.evidenceRefs.some((id) => evidence.get(id)?.source === "static_analysis")
+    )
+      add(
+        path,
+        "REVIEW_BASELINE_EVIDENCE_REQUIRED",
+        "A previous finding's disposition requires fresh static evidence on the current PR source.",
+      );
+    if (disposition === "still_present") {
+      let current: InvestigationCandidate | undefined = candidate;
+      const visited = new Set<string>();
+      while (current?.status === "merged" && !visited.has(current.id)) {
+        visited.add(current.id);
+        current =
+          current.mergedIntoCandidateId === null
+            ? undefined
+            : candidates.get(current.mergedIntoCandidateId);
+      }
+      const finding =
+        current?.findingId === null || current?.findingId === undefined
+          ? undefined
+          : findings.get(current.findingId);
+      if (
+        current?.status !== "confirmed" ||
+        current.subjectRef !== input.subjectRef ||
+        finding?.subjectRef !== input.subjectRef ||
+        finding.version !== current.findingVersion ||
+        finding.confirmation.status !== "confirmed"
+      )
+        add(
+          path,
+          "REVIEW_DISPOSITION_MISMATCH",
+          "A still-present baseline finding must bind to a current confirmed finding through a valid same-source candidate chain.",
+        );
+    } else if (disposition === "fixed" || disposition === "not_confirmed") {
+      if (candidate.status !== "withdrawn")
+        add(
+          path,
+          "REVIEW_DISPOSITION_MISMATCH",
+          "Fixed and unconfirmed previous findings require a withdrawn current-source candidate.",
+        );
+      if (
+        disposition === "fixed" &&
+        (input.headSha === null || input.headSha === input.baseline.subject.headSha)
+      )
+        add(
+          path,
+          "REVIEW_FIX_REQUIRES_NEW_HEAD",
+          "A fix conclusion requires a changed current PR head; the same revision may only reconfirm or reject the previous diagnosis.",
+        );
+    } else if (disposition === "unverified") {
+      const finding = candidate.findingId === null ? undefined : findings.get(candidate.findingId);
+      const retainedHypothesis =
+        candidate.status === "unresolved" &&
+        finding?.subjectRef === input.subjectRef &&
+        finding.version === candidate.findingVersion &&
+        finding.confirmation.status === "hypothesis";
+      const statedMissingEvidence =
+        candidate.status === "withdrawn" &&
+        input.limitations.some((limitation) =>
+          limitation.evidenceRefs.some((id) => candidate.evidenceRefs.includes(id)),
+        );
+      if (!retainedHypothesis && !statedMissingEvidence)
+        add(
+          path,
+          "REVIEW_DISPOSITION_MISMATCH",
+          "Unverified previous findings need a retained current hypothesis or an evidence-linked limitation explaining the missing proof.",
+        );
+    }
+  }
+  for (const finding of expected.values())
+    if (!seen.has(finding.id))
+      add(
+        "/candidates",
+        "MISSING_REVIEW_BASELINE_FINDING",
+        "Every frozen baseline finding must retain its own review candidate.",
+      );
+  return { valid: errors.length === 0, errors };
+}
+
+function validateReviewBaselineBinding(input: {
+  baseline: InvestigationReviewBaselineDescriptor;
+  taskId: string;
+  reportId?: string;
+  taskKind: InvestigationTaskKind;
+  repositoryId: string;
+  workItemId: string;
+  workItemKind: InvestigationWorkItem["kind"];
+  parentTaskId: string | null;
+  parentReportRef: InvestigationReportRef | null;
+  primarySubject: InvestigationSubjectV1 | undefined;
+  subjects: readonly InvestigationSubjectV1[];
+}): InvestigationSemanticIssue[] {
+  const errors = validateInvestigationReviewBaselineDescriptor(input.baseline).errors.map(
+    (issue) => ({ ...issue, path: `/reviewBaseline${issue.path}` }),
+  );
+  if (
+    input.taskKind !== "pr-review" ||
+    input.workItemKind !== "pull_request" ||
+    input.parentTaskId !== null ||
+    input.parentReportRef !== null ||
+    input.primarySubject?.kind !== "original_pr" ||
+    input.baseline.sourceTaskId === input.taskId ||
+    input.baseline.reportRef.id === input.reportId ||
+    input.baseline.subject.repositoryId !== input.repositoryId ||
+    input.baseline.subject.workItemId !== input.workItemId ||
+    input.subjects.some((subject) => subject.id !== input.primarySubject?.id) ||
+    (input.baseline.subject.id === input.primarySubject.id &&
+      investigationCanonicalJson(input.baseline.subject) !==
+        investigationCanonicalJson(input.primarySubject))
+  )
+    errors.push({
+      path: "/reviewBaseline",
+      code: "REVIEW_BASELINE_SCOPE_MISMATCH",
+      message:
+        "A review baseline is an earlier native review of the same PR, while the new root task retains only its current original PR source.",
+    });
+  return errors;
 }
 
 /** Rejects malformed or misbound trusted provenance, including corrupted persisted report data. */
@@ -1619,6 +1929,22 @@ export function validateInvestigationResult(
     );
   };
   const subjects = unique(result.context.subjects, "/context/subjects");
+  if (result.context.reviewBaseline !== undefined)
+    errors.push(
+      ...validateReviewBaselineBinding({
+        baseline: result.context.reviewBaseline,
+        taskId: result.context.task.id,
+        reportId: result.id,
+        taskKind: result.context.task.kind,
+        repositoryId: result.context.repository.id,
+        workItemId: result.context.workItem.id,
+        workItemKind: result.context.workItem.kind,
+        parentTaskId: result.context.task.parentTaskId,
+        parentReportRef: result.context.parentReportRef,
+        primarySubject: subjects.get(result.context.task.subjectRef),
+        subjects: result.context.subjects,
+      }).map((issue) => ({ ...issue, path: `/context${issue.path}` })),
+    );
   if (result.context.sourceProvenance !== undefined)
     errors.push(
       ...validateInvestigationSourceProvenance(result.context.sourceProvenance, {
@@ -2163,6 +2489,21 @@ export function validateInvestigationResult(
     } else if (candidate.mergedIntoCandidateId !== null)
       add(path, "UNEXPECTED_MERGE_TARGET", "Only merged candidates may declare a merge target.");
   });
+  const currentReviewSubject = subjects.get(result.context.task.subjectRef);
+  errors.push(
+    ...validateInvestigationReviewBaselineCandidates({
+      ...(result.context.reviewBaseline === undefined
+        ? {}
+        : { baseline: result.context.reviewBaseline }),
+      subjectRef: result.context.task.subjectRef,
+      headSha: currentReviewSubject?.kind === "original_pr" ? currentReviewSubject.headSha : null,
+      candidates: result.report.loop.candidates,
+      findings: result.findings,
+      evidence: result.verificationEvidence,
+      limitations: result.report.limitations,
+      complete: result.report.completeness === "complete",
+    }).errors.map((issue) => ({ ...issue, path: `/report/loop${issue.path}` })),
+  );
   const incomingMerges = new Map([...candidates.keys()].map((id) => [id, 0]));
   for (const candidate of candidates.values()) {
     const ref = candidate.status === "merged" ? candidate.mergedIntoCandidateId : null;
@@ -2746,6 +3087,28 @@ export function validateInvestigationTask(
   if (subjects.size !== task.subjects.length)
     add("/subjects", "DUPLICATE_ID", "Task subject IDs must be unique.");
   const primary = subjects.get(task.subjectRef);
+  if (task.reviewBaseline !== undefined) {
+    errors.push(
+      ...validateReviewBaselineBinding({
+        baseline: task.reviewBaseline,
+        taskId: task.id,
+        taskKind: task.kind,
+        repositoryId: task.repository.id,
+        workItemId: task.workItem.id,
+        workItemKind: task.workItem.kind,
+        parentTaskId: task.parentTaskId,
+        parentReportRef: task.parentReportRef,
+        primarySubject: primary,
+        subjects: task.subjects,
+      }),
+    );
+    if (task.planRef !== null || task.executionPolicy.mode !== "source_read")
+      add(
+        "/reviewBaseline",
+        "REVIEW_BASELINE_SCOPE_MISMATCH",
+        "Review comparisons require a root source-reading PR review without an execution plan.",
+      );
+  }
   if (!primary)
     add("/subjectRef", "UNKNOWN_SUBJECT", "The primary subject must be frozen in the task.");
   for (const subject of task.subjects) {
@@ -2922,6 +3285,18 @@ export function validateInvestigationAnalysisForTask(
       "Local snapshot review mode belongs to snapshot-only issue investigation tasks.",
     );
   const subjects = new Map([...task.subjects, ...runtime.subjects].map((item) => [item.id, item]));
+  const currentReviewSubject = subjects.get(task.subjectRef);
+  errors.push(
+    ...validateInvestigationReviewBaselineCandidates({
+      ...(task.reviewBaseline === undefined ? {} : { baseline: task.reviewBaseline }),
+      subjectRef: task.subjectRef,
+      headSha: currentReviewSubject?.kind === "original_pr" ? currentReviewSubject.headSha : null,
+      candidates: analysis.candidates,
+      findings: analysis.findings,
+      evidence: [...runtime.evidence, ...analysis.evidence],
+      limitations: analysis.limitations,
+    }).errors,
+  );
   const allowed = new Set(task.executionPolicy.allowedSubjectRefs);
   // Derived patches are authorized only through a trusted runtime record linked to an allowed immutable base.
   for (const item of runtime.subjects) {

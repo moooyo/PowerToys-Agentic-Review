@@ -9,6 +9,8 @@ import type {
   InvestigationModelIdentity,
   InvestigationModelOutputRejection,
   InvestigationPrDiffManifestV1,
+  InvestigationReviewBaselineDescriptor,
+  InvestigationReviewBaselineFindingRef,
   InvestigationRuntimeState,
   InvestigationSourceProvenance,
   InvestigationTaskV1,
@@ -19,6 +21,7 @@ import {
   isCorrectableInvestigationModelOutputIssue,
   validateInvestigationModelExecutions,
   validateInvestigationPrDiffManifest,
+  validateInvestigationReviewBaselineCandidates,
   validateInvestigationSourceProvenance,
 } from "@agentic-review/contracts";
 
@@ -67,6 +70,7 @@ export function investigationTaskBindingDigest(task: InvestigationTaskV1): strin
     workItem: task.workItem,
     parentTaskId: task.parentTaskId,
     parentReportRef: task.parentReportRef,
+    ...(task.reviewBaseline === undefined ? {} : { reviewBaseline: task.reviewBaseline }),
     planRef: task.planRef,
     subjectRef: task.subjectRef,
     subjects: task.subjects,
@@ -284,7 +288,22 @@ export function createInvestigationCheckpoint(
     summary: "Investigation has not started.",
     coverage: structuredClone(task.scope),
     findings: [],
-    candidates: [],
+    candidates:
+      task.reviewBaseline?.findings.map((finding) => ({
+        id: investigationReviewBaselineCandidateId(task.reviewBaseline!, finding),
+        subjectRef: task.subjectRef,
+        title: finding.title,
+        discoveredRound: 0,
+        status: "pending" as const,
+        findingId: null,
+        findingVersion: null,
+        mergedIntoCandidateId: null,
+        rationale:
+          "Recheck the previous finding against the current pinned PR source before drawing a conclusion.",
+        evidenceRefs: [],
+        reviewBaselineFindingRef: { id: finding.id, version: finding.version },
+        reviewDisposition: "pending" as const,
+      })) ?? [],
     rechecks: [],
     evidence: [],
     plans: [],
@@ -344,6 +363,9 @@ export function createInvestigationCheckpoint(
     stopReason: "continuing",
     lastPhase: null,
     runtime: {
+      ...(task.reviewBaseline === undefined
+        ? {}
+        : { reviewBaseline: structuredClone(task.reviewBaseline) }),
       ...(reviewMode === undefined ? {} : { reviewMode }),
       completedStepIds: [],
       checks: [],
@@ -354,6 +376,13 @@ export function createInvestigationCheckpoint(
       completedSteps: [],
     },
   });
+}
+
+export function investigationReviewBaselineCandidateId(
+  baseline: InvestigationReviewBaselineDescriptor,
+  findingRef: InvestigationReviewBaselineFindingRef,
+): string {
+  return `review:${investigationContentDigest({ reportRef: baseline.reportRef, findingRef: { id: findingRef.id, version: findingRef.version } })}`;
 }
 
 function uniqueIds(entries: readonly { id: string }[], kind: string): void {
@@ -467,6 +496,19 @@ function assertAnalysisTransition(
   }
   for (const candidate of analysis.candidates) {
     const old = priorCandidates.get(candidate.id);
+    requireCondition(
+      old === undefined
+        ? candidate.reviewBaselineFindingRef === undefined &&
+            candidate.reviewDisposition === undefined
+        : old.reviewBaselineFindingRef === undefined
+          ? candidate.reviewBaselineFindingRef === undefined &&
+            candidate.reviewDisposition === undefined
+          : candidate.reviewBaselineFindingRef !== undefined &&
+            unchanged(old.reviewBaselineFindingRef, candidate.reviewBaselineFindingRef) &&
+            candidate.reviewDisposition !== undefined,
+      "review_baseline_candidate_identity_changed",
+      "Only the frozen previous findings may have review dispositions, and their candidate references cannot change.",
+    );
     requireCondition(
       old === undefined
         ? candidate.discoveredRound === round.round
@@ -653,6 +695,19 @@ export function evaluateInvestigationCompletion(
       );
     })
     .map((finding) => finding.id);
+  const reviewCandidates = validateInvestigationReviewBaselineCandidates({
+    ...(checkpoint.runtime.reviewBaseline === undefined
+      ? {}
+      : { baseline: checkpoint.runtime.reviewBaseline }),
+    subjectRef: analysis.assessment.subjectRef,
+    headSha: checkpoint.runtime.sourceCoverage?.manifest.headSha ?? null,
+    candidates: analysis.candidates,
+    findings: analysis.findings,
+    evidence: [...checkpoint.runtime.evidence, ...analysis.evidence],
+    limitations: analysis.limitations,
+    complete: true,
+  });
+  if (!reviewCandidates.valid) reasonCodes.push("review_baseline_candidates_incomplete");
   if (checkpoint.runtime.reviewMode === undefined && checkpoint.lastPhase !== "finalize")
     reasonCodes.push("finalization_round_missing");
   const sourceCoverage = checkpoint.runtime.sourceCoverage;
@@ -959,6 +1014,22 @@ export function applyInvestigationLoopRound(
     checkpoint.analysis,
     normalizedRound,
     checkpoint.runtime.reviewMode !== undefined,
+  );
+  const reviewCandidates = validateInvestigationReviewBaselineCandidates({
+    ...(checkpoint.runtime.reviewBaseline === undefined
+      ? {}
+      : { baseline: checkpoint.runtime.reviewBaseline }),
+    subjectRef: normalizedAnalysis.assessment.subjectRef,
+    headSha: checkpoint.runtime.sourceCoverage?.manifest.headSha ?? null,
+    candidates: normalizedAnalysis.candidates,
+    findings: normalizedAnalysis.findings,
+    evidence: [...checkpoint.runtime.evidence, ...normalizedAnalysis.evidence],
+    limitations: normalizedAnalysis.limitations,
+  });
+  requireCondition(
+    reviewCandidates.valid,
+    "review_baseline_candidate_invalid",
+    reviewCandidates.errors.map((issue) => issue.message).join(" "),
   );
   assertRuntimeTransition(checkpoint, checkpoint.runtime);
   const runtime = structuredClone(checkpoint.runtime);
@@ -1431,6 +1502,14 @@ function assertRuntimeTransition(
     runtime.reviewMode === checkpoint.runtime.reviewMode,
     "review_mode_is_trusted",
     "Execution receipts cannot change the trusted source review mode.",
+  );
+  requireCondition(
+    checkpoint.runtime.reviewBaseline === undefined
+      ? runtime.reviewBaseline === undefined
+      : runtime.reviewBaseline !== undefined &&
+          unchanged(checkpoint.runtime.reviewBaseline, runtime.reviewBaseline),
+    "review_baseline_is_trusted",
+    "Execution receipts cannot add, replace, or remove the frozen review baseline.",
   );
   requireCondition(
     checkpoint.runtime.unacceptedModelUsage === undefined
