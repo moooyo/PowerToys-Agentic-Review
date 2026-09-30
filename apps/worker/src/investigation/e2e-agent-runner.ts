@@ -659,8 +659,19 @@ This is a valid response; the Worker retains the build evidence and records unco
 as Not run. An empty feature array never establishes successful verification.
 
 Tool transport (PowerShell; keep this capability out of logs and output):
+$responsePath = Join-Path -Path '${input.directory.replace(/'/gu, "''")}' -ChildPath ('tool-response-' + [Guid]::NewGuid().ToString('N') + '.json')
+Write-Output "Worker response file: $responsePath"
 $reply = Invoke-RestMethod -Method Post -Uri '${input.endpoint}' -Headers @{Authorization='Bearer ${input.capability}'} -ContentType 'application/json' -Body ($request | ConvertTo-Json -Depth 30)
-$reply | ConvertTo-Json -Depth 30
+$reply | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $responsePath -Encoding utf8
+Get-Content -LiteralPath $responsePath -Raw
+Run this entire transport sequence in one foreground shell invocation for each request.
+Retain the printed response path and any session ID returned when the shell yields. A yielded
+shell still owns the original HTTP call: resume or wait on that same session, using substantial
+wait intervals rather than frequent polling. Do not detach it or start a background process.
+Long builds may outlive an initial shell wait. Never reissue a build or other operation merely
+because its response has not appeared or its session handle was lost. Recover the saved response
+from its printed path; a missing file does not establish that the original operation stopped.
+If the original result cannot be recovered, report that blocker instead of repeating execution.
 Every response has id, status, observed, artifactRefs and immutable feature/build bindings.
 Use response ids in assertionReceiptIds and mediaReceiptIds. Build identity, scenarios and
 expected outcomes are generated from Worker records, never supplied in the final answer.
