@@ -372,6 +372,7 @@ export async function runE2eRecipe(
     });
   };
   const dismissDialogs = async (windows: Awaited<ReturnType<typeof enumerate>>) => {
+    let dismissed = false;
     for (const dialog of windows.filter((window) =>
       window.title.endsWith("Plugin Initialization Error"),
     )) {
@@ -405,7 +406,9 @@ export async function runE2eRecipe(
       await wait(300);
       if ((await enumerate()).some((window) => window.windowHandle === dialog.windowHandle))
         throw new Error("The owned initialization dialog remained visible after dismissal.");
+      dismissed = true;
     }
+    return dismissed;
   };
   try {
     await execute({ operation: "desktop-status" });
@@ -451,10 +454,15 @@ export async function runE2eRecipe(
     const deadline = Date.now() + 90_000;
     let windowHandle: string | undefined;
     let activated = false;
+    let activationCount = 0;
     while (Date.now() < deadline) {
       context.signal.throwIfAborted();
-      const windows = await enumerate();
-      await dismissDialogs(windows);
+      let windows = await enumerate();
+      if (await dismissDialogs(windows)) {
+        windows = await enumerate();
+        // A late initialization dialog may consume the first shortcut while Launcher stays hidden.
+        activated = false;
+      }
       const mainWindows = windows.filter((window) => window.title === "PowerToys.PowerLauncher");
       if (mainWindows.length > 1)
         throw new Error("More than one visible owned Launcher main window was found.");
@@ -479,7 +487,11 @@ export async function runE2eRecipe(
           windowHandle = candidate.windowHandle;
           break;
         }
-      } else if (!activated && (await hasNewStartupMarker(logRoot, logOffsets))) {
+      } else if (
+        !activated &&
+        activationCount < 2 &&
+        (await hasNewStartupMarker(logRoot, logOffsets))
+      ) {
         await execute({
           operation: "command",
           script:
@@ -487,6 +499,7 @@ export async function runE2eRecipe(
           timeoutMs: 15_000,
         });
         activated = true;
+        activationCount++;
       }
       await wait(500);
     }

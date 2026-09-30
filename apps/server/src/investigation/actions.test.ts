@@ -207,7 +207,166 @@ function planPrerequisites(
   return action;
 }
 
+function storeVerificationChild(
+  h: ReturnType<typeof harness>,
+  options: {
+    id: string;
+    createdAt: string;
+    status: "passed" | "blocked";
+    checkIds?: readonly string[];
+  },
+) {
+  const report = structuredClone(h.result);
+  const plan = report.plans[0]!;
+  const planRef = { id: plan.id, version: plan.version, digest: plan.digest };
+  const parentReportRef = h.request().reportRef!;
+  const attemptId = `${options.id}-attempt`;
+  report.id = `${options.id}-report`;
+  report.report.id = report.id;
+  report.report.logicalContentDigest = investigationContentDigest(options);
+  report.context.task = {
+    id: options.id,
+    kind: "pr-verify",
+    parentTaskId: h.task.id,
+    subjectRef: h.task.subjectRef,
+  };
+  report.context.attempt = { id: attemptId, number: 1 };
+  report.context.adoptedAttemptIds = [attemptId];
+  report.context.parentReportRef = parentReportRef;
+  const complete =
+    options.status === "passed" &&
+    (options.checkIds === undefined || options.checkIds.length === report.validation.checks.length);
+  report.outcome = complete ? "completed" : "blocked";
+  report.report.delivery = complete ? "final" : "checkpoint";
+  report.report.completeness = complete ? "complete" : "partial";
+  report.nextActions = [];
+  report.report.collections.nextActions = 0;
+  report.validation.checks = report.validation.checks
+    .filter((check) => options.checkIds === undefined || options.checkIds.includes(check.id))
+    .map((check) => {
+      const evidenceId = `${options.id}-${check.id}-observation`;
+      report.verificationEvidence.push({
+        id: evidenceId,
+        subjectRef: check.subjectRef,
+        source: "executor_observation",
+        authority: "worker",
+        summary: `The synthetic execution check was ${options.status}.`,
+        artifactRefs: [],
+        evidenceRefs: [],
+        provenance: {
+          taskId: options.id,
+          attemptId,
+          producer: "synthetic-verification-executor",
+          recordedAt: options.createdAt,
+        },
+      });
+      return {
+        ...check,
+        status: options.status,
+        executor: "synthetic-verification-executor",
+        authoritativeAttemptId: attemptId,
+        evidenceRefs: [evidenceId],
+      };
+    });
+  report.report.collections.verificationEvidence = report.verificationEvidence.length;
+  const task: InvestigationTaskV1 = {
+    ...structuredClone(h.task),
+    id: options.id,
+    kind: "pr-verify",
+    parentTaskId: h.task.id,
+    parentReportRef,
+    planRef,
+    state: report.outcome,
+    executionPolicy: {
+      ...h.task.executionPolicy,
+      mode: "execute",
+      allowRepositoryExecution: true,
+      authorizationRef: h.actor.id,
+    },
+    latestReportRef: {
+      id: report.report.id,
+      version: report.report.version,
+      digest: report.report.logicalContentDigest,
+    },
+    createdAt: options.createdAt,
+    updatedAt: options.createdAt,
+  };
+  h.store.insert("tasks", task.id, task);
+  h.store.insert("reports", report.report.id, report);
+}
+
 describe("investigation action preparation and confirmation", () => {
+  it.each([
+    { older: "blocked", newer: "passed", recommendation: "approve" },
+    { older: "passed", newer: "blocked", recommendation: "reviews.verify" },
+  ] as const)(
+    "uses the newest verification task when an older $older report precedes a $newer report",
+    async ({ older, newer, recommendation }) => {
+      const h = harness();
+      storeVerificationChild(h, {
+        id: "older-verification",
+        createdAt: "2026-09-15T02:10:00.000Z",
+        status: older,
+      });
+      const prior = await h.actions.actionContext(h.actor, h.workItem.id, {
+        reportId: h.result.report.id,
+      });
+      expect(prior.recommendation.action).toBe(older === "passed" ? "approve" : "reviews.verify");
+      storeVerificationChild(h, {
+        id: "newer-verification",
+        createdAt: "2026-09-15T02:20:00.000Z",
+        status: newer,
+      });
+      const savedReports = h.store.list("reports");
+      const context = await h.actions.actionContext(h.actor, h.workItem.id, {
+        reportId: h.result.report.id,
+      });
+      expect(context.reportRef).toEqual(h.request().reportRef);
+      expect(context.recommendation.action).toBe(recommendation);
+      expect(h.store.list("reports")).toEqual(savedReports);
+      expect(h.store.get("reports", h.result.report.id)).toEqual(h.result);
+    },
+  );
+
+  it("does not fill missing checks in the latest verification task from an older passing task", async () => {
+    const h = harness();
+    if (h.result.assessment.kind !== "pr") throw new Error("Expected a PR assessment.");
+    const plan = h.result.plans[0]!;
+    const firstCheck = h.result.validation.checks[0]!;
+    plan.steps[0]!.checkIds.push("second-check");
+    h.result.assessment.e2eAssessment.scenarioIds.push("second-scenario");
+    h.result.validation.checks.push({
+      ...firstCheck,
+      id: "second-check",
+      scenarioId: "second-scenario",
+      description: "The second required scenario is checked.",
+    });
+    h.store.put("plans", `${h.result.report.id}:${plan.id}`, plan);
+    h.store.put("reports", h.result.report.id, h.result);
+    storeVerificationChild(h, {
+      id: "older-complete-verification",
+      createdAt: "2026-09-15T02:10:00.000Z",
+      status: "passed",
+    });
+    expect(
+      (await h.actions.actionContext(h.actor, h.workItem.id, { reportId: h.result.report.id }))
+        .recommendation.action,
+    ).toBe("approve");
+    storeVerificationChild(h, {
+      id: "newer-partial-verification",
+      createdAt: "2026-09-15T02:20:00.000Z",
+      status: "passed",
+      checkIds: [firstCheck.id],
+    });
+    const savedReports = h.store.list("reports");
+    const context = await h.actions.actionContext(h.actor, h.workItem.id, {
+      reportId: h.result.report.id,
+    });
+    expect(context.recommendation.action).toBe("reviews.verify");
+    expect(h.store.list("reports")).toEqual(savedReports);
+    expect(h.store.get("reports", h.result.report.id)).toEqual(h.result);
+  });
+
   it("keeps external actions visible but unavailable when writes are disabled", async () => {
     const h = harness({ externalWrites: false });
     const context = await h.actions.actionContext(h.actor, h.workItem.id);

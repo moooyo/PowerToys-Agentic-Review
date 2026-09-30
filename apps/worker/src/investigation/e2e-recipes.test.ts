@@ -3,6 +3,14 @@ import type { E2eFeaturePlan } from "./e2e-feature-plan.js";
 import { listE2eRecipes, prepareE2eRecipe, runE2eRecipe } from "./e2e-recipes.js";
 import type { E2eToolReceipt } from "./e2e-tool-server.js";
 
+const startupFiles = vi.hoisted(() => ({
+  readdir: vi.fn(),
+  stat: vi.fn(),
+  open: vi.fn(),
+}));
+
+vi.mock("node:fs/promises", () => startupFiles);
+
 const calculatorPath =
   "src/modules/launcher/Plugins/Microsoft.PowerToys.Run.Plugin.Calculator/CalculateEngine.cs";
 const calculatorTestPath =
@@ -135,6 +143,8 @@ function executorFixture(override?: ReceiptOverride) {
         .map((receipt) => receipt.id);
     } else if (operation === "stop") {
       observed = { stopped: true };
+    } else if (operation === "command") {
+      observed = { exitCode: 0, stdout: "", stderr: "" };
     } else if (operation !== "assert") {
       throw new Error(`Unexpected recipe operation: ${operation}`);
     }
@@ -165,11 +175,12 @@ function executorFixture(override?: ReceiptOverride) {
 async function completeRecipe(
   plan: ReturnType<typeof prepareE2eRecipe>,
   fixture: ReturnType<typeof executorFixture>,
+  environment: Readonly<Record<string, string>> = {},
 ) {
   const outcome = runE2eRecipe(plan, {
     execute: fixture.execute,
     signal: fixture.controller.signal,
-    environment: {},
+    environment,
   }).then(
     (value) => ({ ok: true as const, value }),
     (error: unknown) => ({ ok: false as const, error }),
@@ -180,7 +191,92 @@ async function completeRecipe(
   return result.value;
 }
 
+function freshStartupMarker() {
+  const marker = Buffer.from("End PowerToys Run startup", "utf8");
+  const close = vi.fn(async () => {});
+  startupFiles.readdir.mockResolvedValue([
+    {
+      name: `${new Date().toISOString().slice(0, 10)}.txt`,
+      isFile: () => true,
+      isDirectory: () => false,
+    },
+  ]);
+  startupFiles.stat.mockResolvedValue({ size: 0 });
+  startupFiles.open.mockResolvedValue({
+    stat: async () => ({ size: marker.length }),
+    read: async (buffer: Buffer, offset: number, length: number, position: number) => ({
+      bytesRead: marker.copy(buffer, offset, position, position + length),
+      buffer,
+    }),
+    close,
+  });
+  return { close };
+}
+
+function lateDialogFixture(outcome: "reactivate" | "revealed" | "hidden") {
+  let activationCount = 0;
+  let dismissedCount = 0;
+  const events: string[] = [];
+  const fixture = executorFixture((input, receipt) => {
+    const target = input.target as { windowHandle?: string } | undefined;
+    if (input.operation === "command") {
+      activationCount++;
+      events.push("activate");
+    } else if (input.operation === "enumerate") {
+      if (activationCount > dismissedCount && (activationCount === 1 || outcome === "hidden")) {
+        return {
+          ...receipt,
+          observed: {
+            data: {
+              windows: [
+                {
+                  pid: 321,
+                  title: "PowerToys Run Plugin Initialization Error",
+                  windowHandle: activationCount === 1 ? "456" : "789",
+                  owned: true,
+                  visible: true,
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (
+        (outcome === "revealed" && dismissedCount === 1) ||
+        (outcome === "reactivate" && activationCount === 2)
+      )
+        return receipt;
+      return { ...receipt, observed: { data: { windows: [] } } };
+    } else if (target?.windowHandle === "456" || target?.windowHandle === "789") {
+      if (input.operation === "inspect") {
+        return {
+          ...receipt,
+          observed: {
+            data: {
+              nodes: [
+                { name: "Fail to initialize plugins" },
+                { name: "OK", automationId: "2", className: "Button" },
+              ],
+            },
+          },
+        };
+      }
+      if (input.operation === "click") {
+        dismissedCount++;
+        events.push("dismiss");
+      }
+    } else if (input.operation === "inspect" && target?.windowHandle === "123") {
+      events.push("ready");
+    }
+    return receipt;
+  });
+  return { ...fixture, events };
+}
+
 afterEach(() => {
+  startupFiles.readdir.mockReset();
+  startupFiles.stat.mockReset();
+  startupFiles.open.mockReset();
   vi.useRealTimers();
 });
 
@@ -428,6 +524,71 @@ describe("E2E recipe planning", () => {
 });
 
 describe("E2E recipe execution", () => {
+  it.each([
+    {
+      readiness: "a second activation",
+      outcome: "reactivate" as const,
+      activationCount: 2,
+      events: ["activate", "dismiss", "activate", "ready"],
+    },
+    {
+      readiness: "the window revealed by dismissal",
+      outcome: "revealed" as const,
+      activationCount: 1,
+      events: ["activate", "dismiss", "ready"],
+    },
+  ])(
+    "completes the recipe after a late initialization dialog using $readiness",
+    async ({ outcome, activationCount, events }) => {
+      vi.useFakeTimers();
+      const logs = freshStartupMarker();
+      const fixture = lateDialogFixture(outcome);
+      const result = await completeRecipe(calculatorPlan(), fixture, {
+        LOCALAPPDATA: "C:\\Fixture\\Local",
+      });
+      expect(result.features.map((entry) => entry.outcome)).toEqual([
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+      ]);
+      expect(result.cleanupConfirmed).toBe(true);
+      expect(fixture.events.slice(0, events.length)).toEqual(events);
+      expect(fixture.calls.filter((input) => input.operation === "build")).toHaveLength(1);
+      expect(fixture.calls.filter((input) => input.operation === "command")).toHaveLength(
+        activationCount,
+      );
+      expect(fixture.calls.filter((input) => input.operation === "assert")).toHaveLength(10);
+      expect(fixture.calls.filter((input) => input.operation === "screenshot")).toHaveLength(4);
+      const firstReadyInspection = fixture.calls.findIndex(
+        (input) =>
+          input.operation === "inspect" &&
+          (input.target as { windowHandle?: string } | undefined)?.windowHandle === "123",
+      );
+      expect(firstReadyInspection).toBeGreaterThan(-1);
+      expect(
+        fixture.calls.slice(firstReadyInspection).some((input) => input.operation === "command"),
+      ).toBe(false);
+      expect(logs.close).toHaveBeenCalledTimes(activationCount);
+    },
+  );
+
+  it("does not send a third activation after another late initialization dialog is dismissed", async () => {
+    vi.useFakeTimers();
+    freshStartupMarker();
+    const fixture = lateDialogFixture("hidden");
+    const result = await completeRecipe(calculatorPlan(), fixture, {
+      LOCALAPPDATA: "C:\\Fixture\\Local",
+    });
+    expect(fixture.events).toEqual(["activate", "dismiss", "activate", "dismiss"]);
+    expect(fixture.calls.filter((input) => input.operation === "command")).toHaveLength(2);
+    expect(fixture.calls.filter((input) => input.operation === "build")).toHaveLength(1);
+    expect(result.features.every((entry) => entry.outcome === "blocked")).toBe(true);
+    expect(fixture.calls.some((input) => input.operation === "type")).toBe(false);
+    expect(fixture.calls.some((input) => input.operation === "assert")).toBe(false);
+    expect(result.cleanupConfirmed).toBe(true);
+  });
+
   it("shares one build while preserving assertion and fresh screenshot receipts for every scenario", async () => {
     vi.useFakeTimers();
     const plan = calculatorPlan();

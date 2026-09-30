@@ -725,10 +725,25 @@ export class InvestigationActions {
     if (data.report === null) return [];
     const parent = reportRef(data.report);
     const selected = new Set<string>();
+    const selectedPlans = new Set<string>();
     return data.reports.filter((report) => {
       if (!sameRef(report.context.parentReportRef, parent) || selected.has(report.context.task.id))
         return false;
       selected.add(report.context.task.id);
+      const task = this.dependencies.store.get<InvestigationTaskV1>(
+        "tasks",
+        report.context.task.id,
+      );
+      if (task === undefined || task.planRef === null || !sameRef(task.parentReportRef, parent))
+        return false;
+      const planKey = investigationContentDigest({
+        planRef: task.planRef,
+        subjectRef: task.subjectRef,
+      });
+      if (selectedPlans.has(planKey)) return false;
+      // readData orders newest tasks first. Adopt one whole rerun, including failures,
+      // rather than combining checks across tasks or preferring an older success.
+      selectedPlans.add(planKey);
       return true;
     });
   }
