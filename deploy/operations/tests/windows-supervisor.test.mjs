@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -196,11 +196,13 @@ test("status replacement does not retry unrelated filesystem failures", (t) => {
 
 test("Windows status replacement recovers after a real reader closes its non-delete-sharing handle", {
   skip: process.platform !== "win32",
-  timeout: 15_000,
+  timeout: 30_000,
 }, async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "operations-status-reader-"));
   const statusPath = join(directory, "status.json");
   const temporary = join(directory, "status.json.instance.tmp");
+  const releasePath = join(directory, "reader-release");
+  const closedPath = join(directory, "reader-closed");
   writeFileSync(statusPath, '{"state":"stopping"}\n');
   writeFileSync(temporary, '{"state":"stopped"}\n');
   const script = `
@@ -209,8 +211,15 @@ $stream = [IO.File]::Open($env:SUPERVISOR_STATUS_TEST_PATH, [IO.FileMode]::Open,
 try {
     [Console]::Out.WriteLine('READER_READY')
     [Console]::Out.Flush()
-    Start-Sleep -Milliseconds 500
-} finally { $stream.Dispose() }
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    while (-not [IO.File]::Exists($env:SUPERVISOR_STATUS_TEST_RELEASE_PATH)) {
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'The sharing reader was not released.' }
+        Start-Sleep -Milliseconds 20
+    }
+} finally {
+    $stream.Dispose()
+    [IO.File]::WriteAllText($env:SUPERVISOR_STATUS_TEST_CLOSED_PATH, 'closed')
+}
 `;
   const reader = spawn(
     join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
@@ -220,7 +229,15 @@ try {
       "-EncodedCommand",
       Buffer.from(script, "utf16le").toString("base64"),
     ],
-    { windowsHide: true, env: { ...process.env, SUPERVISOR_STATUS_TEST_PATH: statusPath } },
+    {
+      windowsHide: true,
+      env: {
+        ...process.env,
+        SUPERVISOR_STATUS_TEST_PATH: statusPath,
+        SUPERVISOR_STATUS_TEST_RELEASE_PATH: releasePath,
+        SUPERVISOR_STATUS_TEST_CLOSED_PATH: closedPath,
+      },
+    },
   );
   const completed = once(reader, "close");
   t.after(async () => {
@@ -247,7 +264,26 @@ try {
     () => renameSync(temporary, statusPath),
     (error) => ["EACCES", "EPERM"].includes(error.code),
   );
-  const retryCodes = replaceStatusFile(temporary, statusPath);
+  const handshakeWait = new Int32Array(new SharedArrayBuffer(4));
+  let releaseRequested = false;
+  const retryCodes = replaceStatusFile(temporary, statusPath, {
+    wait(ms) {
+      if (releaseRequested) {
+        Atomics.wait(handshakeWait, 0, 0, ms);
+        return;
+      }
+      releaseRequested = true;
+      writeFileSync(releasePath, "release\n");
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(closedPath)) {
+        assert.ok(
+          Date.now() < deadline,
+          "The sharing reader did not close its handle after release.",
+        );
+        Atomics.wait(handshakeWait, 0, 0, 20);
+      }
+    },
+  });
   assert.ok(retryCodes.length > 0);
   assert.equal(JSON.parse(readFileSync(statusPath, "utf8")).state, "stopped");
   const [exitCode] = await completed;
