@@ -297,7 +297,8 @@ describe("explicit reproduction contracts", () => {
     expect(getEvaluationReproductionCellRecordIssues(value)).toContain(
       "Evaluation reproduction exceeds its aggregate UTF-8 byte limit.",
     );
-  });
+    // This intentionally oversized payload is traversed in full on shared CI runners.
+  }, 20_000);
 });
 
 describe("versioned evaluation cell manifests", () => {
