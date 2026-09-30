@@ -91,7 +91,7 @@ describe("repository directory and detail navigation", () => {
     expect(html).toContain(repository.fullName);
     expect(html).not.toContain(hidden.fullName);
     expect(html).toContain("Find a repository");
-    expect(html).not.toContain("Assignment recipient ID");
+    expect(html).not.toContain("Reviewer GitHub user ID");
     expect(html).not.toContain("Global scheduler fixture");
     expect(
       queryClient
@@ -119,7 +119,7 @@ describe("repository directory and detail navigation", () => {
     expect(html).toContain("Back to repositories");
     expect(html).toContain('role="tabpanel"');
     expect(html).toContain('aria-labelledby="repository-tab-intake"');
-    expect(html).toContain("Assignment recipient ID");
+    expect(html).toContain("Reviewer GitHub user ID");
     expect(html).toContain("/webhooks?repositoryId=repo-allowed");
     expect(html).not.toContain("PR reply template");
     expect(html).not.toContain("Global scheduler fixture");

@@ -50,25 +50,49 @@ describe("strict model output schema projection", () => {
         }>;
       };
     };
-    expect(candidates.items.anyOf).toHaveLength(3);
-    const [retained, pendingOrWithdrawn, merged] = candidates.items.anyOf;
-    expect(retained!.properties).toMatchObject({
-      status: { anyOf: [{ const: "confirmed" }, { const: "unresolved" }] },
-      findingId: { type: "string" },
-      findingVersion: { type: "integer", minimum: 1 },
-      mergedIntoCandidateId: { type: "null" },
-    });
-    expect(retained!.properties.findingId).not.toHaveProperty("anyOf");
-    expect(retained!.properties.findingVersion).not.toHaveProperty("anyOf");
-    expect(pendingOrWithdrawn!.properties).toMatchObject({
-      findingId: { anyOf: [{ type: "string" }, { type: "null" }] },
-      mergedIntoCandidateId: { type: "null" },
-    });
-    expect(merged!.properties).toMatchObject({
-      status: { const: "merged" },
-      findingId: { anyOf: [{ type: "string" }, { type: "null" }] },
-      mergedIntoCandidateId: { type: "string" },
-    });
+    expect(candidates.items.anyOf).toHaveLength(6);
+    const ordinary = candidates.items.anyOf.filter(
+      (branch) => !Object.hasOwn(branch.properties, "reviewBaselineFindingRef"),
+    );
+    const baseline = candidates.items.anyOf.filter((branch) =>
+      Object.hasOwn(branch.properties, "reviewBaselineFindingRef"),
+    );
+    expect(ordinary).toHaveLength(3);
+    expect(baseline).toHaveLength(3);
+    for (const group of [ordinary, baseline]) {
+      const [retained, pendingOrWithdrawn, merged] = group;
+      expect(retained!.properties).toMatchObject({
+        status: { anyOf: [{ const: "confirmed" }, { const: "unresolved" }] },
+        findingId: { type: "string" },
+        findingVersion: { type: "integer", minimum: 1 },
+        mergedIntoCandidateId: { type: "null" },
+      });
+      expect(retained!.properties.findingId).not.toHaveProperty("anyOf");
+      expect(retained!.properties.findingVersion).not.toHaveProperty("anyOf");
+      expect(pendingOrWithdrawn!.properties).toMatchObject({
+        findingId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        mergedIntoCandidateId: { type: "null" },
+      });
+      expect(merged!.properties).toMatchObject({
+        status: { const: "merged" },
+        findingId: { anyOf: [{ type: "string" }, { type: "null" }] },
+        mergedIntoCandidateId: { type: "string" },
+      });
+    }
+    for (const branch of ordinary) {
+      expect(branch.properties.discoveredRound).toMatchObject({ type: "integer", minimum: 1 });
+      expect(branch.properties).not.toHaveProperty("reviewDisposition");
+    }
+    for (const branch of baseline) {
+      expect(branch.properties.discoveredRound).toMatchObject({ const: 0 });
+      expect(branch.required).toContain("reviewBaselineFindingRef");
+      expect(branch.required).toContain("reviewDisposition");
+      expect(branch.properties.reviewBaselineFindingRef).toMatchObject({
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "version"],
+      });
+    }
     for (const branch of candidates.items.anyOf) {
       expect(branch.additionalProperties).toBe(false);
       expect(branch.required.toSorted()).toEqual(Object.keys(branch.properties).toSorted());
