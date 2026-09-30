@@ -8,7 +8,13 @@ the Worker performs the fixed build, UI, assertion, screenshot and cleanup seque
 Send requests through the current Task's tool transport. `transport.json` contains
 the exact endpoint and capability. Keep it private and save the response from a
 long-running call before displaying it. Continue waiting on the original shell
-session instead of issuing another build.
+session instead of issuing another build. Use the longest wait explicitly supported
+by the active shell tool. When `write_stdin` advertises support for a 300000 ms wait,
+use its returned `session_id`, `chars: ""` and `yield_time_ms: 300000`; otherwise use
+the maximum stated by that tool. Repeated 1-30 second polls unnecessarily replay
+the model context. Reuse the completed JSON from the original session. If that output
+is missing or incomplete, read the cached response file once after completion;
+do not poll its existence or repeatedly reload completed receipts.
 
 ## Calculator baseline
 

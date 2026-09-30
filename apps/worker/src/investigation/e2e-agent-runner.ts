@@ -673,8 +673,13 @@ retype or reconstruct them, trim the URL or omit its /tool route. Never print th
 file or its contents, copy it into report artifacts, or use another session's transport file.
 Run this entire transport sequence in one foreground shell invocation for each request.
 Retain the printed response path and any session ID returned when the shell yields. A yielded
-shell still owns the original HTTP call: resume or wait on that same session, using substantial
-wait intervals rather than frequent polling. Do not detach it or start a background process.
+shell still owns the original HTTP call. Wait on that same session using the longest interval
+explicitly supported by the current tool. For write_stdin, use the returned session_id,
+chars:"" and yield_time_ms:300000 when its schema permits 300000 ms; otherwise use its advertised
+maximum. Avoid repeated 1-30 second progress polls: each model turn repeats the large context.
+Do not detach the request or start a background process. Use the completed JSON returned by
+the original session directly. Only if that output is missing or incomplete, read the saved
+response file once after completion; do not poll the file or reread completed receipts.
 Long builds may outlive an initial shell wait. Never reissue a build or other operation merely
 because its response has not appeared or its session handle was lost. Recover the saved response
 from its printed path; a missing file does not establish that the original operation stopped.
