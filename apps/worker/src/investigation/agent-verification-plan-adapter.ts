@@ -8,6 +8,7 @@ import type {
   InvestigationWorkerLease,
 } from "@agentic-review/contracts";
 import {
+  getInvestigationExecutionDurationLimitMs,
   investigationCanonicalJson,
   investigationPlanDigestPayload,
 } from "@agentic-review/contracts";
@@ -100,8 +101,6 @@ export function createAgentVerificationPlanAdapter(
           "An agent verification step requires saved, distinct check identifiers.",
         );
       if (context.invocationBudget !== undefined) {
-        if (context.invocationBudget.remainingTokens <= 0)
-          throw new ModelBudgetExceededError("tokens");
         if (context.invocationBudget.deadlineAtMs <= Date.now())
           throw new ModelBudgetExceededError("duration");
       }
@@ -159,9 +158,9 @@ export function createAgentVerificationPlanAdapter(
           hardTimeoutMs: Math.max(
             1,
             Math.min(
-              task.budget.maxDurationMs,
-              (context.invocationBudget?.deadlineAtMs ?? Date.now() + task.budget.maxDurationMs) -
-                Date.now(),
+              getInvestigationExecutionDurationLimitMs(task.budget),
+              (context.invocationBudget?.deadlineAtMs ??
+                Date.now() + getInvestigationExecutionDurationLimitMs(task.budget)) - Date.now(),
             ),
           ),
           maximumResultBytes: Math.min(task.budget.maxReportBytes, 4 * 1024 * 1024),

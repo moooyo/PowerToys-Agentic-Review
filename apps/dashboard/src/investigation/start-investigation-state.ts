@@ -1,4 +1,8 @@
-import type { InvestigationBudget, InvestigationTaskV1 } from "@agentic-review/contracts";
+import {
+  type InvestigationBudget,
+  type InvestigationTaskV1,
+  normalizeInvestigationBudget,
+} from "@agentic-review/contracts";
 import type { CreateTaskInput, WorkItem } from "./api";
 import { InvestigationHttpError } from "./transport";
 
@@ -6,12 +10,10 @@ export interface InvestigationInputs {
   mode: "snapshot_only" | "source_read";
   sourceCommit: string;
   customBudget: boolean;
-  tokens: string;
-  rounds: string;
-  minutes: string;
+  reportBytes: string;
 }
 export type InvestigationInputErrors = Partial<
-  Record<"sourceCommit" | "tokens" | "rounds" | "minutes" | "budget" | "mode", string>
+  Record<"sourceCommit" | "reportBytes" | "budget" | "mode", string>
 >;
 export function initialInvestigationInputs(
   item: WorkItem,
@@ -21,9 +23,7 @@ export function initialInvestigationInputs(
     mode: item.kind === "issue" ? "snapshot_only" : "source_read",
     sourceCommit: "",
     customBudget: false,
-    tokens: budget ? String(budget.maxTokens) : "",
-    rounds: budget ? String(budget.maxRounds) : "",
-    minutes: budget ? String(budget.maxDurationMs / 60_000) : "",
+    reportBytes: budget ? String(budget.maxReportBytes) : "",
   };
 }
 
@@ -50,17 +50,10 @@ export function investigationInputErrors(
   )
     errors.sourceCommit = "Enter the full 40–64 character hexadecimal commit SHA.";
   if (inputs.customBudget) {
-    if (!defaults) errors.budget = "Load the configured budget before choosing custom limits.";
-    if (!Number.isSafeInteger(Number(inputs.tokens)) || Number(inputs.tokens) < 1)
-      errors.tokens = "Enter a positive whole number of tokens.";
-    if (!Number.isSafeInteger(Number(inputs.rounds)) || Number(inputs.rounds) < 1)
-      errors.rounds = "Enter a positive whole number of rounds.";
-    if (
-      !Number.isSafeInteger(Number(inputs.minutes) * 60_000) ||
-      Number(inputs.minutes) <= 0 ||
-      Number(inputs.minutes) * 60_000 > 2_147_483_647
-    )
-      errors.minutes = "Enter a positive duration no longer than 35,791 minutes.";
+    if (!defaults)
+      errors.budget = "Load the configured report size before choosing a custom limit.";
+    if (!Number.isSafeInteger(Number(inputs.reportBytes)) || Number(inputs.reportBytes) < 1)
+      errors.reportBytes = "Enter a positive whole number of report bytes.";
   }
   return errors;
 }
@@ -85,10 +78,8 @@ export function investigationRequest(
     ...(inputs.customBudget && defaults
       ? {
           budget: {
-            ...defaults,
-            maxTokens: Number(inputs.tokens),
-            maxRounds: Number(inputs.rounds),
-            maxDurationMs: Number(inputs.minutes) * 60_000,
+            ...normalizeInvestigationBudget(defaults),
+            maxReportBytes: Number(inputs.reportBytes),
           },
         }
       : {}),

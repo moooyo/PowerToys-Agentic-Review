@@ -30,7 +30,7 @@ export interface CleanupRecoveryOperationsOptions {
 }
 
 export interface CleanupRecoveryOperations {
-  acquireGuard(identity: AttemptCleanupIdentity): Promise<void>;
+  acquireGuard(identity: AttemptCleanupIdentity, signal?: AbortSignal): Promise<void>;
   cleanupWorkspace(
     identity: AttemptCleanupIdentity,
     ownership: InvestigationWorkspaceOwnershipReceipt | null,
@@ -81,6 +81,7 @@ export function createCleanupRecoveryOperations(
   const execute = async (
     identity: AttemptCleanupIdentity,
     operation: CleanupRecoveryOperation,
+    signal: AbortSignal = new AbortController().signal,
   ): Promise<void> => {
     try {
       const instanceKey = identity.processHostInstanceKey;
@@ -92,7 +93,10 @@ export function createCleanupRecoveryOperations(
         environmentMode: "replace" as const,
         environment,
         standardInput: serializeCleanupRecoveryOperation(operation),
-        limits,
+        limits:
+          operation.operation === "guard-acquire"
+            ? limits
+            : { ...limits, hardTimeoutMs: Math.min(limits.hardTimeoutMs, 60_000) },
       };
       assertValidProcessLaunchSpec(spec);
       const fencedHost: ProcessHostClient = {
@@ -108,7 +112,7 @@ export function createCleanupRecoveryOperations(
       };
       const result = await runner.run(spec, {
         processHost: fencedHost,
-        signal: new AbortController().signal,
+        signal,
       });
       recovery(instanceKey, generation);
       const response: unknown = JSON.parse(result.stdout);
@@ -128,6 +132,15 @@ export function createCleanupRecoveryOperations(
         error.cause instanceof CleanupRecoveryOperationError
       )
         throw error.cause;
+      // Never let cancellation hide a separate process completion or output drain failure.
+      if (
+        signal.aborted &&
+        error instanceof ManagedProcessRunError &&
+        error.code === "ABORTED" &&
+        error.cause === signal.reason &&
+        !error.outputTruncated
+      )
+        throw signal.reason;
       if (
         error instanceof ManagedProcessRunError &&
         error.code === "NON_ZERO_EXIT" &&
@@ -152,13 +165,17 @@ export function createCleanupRecoveryOperations(
   };
 
   return {
-    acquireGuard: (identity) =>
-      execute(identity, {
-        operation: "guard-acquire",
-        lockDirectory: identity.desktopLockDirectory,
-        ownerId: identity.guardOwnerId,
-        ownerToken: identity.guardOwnerToken,
-      }),
+    acquireGuard: (identity, signal) =>
+      execute(
+        identity,
+        {
+          operation: "guard-acquire",
+          lockDirectory: identity.desktopLockDirectory,
+          ownerId: identity.guardOwnerId,
+          ownerToken: identity.guardOwnerToken,
+        },
+        signal,
+      ),
     cleanupWorkspace: (identity, ownership) =>
       execute(identity, {
         operation: "workspace",

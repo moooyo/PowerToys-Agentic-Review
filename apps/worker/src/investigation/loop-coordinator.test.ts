@@ -157,7 +157,7 @@ function fixture(
   const order: string[] = [];
   const parts: InvestigationReportPartV1[] = [];
   const submissions: InvestigationFinalizeRequest[] = [];
-  const invocationTokens = new Map<string, number>();
+  const invocationTokens = new Map<string, number | null>();
   const client: InvestigationWorkerClient = {
     claim: vi.fn(async () => claim),
     heartbeat: vi.fn(async () => ({
@@ -193,7 +193,7 @@ function fixture(
         current = rejectInvestigationModelOutput(
           current,
           { ...request, attemptId: attempt.id },
-          { recordedAt, durationMs: 0, accountedTokens: current.consumed.tokens + tokens },
+          { recordedAt, durationMs: 0, accountedTokens: current.consumed.tokens + (tokens ?? 0) },
         );
       } else {
         current = interruptInvestigationLoop(
@@ -1138,8 +1138,15 @@ describe("InvestigationLoopCoordinator", () => {
 
   it("preserves the entire partial ledger when the budget ends after discovery", async () => {
     const f = fixture(137, 1);
+    vi.mocked(f.model.execute)
+      .mockImplementationOnce(async (input) =>
+        modelRound(input, proposedAnalysis(f.initial.result), "discovery"),
+      )
+      .mockImplementationOnce(async () => {
+        throw new ModelBudgetExceededError("duration");
+      });
     await f.coordinator.execute(f.claim, f.shutdown.signal);
-    expect(f.model.execute).toHaveBeenCalledTimes(1);
+    expect(f.model.execute).toHaveBeenCalledTimes(2);
     expect(f.submissions[0]?.header).toMatchObject({
       outcome: "interrupted",
       report: { completeness: "partial" },
@@ -1157,7 +1164,7 @@ describe("InvestigationLoopCoordinator", () => {
     expect(interrupt).not.toHaveProperty("modelUsage");
   });
 
-  it("keeps one attempt deadline across source preparation and recomputes each round token allowance", async () => {
+  it("keeps the task deadline across source preparation and every round", async () => {
     const startedAt = Date.parse(recordedAt);
     let now = startedAt;
     const f = fixture(2, 8, "bug", { now: () => now });
@@ -1169,13 +1176,126 @@ describe("InvestigationLoopCoordinator", () => {
     const calls = vi.mocked(f.model.execute).mock.calls;
     expect(calls).toHaveLength(2);
     expect(calls[0]![0].invocationBudget).toEqual({
-      remainingTokens: f.claim.task.budget.maxTokens,
-      deadlineAtMs: startedAt + f.claim.task.budget.maxDurationMs,
+      deadlineAtMs: startedAt + 7_200_000,
     });
     expect(calls[1]![0].invocationBudget).toEqual({
-      remainingTokens: f.claim.task.budget.maxTokens - 100,
-      deadlineAtMs: startedAt + f.claim.task.budget.maxDurationMs,
+      deadlineAtMs: startedAt + 7_200_000,
     });
+  });
+
+  it("continues past the legacy token and twenty-four-round limits while retaining usage", async () => {
+    const f = fixture(30, 24);
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      const analysis =
+        input.checkpoint!.round === 0
+          ? proposedAnalysis(f.initial.result)
+          : structuredClone(input.checkpoint!.analysis);
+      if (input.checkpoint!.round > 0)
+        analysis.rechecks.push({
+          ...f.initial.result.report.recheck.records[input.checkpoint!.round - 1]!,
+          round: input.checkpoint!.round + 1,
+        });
+      const result = modelRound(
+        input,
+        analysis,
+        input.checkpoint!.round === 0 ? "discovery" : "finalize",
+      );
+      return { ...result, usage: { tokens: 1_000_000, source: "cli" } };
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledTimes(31);
+    expect(f.current().consumed).toMatchObject({ rounds: 31, tokens: 31_000_000 });
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+    expect(f.workspace.cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("accounts runtime admission time without restarting the deadline at coordinator entry", async () => {
+    const startedAt = Date.parse(recordedAt);
+    let now = startedAt + 5_000;
+    const f = fixture(0, 8, "bug", {
+      now: () => now,
+      executionStartedAtMs: startedAt,
+      executionDeadlineAtMs: startedAt + 7_200_000,
+    });
+    vi.mocked(f.model.execute).mockImplementationOnce(async (input) => {
+      expect(input.invocationBudget).toEqual({ deadlineAtMs: startedAt + 7_200_000 });
+      now += 100;
+      return modelRound(input, proposedAnalysis(f.initial.result), "discovery");
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.current().consumed.durationMs).toBe(5_100);
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+  });
+
+  it("accepts the final complete checkpoint at the exact cumulative duration limit", async () => {
+    const startedAt = Date.parse(recordedAt);
+    let now = startedAt;
+    const f = fixture(0, 8, "bug", { now: () => now });
+    vi.mocked(f.model.execute).mockImplementationOnce(async (input) => {
+      now += 7_200_000;
+      return modelRound(input, proposedAnalysis(f.initial.result), "discovery");
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.current().consumed.durationMs).toBe(7_200_000);
+    expect(f.current().stopReason).toBe("complete");
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+    expect(f.workspace.cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("uses only the remaining task duration after restoring an accepted checkpoint", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const discovered = applyInvestigationLoopRound(
+      f.claim.checkpoint!,
+      modelRound(
+        {
+          task: f.claim.task,
+          attempt: f.claim.attempt,
+          checkpoint: f.claim.checkpoint,
+          signal: f.shutdown.signal,
+          workspace: f.workspace,
+        },
+        proposedAnalysis(f.initial.result),
+        "discovery",
+      ).round,
+      { recordedAt, usage: { durationMs: 7_199_900, tokens: 12_000_000, reportBytes: 0 } },
+    );
+    f.claim.attempt = { ...f.claim.attempt, id: "attempt-resumed", number: 2, leaseVersion: 2 };
+    f.claim.lease = { attemptId: f.claim.attempt.id, fence: 2, leaseToken: "resumed-lease" };
+    f.claim.checkpoint = restoreInvestigationCheckpoint({
+      checkpoint: discovered,
+      task: f.claim.task,
+      attemptId: f.claim.attempt.id,
+      leaseVersion: 2,
+      recordedAt,
+    });
+    f.replaceCurrent(f.claim.checkpoint);
+    const modelStarted = Promise.withResolvers<void>();
+    const startedAt = Date.now();
+    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+      expect(input.invocationBudget).toEqual({ deadlineAtMs: startedAt + 100 });
+      modelStarted.resolve();
+      await new Promise<void>((_resolve, reject) => {
+        input.signal.addEventListener("abort", () => reject(input.signal.reason), { once: true });
+      });
+      throw new Error("Unreachable.");
+    });
+    const execution = f.coordinator.execute(f.claim, f.shutdown.signal);
+    try {
+      await modelStarted.promise;
+      await vi.advanceTimersByTimeAsync(99);
+      expect(f.submissions).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await execution;
+      expect(f.model.execute).toHaveBeenCalledOnce();
+      expect(f.submissions[0]?.header.outcome).toBe("interrupted");
+      expect(f.current().consumed.tokens).toBe(12_000_000);
+      expect(f.workspace.cleanup).toHaveBeenCalledOnce();
+    } finally {
+      f.shutdown.abort(new InvestigationWorkerShutdown());
+      await execution;
+      vi.useRealTimers();
+    }
   });
 
   it("retains partial invocation usage and seals an interrupted budget report after a live stop", async () => {
@@ -1183,7 +1303,7 @@ describe("InvestigationLoopCoordinator", () => {
     vi.mocked(f.model.execute).mockImplementation(async (input) => {
       input.onUsage?.({ tokens: 71, source: "cli", completeness: "partial" });
       throw new AggregateError(
-        [new ModelBudgetExceededError("tokens")],
+        [new ModelBudgetExceededError("duration")],
         "Synthetic accounting wrapper.",
       );
     });
@@ -1457,7 +1577,9 @@ describe("InvestigationLoopCoordinator", () => {
         expect(input.correction).toMatchObject({ issue });
         expect(input.checkpoint?.round).toBe(0);
         expect(input.checkpoint?.consumed.tokens).toBe(371);
-        expect(input.invocationBudget?.remainingTokens).toBe(f.claim.task.budget.maxTokens - 371);
+        expect(input.invocationBudget).toEqual({
+          deadlineAtMs: expect.any(Number),
+        });
         expect(input.checkpoint?.version).toBeGreaterThan(f.claim.checkpoint!.version);
         const result = modelRound(input, proposedAnalysis(f.initial.result), "discovery");
         return { ...result, usage: { ...result.usage, invocationId: "accepted-call" } };
@@ -1561,52 +1683,48 @@ describe("InvestigationLoopCoordinator", () => {
     expect(f.order).not.toContain("checkpoint:rejected_analysis");
   });
 
-  it.each([
-    "unknown",
-    "partial",
-    "missing_identity",
-    "unsafe_reference",
-    "cleanup",
-    "forged",
-  ] as const)("does not correct a response with %s state", async (condition) => {
-    const f = fixture(0);
-    f.model.markUsageDisposition = vi.fn(async () => undefined);
-    vi.mocked(f.model.execute).mockImplementation(async (input) => {
-      input.onUsage?.({
-        tokens: condition === "unknown" ? null : 371,
-        source: condition === "unknown" ? "unavailable" : "cli",
-        ...(condition === "missing_identity" ? {} : { invocationId: "rejected-call" }),
-        completeness: condition === "partial" ? "partial" : "complete",
-      });
-      if (condition === "forged")
-        throw Object.assign(new Error("private-token"), {
-          code: "MODEL_OUTPUT_INVALID",
-          rule: "duplicate_record_id",
-          paths: ["/analysis/candidates/0/id"],
+  it.each(["missing_identity", "unsafe_reference", "cleanup", "forged"] as const)(
+    "does not correct a response with %s state",
+    async (condition) => {
+      const f = fixture(0);
+      f.model.markUsageDisposition = vi.fn(async () => undefined);
+      vi.mocked(f.model.execute).mockImplementation(async (input) => {
+        input.onUsage?.({
+          tokens: 371,
+          source: "cli",
+          ...(condition === "missing_identity" ? {} : { invocationId: "rejected-call" }),
+          completeness: "complete",
         });
-      const error = new ModelOutputValidationError("reference_outside_batch", [
-        "analysis",
-        "candidates",
-        0,
-        condition === "unsafe_reference" ? "subjectRef" : "findingId",
-      ]);
-      if (condition === "cleanup")
-        Object.assign(error, { cause: { code: "MODEL_PROCESS_CLEANUP_UNCONFIRMED" } });
-      throw error;
-    });
-    await f.coordinator.execute(f.claim, f.shutdown.signal);
-    expect(f.model.execute).toHaveBeenCalledOnce();
-    expect(f.order).not.toContain("checkpoint:rejected_analysis");
-    expect(f.submissions[0]?.header.outcome).toBe("failed");
-    expect(JSON.stringify(f.submissions)).not.toContain("private-token");
-  });
+        if (condition === "forged")
+          throw Object.assign(new Error("private-token"), {
+            code: "MODEL_OUTPUT_INVALID",
+            rule: "duplicate_record_id",
+            paths: ["/analysis/candidates/0/id"],
+          });
+        const error = new ModelOutputValidationError("reference_outside_batch", [
+          "analysis",
+          "candidates",
+          0,
+          condition === "unsafe_reference" ? "subjectRef" : "findingId",
+        ]);
+        if (condition === "cleanup")
+          Object.assign(error, { cause: { code: "MODEL_PROCESS_CLEANUP_UNCONFIRMED" } });
+        throw error;
+      });
+      await f.coordinator.execute(f.claim, f.shutdown.signal);
+      expect(f.model.execute).toHaveBeenCalledOnce();
+      expect(f.order).not.toContain("checkpoint:rejected_analysis");
+      expect(f.submissions[0]?.header.outcome).toBe("failed");
+      expect(JSON.stringify(f.submissions)).not.toContain("private-token");
+    },
+  );
 
-  it("does not start a correction after the rejected call exhausts its token budget", async () => {
+  it("admits a correction after the rejected call reaches the legacy token limit", async () => {
     const f = fixture(0);
-    const tokens = f.claim.task.budget.maxTokens;
+    const tokens = f.claim.task.budget.maxTokens ?? 12_000_000;
     f.invocationTokens.set("rejected-call", tokens);
     f.model.markUsageDisposition = vi.fn(async () => undefined);
-    vi.mocked(f.model.execute).mockImplementation(async (input) => {
+    vi.mocked(f.model.execute).mockImplementationOnce(async (input) => {
       input.onUsage?.({
         tokens,
         source: "cli",
@@ -1621,12 +1739,42 @@ describe("InvestigationLoopCoordinator", () => {
       ]);
     });
     await f.coordinator.execute(f.claim, f.shutdown.signal);
-    expect(f.model.execute).toHaveBeenCalledOnce();
-    expect(f.current().consumed.tokens).toBe(tokens);
+    expect(f.model.execute).toHaveBeenCalledTimes(2);
+    expect(f.current().consumed.tokens).toBe(tokens + 100);
     expect(f.current().runtime.unacceptedModelUsage ?? []).toEqual([]);
     expect(f.current().runtime.modelOutputRejections).toHaveLength(1);
-    expect(f.submissions[0]?.header.outcome).toBe("interrupted");
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
   });
+
+  it.each(["missing", "partial"] as const)(
+    "admits one bounded output correction with %s token accounting",
+    async (accounting) => {
+      const f = fixture(0);
+      const tokens = accounting === "missing" ? null : 371;
+      f.invocationTokens.set("rejected-call", tokens);
+      f.model.markUsageDisposition = vi.fn(async () => undefined);
+      vi.mocked(f.model.execute).mockImplementationOnce(async (input) => {
+        input.onUsage?.({
+          tokens,
+          source: tokens === null ? "unavailable" : "cli",
+          invocationId: "rejected-call",
+          completeness: accounting === "missing" ? "unavailable" : "partial",
+        });
+        throw new ModelOutputValidationError("duplicate_record_id", [
+          "analysis",
+          "candidates",
+          0,
+          "id",
+        ]);
+      });
+      await f.coordinator.execute(f.claim, f.shutdown.signal);
+      expect(f.model.execute).toHaveBeenCalledTimes(2);
+      expect(f.current().consumed.tokens).toBe((tokens ?? 0) + 100);
+      expect(f.current().runtime.modelOutputRejections).toHaveLength(1);
+      expect(f.submissions[0]?.header.outcome).toBe("completed");
+      expect(f.workspace.cleanup).toHaveBeenCalledOnce();
+    },
+  );
 
   it("retries a lost rejection acknowledgement before dispatching the correction", async () => {
     const f = fixture(0);
@@ -1780,21 +1928,20 @@ describe("InvestigationLoopCoordinator", () => {
 
   it("does not claim zero token consumption when the CLI omitted usage", async () => {
     const f = fixture();
-    vi.mocked(f.model.execute).mockImplementation(async (input) => ({
+    vi.mocked(f.model.execute).mockImplementationOnce(async (input) => ({
       ...modelRound(input, proposedAnalysis(f.initial.result), "discovery"),
       usage: { tokens: null, source: "unavailable" },
     }));
     await f.coordinator.execute(f.claim, f.shutdown.signal);
-    expect(f.submissions[0]?.header.outcome).toBe("interrupted");
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+    expect(f.model.execute).toHaveBeenCalledTimes(2);
+    expect(f.current().round).toBe(2);
+    expect(f.current().consumed.tokens).toBe(100);
     expect(
-      f
-        .current()
-        .analysis.diagnostics.some((diagnostic) => diagnostic.code === "MODEL_USAGE_UNAVAILABLE"),
-    ).toBe(true);
-    expect(f.current().round).toBe(0);
-    expect(f.current().runtime.unacceptedModelUsage).toEqual([
-      { attemptId: f.claim.attempt.id, round: 1, tokens: null },
-    ]);
+      vi
+        .mocked(f.client.checkpoint)
+        .mock.calls.find(([, request]) => request.kind === "analysis")?.[1],
+    ).toMatchObject({ usage: { tokens: null } });
   });
 
   it.each(["runner", "analysis", "cancellation"] as const)(
@@ -1849,7 +1996,7 @@ describe("InvestigationLoopCoordinator", () => {
     expect(f.submissions[0]?.header.outcome).toBe("interrupted");
   });
 
-  it.each([null, 999])(
+  it.each([999])(
     "retains the first complete usage receipt when a runner later reports %s",
     async (laterTokens) => {
       const f = fixture();
@@ -1869,6 +2016,22 @@ describe("InvestigationLoopCoordinator", () => {
       expect(f.model.execute).toHaveBeenCalledOnce();
     },
   );
+
+  it("keeps observed token consumption when final accounting is unavailable and continues", async () => {
+    const f = fixture();
+    vi.mocked(f.model.execute).mockImplementationOnce(async (input) => {
+      input.onUsage?.({ tokens: 371, source: "cli", completeness: "partial" });
+      return {
+        ...modelRound(input, proposedAnalysis(f.initial.result), "discovery"),
+        usage: { tokens: null, source: "unavailable", completeness: "unavailable" },
+      };
+    });
+    await f.coordinator.execute(f.claim, f.shutdown.signal);
+    expect(f.model.execute).toHaveBeenCalledTimes(2);
+    expect(f.current().consumed.tokens).toBe(471);
+    expect(f.current().round).toBe(2);
+    expect(f.submissions[0]?.header.outcome).toBe("completed");
+  });
 
   it("delivers a complete checkpoint when terminal usage reconciliation finds a lost analysis acknowledgement", async () => {
     const f = fixture();

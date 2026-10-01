@@ -641,7 +641,8 @@ describe("investigation report builder", () => {
       recordedAt,
     });
     checkpoint.stopReason = "budget_exhausted";
-    checkpoint.consumed.tokens = input.task.budget.maxTokens + 1;
+    checkpoint.consumed.durationMs = 7_200_000;
+    checkpoint.consumed.tokens = 12_000_001;
     checkpoint.runtime.e2eExecution = {
       attemptId: input.attempt.id,
       status: "completed",
@@ -1171,7 +1172,7 @@ describe("investigation report builder", () => {
     expectBuildError(() => buildInvestigationReportSubmission(tampered), "INVALID_INPUT");
 
     const changedTask = fixture();
-    changedTask.task.budget.maxTokens += 1;
+    changedTask.task.budget.maxReportBytes += 1;
     expectBuildError(() => buildInvestigationReportSubmission(changedTask), "INVALID_INPUT");
   });
 

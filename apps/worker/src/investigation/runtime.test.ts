@@ -1,8 +1,10 @@
 import {
   createInvestigationPreview as createInvestigationFixture,
+  INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
   type InvestigationModelInvocationReceipt,
   unavailableInvestigationTokenUsage,
 } from "@agentic-review/contracts";
+import { createInvestigationCheckpoint, interruptInvestigationLoop } from "@agentic-review/domain";
 import { describe, expect, it, vi } from "vitest";
 import type { StdioProcessHostClientOptions } from "../execution/process-host-client.js";
 import type { Logger } from "../logging/logger.js";
@@ -62,6 +64,27 @@ function claimFixture(): ClaimedInvestigationTask {
     plan: null,
     execution: null,
   } as unknown as ClaimedInvestigationTask;
+}
+
+function claimWithConsumedDuration(
+  durationMs: number,
+  kind: "pr-review" | "pr-e2e" = "pr-review",
+): ClaimedInvestigationTask {
+  const claim = claimFixture();
+  const task = { ...claim.task, kind };
+  const recordedAt = "2026-10-02T00:00:00.000Z";
+  const checkpoint = createInvestigationCheckpoint({
+    task,
+    attemptId: claim.attempt.id,
+    checkpointId: "checkpoint-before-runtime-admission",
+    leaseVersion: claim.lease.fence,
+    recordedAt,
+  });
+  return {
+    ...claim,
+    task,
+    checkpoint: interruptInvestigationLoop(checkpoint, "interrupted", recordedAt, [], durationMs),
+  };
 }
 
 function fixture() {
@@ -674,6 +697,331 @@ describe("production investigation runtime composition", () => {
     expect(f.events).toContain("host.close");
   });
 
+  it.each(["output", "cleanup-register", "desktop-guard", "execution-started"] as const)(
+    "charges %s preparation time against the shared attempt deadline",
+    async (stage) => {
+      vi.useFakeTimers({ now: new Date("2026-10-02T00:00:00.000Z") });
+      const f = fixture();
+      const entered = Promise.withResolvers<void>();
+      const released = Promise.withResolvers<void>();
+      const waitForPreparation = async () => {
+        entered.resolve();
+        await released.promise;
+      };
+      if (stage === "output")
+        vi.mocked(f.outputJournal.openAttempt).mockImplementation(waitForPreparation);
+      const runtime = await createInvestigationExecutionRuntime(f.config, logger, {
+        ...f.dependencies,
+        createCleanupJournal: () => ({
+          ...f.cleanupJournal,
+          async register(input) {
+            if (stage === "cleanup-register") await waitForPreparation();
+            return f.cleanupJournal.register(input);
+          },
+          async executionStarted(attemptId) {
+            if (stage === "execution-started") await waitForPreparation();
+            await f.cleanupJournal.executionStarted(attemptId);
+          },
+        }),
+        acquireDesktopGuard: async () => {
+          if (stage === "desktop-guard") await waitForPreparation();
+          return desktopGuardFixture(f.events);
+        },
+      });
+      const claim = claimWithConsumedDuration(
+        INVESTIGATION_EXECUTION_DURATION_LIMIT_MS - 1_000,
+        "pr-e2e",
+      );
+      const signal = new AbortController().signal;
+      const startedAtMs = Date.now();
+      f.coordinator.execute.mockImplementation(async (accepted, observedSignal) => {
+        expect(accepted).toBe(claim);
+        expect(observedSignal).toBe(signal);
+        expect(observedSignal.aborted).toBe(false);
+        expect(f.captured.coordinator?.executionStartedAtMs).toBe(startedAtMs);
+        expect(f.captured.coordinator?.executionDeadlineAtMs).toBe(startedAtMs + 1_000);
+        expect(f.captured.coordinator!.executionDeadlineAtMs! - Date.now()).toBe(800);
+        await f.captured.coordinator!.onAttemptCleanupConfirmed!();
+      });
+      const execution = f.captured.service!.executor.execute(claim, signal);
+      try {
+        await entered.promise;
+        expect(f.coordinator.execute).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(200);
+        released.resolve();
+        await execution;
+        expect(f.coordinator.execute).toHaveBeenCalledOnce();
+        expect(f.outputJournal.closeAttempt).toHaveBeenCalledWith(claim.task.id, claim.attempt.id);
+        expect(f.cleanupJournal.localCleanupConfirmed).toHaveBeenCalledWith(claim.attempt.id);
+        expect(f.cleanupJournal.guardReleased).toHaveBeenCalledWith(claim.attempt.id);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        released.resolve();
+        try {
+          await execution.catch(() => undefined);
+          await runtime.stop();
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    },
+  );
+
+  it("dispatches terminal coordination after the shared deadline expires during output initialization", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-02T00:00:00.000Z") });
+    const f = fixture();
+    const entered = Promise.withResolvers<void>();
+    const opening = Promise.withResolvers<void>();
+    vi.mocked(f.outputJournal.openAttempt).mockImplementation(() => {
+      entered.resolve();
+      return opening.promise;
+    });
+    const executeModel = vi.fn(never);
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, {
+      ...f.dependencies,
+      createModelTurnRunner: (options) => {
+        f.captured.model = options;
+        return { execute: executeModel };
+      },
+    });
+    const claim = claimWithConsumedDuration(INVESTIGATION_EXECUTION_DURATION_LIMIT_MS - 100);
+    const signal = new AbortController().signal;
+    const startedAtMs = Date.now();
+    f.coordinator.execute.mockImplementation(async (accepted, observedSignal) => {
+      expect(accepted).toBe(claim);
+      expect(observedSignal).toBe(signal);
+      expect(observedSignal.aborted).toBe(false);
+      expect(f.captured.coordinator?.executionStartedAtMs).toBe(startedAtMs);
+      expect(f.captured.coordinator?.executionDeadlineAtMs).toBe(startedAtMs + 100);
+      expect(f.captured.coordinator!.executionDeadlineAtMs).toBeLessThanOrEqual(Date.now());
+    });
+    const execution = f.captured.service!.executor.execute(claim, signal);
+    try {
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(99);
+      expect(f.coordinator.execute).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await execution;
+      expect(f.coordinator.execute).toHaveBeenCalledOnce();
+      expect(executeModel).not.toHaveBeenCalled();
+      expect(vi.mocked(f.outputJournal.openAttempt).mock.calls[0]?.[2]?.reason).toMatchObject({
+        name: "ModelBudgetExceededError",
+        kind: "duration",
+      });
+      expect(f.outputJournal.closeAttempt).toHaveBeenCalledWith(claim.task.id, claim.attempt.id);
+      expect(f.outputJournal.append).not.toHaveBeenCalled();
+      expect(f.outputJournal.flush).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      opening.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(f.outputJournal.append).not.toHaveBeenCalled();
+    } finally {
+      opening.resolve();
+      try {
+        await execution.catch(() => undefined);
+        await runtime.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  it.each(["cleanup-register", "execution-started"] as const)(
+    "seals an expired attempt without waiting for a pending %s record",
+    async (stage) => {
+      vi.useFakeTimers({ now: new Date("2026-10-02T00:00:00.000Z") });
+      const f = fixture();
+      const entered = Promise.withResolvers<void>();
+      const recorded = Promise.withResolvers<void>();
+      const lateCleanupRecorded = Promise.withResolvers<void>();
+      const guard = desktopGuardFixture(f.events);
+      const acquireDesktopGuard = vi.fn(async () => guard);
+      const releaseGuard = vi.fn(async () => {});
+      const cleanupWorkspace = vi.fn(async () => {});
+      const executeModel = vi.fn(never);
+      vi.mocked(f.cleanupJournal.guardReleased).mockImplementation(async () => {
+        lateCleanupRecorded.resolve();
+      });
+      const runtime = await createInvestigationExecutionRuntime(f.config, logger, {
+        ...f.dependencies,
+        acquireDesktopGuard,
+        createCleanupJournal: () => ({
+          ...f.cleanupJournal,
+          async register(input) {
+            if (stage === "cleanup-register") {
+              entered.resolve();
+              await recorded.promise;
+            }
+            return f.cleanupJournal.register(input);
+          },
+          async executionStarted(attemptId) {
+            if (stage === "execution-started") {
+              entered.resolve();
+              await recorded.promise;
+            }
+            await f.cleanupJournal.executionStarted(attemptId);
+          },
+        }),
+        createCleanupRecoveryOperations: () => ({
+          acquireGuard: never,
+          cleanupWorkspace,
+          releaseGuard,
+        }),
+        createModelTurnRunner: () => ({ execute: executeModel }),
+        createE2eAgentRunner: () => ({ execute: executeModel }),
+      });
+      const claim = claimWithConsumedDuration(
+        INVESTIGATION_EXECUTION_DURATION_LIMIT_MS - 100,
+        "pr-e2e",
+      );
+      const signal = new AbortController().signal;
+      const startedAtMs = Date.now();
+      f.coordinator.execute.mockImplementation(async (accepted, observedSignal) => {
+        expect(accepted).toBe(claim);
+        expect(observedSignal).toBe(signal);
+        expect(observedSignal.aborted).toBe(false);
+        expect(f.captured.coordinator?.executionStartedAtMs).toBe(startedAtMs);
+        expect(f.captured.coordinator?.executionDeadlineAtMs).toBe(startedAtMs + 100);
+        expect(f.captured.coordinator!.executionDeadlineAtMs).toBeLessThanOrEqual(Date.now());
+        await f.captured.coordinator!.onAttemptCleanupConfirmed?.();
+      });
+      const execution = f.captured.service!.executor.execute(claim, signal);
+      try {
+        await entered.promise;
+        await vi.advanceTimersByTimeAsync(99);
+        expect(f.coordinator.execute).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await execution;
+        expect(f.coordinator.execute).toHaveBeenCalledOnce();
+        expect(f.outputJournal.closeAttempt).toHaveBeenCalledWith(claim.task.id, claim.attempt.id);
+        expect(f.cleanupJournal.localCleanupConfirmed).not.toHaveBeenCalled();
+        expect(f.cleanupJournal.guardReleased).not.toHaveBeenCalled();
+        expect(f.cleanupJournal.acknowledged).not.toHaveBeenCalled();
+        expect(executeModel).not.toHaveBeenCalled();
+        expect(cleanupWorkspace).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+        if (stage === "cleanup-register") {
+          expect(acquireDesktopGuard).not.toHaveBeenCalled();
+          expect(releaseGuard).not.toHaveBeenCalled();
+          expect(f.cleanupJournal.executionStarted).not.toHaveBeenCalled();
+        } else {
+          expect(acquireDesktopGuard).toHaveBeenCalledOnce();
+          expect(releaseGuard).toHaveBeenCalledOnce();
+          expect(guard.state).toBe("released");
+        }
+        recorded.resolve();
+        await lateCleanupRecorded.promise;
+        expect(f.cleanupJournal.localCleanupConfirmed).toHaveBeenCalledExactlyOnceWith(
+          claim.attempt.id,
+        );
+        expect(f.cleanupJournal.guardReleased).toHaveBeenCalledExactlyOnceWith(claim.attempt.id);
+        expect(f.cleanupJournal.acknowledged).not.toHaveBeenCalled();
+        expect(f.coordinator.execute).toHaveBeenCalledOnce();
+        expect(executeModel).not.toHaveBeenCalled();
+        expect(acquireDesktopGuard).toHaveBeenCalledTimes(stage === "cleanup-register" ? 0 : 1);
+        expect(releaseGuard).toHaveBeenCalledTimes(stage === "cleanup-register" ? 0 : 1);
+      } finally {
+        recorded.resolve();
+        try {
+          await execution.catch(() => undefined);
+          await runtime.stop();
+        } finally {
+          vi.useRealTimers();
+        }
+      }
+    },
+  );
+
+  it("releases an owned guard marker before coordinating an expired acquisition", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-02T00:00:00.000Z") });
+    const f = fixture();
+    const entered = Promise.withResolvers<void>();
+    const executeModel = vi.fn(never);
+    const acquireGuard = vi.fn(never);
+    const cleanupWorkspace = vi.fn(async () => {});
+    const releaseGuard = vi.fn(async () => {
+      f.events.push("guard.marker.release");
+    });
+    let acquisitionSignal: AbortSignal | undefined;
+    const acquireDesktopGuard = vi.fn<
+      NonNullable<InvestigationRuntimeDependencies["acquireDesktopGuard"]>
+    >(async (options) => {
+      acquisitionSignal = options.signal;
+      options.signal!.throwIfAborted();
+      entered.resolve();
+      await new Promise<void>((_resolve, reject) => {
+        options.signal!.addEventListener("abort", () => reject(options.signal!.reason), {
+          once: true,
+        });
+      });
+      throw new Error("An aborted guard acquisition cannot return a held guard.");
+    });
+    const runtime = await createInvestigationExecutionRuntime(f.config, logger, {
+      ...f.dependencies,
+      acquireDesktopGuard,
+      createCleanupRecoveryOperations: () => ({ acquireGuard, cleanupWorkspace, releaseGuard }),
+      createModelTurnRunner: () => ({ execute: executeModel }),
+      createE2eAgentRunner: () => ({ execute: executeModel }),
+    });
+    const claim = claimWithConsumedDuration(
+      INVESTIGATION_EXECUTION_DURATION_LIMIT_MS - 100,
+      "pr-e2e",
+    );
+    const signal = new AbortController().signal;
+    const startedAtMs = Date.now();
+    f.coordinator.execute.mockImplementation(async (accepted, observedSignal) => {
+      expect(accepted).toBe(claim);
+      expect(observedSignal).toBe(signal);
+      expect(observedSignal.aborted).toBe(false);
+      expect(f.captured.coordinator?.executionDeadlineAtMs).toBe(startedAtMs + 100);
+      expect(f.captured.coordinator!.executionDeadlineAtMs).toBeLessThanOrEqual(Date.now());
+      expect(releaseGuard).toHaveBeenCalledOnce();
+      f.events.push("coordinator.expired");
+      await f.captured.coordinator!.onAttemptCleanupConfirmed!();
+    });
+    const execution = f.captured.service!.executor.execute(claim, signal);
+    try {
+      await entered.promise;
+      expect(acquisitionSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(releaseGuard).not.toHaveBeenCalled();
+      expect(f.coordinator.execute).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await execution;
+      expect(acquisitionSignal?.reason).toMatchObject({
+        name: "ModelBudgetExceededError",
+        kind: "duration",
+      });
+      expect(releaseGuard).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ attemptId: claim.attempt.id }),
+      );
+      expect(f.events).toEqual([
+        "directories.prepare",
+        "guard.marker.release",
+        "coordinator.expired",
+      ]);
+      expect(f.coordinator.execute).toHaveBeenCalledOnce();
+      expect(f.cleanupJournal.localCleanupConfirmed).toHaveBeenCalledWith(claim.attempt.id);
+      expect(f.cleanupJournal.guardReleased).toHaveBeenCalledWith(claim.attempt.id);
+      expect(f.cleanupJournal.executionStarted).not.toHaveBeenCalled();
+      expect(f.cleanupJournal.acknowledged).not.toHaveBeenCalled();
+      expect(executeModel).not.toHaveBeenCalled();
+      expect(acquireGuard).not.toHaveBeenCalled();
+      expect(cleanupWorkspace).not.toHaveBeenCalled();
+      expect(f.outputJournal.closeAttempt).toHaveBeenCalledWith(claim.task.id, claim.attempt.id);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      try {
+        await vi.advanceTimersByTimeAsync(100);
+        await execution.catch(() => undefined);
+        await runtime.stop();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
   it("reports permanent output delivery failures using only the journal's bounded diagnostic", async () => {
     const f = fixture();
     const error = vi.fn();
@@ -934,6 +1282,7 @@ describe("production investigation runtime composition", () => {
       lockDirectory: f.config.desktopLockDirectory,
       ownerId: `${claim.attempt.id}:${claim.lease.fence}`,
       ownerToken: "12345678-1234-1234-1234-123456789abc",
+      signal: expect.any(AbortSignal),
     });
     expect(f.events).toEqual([
       "directories.prepare",

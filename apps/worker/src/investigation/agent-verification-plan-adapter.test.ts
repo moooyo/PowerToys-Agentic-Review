@@ -735,7 +735,7 @@ describe("saved-plan agent verification adapter", () => {
       ],
     };
     f.setSnapshot(f.snapshot);
-    const invocationBudget = { remainingTokens: 321, deadlineAtMs: Date.now() + 60_000 };
+    const invocationBudget = { deadlineAtMs: Date.now() + 60_000 };
     const usageLease: NonNullable<Context["usageLease"]> = {
       attemptId: f.attempt.id,
       fence: f.attempt.leaseVersion,
@@ -863,7 +863,7 @@ describe("saved-plan agent verification adapter", () => {
     "confirms cleanup after %s",
     async (failure) => {
       const f = fixture();
-      const stopped = new ModelBudgetExceededError("tokens");
+      const stopped = new ModelBudgetExceededError("duration");
       if (failure === "model failure") f.execute.mockRejectedValueOnce(stopped);
       if (failure === "invalid output")
         f.execute.mockResolvedValueOnce({

@@ -394,7 +394,7 @@ describe("E2E interruption recovery", () => {
         startedAt: "2026-09-19T00:00:00Z",
         completedAt: null,
       };
-      const stopped = new ModelBudgetExceededError("tokens");
+      const stopped = new ModelBudgetExceededError("duration");
       const execute = vi.fn(async () => {
         throw stopped;
       });
@@ -423,7 +423,7 @@ describe("E2E interruption recovery", () => {
       const pending = runner.execute({
         ...f.input,
         workspace: frozen.workspace,
-        invocationBudget: { remainingTokens: 1, deadlineAtMs: Date.now() + 60_000 },
+        invocationBudget: { deadlineAtMs: Date.now() + 60_000 },
       });
       if (cleanupFails)
         await expect(pending).rejects.toMatchObject({ code: "E2E_CLEANUP_UNCONFIRMED" });
@@ -546,7 +546,7 @@ describe("E2E interruption recovery", () => {
       jsonRunner: { execute },
       createTools: () => tools,
     });
-    const invocationBudget = { remainingTokens: 321, deadlineAtMs: Date.now() + 60_000 };
+    const invocationBudget = { deadlineAtMs: Date.now() + 60_000 };
     const result = await runner.execute({
       ...f.input,
       workspace: frozen.workspace,

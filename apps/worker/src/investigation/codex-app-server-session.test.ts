@@ -83,7 +83,6 @@ function fixture(
     prompt: "Inspect the proposed change.",
     outputSchema: { type: "object", properties: { summary: { type: "string" } } },
     passiveProposal: false,
-    maximumTokens: 1_000,
     maximumResultBytes: 16_384,
     ...configuration,
     onUsage,
@@ -211,6 +210,7 @@ describe("Codex app-server session protocol", () => {
       completion("completed", [foreign], {
         turn: { id: "other-turn", status: "completed", items: [foreign] },
       }),
+      notification("thread/compacted", { threadId: "other-thread" }),
     );
     expect(f.onUsage).not.toHaveBeenCalled();
     expect(f.onEvent).not.toHaveBeenCalled();
@@ -290,17 +290,35 @@ describe("Codex app-server session protocol", () => {
     counters(60, 30, { reasoningOutputTokens: 4 }),
     counters(60, 30, { cacheWriteInputTokens: 3 }),
     counters(60, 30, { cachedInputTokens: null }),
-  ])("stops if a previously observed counter decreases or disappears: %j", async (next) => {
-    const f = fixture();
-    await f.start();
-    f.push(usage(), usage(next));
-    expect(f.onStop).toHaveBeenCalledExactlyOnceWith("usage_unavailable");
-    expect(f.onUsage).toHaveBeenCalledTimes(1);
-    expect(f.session.snapshot(true)).toMatchObject({
-      completeness: "partial",
-      usage: { inputTokens: 60, outputTokens: 30, totalTokens: 90 },
-    });
-  });
+  ])(
+    "retains observed usage and completes when a counter decreases or disappears: %j",
+    async (next) => {
+      const f = fixture();
+      await f.start();
+      f.push(usage(), usage(next));
+      expect(f.onStop).not.toHaveBeenCalled();
+      expect(f.onUsage).toHaveBeenCalledTimes(1);
+      expect(f.session.snapshot(true)).toMatchObject({
+        completeness: "partial",
+        usage: { inputTokens: 60, outputTokens: 30, totalTokens: 90 },
+      });
+      const answer = JSON.stringify({ summary: "The investigation completed." });
+      f.push(
+        usage(counters(70, 40)),
+        completion("completed", [{ id: "answer", type: "agentMessage", text: answer }]),
+      );
+      await nextImmediate();
+      expect(f.onStop).not.toHaveBeenCalled();
+      expect(f.onUsage).toHaveBeenCalledTimes(2);
+      expect(f.session.snapshot(true)).toMatchObject({
+        completeness: "partial",
+        completedTurns: 1,
+        usage: { inputTokens: 70, outputTokens: 40, totalTokens: 110 },
+      });
+      expect(f.session.finalMessage()).toBe(answer);
+      expect(f.stdin.close).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     null,
@@ -309,62 +327,152 @@ describe("Codex app-server session protocol", () => {
     counters(60, 30, { totalTokens: 89 }),
     counters(60, 30, { cachedInputTokens: 61 }),
     counters(60, 30, { reasoningOutputTokens: 31 }),
-  ])("stops when bound usage is unavailable or inconsistent: %j", async (total) => {
+  ])(
+    "completes with incomplete accounting when bound usage is unavailable or inconsistent: %j",
+    async (total) => {
+      const f = fixture();
+      await f.start();
+      const answer = JSON.stringify({ summary: "The result is independent of accounting." });
+      f.push(
+        usage(total),
+        completion("completed", [{ id: "answer", type: "agentMessage", text: answer }]),
+      );
+      await nextImmediate();
+      expect(f.onStop).not.toHaveBeenCalled();
+      expect(f.session.snapshot(true).completedTurns).toBe(1);
+      expect(f.session.snapshot(true).completeness).toBe(
+        total === null || Object.keys(total).length === 0 ? "unavailable" : "partial",
+      );
+      if (total === null || Object.keys(total).length === 0)
+        expect(f.session.snapshot(true).usage.totalTokens).toBeNull();
+      expect(f.session.finalMessage()).toBe(answer);
+      expect(f.stdin.close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("returns a completed answer with unavailable accounting when no usage was emitted", async () => {
     const f = fixture();
     await f.start();
-    f.push(usage(total));
-    expect(f.onStop).toHaveBeenCalledExactlyOnceWith("usage_unavailable");
-    expect(f.session.snapshot(true).completeness).not.toBe("complete");
+    const answer = JSON.stringify({ summary: "The completed result has no usage record." });
+    f.push(completion("completed", [{ id: "answer", type: "agentMessage", text: answer }]));
+    await nextImmediate();
+    expect(f.onStop).not.toHaveBeenCalled();
+    expect(f.onUsage).not.toHaveBeenCalled();
+    expect(f.session.snapshot(true)).toMatchObject({
+      completeness: "unavailable",
+      completedTurns: 1,
+      usage: { inputTokens: null, outputTokens: null, totalTokens: null },
+    });
+    expect(f.session.finalMessage()).toBe(answer);
+    expect(f.stdin.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps accounting partial after usable counters follow a missing usage record", async () => {
+    const f = fixture();
+    await f.start();
+    f.push(usage(null), usage(), completion());
+    await nextImmediate();
+    expect(f.onStop).not.toHaveBeenCalled();
+    expect(f.onUsage).toHaveBeenCalledTimes(1);
+    expect(f.session.snapshot(true)).toMatchObject({
+      completeness: "partial",
+      completedTurns: 1,
+      usage: { totalTokens: 90 },
+    });
+  });
+
+  it("keeps malformed protocol output fatal after accounting becomes incomplete", async () => {
+    const f = fixture();
+    await f.start();
+    f.push(usage(null));
+    f.session.push(Buffer.from("invalid JSON\n"));
+    expect(f.onStop).toHaveBeenCalledExactlyOnceWith("protocol_error");
+    f.push(completion("completed", [{ id: "answer", type: "agentMessage", text: "Done." }]));
+    expect(f.session.finalMessage()).toBe("");
+    expect(f.session.snapshot(true).completeness).toBe("unavailable");
   });
 
   it.each([
     notification("thread/compacted", { threadId }),
     item({ id: "compaction-1", type: "contextCompaction" }, "item/started"),
     item({ id: "compaction-1", type: "contextCompaction" }),
-  ])("stops rather than trusting usage across context compaction: %j", async (event) => {
+  ])(
+    "continues through context compaction while retaining partial accounting: %j",
+    async (event) => {
+      const f = fixture();
+      await f.start();
+      const answer = JSON.stringify({ summary: "The investigation continued after compaction." });
+      f.push(
+        usage(),
+        event,
+        usage(counters(70, 40)),
+        completion("completed", [{ id: "answer", type: "agentMessage", text: answer }]),
+      );
+      await nextImmediate();
+      expect(f.onStop).not.toHaveBeenCalled();
+      expect(f.session.snapshot(true)).toMatchObject({
+        completeness: "partial",
+        completedTurns: 1,
+        usage: { inputTokens: 70, outputTokens: 40, totalTokens: 110 },
+      });
+      expect(f.session.finalMessage()).toBe(answer);
+      expect(f.stdin.close).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("retains streamed usage above former token limits without stopping the turn", async () => {
     const f = fixture();
     await f.start();
-    f.push(usage(), event);
-    expect(f.onStop).toHaveBeenCalledExactlyOnceWith("usage_unavailable");
-    expect(f.session.snapshot(true).completeness).toBe("partial");
-  });
-
-  it("stops once when usage exceeds the budget and preserves the observed total", async () => {
-    const f = fixture({ maximumTokens: 100 });
-    await f.start();
-    f.push(usage(counters(70, 31)), usage(counters(70, 31)));
-    expect(f.onStop).toHaveBeenCalledExactlyOnceWith("token_budget");
+    f.push(usage(counters(8_000_000, 5_000_000)), usage(counters(8_000_000, 5_000_000)));
+    await nextImmediate();
+    expect(f.onStop).not.toHaveBeenCalled();
+    expect(f.onUsage).toHaveBeenCalledTimes(1);
+    expect(f.stdin.close).not.toHaveBeenCalled();
     expect(f.session.snapshot(true)).toMatchObject({
       completeness: "partial",
-      usage: { totalTokens: 101 },
+      usage: { totalTokens: 13_000_000 },
     });
   });
 
-  it("allows a turn to complete exactly at budget in the same stdout batch", async () => {
-    const f = fixture({ maximumTokens: 100 });
+  it("accepts completion with unrestricted token usage in the same stdout batch", async () => {
+    const f = fixture();
     await f.start();
     f.push(
-      usage(counters(60, 40)),
+      usage(counters(16_000_000, 4_000_000)),
       completion("completed", [{ id: "answer", type: "agentMessage", text: "Done." }]),
     );
     await nextImmediate();
     expect(f.onStop).not.toHaveBeenCalled();
     expect(f.session.snapshot(true)).toMatchObject({
       completeness: "complete",
-      usage: { totalTokens: 100 },
+      usage: { totalTokens: 20_000_000 },
     });
     expect(f.session.finalMessage()).toBe("Done.");
     expect(f.stdin.close).toHaveBeenCalledTimes(1);
   });
 
-  it("stops on the next immediate if a turn remains active exactly at budget", async () => {
-    const f = fixture({ maximumTokens: 100 });
+  it("keeps an active turn running as token usage increases between stdout batches", async () => {
+    const f = fixture();
     await f.start();
-    f.push(usage(counters(60, 40)));
+    f.push(usage(counters(10_000_000, 2_000_000)));
     expect(f.onStop).not.toHaveBeenCalled();
     await nextImmediate();
-    expect(f.onStop).toHaveBeenCalledExactlyOnceWith("token_budget");
-    expect(f.session.snapshot(true).completeness).toBe("partial");
+    f.push(usage(counters(12_000_000, 4_000_000)));
+    await nextImmediate();
+    expect(f.onStop).not.toHaveBeenCalled();
+    expect(f.stdin.close).not.toHaveBeenCalled();
+    expect(f.session.snapshot(true)).toMatchObject({
+      completeness: "partial",
+      usage: { totalTokens: 16_000_000 },
+    });
+    f.push(completion());
+    await nextImmediate();
+    expect(f.onStop).not.toHaveBeenCalled();
+    expect(f.session.snapshot(true)).toMatchObject({
+      completeness: "complete",
+      usage: { totalTokens: 16_000_000 },
+    });
+    expect(f.stdin.close).toHaveBeenCalledTimes(1);
   });
 
   it("sends one interrupt and waits for the interrupted turn before closing stdin", async () => {
@@ -444,6 +552,7 @@ describe("Codex app-server session protocol", () => {
   it("rejects a bound reroute to another model", async () => {
     const f = fixture();
     await f.start();
+    f.push(usage(null));
     f.push(notification("model/rerouted", { threadId, turnId, toModel: "gpt-6-luna" }));
     expect(f.onStop).not.toHaveBeenCalled();
     f.push(notification("model/rerouted", { threadId, turnId, toModel: "gpt-6-astra" }));

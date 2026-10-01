@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  getInvestigationExecutionDurationLimitMs,
   type InvestigationCheckpointRequest,
   type InvestigationDiagnostic,
   type InvestigationLoopCheckpointV1,
@@ -68,6 +69,9 @@ export interface InvestigationLoopCoordinatorOptions {
   readonly onAttemptCleanupUnconfirmed?: (code: string) => Promise<void>;
   readonly now?: () => number;
   readonly createId?: () => string;
+  /** Runtime admission and every model round share this absolute execution deadline. */
+  readonly executionDeadlineAtMs?: number;
+  readonly executionStartedAtMs?: number;
 }
 
 class InvestigationExecutionStopped extends Error {
@@ -130,8 +134,20 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
     const modelRunner =
       claim.task.kind === "pr-e2e" ? this.options.e2eAgentRunner : this.options.modelTurnRunner;
     const budget = new AbortController();
-    const remainingDuration = claim.task.budget.maxDurationMs - checkpoint.consumed.durationMs;
-    const deadlineAtMs = this.#now() + remainingDuration;
+    const deadlineAtMs =
+      this.options.executionDeadlineAtMs ??
+      this.#now() +
+        getInvestigationExecutionDurationLimitMs(claim.task.budget) -
+        checkpoint.consumed.durationMs;
+    const remainingDuration = deadlineAtMs - this.#now();
+    if (remainingDuration <= 0)
+      budget.abort(
+        new InvestigationExecutionStopped(
+          "interrupted",
+          "BUDGET_EXHAUSTED",
+          "The frozen task execution duration was exhausted.",
+        ),
+      );
     const deadline = setTimeout(
       () =>
         budget.abort(
@@ -148,7 +164,7 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
       heartbeat.executionSignal,
       budget.signal,
     ]);
-    let lastAccountedAt = this.#now();
+    let lastAccountedAt = this.options.executionStartedAtMs ?? this.#now();
     let lastAccountedDuration = checkpoint.consumed.durationMs;
     try {
       await heartbeat.start();
@@ -310,10 +326,6 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
               signal: executionSignal,
               usageLease: claim.lease,
               invocationBudget: {
-                remainingTokens: Math.max(
-                  0,
-                  claim.task.budget.maxTokens - checkpoint.consumed.tokens,
-                ),
                 deadlineAtMs,
               },
               onStepStarted: async (event) => {
@@ -452,10 +464,6 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
             onActivity: progress.onActivity,
             usageLease: claim.lease,
             invocationBudget: {
-              remainingTokens: Math.max(
-                0,
-                claim.task.budget.maxTokens - checkpoint.consumed.tokens,
-              ),
               deadlineAtMs,
             },
             ...(correction === undefined ? {} : { correction }),
@@ -523,8 +531,6 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
                 ) ||
                 pendingInvocationId === undefined ||
                 pendingModelUsage?.tokens === undefined ||
-                pendingModelUsage.tokens === null ||
-                !pendingUsageComplete ||
                 !cleanupConfirmed ||
                 modelRunner.markUsageDisposition === undefined ||
                 findUnconfirmedProcess(error) !== null
@@ -566,20 +572,13 @@ export class InvestigationLoopCoordinator implements InvestigationClaimExecutor 
           executionSignal.throwIfAborted();
           await progress.reportProgress("validate_result", executionSignal);
           await workspace.assertIntegrity();
-          if (turn.usage.tokens === null) {
-            throw new InvestigationExecutionStopped(
-              "interrupted",
-              "MODEL_USAGE_UNAVAILABLE",
-              "The CLI did not provide token consumption, so the frozen token budget cannot be enforced for another round.",
-            );
-          }
           const usage = {
             durationMs: Math.max(
               0,
               Math.floor(this.#now() - lastAccountedAt) -
                 (checkpoint.consumed.durationMs - lastAccountedDuration),
             ),
-            tokens: turn.usage.tokens,
+            tokens: pendingModelUsage?.tokens ?? turn.usage.tokens,
             reportBytes: Buffer.byteLength(JSON.stringify(turn.round.analysis), "utf8"),
           };
           const validity = validateInvestigationAnalysisForTask(

@@ -781,16 +781,46 @@ describe("ProductionInvestigationPlanExecutor", () => {
     },
   );
 
-  it("blocks unknown model usage before applying any proposed edits", async () => {
+  it("accepts valid proposed edits and records unknown model token usage", async () => {
     const f = explicitIssueSourceFixture("issue-fix");
+    const markUsageDisposition = vi.fn(async () => undefined);
+    const executor = new ProductionInvestigationPlanExecutor({
+      processLimits: limits,
+      modelEditAdapter: { execute: f.edit, markUsageDisposition },
+    });
     f.edit.mockResolvedValue({
       proposal: {
         schemaVersion: "InvestigationModelEditsV1",
         summary: "A proposed edit.",
-        edits: [],
+        edits: [
+          {
+            path: "src/file.ts",
+            expectedDigest: createHash("sha256").update("old").digest("hex"),
+            content: "new",
+          },
+        ],
       },
-      usage: { tokens: null, source: "unavailable" },
+      usage: { tokens: null, source: "unavailable", invocationId: "edit-invocation" },
     });
+    const result = await executor.execute(f.input, f.context);
+    expect(result.outcome).toBe("completed");
+    expect(result.diagnostics).toEqual([]);
+    expect(f.workspace.applyEdits).toHaveBeenCalledOnce();
+    expect(result.state.completedSteps[0]?.modelUsage).toEqual({
+      tokens: null,
+      durationMs: expect.any(Number),
+    });
+    expect(result.subjects[0]?.kind).toBe("local_patch");
+    expect(markUsageDisposition).toHaveBeenCalledExactlyOnceWith("edit-invocation", "accepted");
+  });
+
+  it.each([-1, Number.NaN])("rejects an invalid edit token usage counter: %s", async (tokens) => {
+    const f = explicitIssueSourceFixture("issue-fix");
+    const executeEdit = f.edit.getMockImplementation()!;
+    f.edit.mockImplementation(async (...args) => ({
+      ...(await executeEdit(...args)),
+      usage: { tokens, source: "cli" },
+    }));
     const result = await f.executor.execute(f.input, f.context);
     expect(result.outcome).toBe("blocked");
     expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_USAGE_UNAVAILABLE");
@@ -798,20 +828,19 @@ describe("ProductionInvestigationPlanExecutor", () => {
     expect(result.state.completedSteps[0]?.modelUsage).toBeUndefined();
   });
 
-  it("records observed token consumption and rejects edits beyond the remaining budget", async () => {
+  it("records observed token consumption and accepts edits beyond the configured token limit", async () => {
     const f = explicitIssueSourceFixture("issue-fix");
-    const result = await f.executor.execute(
-      { ...f.input, consumedTokens: f.task.budget.maxTokens - 1 },
-      f.context,
-    );
-    expect(result.outcome).toBe("blocked");
-    expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_TOKEN_BUDGET_EXCEEDED");
+    f.task.budget.maxTokens = 100;
+    const result = await f.executor.execute({ ...f.input, consumedTokens: 99 }, f.context);
+    expect(result.outcome).toBe("completed");
+    expect(result.diagnostics).toEqual([]);
     expect(result.state.completedSteps[0]?.modelUsage?.tokens).toBe(120);
-    expect(f.workspace.applyEdits).not.toHaveBeenCalled();
+    expect(f.workspace.applyEdits).toHaveBeenCalledOnce();
   });
 
-  it("deducts each edit from the invocation allowance while retaining the attempt deadline", async () => {
+  it("shares the attempt deadline across edits after the configured token limit is exceeded", async () => {
     const f = explicitIssueSourceFixture("issue-fix");
+    f.task.budget.maxTokens = 200;
     f.plan.steps.push({ ...f.plan.steps[0]!, id: "second-edit", checkIds: [] });
     f.plan.digest = createHash("sha256")
       .update(investigationCanonicalJson(investigationPlanDigestPayload(f.plan)))
@@ -824,7 +853,7 @@ describe("ProductionInvestigationPlanExecutor", () => {
       operation,
       digest: digestInvestigationExecutableStep({ stepId: "second-edit", operation }),
     });
-    const invocationBudget = { remainingTokens: 300, deadlineAtMs: Date.now() + 60_000 };
+    const invocationBudget = { deadlineAtMs: Date.now() + 60_000 };
     const result = await f.executor.execute(
       { ...f.input, consumedTokens: 200 },
       { ...f.context, invocationBudget },
@@ -832,19 +861,20 @@ describe("ProductionInvestigationPlanExecutor", () => {
     expect(result.outcome).toBe("completed");
     expect(f.edit.mock.calls.map(([, context]) => context.invocationBudget)).toEqual([
       invocationBudget,
-      { remainingTokens: 180, deadlineAtMs: invocationBudget.deadlineAtMs },
+      invocationBudget,
     ]);
     expect(result.state.completedSteps.map((step) => step.modelUsage?.tokens)).toEqual([120, 120]);
+    expect(f.workspace.applyEdits).toHaveBeenCalledTimes(2);
   });
 
-  it("does not dispatch an edit when its supplied invocation allowance is exhausted", async () => {
+  it("does not dispatch an edit when its supplied attempt deadline is exhausted", async () => {
     const f = explicitIssueSourceFixture("issue-fix");
     await expect(
       f.executor.execute(f.input, {
         ...f.context,
-        invocationBudget: { remainingTokens: 0, deadlineAtMs: Date.now() + 60_000 },
+        invocationBudget: { deadlineAtMs: Date.now() },
       }),
-    ).rejects.toBeInstanceOf(ModelBudgetExceededError);
+    ).rejects.toMatchObject({ name: "ModelBudgetExceededError", kind: "duration" });
     expect(f.edit).not.toHaveBeenCalled();
     expect(f.context.onStepStarted).not.toHaveBeenCalled();
     expect(f.workspace.applyEdits).not.toHaveBeenCalled();
@@ -852,12 +882,12 @@ describe("ProductionInvestigationPlanExecutor", () => {
 
   it("propagates a live edit budget stop without recording a successful step or applying edits", async () => {
     const f = explicitIssueSourceFixture("issue-fix");
-    const stopped = new ModelBudgetExceededError("tokens");
+    const stopped = new ModelBudgetExceededError("duration");
     f.edit.mockRejectedValue(stopped);
     await expect(
       f.executor.execute(f.input, {
         ...f.context,
-        invocationBudget: { remainingTokens: 1, deadlineAtMs: Date.now() + 60_000 },
+        invocationBudget: { deadlineAtMs: Date.now() + 60_000 },
       }),
     ).rejects.toBe(stopped);
     expect(f.context.onStepStarted).toHaveBeenCalledOnce();
@@ -934,7 +964,7 @@ describe("ProductionInvestigationPlanExecutor", () => {
       "executes %s with separate authoritative results for each saved check",
       async (kind) => {
         const f = agentVerificationFixture(["failed", "passed"], kind);
-        const invocationBudget = { remainingTokens: 200, deadlineAtMs: Date.now() + 10_000 };
+        const invocationBudget = { deadlineAtMs: Date.now() + 10_000 };
         const usageLease = { attemptId: f.input.attempt.id, fence: 1, leaseToken: "lease" };
         const onRuntimeObservation = vi.fn(async () => undefined);
         const onProgress = vi.fn();
@@ -1080,45 +1110,97 @@ describe("ProductionInvestigationPlanExecutor", () => {
       );
     });
 
-    it.each(["scenario", "usage", "evidence-attempt", "artifact-subject", "visual-receipt"])(
-      "rejects persisted verification with an invalid %s observation",
-      async (kind) => {
-        const f = agentVerificationFixture();
-        const first = await f.executor.execute(f.input, f.context);
-        const prior = structuredClone(first.state);
-        const completed = prior.completedSteps[0]!;
-        if (kind === "scenario") completed.validation.checks[0]!.scenarioId = "another-check";
-        if (kind === "usage") delete completed.modelUsage;
-        if (kind === "evidence-attempt")
-          completed.verificationEvidence[0]!.provenance.attemptId = "another-attempt";
-        if (kind === "artifact-subject") completed.artifacts[1]!.subjectRef = "another-subject";
-        if (kind === "visual-receipt")
-          completed.validation.checks[0]!.evidenceRefs = ["screenshot-0"];
-        f.executeAgent.mockClear();
-        const result = await f.executor.execute({ ...f.input, priorState: prior }, f.context);
-        expect(result.diagnostics[0]?.code).toBe("PLAN_RESUME_UNSAFE");
-        expect(f.executeAgent).not.toHaveBeenCalled();
-      },
-    );
+    it.each([
+      "scenario",
+      "missing-usage-receipt",
+      "evidence-attempt",
+      "artifact-subject",
+      "visual-receipt",
+    ])("rejects persisted verification with an invalid %s observation", async (kind) => {
+      const f = agentVerificationFixture();
+      const first = await f.executor.execute(f.input, f.context);
+      const prior = structuredClone(first.state);
+      const completed = prior.completedSteps[0]!;
+      if (kind === "scenario") completed.validation.checks[0]!.scenarioId = "another-check";
+      if (kind === "missing-usage-receipt") delete completed.modelUsage;
+      if (kind === "evidence-attempt")
+        completed.verificationEvidence[0]!.provenance.attemptId = "another-attempt";
+      if (kind === "artifact-subject") completed.artifacts[1]!.subjectRef = "another-subject";
+      if (kind === "visual-receipt")
+        completed.validation.checks[0]!.evidenceRefs = ["screenshot-0"];
+      f.executeAgent.mockClear();
+      const result = await f.executor.execute({ ...f.input, priorState: prior }, f.context);
+      expect(result.diagnostics[0]?.code).toBe("PLAN_RESUME_UNSAFE");
+      expect(f.executeAgent).not.toHaveBeenCalled();
+    });
 
-    it("does not claim passed checks when trusted model usage is unavailable", async () => {
+    it("accepts valid verification and records unknown model token usage", async () => {
       const f = agentVerificationFixture();
       f.executeAgent.mockResolvedValueOnce({
         ...f.observation,
         usage: { tokens: null, source: "unavailable", invocationId: "agent-invocation" },
       });
       const result = await f.executor.execute(f.input, f.context);
-      expect(result.outcome).toBe("blocked");
-      expect(result.validation.checks.map((check) => check.status)).toEqual(["blocked", "blocked"]);
-      expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_USAGE_UNAVAILABLE");
-      expect(f.completed[0]?.modelUsage).toBeUndefined();
+      expect(result.outcome).toBe("completed");
+      expect(result.validation.checks).toEqual(f.observation.checks);
+      expect(result.diagnostics).toEqual([]);
+      expect(f.completed[0]?.modelUsage).toEqual({ tokens: null, durationMs: 42 });
       expect(f.markUsageDisposition).toHaveBeenCalledExactlyOnceWith(
         "agent-invocation",
-        "rejected",
+        "accepted",
       );
     });
 
-    it("rejects a blocked checkpoint that retains passed checks without trusted usage", async () => {
+    it("reuses completed verification with unknown token usage without another invocation", async () => {
+      const f = agentVerificationFixture();
+      f.executeAgent.mockResolvedValueOnce({
+        ...f.observation,
+        usage: { tokens: null, source: "unavailable", invocationId: "agent-invocation" },
+      });
+      const first = await f.executor.execute(f.input, f.context);
+      f.executeAgent.mockClear();
+      f.markUsageDisposition.mockClear();
+      const resumed = await f.executor.execute(
+        {
+          ...f.input,
+          attempt: { ...f.input.attempt, id: "next-agent-attempt", number: 2 },
+          priorState: first.state,
+        },
+        f.context,
+      );
+      expect(resumed.outcome).toBe("completed");
+      expect(resumed.diagnostics).toEqual([]);
+      expect(resumed.state.completedSteps[0]?.modelUsage).toEqual({ tokens: null, durationMs: 42 });
+      expect(resumed.validation.checks).toEqual(first.validation.checks);
+      expect(resumed.verificationEvidence).toEqual(first.verificationEvidence);
+      expect(f.executeAgent).not.toHaveBeenCalled();
+      expect(f.markUsageDisposition).not.toHaveBeenCalled();
+    });
+
+    it.each([-1, Number.NaN])(
+      "rejects an invalid verification token usage counter: %s",
+      async (tokens) => {
+        const f = agentVerificationFixture();
+        f.executeAgent.mockResolvedValueOnce({
+          ...f.observation,
+          usage: { tokens, source: "cli", invocationId: "agent-invocation" },
+        });
+        const result = await f.executor.execute(f.input, f.context);
+        expect(result.outcome).toBe("blocked");
+        expect(result.validation.checks.map((check) => check.status)).toEqual([
+          "blocked",
+          "blocked",
+        ]);
+        expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_USAGE_UNAVAILABLE");
+        expect(f.completed[0]?.modelUsage).toBeUndefined();
+        expect(f.markUsageDisposition).toHaveBeenCalledExactlyOnceWith(
+          "agent-invocation",
+          "rejected",
+        );
+      },
+    );
+
+    it("rejects a blocked checkpoint that retains passed checks without a model usage receipt", async () => {
       const f = agentVerificationFixture(["passed", "blocked"]);
       const first = await f.executor.execute(f.input, f.context);
       const prior = structuredClone(first.state);
@@ -1132,35 +1214,39 @@ describe("ProductionInvestigationPlanExecutor", () => {
       expect(f.executeAgent).not.toHaveBeenCalled();
     });
 
-    it("charges trusted usage but blocks results that exceed the remaining allowance", async () => {
+    it("records trusted usage and accepts verification beyond the configured token limit", async () => {
       const f = agentVerificationFixture();
-      const result = await f.executor.execute(f.input, {
-        ...f.context,
-        invocationBudget: { remainingTokens: 100, deadlineAtMs: Date.now() + 10_000 },
-      });
-      expect(result.outcome).toBe("blocked");
-      expect(result.validation.checks.map((check) => check.status)).toEqual(["blocked", "blocked"]);
-      expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_TOKEN_BUDGET_EXCEEDED");
+      f.task.budget.maxTokens = 100;
+      const result = await f.executor.execute(
+        { ...f.input, consumedTokens: 99 },
+        {
+          ...f.context,
+          invocationBudget: { deadlineAtMs: Date.now() + 10_000 },
+        },
+      );
+      expect(result.outcome).toBe("completed");
+      expect(result.validation.checks.map((check) => check.status)).toEqual(["passed", "passed"]);
+      expect(result.diagnostics).toEqual([]);
       expect(f.completed[0]?.modelUsage).toEqual({ tokens: 120, durationMs: 42 });
       expect(f.markUsageDisposition).toHaveBeenCalledExactlyOnceWith(
         "agent-invocation",
-        "rejected",
+        "accepted",
       );
     });
 
-    it("does not invoke the adapter after the model budget is exhausted", async () => {
+    it("does not invoke the adapter after the attempt deadline is exhausted", async () => {
       const f = agentVerificationFixture();
       await expect(
         f.executor.execute(f.input, {
           ...f.context,
-          invocationBudget: { remainingTokens: 0, deadlineAtMs: Date.now() + 10_000 },
+          invocationBudget: { deadlineAtMs: Date.now() },
         }),
-      ).rejects.toBeInstanceOf(ModelBudgetExceededError);
+      ).rejects.toMatchObject({ name: "ModelBudgetExceededError", kind: "duration" });
       expect(f.executeAgent).not.toHaveBeenCalled();
       expect(f.started).toHaveLength(0);
     });
 
-    it("deducts completed verification usage before admitting the next saved step", async () => {
+    it("shares the attempt deadline and admits the next saved step after reaching the token limit", async () => {
       const f = agentVerificationFixture();
       f.task.budget.maxTokens = 120;
       const nextStep = { ...f.plan.steps[0]!, id: "next-step", checkIds: ["next-check"] };
@@ -1173,12 +1259,52 @@ describe("ProductionInvestigationPlanExecutor", () => {
         operation,
         digest: digestInvestigationExecutableStep({ stepId: nextStep.id, operation }),
       });
-      const result = await f.executor.execute(f.input, f.context);
-      expect(result.outcome).toBe("blocked");
-      expect(result.diagnostics[0]?.code).toBe("PLAN_MODEL_TOKEN_BUDGET_EXCEEDED");
-      expect(f.executeAgent).toHaveBeenCalledTimes(1);
-      expect(f.started).toHaveLength(1);
-      expect(f.completed[0]?.modelUsage?.tokens).toBe(120);
+      const nextObservation: AgentVerificationObservation = {
+        ...f.observation,
+        checks: [
+          {
+            ...f.observation.checks[0]!,
+            id: "next-check",
+            scenarioId: "next-check",
+            evidenceRefs: ["next-assertion"],
+          },
+        ],
+        evidence: [
+          {
+            ...f.observation.evidence.find((entry) => entry.id === "assertion-0")!,
+            id: "next-assertion",
+            artifactRefs: ["next-assertion.json"],
+          },
+        ],
+        artifacts: [
+          {
+            ...f.observation.artifacts.find((entry) => entry.id === "assertion-0.json")!,
+            id: "next-assertion.json",
+            name: "next-assertion.json",
+          },
+        ],
+        usage: { ...f.observation.usage, invocationId: "next-agent-invocation" },
+      };
+      f.executeAgent.mockResolvedValueOnce(f.observation).mockResolvedValueOnce(nextObservation);
+      const invocationBudget = { deadlineAtMs: Date.now() + 10_000 };
+      const result = await f.executor.execute(f.input, { ...f.context, invocationBudget });
+      expect(result.outcome).toBe("completed");
+      expect(result.diagnostics).toEqual([]);
+      expect(f.executeAgent.mock.calls.map(([, context]) => context.invocationBudget)).toEqual([
+        invocationBudget,
+        invocationBudget,
+      ]);
+      expect(f.started).toHaveLength(2);
+      expect(f.completed.map((step) => step.modelUsage?.tokens)).toEqual([120, 120]);
+      expect(result.validation.checks.map((check) => check.status)).toEqual([
+        "passed",
+        "passed",
+        "passed",
+      ]);
+      expect(f.markUsageDisposition.mock.calls).toEqual([
+        ["agent-invocation", "accepted"],
+        ["next-agent-invocation", "accepted"],
+      ]);
     });
 
     it("blocks when the generic adapter is unavailable", async () => {

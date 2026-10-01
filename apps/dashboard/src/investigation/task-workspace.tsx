@@ -50,7 +50,7 @@ import { useUnsavedChanges } from "./navigation-guard";
 import { reportOutcome } from "./outcome-summary";
 import { Section, SubjectPanel, TextList } from "./report-sections";
 import { useInvestigationRepositoryScope } from "./repository-scope";
-import { ResumeTaskButton } from "./resume-task";
+import { investigationExecutionDurationExhausted, ResumeTaskButton } from "./resume-task";
 import { ReviewQueueBar, type ReviewRecord, useReviewListNavigation } from "./review-navigation";
 import { schedulerQueryKey } from "./scheduler-panel";
 import { sessionIdentity, useInvestigationSession } from "./session";
@@ -448,10 +448,12 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
   const cleanup = taskCleanupPending(task, resourceLeases);
   const fresh = !query.isError;
   const canCancel = session.user?.permissions.includes("task:cancel") === true;
+  const durationExhausted = investigationExecutionDurationExhausted(checkpoint);
   const canResume =
     session.user?.permissions.includes("task:create") === true &&
     (task.executionPolicy.mode !== "execute" || session.user.allowRepositoryExecution) &&
-    !checkpointMismatch;
+    !checkpointMismatch &&
+    !durationExhausted;
   const stopReason = currentAttempt?.terminationReason ?? checkpoint?.stopReason;
   const outputView = normalizeTaskOutputView({
     search: parameters.get("outputSearch"),
@@ -571,9 +573,11 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
                       ? "The returned checkpoint does not belong to this task. Reload its saved state before recovery."
                       : cleanup
                         ? "Wait for the worker cleanup receipt before starting another attempt."
-                        : !canResume
-                          ? "Recovery requires Create tasks access and an execution grant for execution tasks."
-                          : undefined
+                        : durationExhausted
+                          ? "The 2-hour total execution limit is exhausted. It cannot be reset or extended."
+                          : !canResume
+                            ? "Recovery requires Create tasks access and an execution grant for execution tasks."
+                            : undefined
                 }
                 onResumed={async () => {
                   await query.refetch();
@@ -774,7 +778,9 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
         <Typography variant="caption" color="text.secondary">
           {active && !canCancel
             ? "Cancel tasks permission required."
-            : "Recovery requires Create tasks access and an execution grant for execution tasks."}
+            : durationExhausted
+              ? "The 2-hour total execution limit is exhausted. It cannot be reset or extended."
+              : "Recovery requires Create tasks access and an execution grant for execution tasks."}
         </Typography>
       )}
       {tab === "progress" && (
@@ -946,12 +952,12 @@ function TaskDetailsReader({ taskId, identity }: { taskId: string; identity: str
                   }}
                 >
                   {[
-                    ["Token budget", task.budget.maxTokens.toLocaleString("en-US")],
+                    ["Review rounds", String(checkpoint?.consumed.rounds ?? 0)],
+                    ["Total execution limit", "2 hours across all attempts"],
                     [
-                      "Review rounds",
-                      `${checkpoint?.consumed.rounds ?? 0} / ${task.budget.maxRounds}`,
+                      "Execution time used",
+                      `${((checkpoint?.consumed.durationMs ?? 0) / 60_000).toLocaleString("en-US")} minutes`,
                     ],
-                    ["Duration limit", `${task.budget.maxDurationMs / 60_000} minutes`],
                     [
                       "Report size limit",
                       `${task.budget.maxReportBytes.toLocaleString("en-US")} bytes`,

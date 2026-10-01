@@ -1,11 +1,14 @@
+import * as contracts from "@agentic-review/contracts";
 import {
   ActionContextV1Schema,
+  INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
   InvestigationActionIntentV1Schema,
   InvestigationArtifactMetadataV1Schema,
   type InvestigationCommentDelivery,
   InvestigationCommentDeliveryListSchema,
   InvestigationCommentPublicationListSchema,
   InvestigationCommentPublicationSummarySchema,
+  type InvestigationConsumption,
   InvestigationFindingsPageV1Schema,
   type InvestigationFindingV1,
   InvestigationReportHeaderV1Schema,
@@ -102,9 +105,43 @@ afterEach(() => {
   try {
     expect(fetcher).not.toHaveBeenCalled();
   } finally {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   }
 });
+
+function legacyCheckpointFixture(
+  consumed: Partial<InvestigationConsumption> = {},
+  completed = false,
+): void {
+  const createPreview = contracts.createInvestigationPreview;
+  vi.spyOn(contracts, "createInvestigationPreview").mockImplementation((kind, options) => {
+    const partial = options?.outcome === "interrupted";
+    const fixture = createPreview(kind, {
+      ...options,
+      ...(partial && completed ? { outcome: "completed" as const } : {}),
+    });
+    fixture.task.budget = {
+      maxRounds: 1,
+      maxDurationMs: 1_000,
+      maxTokens: 1,
+      maxReportBytes: 8 * 1024 * 1024,
+    };
+    fixture.result.report.loop.budget = structuredClone(fixture.task.budget);
+    if (partial) {
+      fixture.task.state = "interrupted";
+      fixture.result.report.loop.consumed = {
+        ...fixture.result.report.loop.consumed,
+        rounds: 100,
+        tokens: 100_000,
+        durationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS - 1,
+        ...consumed,
+      };
+      fixture.result.report.loop.completedRounds = fixture.result.report.loop.consumed.rounds;
+    }
+    return fixture;
+  });
+}
 
 describe("sample investigation read contracts", () => {
   it("keeps historical report content stable when current artifact bytes are unavailable", async () => {
@@ -1253,6 +1290,169 @@ describe("sample action preparation and confirmation", () => {
     });
     expect(await api.createTask(input)).toEqual(created);
     expect((await api.tasks()).items).toHaveLength(seeds.length + 1);
+  });
+});
+
+describe("sample fixed execution budgets", () => {
+  it("normalizes new task budgets while retaining the original request for idempotency", async () => {
+    const api = createSampleInvestigationApi();
+    const input = {
+      idempotencyKey: "sample-legacy-budget-create",
+      workItemId: "sample-feature-work-item",
+      kind: "issue-investigate" as const,
+      budget: { maxRounds: 1, maxTokens: 1, maxDurationMs: 1_000, maxReportBytes: 8_192 },
+    };
+    const created = await api.createTask(input);
+    expectSchema(InvestigationTaskV1Schema, created);
+    expect(created.budget).toEqual({
+      maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+      maxReportBytes: 8_192,
+    });
+    expect(await api.createTask(structuredClone(input))).toEqual(created);
+    await expect(
+      api.createTask({ ...input, budget: { ...input.budget, maxDurationMs: 2_000 } }),
+    ).rejects.toMatchObject({ status: 409 });
+    const defaultTask = await api.createTask({
+      ...input,
+      idempotencyKey: "sample-default-budget-create",
+      budget: undefined,
+    });
+    expect(defaultTask.budget).toEqual((await api.taskDefaults()).budget);
+  });
+
+  it("resumes legacy checkpoints without enforcing counters or resetting cumulative consumption", async () => {
+    legacyCheckpointFixture();
+    const api = createSampleInvestigationApi();
+    const stopped = await api.task("sample-pr-partial-task");
+    const report = await api.exportReport("sample-pr-partial-report");
+    const resumed = await api.resumeTask(stopped.task.id, "sample-legacy-budget-resume");
+    expect(resumed.budget).toEqual({
+      maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+      maxReportBytes: stopped.task.budget.maxReportBytes,
+    });
+    expect((await api.task(resumed.id)).checkpoint).toEqual(stopped.checkpoint);
+    expect(await api.exportReport(report.id)).toEqual(report);
+    expect(report.report.loop.budget).toHaveProperty("maxTokens", 1);
+    expect(await api.resumeTask(stopped.task.id, "sample-legacy-budget-resume")).toEqual(resumed);
+    await expect(
+      api.resumeTask(stopped.task.id, "sample-legacy-budget-resume", resumed.budget),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining("key was reused") });
+  });
+
+  it.each([
+    INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+    INVESTIGATION_EXECUTION_DURATION_LIMIT_MS + 1,
+  ])("cannot top up an exhausted cumulative execution duration of %i ms", async (durationMs) => {
+    legacyCheckpointFixture({ durationMs });
+    const api = createSampleInvestigationApi();
+    const stopped = await api.task("sample-pr-partial-task");
+    const report = await api.exportReport("sample-pr-partial-report");
+    await expect(
+      api.resumeTask(stopped.task.id, "sample-exhausted-duration", {
+        maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+        maxReportBytes: stopped.task.budget.maxReportBytes * 2,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining("cumulative two-hour execution limit"),
+    });
+    expect(await api.task(stopped.task.id)).toEqual(stopped);
+    expect(await api.exportReport(report.id)).toEqual(report);
+  });
+
+  it("recovers completed execution for delivery even when its duration is exhausted", async () => {
+    legacyCheckpointFixture({ durationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS }, true);
+    const api = createSampleInvestigationApi();
+    const stopped = await api.task("sample-pr-partial-task");
+    expect(stopped.checkpoint?.stopReason).toBe("complete");
+    const report = await api.exportReport("sample-pr-partial-report");
+    const resumed = await api.resumeTask(stopped.task.id, "sample-complete-delivery-resume");
+    expect(resumed.state).toBe("queued");
+    expect((await api.task(resumed.id)).checkpoint).toEqual(stopped.checkpoint);
+    expect(await api.exportReport(report.id)).toEqual(report);
+  });
+
+  it.each([8 * 1024 * 1024, 8 * 1024 * 1024 + 1])(
+    "only requires a larger report limit when %i retained bytes exceed it",
+    async (reportBytes) => {
+      legacyCheckpointFixture({ reportBytes });
+      const api = createSampleInvestigationApi();
+      const stopped = await api.task("sample-pr-partial-task");
+      const report = await api.exportReport("sample-pr-partial-report");
+      const key = "sample-report-size-resume";
+      let budget = {
+        maxDurationMs: 1,
+        maxReportBytes: stopped.task.budget.maxReportBytes,
+        maxRounds: 1,
+        maxTokens: 1,
+      };
+      if (reportBytes > budget.maxReportBytes) {
+        await expect(api.resumeTask(stopped.task.id, key, budget)).rejects.toMatchObject({
+          status: 409,
+          message: expect.stringContaining("report size limit"),
+        });
+        expect(await api.task(stopped.task.id)).toEqual(stopped);
+        budget = { ...budget, maxReportBytes: reportBytes };
+      }
+      const resumed = await api.resumeTask(stopped.task.id, key, budget);
+      expect(resumed.budget).toEqual({
+        maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+        maxReportBytes: budget.maxReportBytes,
+      });
+      expect((await api.task(resumed.id)).checkpoint).toEqual(stopped.checkpoint);
+      expect(await api.exportReport(report.id)).toEqual(report);
+      expect(await api.resumeTask(stopped.task.id, key, structuredClone(budget))).toEqual(resumed);
+      await expect(
+        api.resumeTask(stopped.task.id, key, { ...budget, maxTokens: 2 }),
+      ).rejects.toMatchObject({ status: 409, message: expect.stringContaining("key was reused") });
+    },
+  );
+
+  it("rejects a lower report limit without reserving the resume key", async () => {
+    legacyCheckpointFixture();
+    const api = createSampleInvestigationApi();
+    const stopped = await api.task("sample-pr-partial-task");
+    const budget = { maxDurationMs: 1, maxReportBytes: stopped.task.budget.maxReportBytes - 1 };
+    await expect(
+      api.resumeTask(stopped.task.id, "sample-report-limit-decrease", budget),
+    ).rejects.toMatchObject({ status: 400, message: expect.stringContaining("cannot decrease") });
+    expect(await api.task(stopped.task.id)).toEqual(stopped);
+    const resumed = await api.resumeTask(stopped.task.id, "sample-report-limit-decrease", {
+      ...budget,
+      maxReportBytes: stopped.task.budget.maxReportBytes,
+    });
+    expect(resumed.state).toBe("queued");
+  });
+
+  it("rejects requested duration extensions without reserving task or resume keys", async () => {
+    legacyCheckpointFixture();
+    const api = createSampleInvestigationApi();
+    const stopped = await api.task("sample-pr-partial-task");
+    const budget = {
+      maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS + 1,
+      maxReportBytes: stopped.task.budget.maxReportBytes,
+    };
+    const input = {
+      idempotencyKey: "sample-duration-extension-create",
+      workItemId: "sample-feature-work-item",
+      kind: "issue-investigate" as const,
+      budget,
+    };
+    await expect(api.createTask(input)).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining("cannot exceed two hours"),
+    });
+    await expect(
+      api.resumeTask(stopped.task.id, "sample-duration-extension-resume", budget),
+    ).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining("cannot exceed two hours"),
+    });
+    const fixed = { ...budget, maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS };
+    expect((await api.createTask({ ...input, budget: fixed })).budget).toEqual(fixed);
+    expect(
+      (await api.resumeTask(stopped.task.id, "sample-duration-extension-resume", fixed)).budget,
+    ).toEqual(fixed);
   });
 });
 

@@ -1,5 +1,6 @@
 import {
   createInvestigationPreview,
+  INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
   type InvestigationLoopCheckpointV1,
   type InvestigationSourceProvenance,
   type InvestigationTaskV1,
@@ -311,10 +312,16 @@ describe("trusted source provenance checkpoints", () => {
     "retains the graph when registration exhausts the %s budget",
     (kind) => {
       const f = fixture((task) => {
-        if (kind === "duration") task.budget.maxDurationMs = 7;
-        else task.budget.maxReportBytes = 1;
+        if (kind === "report") task.budget.maxReportBytes = 1;
       });
-      const registered = f.register();
+      const registered =
+        kind === "duration"
+          ? applyInvestigationSourceProvenanceCheckpoint(f.checkpoint, f.provenance, {
+              task: f.task,
+              recordedAt,
+              durationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+            })
+          : f.register();
       expect(registered.stopReason).toBe("budget_exhausted");
       expect(registered.runtime.sourceProvenance).toEqual(f.provenance);
       expect(registered.round).toBe(0);

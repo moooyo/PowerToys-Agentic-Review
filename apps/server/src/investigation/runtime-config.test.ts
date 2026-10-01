@@ -46,9 +46,7 @@ describe("password runtime configuration", () => {
     expect(config.enableExternalWrites).toBe(false);
     expect(config.staticConcurrency).toBe(1);
     expect(config.defaultTaskBudget).toEqual({
-      maxTokens: 120_000,
-      maxRounds: 24,
-      maxDurationMs: 1_800_000,
+      maxDurationMs: 7_200_000,
     });
     expect(config.media).toEqual({ enabled: true, requestTimeoutMs: 120_000 });
   });
@@ -75,7 +73,7 @@ describe("password runtime configuration", () => {
       ).toThrow("INVESTIGATION_STATIC_CONCURRENCY");
   });
 
-  it("loads immutable per-Task deployment budgets independently of source import limits", () => {
+  it("ignores legacy deployment limits and returns an immutable two-hour policy", () => {
     const environment = {
       INVESTIGATION_DEFAULT_TASK_MAX_TOKENS: "5000000",
       INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS: "8",
@@ -84,8 +82,6 @@ describe("password runtime configuration", () => {
     const config = loadInvestigationRuntimeConfig(environment);
     environment.INVESTIGATION_DEFAULT_TASK_MAX_TOKENS = "7";
     expect(config.defaultTaskBudget).toEqual({
-      maxTokens: 5_000_000,
-      maxRounds: 8,
       maxDurationMs: 7_200_000,
     });
     expect(Object.isFrozen(config.defaultTaskBudget)).toBe(true);
@@ -93,7 +89,7 @@ describe("password runtime configuration", () => {
   });
 
   it.each(["MAX_TOKENS", "MAX_ROUNDS", "MAX_DURATION_MS"])(
-    "rejects invalid default Task %s values",
+    "ignores obsolete default Task %s values",
     (field) => {
       for (const value of [
         "0",
@@ -107,26 +103,26 @@ describe("password runtime configuration", () => {
         "9007199254740992",
         "999999999999999999999",
       ])
-        expect(() =>
-          loadInvestigationRuntimeConfig({ [`INVESTIGATION_DEFAULT_TASK_${field}`]: value }),
-        ).toThrow(`INVESTIGATION_DEFAULT_TASK_${field}`);
+        expect(
+          loadInvestigationRuntimeConfig({ [`INVESTIGATION_DEFAULT_TASK_${field}`]: value })
+            .defaultTaskBudget,
+        ).toEqual({ maxDurationMs: 7_200_000 });
     },
   );
 
-  it("accepts safe token counters and bounds durations to the timer implementation", () => {
+  it("does not let legacy environment values extend the fixed duration policy", () => {
     const config = loadInvestigationRuntimeConfig({
       INVESTIGATION_DEFAULT_TASK_MAX_TOKENS: String(Number.MAX_SAFE_INTEGER),
       INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS: String(Number.MAX_SAFE_INTEGER),
       INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS: "2147483647",
     });
     expect(config.defaultTaskBudget).toEqual({
-      maxTokens: Number.MAX_SAFE_INTEGER,
-      maxRounds: Number.MAX_SAFE_INTEGER,
-      maxDurationMs: 2_147_483_647,
+      maxDurationMs: 7_200_000,
     });
-    expect(() =>
-      loadInvestigationRuntimeConfig({ INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS: "2147483648" }),
-    ).toThrow("INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS");
+    expect(
+      loadInvestigationRuntimeConfig({ INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS: "2147483648" })
+        .defaultTaskBudget,
+    ).toEqual({ maxDurationMs: 7_200_000 });
   });
 
   it("rejects every no-password mode and non-loopback HTTP listener", () => {

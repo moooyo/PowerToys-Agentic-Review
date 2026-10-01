@@ -223,7 +223,13 @@ Configure bounded process duration,
 process count, memory, and output through `PROCESS_TIMEOUT_MS`, `MAX_PROCESS_COUNT`,
 `MAX_MEMORY_BYTES`, and `MAX_OUTPUT_BYTES`, each prefixed with `INVESTIGATION_WORKER_`.
 `GIT_TIMEOUT_MS`, `REQUEST_TIMEOUT_MS`, `CLAIM_POLL_MS`, and `SHUTDOWN_TIMEOUT_MS` use the same prefix.
-Task budgets are independently frozen by the Server and enforced across loop and plan receipts.
+The default process timeout is two hours. Native task execution has a fixed cumulative
+two-hour deadline across loop rounds and resumed attempts, beginning before preparation.
+All model work shares its remaining duration; resuming does not reset the deadline.
+Tokens and rounds are recorded without execution caps. Missing or partial model usage
+retains its accounting status without stopping a valid turn. Process memory, count,
+output, and report capacity remain independent resource safeguards. See the
+[execution policy](../../docs/design/2026-10-02-time-only-execution-budget.md).
 
 Artifact retention and aggregate upload quotas are configured on the Server through
 `INVESTIGATION_EVIDENCE_*`; they are independent of Worker process and task limits. Quota exhaustion

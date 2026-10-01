@@ -12,6 +12,7 @@ import {
   InvestigationWorkItemDiscussionQuerySchema,
   InvestigationWorkspaceSearchQuerySchema,
   type InvestigationWorkspaceSearchResult,
+  normalizeInvestigationBudget,
 } from "@agentic-review/contracts";
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -203,7 +204,8 @@ export function createSampleReadApi(state: SampleReadState): InvestigationReadAp
   return {
     async taskDefaults(signal) {
       signal?.throwIfAborted();
-      return { budget: structuredClone(required(state.tasks()[0], "task defaults").task.budget) };
+      const budget = required(state.tasks()[0], "task defaults").task.budget;
+      return { budget: normalizeInvestigationBudget(budget) };
     },
     async taskOutput(id, input, signal) {
       signal?.throwIfAborted();

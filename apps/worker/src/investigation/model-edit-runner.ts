@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 import {
+  getInvestigationExecutionDurationLimitMs,
   type InvestigationModelEditsV1,
   InvestigationModelEditsV1Schema,
 } from "@agentic-review/contracts";
@@ -204,7 +205,7 @@ export function createModelEditAdapter(
         signal: context.signal,
         prompt,
         schema: InvestigationModelEditsV1Schema,
-        hardTimeoutMs: task.budget.maxDurationMs,
+        hardTimeoutMs: getInvestigationExecutionDurationLimitMs(task.budget),
         maximumResultBytes: task.budget.maxReportBytes,
       });
       try {

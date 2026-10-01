@@ -7,7 +7,10 @@ import type {
   InvestigationOutcome,
   InvestigationRuntimeState,
 } from "@agentic-review/contracts";
-import { isInvestigationE2eBlockerCode } from "@agentic-review/contracts";
+import {
+  getInvestigationExecutionDurationLimitMs,
+  isInvestigationE2eBlockerCode,
+} from "@agentic-review/contracts";
 import { projectRecordedE2eAnalysis } from "@agentic-review/domain";
 import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -206,7 +209,8 @@ export function createE2eAgentRunner(options: E2eAgentRunnerOptions): E2eAgentRu
           schema: E2eAgentResultSchema,
           hardTimeoutMs: Math.max(
             1,
-            input.task.budget.maxDurationMs - input.checkpoint.consumed.durationMs,
+            getInvestigationExecutionDurationLimitMs(input.task.budget) -
+              input.checkpoint.consumed.durationMs,
           ),
           maximumResultBytes: Math.min(input.task.budget.maxReportBytes, 4 * 1024 * 1024),
           ...(input.onUsage === undefined ? {} : { onUsage: input.onUsage }),

@@ -14,6 +14,7 @@ import type {
   InvestigationSubjectV1,
   InvestigationTaskV1,
 } from "./investigation.js";
+import { INVESTIGATION_EXECUTION_DURATION_LIMIT_MS } from "./investigation.js";
 
 export interface InvestigationPreviewOptions {
   priority?: "P0" | "P1" | "P2" | "P3";
@@ -87,9 +88,7 @@ export function createInvestigationPreview(
   const profileRef = { id: `${prefix}-profile`, version: 1, digest: "f".repeat(64) };
   const promptRef = { id: `${prefix}-prompt`, version: 1, digest: "1".repeat(64) };
   const budget = {
-    maxRounds: 8,
-    maxDurationMs: 300_000,
-    maxTokens: Math.max(64_000, findingCount * 2_000),
+    maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
     maxReportBytes: Math.max(8 * 1024 * 1024, findingCount * 32_768),
   };
   const prerequisiteId = `${prefix}-environment`;

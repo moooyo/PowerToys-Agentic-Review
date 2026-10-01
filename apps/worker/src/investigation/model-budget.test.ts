@@ -3,7 +3,7 @@ import { findModelBudgetExceeded, ModelBudgetExceededError } from "./model-budge
 
 describe("model invocation budget failures", () => {
   it("recovers a budget stop through accounting wrappers without following cyclic causes", () => {
-    const budget = new ModelBudgetExceededError("tokens");
+    const budget = new ModelBudgetExceededError("duration");
     const cyclic = new Error("Synthetic cyclic cause.");
     cyclic.cause = cyclic;
     const wrapped = new AggregateError(

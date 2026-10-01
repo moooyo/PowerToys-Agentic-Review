@@ -271,7 +271,7 @@ describe("saved model edit adapter", () => {
 
   it("uses the strict edit schema and returns passive edits with observed usage", async () => {
     const f = fixture();
-    const invocationBudget = { remainingTokens: 321, deadlineAtMs: Date.now() + 60_000 };
+    const invocationBudget = { deadlineAtMs: Date.now() + 60_000 };
     const result = await f.adapter.execute(f.input, { ...f.context, invocationBudget });
     expect(result).toEqual({ proposal: f.proposal, usage: { tokens: 50, source: "cli" } });
     expect(f.input.workspace.readSourceFile).toHaveBeenCalledTimes(2);
@@ -292,12 +292,12 @@ describe("saved model edit adapter", () => {
 
   it("propagates a transport budget stop without applying or accepting a partial edit proposal", async () => {
     const f = fixture();
-    const stopped = new ModelBudgetExceededError("tokens");
+    const stopped = new ModelBudgetExceededError("duration");
     f.execute.mockRejectedValue(stopped);
     await expect(
       f.adapter.execute(f.input, {
         ...f.context,
-        invocationBudget: { remainingTokens: 1, deadlineAtMs: Date.now() + 60_000 },
+        invocationBudget: { deadlineAtMs: Date.now() + 60_000 },
       }),
     ).rejects.toBe(stopped);
     expect(f.input.workspace.applyEdits).not.toHaveBeenCalled();

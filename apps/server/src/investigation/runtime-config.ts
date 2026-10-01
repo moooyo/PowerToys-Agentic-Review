@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   EntityIdSchema,
+  getInvestigationExecutionDurationLimitMs,
   type InvestigationBudget,
   InvestigationNewPasswordSchema,
   InvestigationUsernameInputSchema,
@@ -362,24 +363,8 @@ export function loadInvestigationRuntimeConfig(
     ),
     staticConcurrency: integer(environment, "INVESTIGATION_STATIC_CONCURRENCY", 1, 16),
     defaultTaskBudget: Object.freeze({
-      maxTokens: integer(
-        environment,
-        "INVESTIGATION_DEFAULT_TASK_MAX_TOKENS",
-        120_000,
-        Number.MAX_SAFE_INTEGER,
-      ),
-      maxRounds: integer(
-        environment,
-        "INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS",
-        24,
-        Number.MAX_SAFE_INTEGER,
-      ),
-      maxDurationMs: integer(
-        environment,
-        "INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS",
-        1_800_000,
-        2_147_483_647,
-      ),
+      // Legacy deployment budget variables cannot alter the fixed execution policy.
+      maxDurationMs: getInvestigationExecutionDurationLimitMs(),
     }),
     evidencePolicy: {
       maximumBytes: integer(

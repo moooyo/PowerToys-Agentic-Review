@@ -18,7 +18,9 @@ import type {
   InvestigationVersionRef,
 } from "@agentic-review/contracts";
 import {
+  getInvestigationExecutionDurationLimitMs,
   isCorrectableInvestigationModelOutputIssue,
+  normalizeInvestigationBudget,
   validateInvestigationModelExecutions,
   validateInvestigationPrDiffManifest,
   validateInvestigationReviewBaselineCandidates,
@@ -105,11 +107,6 @@ export function projectInvestigationTokenConsumption(
   const next = sealCheckpoint({
     ...structuredClone(checkpoint),
     consumed: { ...checkpoint.consumed, tokens },
-    stopReason:
-      (checkpoint.stopReason === "continuing" && tokens >= checkpoint.budget.maxTokens) ||
-      (checkpoint.stopReason === "complete" && tokens > checkpoint.budget.maxTokens)
-        ? "budget_exhausted"
-        : checkpoint.stopReason,
   });
   assertInvestigationCheckpointIntegrity(next);
   return next;
@@ -913,7 +910,7 @@ export interface ApplyInvestigationRoundOptions {
   /** Actual consumption observed by the worker, excluding model-supplied claims. */
   readonly usage: {
     readonly durationMs: number;
-    readonly tokens: number;
+    readonly tokens: number | null;
     readonly reportBytes: number;
   };
   /** Exact source chunk IDs delivered to this CLI invocation by the trusted worker. */
@@ -991,11 +988,12 @@ export function applyInvestigationLoopRound(
     "stale_checkpoint_reference",
     "The round must reference the precise accepted input checkpoint.",
   );
-  for (const value of Object.values(options.usage))
+  for (const [field, value] of Object.entries(options.usage))
     requireCondition(
-      Number.isSafeInteger(value) && value >= 0,
+      (field === "tokens" && value === null) ||
+        (typeof value === "number" && Number.isSafeInteger(value) && value >= 0),
       "invalid_worker_consumption",
-      "Worker consumption must be a nonnegative safe integer.",
+      "Worker consumption must be a nonnegative safe integer, with null allowed only for unavailable token usage.",
     );
   if (options.accountedTokens !== undefined)
     requireCondition(
@@ -1133,7 +1131,7 @@ export function applyInvestigationLoopRound(
   const consumed = {
     rounds: checkpoint.consumed.rounds + 1,
     durationMs: checkpoint.consumed.durationMs + options.usage.durationMs,
-    tokens: options.accountedTokens ?? checkpoint.consumed.tokens + options.usage.tokens,
+    tokens: options.accountedTokens ?? checkpoint.consumed.tokens + (options.usage.tokens ?? 0),
     reportBytes: Math.max(
       checkpoint.consumed.reportBytes,
       options.usage.reportBytes,
@@ -1162,14 +1160,10 @@ export function applyInvestigationLoopRound(
     );
   }
   const exhausted =
-    consumed.rounds >= checkpoint.budget.maxRounds ||
-    consumed.durationMs >= checkpoint.budget.maxDurationMs ||
-    consumed.tokens >= checkpoint.budget.maxTokens ||
+    consumed.durationMs >= getInvestigationExecutionDurationLimitMs(checkpoint.budget) ||
     consumed.reportBytes > checkpoint.budget.maxReportBytes;
   const exceeded =
-    consumed.rounds > checkpoint.budget.maxRounds ||
-    consumed.durationMs > checkpoint.budget.maxDurationMs ||
-    consumed.tokens > checkpoint.budget.maxTokens ||
+    consumed.durationMs > getInvestigationExecutionDurationLimitMs(checkpoint.budget) ||
     consumed.reportBytes > checkpoint.budget.maxReportBytes;
   // A successfully completed final round is allowed to consume the final unit of its budget.
   next = {
@@ -1278,9 +1272,7 @@ export function rejectInvestigationModelOutput(
       reportBytes,
     },
     stopReason:
-      checkpoint.consumed.rounds >= checkpoint.budget.maxRounds ||
-      totalDurationMs >= checkpoint.budget.maxDurationMs ||
-      options.accountedTokens >= checkpoint.budget.maxTokens ||
+      totalDurationMs >= getInvestigationExecutionDurationLimitMs(checkpoint.budget) ||
       reportBytes > checkpoint.budget.maxReportBytes
         ? "budget_exhausted"
         : "continuing",
@@ -1380,7 +1372,10 @@ export function interruptInvestigationLoop(
     },
     previousCheckpointRef: reference(checkpoint),
     stopReason:
-      reportBytes > checkpoint.budget.maxReportBytes && reason !== "cancelled"
+      (reportBytes > checkpoint.budget.maxReportBytes ||
+        checkpoint.consumed.durationMs + durationMs >=
+          getInvestigationExecutionDurationLimitMs(checkpoint.budget)) &&
+      reason !== "cancelled"
         ? "budget_exhausted"
         : reason === "failed"
           ? "error"
@@ -1409,7 +1404,7 @@ export function restoreInvestigationCheckpoint(
     "checkpoint_task_binding_mismatch",
     "Resume requires the identical frozen scope, subjects, configuration, and execution policy.",
   );
-  assertNondecreasingBudget(checkpoint.budget, task.budget);
+  assertCompatibleBudgetRevision(checkpoint.budget, task.budget);
   requireCondition(
     checkpoint.stopReason !== "complete",
     "completed_loop_is_immutable",
@@ -1426,12 +1421,10 @@ export function restoreInvestigationCheckpoint(
     retainedReportBytes(checkpoint.analysis, checkpoint.runtime),
   );
   requireCondition(
-    checkpoint.consumed.rounds < task.budget.maxRounds &&
-      checkpoint.consumed.durationMs < task.budget.maxDurationMs &&
-      checkpoint.consumed.tokens < task.budget.maxTokens &&
+    checkpoint.consumed.durationMs < getInvestigationExecutionDurationLimitMs(task.budget) &&
       reportBytes <= task.budget.maxReportBytes,
     "resume_budget_exhausted",
-    "The task budget is exhausted; an operator must explicitly increase the required limits before resuming.",
+    "The task budget is exhausted; the total execution duration cannot be reset or extended when resuming.",
   );
   return sealCheckpoint({
     ...structuredClone(checkpoint),
@@ -1632,14 +1625,13 @@ export function applyInvestigationRuntimeCheckpoint(
     .flatMap((step) => (step.modelUsage === undefined ? [] : [step.modelUsage]));
   for (const usage of newModelUsage)
     requireCondition(
-      Number.isSafeInteger(usage.tokens) &&
-        usage.tokens >= 0 &&
+      (usage.tokens === null || (Number.isSafeInteger(usage.tokens) && usage.tokens >= 0)) &&
         Number.isSafeInteger(usage.durationMs) &&
         usage.durationMs >= 0,
       "invalid_worker_consumption",
-      "Trusted model usage must contain nonnegative safe integer counts.",
+      "Trusted model usage must contain a nonnegative duration and known token count or null.",
     );
-  const modelTokens = newModelUsage.reduce((sum, usage) => sum + usage.tokens, 0);
+  const modelTokens = newModelUsage.reduce((sum, usage) => sum + (usage.tokens ?? 0), 0);
   const modelDurationMs = newModelUsage.reduce((sum, usage) => sum + usage.durationMs, 0);
   const durationMs = options.durationMs ?? modelDurationMs;
   requireCondition(
@@ -1679,8 +1671,7 @@ export function applyInvestigationRuntimeCheckpoint(
     },
     stopReason:
       reportBytes > checkpoint.budget.maxReportBytes ||
-      totalDurationMs >= checkpoint.budget.maxDurationMs ||
-      totalTokens >= checkpoint.budget.maxTokens
+      totalDurationMs >= getInvestigationExecutionDurationLimitMs(checkpoint.budget)
         ? "budget_exhausted"
         : "continuing",
   });
@@ -1813,7 +1804,7 @@ export function applyInvestigationSourceCoverage(
     consumed: { ...checkpoint.consumed, durationMs: totalDurationMs, reportBytes },
     stopReason:
       reportBytes > checkpoint.budget.maxReportBytes ||
-      totalDurationMs >= checkpoint.budget.maxDurationMs
+      totalDurationMs >= getInvestigationExecutionDurationLimitMs(checkpoint.budget)
         ? "budget_exhausted"
         : "continuing",
   });
@@ -1916,28 +1907,32 @@ export function applyInvestigationSourceProvenanceCheckpoint(
     consumed: { ...checkpoint.consumed, durationMs: totalDurationMs, reportBytes },
     stopReason:
       reportBytes > checkpoint.budget.maxReportBytes ||
-      totalDurationMs >= checkpoint.budget.maxDurationMs
+      totalDurationMs >= getInvestigationExecutionDurationLimitMs(checkpoint.budget)
         ? "budget_exhausted"
         : "continuing",
   });
 }
 
-function assertNondecreasingBudget(previous: InvestigationBudget, next: InvestigationBudget): void {
-  for (const field of ["maxRounds", "maxDurationMs", "maxTokens", "maxReportBytes"] as const) {
+function assertCompatibleBudgetRevision(
+  previous: InvestigationBudget,
+  next: InvestigationBudget,
+): void {
+  for (const field of ["maxDurationMs", "maxReportBytes"] as const) {
     requireCondition(
       Number.isSafeInteger(next[field]) && next[field] > 0,
       "invalid_investigation_budget",
       "Budget limits must be positive safe integers.",
     );
-    requireCondition(
-      next[field] >= previous[field],
-      "budget_decreased",
-      `The explicitly revised budget cannot decrease ${field}.`,
-    );
+    if (field === "maxReportBytes")
+      requireCondition(
+        next[field] >= previous[field],
+        "budget_decreased",
+        `The explicitly revised budget cannot decrease ${field}.`,
+      );
   }
 }
 
-/** The server must authorize and audit the operator's exact revised limits before calling this. */
+/** The server must authorize and audit a retained report storage limit revision before calling this. */
 export function increaseInvestigationBudget(
   checkpoint: InvestigationLoopCheckpointV1,
   task: InvestigationTaskV1,
@@ -1951,10 +1946,16 @@ export function increaseInvestigationBudget(
     "checkpoint_task_binding_mismatch",
     "A budget revision cannot change any other frozen task binding.",
   );
-  assertNondecreasingBudget(checkpoint.budget, budget);
+  assertCompatibleBudgetRevision(checkpoint.budget, budget);
+  requireCondition(
+    budget.maxDurationMs <= getInvestigationExecutionDurationLimitMs(budget),
+    "invalid_investigation_budget",
+    "The total execution duration cannot exceed the fixed two-hour limit.",
+  );
+  const revisedBudget = normalizeInvestigationBudget(budget);
   const revisedTask = {
     ...structuredClone(task),
-    budget: structuredClone(budget),
+    budget: revisedBudget,
     updatedAt: options.recordedAt,
   };
   const revisedCheckpoint = sealCheckpoint({
@@ -1962,7 +1963,7 @@ export function increaseInvestigationBudget(
     version: checkpoint.version + 1,
     previousCheckpointRef: reference(checkpoint),
     recordedAt: options.recordedAt,
-    budget: structuredClone(budget),
+    budget: structuredClone(revisedBudget),
     taskBindingDigest: investigationTaskBindingDigest(revisedTask),
     consumed: {
       ...checkpoint.consumed,

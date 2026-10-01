@@ -1,18 +1,13 @@
 /** The task allowance available to one invocation, before any of its usage is charged. */
 export interface ModelInvocationBudget {
-  readonly remainingTokens: number;
   readonly deadlineAtMs: number;
 }
 
 export class ModelBudgetExceededError extends Error {
   public readonly code = "MODEL_BUDGET_EXCEEDED";
 
-  public constructor(public readonly kind: "tokens" | "duration") {
-    super(
-      kind === "tokens"
-        ? "The remaining task model token budget was exhausted."
-        : "The remaining task execution duration was exhausted.",
-    );
+  public constructor(public readonly kind: "duration") {
+    super("The remaining task execution duration was exhausted.");
     this.name = "ModelBudgetExceededError";
   }
 }

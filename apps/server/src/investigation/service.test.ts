@@ -1694,8 +1694,8 @@ describe("investigation service API", () => {
     expect(above.json()).toMatchObject({ code: "report_budget_exceeds_server_limit" });
   });
 
-  it("requires an explicit audited budget increase before resuming an exhausted investigation", async () => {
-    const { app, item, store, advance, operator } = await harness();
+  it("resumes a legacy token and round boundary without increasing execution limits", async () => {
+    const { app, item, store, advance } = await harness();
     const budget = {
       maxRounds: 1,
       maxDurationMs: 60_000,
@@ -1709,54 +1709,79 @@ describe("investigation service API", () => {
       budget,
     });
     const task = created.json<InvestigationTaskV1>();
+    store.put("tasks", task.id, { ...task, budget });
     const first = await claim(app);
     const checkpoint = first.checkpoint;
     if (checkpoint === null) throw new Error("Expected an accepted checkpoint.");
     checkpoint.round = 1;
     checkpoint.consumed.rounds = 1;
+    checkpoint.consumed.tokens = budget.maxTokens;
+    checkpoint.stopReason = "budget_exhausted";
+    const { digest: _digest, ...content } = checkpoint;
+    checkpoint.digest = investigationContentDigest(content);
+    store.put("checkpoints", task.id, checkpoint);
+    advance(1_001);
+    const resumed = await post(app, `/api/tasks/${task.id}/resume`, {
+      idempotencyKey: "resume-without-increase",
+    });
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    expect(resumed.json<InvestigationTaskV1>().budget).toEqual(budget);
+    const acceptedBeforeClaim = store.get<NonNullable<InvestigationClaim["checkpoint"]>>(
+      "checkpoints",
+      task.id,
+    );
+    const second = await claim(app);
+    expect(second.checkpoint?.consumed.rounds).toBe(1);
+    expect(second.checkpoint?.consumed.tokens).toBe(budget.maxTokens);
+    expect(second.checkpoint?.budget).toEqual(budget);
+    expect(second.checkpoint?.stopReason).toBe("continuing");
+    expect(second.checkpoint?.analysis).toEqual(acceptedBeforeClaim?.analysis);
+    const changedReplay = await post(app, `/api/tasks/${task.id}/resume`, {
+      idempotencyKey: "resume-without-increase",
+      budget: { ...budget, maxReportBytes: budget.maxReportBytes + 1 },
+    });
+    expect(changedReplay.statusCode).toBe(409);
+    expect(changedReplay.json()).toMatchObject({ code: "idempotency_conflict" });
+  });
+
+  it("cannot extend or reset the cumulative two-hour limit through resume", async () => {
+    const { app, item, store, advance } = await harness();
+    const created = await post(app, "/api/tasks", {
+      idempotencyKey: "cumulative-duration-task",
+      workItemId: item.id,
+      kind: "pr-review",
+      budget: { maxDurationMs: 7_200_000, maxReportBytes: 100_000 },
+    });
+    expect(created.statusCode).toBe(201);
+    const task = created.json<InvestigationTaskV1>();
+    const first = await claim(app);
+    const checkpoint = checkpointFor(first);
+    checkpoint.consumed.durationMs = 7_200_000;
     checkpoint.stopReason = "budget_exhausted";
     const { digest: _digest, ...content } = checkpoint;
     checkpoint.digest = investigationContentDigest(content);
     store.put("checkpoints", task.id, checkpoint);
     advance(1_001);
     const exhausted = await post(app, `/api/tasks/${task.id}/resume`, {
-      idempotencyKey: "without-increase",
+      idempotencyKey: "exhausted-duration",
     });
     expect(exhausted.statusCode).toBe(409);
     expect(exhausted.json()).toMatchObject({ code: "resume_budget_exhausted" });
-    const acceptedBeforeIncrease = store.get<NonNullable<InvestigationClaim["checkpoint"]>>(
-      "checkpoints",
-      task.id,
-    );
-    const increased = await post(app, `/api/tasks/${task.id}/resume`, {
-      idempotencyKey: "increase-budget",
-      budget: { ...budget, maxRounds: 2 },
+    const extended = await post(app, `/api/tasks/${task.id}/resume`, {
+      idempotencyKey: "extend-duration",
+      budget: { ...task.budget, maxDurationMs: 7_200_001 },
     });
-    expect(increased.statusCode).toBe(200);
-    expect(increased.json<InvestigationTaskV1>().budget.maxRounds).toBe(2);
-    const second = await claim(app);
-    expect(second.checkpoint?.consumed.rounds).toBe(1);
-    expect(second.checkpoint?.budget.maxRounds).toBe(2);
-    expect(second.checkpoint?.analysis).toEqual(acceptedBeforeIncrease?.analysis);
-    const changedReplay = await post(app, `/api/tasks/${task.id}/resume`, {
-      idempotencyKey: "increase-budget",
-      budget: { ...budget, maxRounds: 3 },
+    expect(extended.statusCode).toBe(400);
+    expect(extended.json()).toMatchObject({ code: "duration_budget_exceeds_task_limit" });
+    const increasedReport = await post(app, `/api/tasks/${task.id}/resume`, {
+      idempotencyKey: "increase-report-only",
+      budget: { ...task.budget, maxReportBytes: 200_000 },
     });
-    expect(changedReplay.statusCode).toBe(409);
-    expect(changedReplay.json()).toMatchObject({ code: "idempotency_conflict" });
-    const audit = store
-      .list<{
-        actorId?: string;
-        previousBudget?: { maxRounds: number };
-        budget?: { maxRounds: number };
-      }>("idempotency")
-      .find(
-        (record) =>
-          record.actorId === operator.id &&
-          record.previousBudget?.maxRounds === 1 &&
-          record.budget?.maxRounds === 2,
-      );
-    expect(audit).toBeDefined();
+    expect(increasedReport.statusCode).toBe(409);
+    expect(increasedReport.json()).toMatchObject({ code: "resume_budget_exhausted" });
+    expect(
+      store.get<InvestigationLoopCheckpointV1>("checkpoints", task.id)?.consumed.durationMs,
+    ).toBeGreaterThanOrEqual(7_200_000);
   });
 
   it.each([0, 127, null])(
@@ -2265,7 +2290,7 @@ describe("ledger-owned checkpoint budgets", () => {
     expect(store.has("idempotency", investigationUsagePublicationPendingKey(task.id))).toBe(true);
   });
 
-  it("charges failed model edits before admitting another model process", async () => {
+  it("charges failed model edits without letting legacy token limits block another process", async () => {
     const { app, item, store } = await harness();
     const task = await createTask(app, item);
     store.put("tasks", task.id, { ...task, budget: { ...task.budget, maxTokens: 50 } });
@@ -2290,11 +2315,78 @@ describe("ledger-owned checkpoint budgets", () => {
     expect(
       (await post(app, path, { lease: claimed.lease, receipt: failed }, "worker")).statusCode,
     ).toBe(200);
-    const denied = registration(claimed, "not-dispatched");
+    const continued = registration(claimed, "continued-after-legacy-token-limit");
     expect(
-      (await post(app, path, { lease: claimed.lease, receipt: denied }, "worker")).json()
+      (await post(app, path, { lease: claimed.lease, receipt: continued }, "worker")).json()
         .executionAllowed,
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      (
+        await post(
+          app,
+          path,
+          { lease: claimed.lease, receipt: { ...continued, revision: 2, state: "running" } },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await post(
+          app,
+          path,
+          {
+            lease: claimed.lease,
+            receipt: {
+              ...continued,
+              revision: 3,
+              state: "failed",
+              disposition: "rejected",
+              completeness: "complete",
+              usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 0 },
+            },
+          },
+          "worker",
+        )
+      ).statusCode,
+    ).toBe(200);
+    const interrupted = await post(
+      app,
+      `/api/worker/tasks/${task.id}/checkpoints`,
+      { kind: "interrupt", lease: claimed.lease, reason: "interrupted", diagnostics: [] },
+      "worker",
+    );
+    expect(interrupted.statusCode, interrupted.body).toBe(200);
+    expect(interrupted.json().checkpoint).toMatchObject({
+      consumed: { tokens: 50 },
+      stopReason: "interrupted",
+    });
+    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage.reportedTokens).toBe(50);
+  });
+
+  it("keeps the remaining duration across attempts and rejects a new model within an active lease", async () => {
+    const { app, item, store, advance } = await harness();
+    const task = await createTask(app, item);
+    const first = await claim(app);
+    const checkpoint = checkpointFor(first);
+    checkpoint.consumed.durationMs = 7_198_999;
+    const { digest: _digest, ...content } = checkpoint;
+    checkpoint.digest = investigationContentDigest(content);
+    store.put("checkpoints", task.id, checkpoint);
+    advance(1_001);
+    const resumed = await post(app, `/api/tasks/${task.id}/resume`, {
+      idempotencyKey: "resume-with-one-millisecond-left",
+    });
+    expect(resumed.statusCode, resumed.body).toBe(200);
+    const claimed = await claim(app);
+    expect(claimed.checkpoint?.consumed.durationMs).toBe(7_199_999);
+    expect(claimed.attempt.number).toBe(2);
+    advance(1);
+    const path = `/api/worker/tasks/${task.id}/model-usage`;
+    const denied = registration(claimed, "not-dispatched-at-duration-limit");
+    const admission = await post(app, path, { lease: claimed.lease, receipt: denied }, "worker");
+    expect(admission.statusCode, admission.body).toBe(200);
+    expect(admission.json().executionAllowed).toBe(false);
     expect(
       (
         await post(
@@ -2325,18 +2417,9 @@ describe("ledger-owned checkpoint budgets", () => {
         )
       ).statusCode,
     ).toBe(200);
-    const interrupted = await post(
-      app,
-      `/api/worker/tasks/${task.id}/checkpoints`,
-      { kind: "interrupt", lease: claimed.lease, reason: "budget_exhausted", diagnostics: [] },
-      "worker",
+    expect(store.get<InvestigationLoopCheckpointV1>("checkpoints", task.id)?.stopReason).toBe(
+      "continuing",
     );
-    expect(interrupted.statusCode, interrupted.body).toBe(200);
-    expect(interrupted.json().checkpoint).toMatchObject({
-      consumed: { tokens: 50 },
-      stopReason: "budget_exhausted",
-    });
-    expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage.reportedTokens).toBe(50);
   });
 
   it("binds one invocation to one analysis round and projects rather than recharges its tokens", async () => {
@@ -2416,6 +2499,87 @@ describe("ledger-owned checkpoint budgets", () => {
     expect(reuse.json().code).toBe("analysis_invocation_already_used");
     expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage.reportedTokens).toBe(40);
   });
+
+  it.each([
+    { completeness: "partial", tokens: 40 },
+    { completeness: "partial", tokens: null },
+    { completeness: "unavailable", tokens: null },
+  ] as const)(
+    "accepts analysis with $completeness usage and $tokens known tokens without inventing a complete total",
+    async ({ completeness, tokens }) => {
+      const { app, item } = await harness();
+      const task = await createTask(app, item);
+      const claimed = await claim(app);
+      const checkpoint = checkpointFor(claimed);
+      const first = registration(claimed, "analysis-with-incomplete-usage");
+      const usagePath = `/api/worker/tasks/${task.id}/model-usage`;
+      expect(
+        (await post(app, usagePath, { lease: claimed.lease, receipt: first }, "worker")).json()
+          .executionAllowed,
+      ).toBe(true);
+      const terminal = {
+        ...first,
+        revision: 2,
+        state: "completed",
+        disposition: "accepted",
+        completeness,
+        usage: { ...unavailableInvestigationTokenUsage(), totalTokens: tokens },
+      };
+      expect(
+        (await post(app, usagePath, { lease: claimed.lease, receipt: terminal }, "worker"))
+          .statusCode,
+      ).toBe(200);
+      const request = {
+        kind: "analysis",
+        lease: claimed.lease,
+        invocationId: first.invocationId,
+        usage: { durationMs: 0, tokens, reportBytes: 0 },
+        round: {
+          schemaVersion: "InvestigationLoopRoundV1",
+          taskId: task.id,
+          attemptId: claimed.attempt.id,
+          inputCheckpointRef: {
+            id: checkpoint.id,
+            version: checkpoint.version,
+            digest: checkpoint.digest,
+          },
+          round: 1,
+          phase: "discovery",
+          analysis: structuredClone(checkpoint.analysis),
+          continue: true,
+          continuationReason: "Review pending synthetic scope with incomplete usage statistics.",
+        },
+      };
+      const checkpointPath = `/api/worker/tasks/${task.id}/checkpoints`;
+      const mismatch = await post(
+        app,
+        checkpointPath,
+        { ...request, usage: { ...request.usage, tokens: tokens === null ? 0 : null } },
+        "worker",
+      );
+      expect(mismatch.statusCode).toBe(409);
+      expect(mismatch.json().code).toBe("analysis_usage_mismatch");
+      const accepted = await post(app, checkpointPath, request, "worker");
+      expect(accepted.statusCode, accepted.body).toBe(200);
+      expect(accepted.json().checkpoint).toMatchObject({
+        round: 1,
+        stopReason: "continuing",
+        consumed: { tokens: tokens ?? 0 },
+      });
+      expect((await post(app, checkpointPath, request, "worker")).json()).toEqual(accepted.json());
+      expect((await get(app, `/api/tasks/${task.id}/usage`)).json().usage).toMatchObject({
+        reportedTokens: tokens ?? 0,
+        activeInvocationCount: 0,
+        unknownInvocationCount: 1,
+        usage: { totalTokens: null },
+      });
+      const next = registration(claimed, "analysis-after-incomplete-usage");
+      expect(
+        (await post(app, usagePath, { lease: claimed.lease, receipt: next }, "worker")).json()
+          .executionAllowed,
+      ).toBe(true);
+    },
+  );
 
   it("records a late first registration as not admitted and accepts only zero-cost termination", async () => {
     const { app, item, advance } = await harness();

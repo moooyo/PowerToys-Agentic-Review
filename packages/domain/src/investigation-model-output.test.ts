@@ -1,5 +1,6 @@
 import {
   createInvestigationPreview,
+  INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
   type InvestigationAnalysisV1,
   type InvestigationLoopCheckpointV1,
   type InvestigationModelOutputRejectionIssue,
@@ -272,22 +273,37 @@ describe("rejected analysis checkpoints", () => {
     }
   });
 
-  it("stops at token, duration, or retained report budget exhaustion without advancing the round", () => {
-    for (const field of ["maxTokens", "maxDurationMs", "maxReportBytes"] as const) {
+  it("stops at the total duration or retained report limit without advancing the round", () => {
+    for (const limit of ["duration", "report"] as const) {
       const { checkpoint } = setup();
       const constrained = reseal({
         ...checkpoint,
         budget: {
           ...checkpoint.budget,
-          [field]: field === "maxTokens" ? 120 : field === "maxDurationMs" ? 30 : 1,
+          maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS * 2,
+          maxReportBytes: limit === "report" ? 1 : checkpoint.budget.maxReportBytes,
         },
       });
-      const next = rejectInvestigationModelOutput(constrained, rejection(constrained), options);
+      const next = rejectInvestigationModelOutput(constrained, rejection(constrained), {
+        ...options,
+        durationMs: limit === "duration" ? INVESTIGATION_EXECUTION_DURATION_LIMIT_MS : 30,
+      });
       expect(next.stopReason).toBe("budget_exhausted");
       expect(next.round).toBe(0);
       expect(next.consumed.rounds).toBe(0);
       expect(next.analysis).toEqual(checkpoint.analysis);
     }
+  });
+
+  it("records rejected usage above legacy token and round limits without stopping correction", () => {
+    const { checkpoint } = setup();
+    const constrained = reseal({
+      ...checkpoint,
+      budget: { ...checkpoint.budget, maxRounds: 1, maxTokens: 1, maxDurationMs: 1 },
+    });
+    const next = rejectInvestigationModelOutput(constrained, rejection(constrained), options);
+    expect(next.stopReason).toBe("continuing");
+    expect(next.consumed).toMatchObject({ rounds: 0, tokens: 120, durationMs: 30 });
   });
 
   it("rejects invalid accounting totals, elapsed time, and rejection identities", () => {

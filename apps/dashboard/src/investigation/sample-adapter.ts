@@ -1,10 +1,13 @@
 import {
   type ActionContextV1,
   createInvestigationPreview,
+  getInvestigationExecutionDurationLimitMs,
   type InvestigationActionGuard,
   type InvestigationActionIntentV1,
   type InvestigationActionKind,
   type InvestigationArtifactMetadataV1,
+  type InvestigationBudget,
+  InvestigationBudgetSchema,
   type InvestigationCommentCommand,
   type InvestigationCommentDelivery,
   type InvestigationCommentDeliveryQuery,
@@ -16,7 +19,9 @@ import {
   type InvestigationResultV1,
   type InvestigationSchedulerStatus,
   type InvestigationTaskV1,
+  normalizeInvestigationBudget,
 } from "@agentic-review/contracts";
+import { Value } from "@sinclair/typebox/value";
 import type {
   CreateTaskInput,
   InvestigationApi,
@@ -263,7 +268,7 @@ function reportHeader(result: InvestigationResultV1): InvestigationReportHeaderV
 }
 
 function reportCheckpoint(fixture: Fixture): InvestigationLoopCheckpointV1 | null {
-  if (fixture.result.outcome === "completed") return null;
+  if (fixture.task.state === "completed") return null;
   const { task, attempt, result } = fixture;
   return {
     schemaVersion: "InvestigationLoopCheckpointV1",
@@ -356,6 +361,19 @@ function required<T>(map: ReadonlyMap<string, T>, id: string, kind: string): T {
 
 function guard(code: string, satisfied: boolean, message: string): InvestigationActionGuard {
   return { code, satisfied, message };
+}
+
+function executionBudget(budget: InvestigationBudget, submitted: boolean): InvestigationBudget {
+  if (!Value.Check(InvestigationBudgetSchema, budget)) {
+    throw new InvestigationHttpError(400, "The sample execution budget is invalid.");
+  }
+  if (submitted && budget.maxDurationMs > getInvestigationExecutionDurationLimitMs()) {
+    throw new InvestigationHttpError(
+      400,
+      "The total sample task execution duration cannot exceed two hours, including resumed attempts.",
+    );
+  }
+  return normalizeInvestigationBudget(budget);
 }
 
 /** Each adapter owns isolated synthetic state and never dispatches network requests. */
@@ -992,7 +1010,7 @@ export function createSampleInvestigationApi(): InvestigationApi {
         allowRepositoryExecution: false,
         authorizationRef: null,
       },
-      budget: input.budget ?? template.budget,
+      budget: executionBudget(input.budget ?? template.budget, input.budget !== undefined),
       profileRef: input.profileRef ?? template.profileRef,
       promptRef: input.promptRef ?? template.promptRef,
       state: "queued",
@@ -1256,30 +1274,26 @@ export function createSampleInvestigationApi(): InvestigationApi {
       if (!["interrupted", "blocked", "failed", "cancelled"].includes(detail.task.state)) {
         throw new InvestigationHttpError(409, "Only a stopped sample task can be resumed.");
       }
-      if (
-        budget &&
-        Object.entries(budget).some(
-          ([name, value]) =>
-            !Number.isSafeInteger(value) ||
-            value < detail.task.budget[name as keyof InvestigationTaskV1["budget"]],
-        )
-      )
+      const nextBudget = executionBudget(budget ?? detail.task.budget, budget !== undefined);
+      if (nextBudget.maxReportBytes < detail.task.budget.maxReportBytes)
         throw new InvestigationHttpError(
           400,
-          "Sample resume limits cannot decrease the saved budget.",
+          "The sample report size limit cannot decrease the saved budget.",
         );
-      const nextBudget = budget ?? detail.task.budget;
       const consumed = detail.checkpoint?.consumed;
       if (
         consumed &&
-        (consumed.rounds >= nextBudget.maxRounds ||
-          consumed.durationMs >= nextBudget.maxDurationMs ||
-          consumed.tokens >= nextBudget.maxTokens ||
-          consumed.reportBytes >= nextBudget.maxReportBytes)
+        detail.checkpoint?.stopReason !== "complete" &&
+        consumed.durationMs >= getInvestigationExecutionDurationLimitMs(nextBudget)
       )
         throw new InvestigationHttpError(
           409,
-          "Increase the exhausted sample budget before resuming.",
+          "The sample task exhausted its cumulative two-hour execution limit and cannot be resumed.",
+        );
+      if (consumed && consumed.reportBytes > nextBudget.maxReportBytes)
+        throw new InvestigationHttpError(
+          409,
+          "Increase the exhausted sample report size limit before resuming.",
         );
       detail.task = {
         ...detail.task,

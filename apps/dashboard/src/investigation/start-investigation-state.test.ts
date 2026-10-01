@@ -201,26 +201,34 @@ describe("investigation access and budget", () => {
     expect(request.expectedSubjectRevisionKey).toBe(source.subject.revisionKey);
   });
 
-  it("preserves the configured report size when custom limits change", async () => {
+  it("changes only report capacity and discards legacy execution limits in a custom request", async () => {
     const { source, task } = await fixture();
-    const defaults = { ...task.budget, maxReportBytes: 27_456_789 };
+    const defaults = {
+      ...task.budget,
+      maxTokens: 5,
+      maxRounds: 1,
+      maxDurationMs: 300_000,
+      maxReportBytes: 27_456_789,
+    };
     const request = investigationRequest(
       source,
       {
         ...initialInvestigationInputs(source, defaults),
         customBudget: true,
-        tokens: "8000000",
-        rounds: "6",
-        minutes: "60",
+        reportBytes: "31457280",
       },
       "custom-budget",
       defaults,
     );
     expect(request.budget).toEqual({
-      maxTokens: 8_000_000,
-      maxRounds: 6,
-      maxDurationMs: 3_600_000,
-      maxReportBytes: 27_456_789,
+      maxDurationMs: 7_200_000,
+      maxReportBytes: 31_457_280,
+    });
+    expect(initialInvestigationInputs(source, defaults)).toEqual({
+      mode: "source_read",
+      sourceCommit: "",
+      customBudget: false,
+      reportBytes: "27456789",
     });
   });
 
@@ -243,20 +251,19 @@ describe("investigation access and budget", () => {
     ).toBeUndefined();
   });
 
-  it("rejects invalid custom limits before any submission", async () => {
-    const { source, task } = await fixture();
-    const inputs = {
-      ...initialInvestigationInputs(source, task.budget),
-      customBudget: true,
-      tokens: "0",
-      rounds: "1.5",
-      minutes: "Infinity",
-    };
-    expect(Object.keys(investigationInputErrors(source, inputs, task.budget)).sort()).toEqual([
-      "minutes",
-      "rounds",
-      "tokens",
-    ]);
-    expect(() => investigationRequest(source, inputs, "invalid", task.budget)).toThrow();
-  });
+  it.each(["0", "1.5", "Infinity", "9007199254740992"])(
+    "rejects an invalid report capacity of %s before any submission",
+    async (reportBytes) => {
+      const { source, task } = await fixture();
+      const inputs = {
+        ...initialInvestigationInputs(source, task.budget),
+        customBudget: true,
+        reportBytes,
+      };
+      expect(Object.keys(investigationInputErrors(source, inputs, task.budget)).sort()).toEqual([
+        "reportBytes",
+      ]);
+      expect(() => investigationRequest(source, inputs, "invalid", task.budget)).toThrow();
+    },
+  );
 });

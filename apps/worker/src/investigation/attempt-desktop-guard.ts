@@ -42,6 +42,7 @@ export interface AttemptDesktopGuardOptions {
   readonly ownerId: string;
   /** A trusted journal allocates a fresh token for this acquisition; never reuse an old token. */
   readonly ownerToken?: string;
+  readonly signal?: AbortSignal;
 }
 
 export interface AttemptDesktopGuardRecoveryOptions {
@@ -108,6 +109,7 @@ interface OpenedFile {
 export async function acquireAttemptDesktopGuard(
   options: AttemptDesktopGuardOptions,
 ): Promise<AttemptDesktopGuard> {
+  options.signal?.throwIfAborted();
   assertOptions(options);
   const directory = resolve(options.lockDirectory);
   const record: GuardRecord & { readonly publicationId: string } = {

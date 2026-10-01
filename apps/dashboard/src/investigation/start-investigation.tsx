@@ -203,9 +203,7 @@ export function StartInvestigationButton({
     if (defaults.data && !inputs.customBudget && !receipt)
       setInputs((current) => ({
         ...current,
-        tokens: String(defaults.data.budget.maxTokens),
-        rounds: String(defaults.data.budget.maxRounds),
-        minutes: String(defaults.data.budget.maxDurationMs / 60_000),
+        reportBytes: String(defaults.data.budget.maxReportBytes),
       }));
   }, [defaults.data, inputs.customBudget, receipt]);
   useEffect(() => {
@@ -291,8 +289,7 @@ export function StartInvestigationButton({
       : investigationInputErrors(source, inputs, defaults.data?.budget);
     setErrors(validation);
     if (Object.keys(validation).length) {
-      if (validation.tokens || validation.rounds || validation.minutes || validation.budget)
-        setBudgetOpen(true);
+      if (validation.reportBytes || validation.budget) setBudgetOpen(true);
       focusErrors();
       return;
     }
@@ -457,11 +454,12 @@ export function StartInvestigationButton({
                   <Box>
                     <Typography variant="subtitle2">Investigation budget</Typography>
                     <Typography variant="caption" color="text.secondary">
+                      2 hours total execution
                       {inputs.customBudget
-                        ? `${Number(inputs.tokens).toLocaleString()} tokens · ${inputs.rounds} rounds · ${inputs.minutes} min`
+                        ? ` · ${Number(inputs.reportBytes).toLocaleString()} report bytes`
                         : defaults.data
-                          ? `${defaults.data.budget.maxTokens.toLocaleString()} tokens · ${defaults.data.budget.maxRounds} rounds · ${defaults.data.budget.maxDurationMs / 60_000} min`
-                          : "Use configured limits"}
+                          ? ` · ${defaults.data.budget.maxReportBytes.toLocaleString()} report bytes`
+                          : " · Use configured report size"}
                     </Typography>
                   </Box>
                 </AccordionSummary>
@@ -475,49 +473,27 @@ export function StartInvestigationButton({
                           onChange={(event) => update({ customBudget: event.target.checked })}
                         />
                       }
-                      label="Choose custom limits"
+                      label="Choose custom report size"
                     />
                     {defaults.isError && (
                       <Alert severity="warning">
-                        Configured limits could not be loaded. You can still use the server
+                        Configured report size could not be loaded. You can still use the server
                         defaults. <Button onClick={() => void defaults.refetch()}>Retry</Button>
                       </Alert>
                     )}
-                    <Box
-                      sx={{
-                        display: "grid",
-                        gridTemplateColumns: { xs: "1fr", sm: "1.4fr 1fr 1fr" },
-                        gap: 2,
-                      }}
-                    >
-                      {(
-                        [
-                          { key: "tokens", label: "Token limit" },
-                          { key: "rounds", label: "Round limit" },
-                          { key: "minutes", label: "Time limit (min)" },
-                        ] as const
-                      ).map((field) => (
-                        <TextField
-                          key={field.key}
-                          type="number"
-                          label={field.label}
-                          value={inputs[field.key]}
-                          onChange={(event) => update({ [field.key]: event.target.value })}
-                          disabled={locked || !inputs.customBudget}
-                          error={!!errors[field.key]}
-                          helperText={errors[field.key]}
-                          slotProps={{
-                            htmlInput: {
-                              min: field.key === "minutes" ? 0.001 : 1,
-                              step: field.key === "minutes" ? "any" : 1,
-                            },
-                          }}
-                        />
-                      ))}
-                    </Box>
+                    <TextField
+                      type="number"
+                      label="Report size limit (bytes)"
+                      value={inputs.reportBytes}
+                      onChange={(event) => update({ reportBytes: event.target.value })}
+                      disabled={locked || !inputs.customBudget}
+                      error={!!errors.reportBytes}
+                      helperText={errors.reportBytes}
+                      slotProps={{ htmlInput: { min: 1, step: 1 } }}
+                    />
                     <Typography variant="caption" color="text.secondary">
-                      The investigation saves a checkpoint when a limit is reached. The configured
-                      report size limit stays unchanged.
+                      Execution stops after 2 hours across all attempts. Resuming keeps the time
+                      already used. Tokens and rounds are recorded without limiting execution.
                     </Typography>
                     {errors.budget && (
                       <Alert severity="error" tabIndex={-1}>

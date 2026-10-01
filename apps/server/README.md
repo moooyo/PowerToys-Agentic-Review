@@ -667,22 +667,22 @@ Admission and Worker reads verify the exact saved parent report, patch subject, 
 content availability. A required patch that has expired or gone missing cannot be replaced with a
 different branch or artifact under the same task identity.
 
-## Deployment Task budget defaults
+## Task execution limit
 
-New Tasks without an explicit budget use the deployment defaults below. This includes signed
-assignment intake and trusted E2E comment intake. These settings are read at startup; GitHub
-comments cannot change them. Existing Tasks, idempotent creation retries, and resumed Tasks retain
-their recorded budgets. An authorized explicit Task budget continues to take precedence.
+Every Task has a fixed two-hour (`7200000` millisecond) execution limit. Active execution time
+accumulates across analysis rounds, interrupted attempts, and explicit recovery; resuming cannot
+reset or extend it. Tokens and analysis rounds remain usage measurements with no execution cap.
+The same policy applies to signed assignment intake and trusted E2E comment intake.
 
-| Setting | Default | Allowed values |
-| --- | --- | --- |
-| `INVESTIGATION_DEFAULT_TASK_MAX_TOKENS` | `120000` | Positive safe integers |
-| `INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS` | `24` | Positive safe integers |
-| `INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS` | `1800000` | Positive integers up to `2147483647` |
+New and explicitly revised budgets contain `maxDurationMs: 7200000` and the report resource limit
+`maxReportBytes`. Requests cannot increase the duration beyond two hours. The Server's configured
+report-size limit still bounds `maxReportBytes`, which is an independent storage limit.
 
-The duration maximum matches the process timer limit. The Server's report-size limit continues
-to supply `maxReportBytes`. These are per-Task limits, not a shared deployment spending allowance;
-an acceptance run with an aggregate token allowance must monitor usage across its Tasks.
+The obsolete `INVESTIGATION_DEFAULT_TASK_MAX_TOKENS`, `INVESTIGATION_DEFAULT_TASK_MAX_ROUNDS`,
+and `INVESTIGATION_DEFAULT_TASK_MAX_DURATION_MS` environment variables are ignored, including
+their old values on existing deployments. Legacy Task and sealed report budget fields remain
+readable without rewriting immutable history; execution uses the fixed two-hour policy even
+when a legacy record contains lower token, round, or duration values.
 
 ## Trusted PR E2E commands
 

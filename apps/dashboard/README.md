@@ -215,14 +215,21 @@ business access. Account updates and password resets preserve versions and
 surface conflicts. The current account cannot disable itself. Password changes
 and resets revoke the affected sessions.
 
-## Retained limits and deferred decisions
+## Execution time and deferred decisions
 
-The existing default task limits are real: 120,000 reported tokens, 24 analysis
-rounds, and 30 minutes, with a 64 MiB report resource limit. This work does not
-change those defaults or add a budget editor. A Review exhausted under its saved
-limits can still receive a resume rejection. Reported usage is not a guaranteed
-provider total or a hard provider spending limit; future budget policy remains a
-separate discussion.
+Native tasks have one fixed execution allowance: two hours in total across all
+attempts. Queue and paused time do not count; preparation and active execution
+do. Resuming preserves time already used and cannot extend the allowance.
+Tokens and analysis rounds remain statistics without execution caps, including
+for tasks with historical budget fields. Missing model usage remains explicitly
+unknown or partial and does not itself prevent a valid result from being saved.
+
+The default 64 MiB report capacity remains a storage safeguard. Start and resume
+forms can adjust this capacity separately. An exhausted execution allowance
+disables further execution recovery; delivery-only recovery of a completed
+saved report remains available when otherwise eligible. Reported usage is not a
+guaranteed provider total or a provider spending limit. See the
+[time-only execution policy](../../docs/design/2026-10-02-time-only-execution-budget.md).
 
 Publishing-account identity and token-scope diagnostics are not added. Historical
 legacy result publications are readable but have no new repost operation. Numeric

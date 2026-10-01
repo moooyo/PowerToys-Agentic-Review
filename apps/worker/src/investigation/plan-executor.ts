@@ -228,7 +228,6 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
       0,
     );
     let consumedTokens = input.consumedTokens ?? priorModelTokens;
-    const initialConsumedTokens = consumedTokens;
     const result = (
       outcome: InvestigationOutcome,
       diagnostics: readonly InvestigationDiagnostic[] = [],
@@ -312,31 +311,13 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
       const step = plan.steps.find((candidate) => candidate.id === executable.stepId);
       if (step === undefined)
         return block("PLAN_STEP_MISSING", "The executable step is absent from the saved plan.");
-      const invocationBudget =
-        context.invocationBudget === undefined
-          ? undefined
-          : {
-              remainingTokens: Math.max(
-                0,
-                Math.min(
-                  input.task.budget.maxTokens - consumedTokens,
-                  context.invocationBudget.remainingTokens -
-                    (consumedTokens - initialConsumedTokens),
-                ),
-              ),
-              deadlineAtMs: context.invocationBudget.deadlineAtMs,
-            };
+      const invocationBudget = context.invocationBudget;
       if (
         executable.operation.kind === "model-edit" ||
         executable.operation.kind === "agent-verify"
       ) {
-        if (invocationBudget !== undefined && invocationBudget.remainingTokens <= 0)
-          throw new ModelBudgetExceededError("tokens");
-        if (consumedTokens >= input.task.budget.maxTokens)
-          return block(
-            "PLAN_MODEL_TOKEN_BUDGET_EXCEEDED",
-            "The task has no model token budget remaining for this saved model step.",
-          );
+        if (invocationBudget !== undefined && invocationBudget.deadlineAtMs <= Date.now())
+          throw new ModelBudgetExceededError("duration");
       }
       await input.workspace.assertIntegrity();
       await input.workspace.assertSourceBinding();
@@ -356,7 +337,8 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
         { ...input, consumedTokens },
         invocationBudget === undefined ? context : { ...context, invocationBudget },
       );
-      if (observation.modelUsage !== undefined) consumedTokens += observation.modelUsage.tokens;
+      if (observation.modelUsage !== undefined)
+        consumedTokens += observation.modelUsage.tokens ?? 0;
       context.signal.throwIfAborted();
       await input.workspace.assertIntegrity();
       await input.workspace.assertSourceBinding();
@@ -597,7 +579,7 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
     readonly summary: string;
     readonly details: unknown;
     readonly diagnosticCode?: string;
-    readonly modelUsage?: { readonly tokens: number; readonly durationMs: number };
+    readonly modelUsage?: { readonly tokens: number | null; readonly durationMs: number };
     readonly artifacts?: readonly InvestigationUiArtifact[];
     readonly recipe?: InvestigationRecipeObservation;
     readonly markUsageDisposition?: (disposition: "accepted" | "rejected") => Promise<void>;
@@ -648,34 +630,18 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
         },
       });
       if (
-        response.usage.source !== "cli" ||
-        response.usage.tokens === null ||
-        !Number.isSafeInteger(response.usage.tokens) ||
-        response.usage.tokens < 0 ||
+        (response.usage.tokens !== null &&
+          (!Number.isSafeInteger(response.usage.tokens) || response.usage.tokens < 0)) ||
         !Number.isSafeInteger(response.durationMs) ||
         response.durationMs < 0
       ) {
         await disposition("rejected");
         return blockUsage(
           "PLAN_MODEL_USAGE_UNAVAILABLE",
-          "The saved verification cannot be accepted because trusted model usage is unavailable.",
+          "The saved verification returned invalid model usage counters.",
         );
       }
       const modelUsage = { tokens: response.usage.tokens, durationMs: response.durationMs };
-      if (
-        (input.consumedTokens ?? 0) + modelUsage.tokens > input.task.budget.maxTokens ||
-        (context.invocationBudget !== undefined &&
-          modelUsage.tokens > context.invocationBudget.remainingTokens)
-      ) {
-        await disposition("rejected");
-        return {
-          ...blockUsage(
-            "PLAN_MODEL_TOKEN_BUDGET_EXCEEDED",
-            "The saved verification exceeded the remaining model token budget.",
-          ),
-          modelUsage,
-        };
-      }
       const blocked = response.checks.some(
         (check) => check.status === "blocked" || check.status === "not_run",
       );
@@ -777,10 +743,8 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
         throw new Error("The model edit adapter returned an invalid structured proposal.");
       }
       if (
-        response.usage.source !== "cli" ||
-        response.usage.tokens === null ||
-        !Number.isSafeInteger(response.usage.tokens) ||
-        response.usage.tokens < 0
+        response.usage.tokens !== null &&
+        (!Number.isSafeInteger(response.usage.tokens) || response.usage.tokens < 0)
       ) {
         if (response.usage.invocationId !== undefined)
           await adapter.markUsageDisposition?.(response.usage.invocationId, "rejected");
@@ -788,24 +752,11 @@ export class ProductionInvestigationPlanExecutor implements InvestigationPlanExe
           status: "blocked",
           outcome: "blocked",
           diagnosticCode: "PLAN_MODEL_USAGE_UNAVAILABLE",
-          summary:
-            "The model edit proposal was not applied because trusted token usage is unavailable.",
+          summary: "The model edit proposal returned invalid token usage counters.",
           details: { durationMs, usageSource: response.usage.source },
         };
       }
       const modelUsage = { tokens: response.usage.tokens, durationMs };
-      if ((input.consumedTokens ?? 0) + modelUsage.tokens > input.task.budget.maxTokens) {
-        if (response.usage.invocationId !== undefined)
-          await adapter.markUsageDisposition?.(response.usage.invocationId, "rejected");
-        return {
-          status: "blocked",
-          outcome: "blocked",
-          diagnosticCode: "PLAN_MODEL_TOKEN_BUDGET_EXCEEDED",
-          modelUsage,
-          summary: "The model edit proposal exceeded the task token budget and was not applied.",
-          details: { modelUsage },
-        };
-      }
       try {
         await input.workspace.applyEdits({
           edits: structuredClone(proposal.edits),
@@ -1167,8 +1118,8 @@ function validatePriorState(
             event.modelUsage !== undefined ||
             event.validation.checks.some((check) => check.status !== "blocked")))) &&
       (event.modelUsage === undefined ||
-        !Number.isSafeInteger(event.modelUsage.tokens) ||
-        event.modelUsage.tokens < 0 ||
+        (event.modelUsage.tokens !== null &&
+          (!Number.isSafeInteger(event.modelUsage.tokens) || event.modelUsage.tokens < 0)) ||
         !Number.isSafeInteger(event.modelUsage.durationMs) ||
         event.modelUsage.durationMs < 0)
     )

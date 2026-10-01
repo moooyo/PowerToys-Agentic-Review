@@ -9,6 +9,7 @@ import {
   cliProcessResourceLimitBounds,
 } from "@agentic-review/codex";
 import {
+  getInvestigationExecutionDurationLimitMs,
   type InvestigationAttemptV1,
   type InvestigationInputSnapshotV1,
   InvestigationInputSnapshotV1Schema,
@@ -36,6 +37,7 @@ import {
   type ProcessHostClient,
   ProcessHostProtocolError,
   type ProcessLaunchSpec,
+  processHostResourceBounds,
 } from "../execution/process-host-protocol.js";
 import {
   type CodexAppServerSession,
@@ -431,7 +433,7 @@ export function createModelTurnRunner(suppliedOptions: ModelTurnRunnerOptions): 
         prompt,
         schema: InvestigationModelTurnDeltaV1Schema,
         generationSchema,
-        hardTimeoutMs: input.task.budget.maxDurationMs,
+        hardTimeoutMs: getInvestigationExecutionDurationLimitMs(input.task.budget),
         maximumResultBytes: maximumModelDeltaBytes,
         ...(input.onUsage === undefined ? {} : { onUsage: input.onUsage }),
         ...(input.onActivity === undefined ? {} : { onActivity: input.onActivity }),
@@ -539,14 +541,8 @@ export function createStaticModelJsonRunner(
           "App-server execution requires an explicit model selection.",
         );
       if (input.invocationBudget !== undefined) {
-        if (
-          !Number.isSafeInteger(input.invocationBudget.remainingTokens) ||
-          input.invocationBudget.remainingTokens < 0 ||
-          !Number.isSafeInteger(input.invocationBudget.deadlineAtMs)
-        )
+        if (!Number.isSafeInteger(input.invocationBudget.deadlineAtMs))
           throw failure("MODEL_INPUT_INVALID", "The invocation allowance is invalid.");
-        if (input.invocationBudget.remainingTokens === 0)
-          throw new ModelBudgetExceededError("tokens");
         if (input.invocationBudget.deadlineAtMs <= Date.now())
           throw new ModelBudgetExceededError("duration");
       }
@@ -616,7 +612,6 @@ export function createStaticModelJsonRunner(
             "The round input contains a protected worker value.",
           );
         const hardTimeoutMs = Math.min(
-          Math.max(1, options.limits.hardTimeoutMs - teardownTimeoutMs),
           input.hardTimeoutMs,
           input.invocationBudget === undefined
             ? Number.MAX_SAFE_INTEGER
@@ -646,7 +641,10 @@ export function createStaticModelJsonRunner(
             ...options.limits,
             hardTimeoutMs: Math.max(
               10_000,
-              Math.min(options.limits.hardTimeoutMs, hardTimeoutMs + teardownTimeoutMs),
+              Math.min(
+                processHostResourceBounds.hardTimeoutMs.maximum,
+                hardTimeoutMs + teardownTimeoutMs,
+              ),
             ),
           },
         });
@@ -724,7 +722,7 @@ export function createStaticModelJsonRunner(
         }
         input.signal.throwIfAborted();
         let managed: ManagedProcess;
-        // The worker deadline starts before dispatch; the native deadline reserves teardown time.
+        // All rounds share the task deadline; the native timeout allows bounded teardown.
         const timeout = new AbortController();
         const transportStop = new AbortController();
         const dispatchTimeoutMs = Math.min(
@@ -798,7 +796,6 @@ export function createStaticModelJsonRunner(
                 prompt,
                 outputSchema: JSON.parse(schemaJson),
                 passiveProposal,
-                maximumTokens: input.invocationBudget!.remainingTokens,
                 maximumResultBytes: Math.min(
                   input.maximumResultBytes,
                   options.limits.maximumOutputBytes,
@@ -816,20 +813,14 @@ export function createStaticModelJsonRunner(
                     text: `The model invocation was stopped: ${reason}.`,
                   });
                   transportStop.abort(
-                    reason === "token_budget"
-                      ? new ModelBudgetExceededError("tokens")
-                      : failure(
-                          reason === "usage_unavailable"
-                            ? "MODEL_USAGE_UNAVAILABLE"
-                            : reason === "model_mismatch"
-                              ? "MODEL_POLICY_UNAVAILABLE"
-                              : "MODEL_PROCESS_FAILED",
-                          reason === "usage_unavailable"
-                            ? "Model usage accounting became unavailable during the invocation."
-                            : reason === "model_mismatch"
-                              ? "The CLI selected a model other than the explicitly requested model."
-                              : "The Codex app-server protocol failed.",
-                        ),
+                    failure(
+                      reason === "model_mismatch"
+                        ? "MODEL_POLICY_UNAVAILABLE"
+                        : "MODEL_PROCESS_FAILED",
+                      reason === "model_mismatch"
+                        ? "The CLI selected a model other than the explicitly requested model."
+                        : "The Codex app-server protocol failed.",
+                    ),
                   );
                 },
                 onUsage: (usage) => {
@@ -965,9 +956,7 @@ export function createStaticModelJsonRunner(
           const tokens =
             invocationId === undefined
               ? (events.tokens ?? observedTokens)
-              : invocationUsage?.completeness === "complete"
-                ? invocationUsage.usage.totalTokens
-                : null;
+              : (invocationUsage?.usage.totalTokens ?? null);
           input.onUsage?.({
             tokens,
             source: tokens === null ? "unavailable" : "cli",
@@ -1011,7 +1000,8 @@ export function createStaticModelJsonRunner(
               tokens,
               source: tokens === null ? "unavailable" : "cli",
               ...(invocationId === undefined ? {} : { invocationId }),
-              ...(invocationId === undefined || invocationUsage === undefined
+              ...((invocationId === undefined && appSession === undefined) ||
+              invocationUsage === undefined
                 ? {}
                 : { details: invocationUsage.usage, completeness: invocationUsage.completeness }),
             },
@@ -1176,12 +1166,11 @@ function assertInputBinding(input: ModelTurnExecutionInput): void {
   if (
     attempt.taskId !== task.id ||
     !task.executionPolicy.allowedSubjectRefs.includes(task.subjectRef) ||
-    (checkpoint !== null &&
-      (checkpoint.taskId !== task.id || checkpoint.round >= task.budget.maxRounds))
+    (checkpoint !== null && checkpoint.taskId !== task.id)
   )
     throw failure(
       "MODEL_INPUT_INVALID",
-      "The round input does not match its task, authorized subjects, or remaining round budget.",
+      "The round input does not match its task or authorized subjects.",
     );
 }
 
@@ -1274,7 +1263,7 @@ function reviewBaselineGuidance(task: InvestigationTaskV1): readonly string[] {
     "For every supplied candidate with reviewBaselineFindingRef, preserve that reference and discoveredRound=0 exactly and provide an explicit reviewDisposition. Omitted candidates remain pending; omission never means fixed. Do not create replacement baseline candidates or move a baseline reference to another candidate. Ordinary new candidates omit both baseline fields and use this turn's positive discovery round.",
     "Use reviewDisposition=fixed only when the current head differs from the prior head and fresh source evidence establishes that the original defect no longer exists. Use not_confirmed when fresh source analysis rejects the old conclusion, including a reevaluation at the same head; do not call that a code repair. Both dispositions use status=withdrawn with findingId=null, findingVersion=null, mergedIntoCandidateId=null, a concrete rationale, and fresh current-subject static evidence.",
     "Use reviewDisposition=still_present with status=confirmed, linked to the exact final version of a fresh current-subject finding and its independent final-version recheck. Use unverified with status=unresolved when a supported current-subject hypothesis remains; independently recheck it with unresolvedQuestions, explicit limitations, and a saved continuation plan. If the available source cannot support a retained hypothesis, use unverified with status=withdrawn, no finding link, fresh static evidence describing the gap, and a limitation citing that same evidence; do not invent a finding. Multiple prior findings may link to one current finding when they describe the same defect; retain each baseline candidate and its explicit conclusion.",
-    "Keep reviewDisposition=pending and status=pending for any prior finding whose investigation has not been completed. A token, input, duration, or round budget limit cannot justify fixed, not_confirmed, or a false completion claim. State remaining work honestly and preserve the complete pending ledger. All rereview conclusions remain static analysis: do not run repository code, builds, tests, applications, UI checks, or edit source to manufacture confirmation.",
+    "Keep reviewDisposition=pending and status=pending for any prior finding whose investigation has not been completed. An input or duration limit cannot justify fixed, not_confirmed, or a false completion claim. State remaining work honestly and preserve the complete pending ledger. All rereview conclusions remain static analysis: do not run repository code, builds, tests, applications, UI checks, or edit source to manufacture confirmation.",
   ];
 }
 

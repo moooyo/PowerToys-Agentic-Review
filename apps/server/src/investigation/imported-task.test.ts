@@ -151,6 +151,7 @@ function harness(kind: InvestigationWorkItemRecord["kind"] = "pull_request") {
     actionTransport: { supportedActions: [], readTarget, execute, reconcile },
     prepareTaskInput,
   });
+  service.prompts.catalog(actor, repository.id);
   const initialIdempotencyRecords = store.list("idempotency");
   const initialReportDirectoryMarker = store.get("idempotency", "workspace:report-directory:v1");
   const request: InvestigationCreateTaskRequestV1 = {

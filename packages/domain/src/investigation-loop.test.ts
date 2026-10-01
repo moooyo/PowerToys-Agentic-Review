@@ -1,5 +1,6 @@
 import {
   createInvestigationPreview as createInvestigationFixture,
+  INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
   type InvestigationAnalysisV1,
   type InvestigationLoopCheckpointV1,
   type InvestigationLoopRoundV1,
@@ -683,7 +684,10 @@ describe("complete investigation loop", () => {
       leaseVersion: 1,
       recordedAt,
     });
-    const exhausted = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), options);
+    const exhausted = applyInvestigationLoopRound(checkpoint, round(checkpoint, analysis), {
+      ...options,
+      usage: { ...options.usage, durationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS },
+    });
     expect(exhausted.stopReason).toBe("budget_exhausted");
     expect(evaluateInvestigationCompletion(exhausted).complete).toBe(false);
     expect(exhausted.analysis.findings).toHaveLength(137);
@@ -723,63 +727,188 @@ describe("complete investigation loop", () => {
     expect(final.analysis.findings).toHaveLength(1);
   });
 
-  it("preserves accepted execution receipts across an interrupted attempt", () => {
-    const { checkpoint, task, result } = setup();
-    const runtime = structuredClone(checkpoint.runtime);
-    const started = {
-      taskId: task.id,
-      attemptId: checkpoint.attemptId,
-      planRef: { id: result.plans[0]!.id, version: 1, digest: result.plans[0]!.digest },
-      subjectRef: task.subjectRef,
-      subjectRevisionKey: checkpoint.subjectRevisionKey,
-      stepId: "frozen-step",
-      stepDigest: "f".repeat(64),
-    };
-    runtime.startedSteps.push(started);
-    const acceptedStart = applyInvestigationRuntimeCheckpoint(checkpoint, runtime, { recordedAt });
-    runtime.completedStepIds.push(started.stepId);
-    runtime.completedSteps.push({
-      ...started,
-      outcome: "completed",
-      validation: { checks: [], summary: "Synthetic step receipt." },
-      verificationEvidence: [],
-      artifacts: [],
-      diagnostics: [],
-      subjects: [],
-      modelUsage: { tokens: 100, durationMs: 20 },
-    });
-    const completed = applyInvestigationRuntimeCheckpoint(acceptedStart, runtime, { recordedAt });
-    const precharged = projectInvestigationTokenConsumption(acceptedStart, 100);
-    const ledgerRecorded = applyInvestigationRuntimeCheckpoint(precharged, runtime, {
-      recordedAt,
-      accountedTokens: 100,
-    });
-    expect(ledgerRecorded.consumed.tokens).toBe(100);
-    expect(completed.consumed.tokens).toBe(100);
-    expect(completed.consumed.durationMs).toBe(20);
-    const replayed = applyInvestigationRuntimeCheckpoint(completed, runtime, { recordedAt });
-    expect(replayed.consumed.tokens).toBe(100);
-    expect(replayed.consumed.durationMs).toBe(20);
-    const serverTimed = applyInvestigationRuntimeCheckpoint(acceptedStart, runtime, {
-      recordedAt,
-      durationMs: 50,
-    });
-    expect(serverTimed.consumed.durationMs).toBe(50);
-    const restored = restoreInvestigationCheckpoint({
-      checkpoint: interruptInvestigationLoop(completed, "interrupted"),
+  it("continues beyond legacy token and round limits while preserving their original checkpoint", () => {
+    const { task, attempt, analysis, result } = setup();
+    task.budget.maxRounds = 1;
+    task.budget.maxTokens = 1;
+    const initial = createInvestigationCheckpoint({
       task,
-      attemptId: "attempt-2",
-      leaseVersion: 2,
+      attemptId: attempt.id,
+      checkpointId: "legacy-counter-checkpoint",
+      leaseVersion: 1,
       recordedAt,
     });
-    expect(restored.runtime.completedStepIds).toEqual([started.stepId]);
-    const forgotten = structuredClone(restored.runtime);
-    forgotten.completedSteps = [];
-    forgotten.completedStepIds = [];
-    expect(() => applyInvestigationRuntimeCheckpoint(restored, forgotten, { recordedAt })).toThrow(
-      "ledger cannot discard",
+    const original = structuredClone(initial);
+    const first = applyInvestigationLoopRound(initial, round(initial, analysis), options);
+    expect(first.stopReason).toBe("continuing");
+    const final = applyInvestigationLoopRound(
+      first,
+      round(first, finalAnalysis(result, analysis, 2), "finalize"),
+      options,
     );
+    expect(final.stopReason).toBe("complete");
+    expect(final.consumed).toMatchObject({ rounds: 2, tokens: 200, durationMs: 20 });
+    expect(initial).toEqual(original);
+    expect(initial.budget).toMatchObject({ maxRounds: 1, maxTokens: 1 });
   });
+
+  it("completes past a legacy thirty-minute allowance while within the fixed two hours", () => {
+    const { task, analysis } = setup(0, true);
+    task.budget = { ...task.budget, maxDurationMs: 30 * 60_000, maxRounds: 1, maxTokens: 1 };
+    const initial = createInvestigationCheckpoint({
+      task,
+      attemptId: "legacy-duration-attempt",
+      checkpointId: "legacy-duration-checkpoint",
+      leaseVersion: 1,
+      recordedAt,
+    });
+    const completed = applyInvestigationLoopRound(initial, round(initial, analysis), {
+      ...options,
+      usage: { ...options.usage, durationMs: 90 * 60_000 },
+    });
+    expect(completed.stopReason).toBe("complete");
+    expect(completed.consumed.durationMs).toBe(90 * 60_000);
+    expect(completed.budget).toEqual(initial.budget);
+  });
+
+  it.each([1, INVESTIGATION_EXECUTION_DURATION_LIMIT_MS * 2])(
+    "shares the two-hour duration across recovery with a legacy duration allowance of %s",
+    (legacyDurationMs) => {
+      const { task, attempt, analysis } = setup();
+      task.budget.maxDurationMs = legacyDurationMs;
+      task.budget.maxRounds = 1;
+      task.budget.maxTokens = 1;
+      const initial = createInvestigationCheckpoint({
+        task,
+        attemptId: attempt.id,
+        checkpointId: "cumulative-duration-checkpoint",
+        leaseVersion: 1,
+        recordedAt,
+      });
+      const original = structuredClone(initial);
+      const advanced = applyInvestigationRuntimeCheckpoint(initial, initial.runtime, {
+        recordedAt,
+        durationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS - 100,
+        accountedTokens: 1_000_000_000,
+      });
+      expect(advanced.stopReason).toBe("continuing");
+      const interrupted = interruptInvestigationLoop(advanced, "interrupted", recordedAt, [], 30);
+      const resumed = restoreInvestigationCheckpoint({
+        checkpoint: JSON.parse(JSON.stringify(interrupted)),
+        task,
+        attemptId: "duration-recovery-attempt",
+        leaseVersion: 2,
+        recordedAt,
+      });
+      expect(resumed.consumed.durationMs).toBe(INVESTIGATION_EXECUTION_DURATION_LIMIT_MS - 70);
+      expect(resumed.consumed.tokens).toBe(1_000_000_000);
+      expect(resumed.budget).toEqual(task.budget);
+      const exhausted = applyInvestigationLoopRound(resumed, round(resumed, analysis), {
+        ...options,
+        usage: { ...options.usage, durationMs: 70 },
+      });
+      expect(exhausted.stopReason).toBe("budget_exhausted");
+      expect(exhausted.consumed.durationMs).toBe(INVESTIGATION_EXECUTION_DURATION_LIMIT_MS);
+      expect(exhausted.analysis.findings).toHaveLength(1);
+      expect(() =>
+        restoreInvestigationCheckpoint({
+          checkpoint: exhausted,
+          task,
+          attemptId: "duration-reset-attempt",
+          leaseVersion: 3,
+          recordedAt,
+        }),
+      ).toThrow("cannot be reset or extended");
+      expect(initial).toEqual(original);
+    },
+  );
+
+  it("charges interruption time against the same total execution limit", () => {
+    const { checkpoint } = setup();
+    const stopped = interruptInvestigationLoop(
+      checkpoint,
+      "error",
+      recordedAt,
+      [],
+      INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+    );
+    expect(stopped.stopReason).toBe("budget_exhausted");
+    expect(stopped.consumed.durationMs).toBe(INVESTIGATION_EXECUTION_DURATION_LIMIT_MS);
+  });
+
+  it.each([100, null])(
+    "preserves accepted execution receipts with token usage %s across an interrupted attempt",
+    (tokens) => {
+      const { checkpoint, task, result } = setup();
+      const knownTokens = tokens ?? 0;
+      const runtime = structuredClone(checkpoint.runtime);
+      const started = {
+        taskId: task.id,
+        attemptId: checkpoint.attemptId,
+        planRef: { id: result.plans[0]!.id, version: 1, digest: result.plans[0]!.digest },
+        subjectRef: task.subjectRef,
+        subjectRevisionKey: checkpoint.subjectRevisionKey,
+        stepId: "frozen-step",
+        stepDigest: "f".repeat(64),
+      };
+      runtime.startedSteps.push(started);
+      const acceptedStart = applyInvestigationRuntimeCheckpoint(checkpoint, runtime, {
+        recordedAt,
+      });
+      runtime.completedStepIds.push(started.stepId);
+      runtime.completedSteps.push({
+        ...started,
+        outcome: "completed",
+        validation: { checks: [], summary: "Synthetic step receipt." },
+        verificationEvidence: [],
+        artifacts: [],
+        diagnostics: [],
+        subjects: [],
+        modelUsage: { tokens, durationMs: 20 },
+      });
+      const completed = applyInvestigationRuntimeCheckpoint(acceptedStart, runtime, { recordedAt });
+      const ledgerKnownTokens = knownTokens + 37;
+      const precharged = projectInvestigationTokenConsumption(acceptedStart, ledgerKnownTokens);
+      const ledgerRecorded = applyInvestigationRuntimeCheckpoint(precharged, runtime, {
+        recordedAt,
+        accountedTokens: ledgerKnownTokens,
+      });
+      expect(ledgerRecorded.consumed.tokens).toBe(ledgerKnownTokens);
+      expect(completed.consumed.tokens).toBe(knownTokens);
+      expect(completed.consumed.durationMs).toBe(20);
+      const replayed = applyInvestigationRuntimeCheckpoint(completed, runtime, { recordedAt });
+      expect(replayed.consumed.tokens).toBe(knownTokens);
+      expect(replayed.consumed.durationMs).toBe(20);
+      const serverTimed = applyInvestigationRuntimeCheckpoint(acceptedStart, runtime, {
+        recordedAt,
+        durationMs: 50,
+      });
+      expect(serverTimed.consumed.durationMs).toBe(50);
+      const restored = restoreInvestigationCheckpoint({
+        checkpoint: interruptInvestigationLoop(completed, "interrupted"),
+        task,
+        attemptId: "attempt-2",
+        leaseVersion: 2,
+        recordedAt,
+      });
+      expect(restored.runtime.completedStepIds).toEqual([started.stepId]);
+      expect(restored.runtime.completedSteps[0]!.modelUsage).toEqual({ tokens, durationMs: 20 });
+      expect(restored.consumed.tokens).toBe(knownTokens);
+      for (const invalidTokens of [-1, Number.NaN]) {
+        const invalid = structuredClone(runtime);
+        invalid.completedSteps[0]!.modelUsage!.tokens = invalidTokens;
+        expect(() =>
+          applyInvestigationRuntimeCheckpoint(acceptedStart, invalid, { recordedAt }),
+        ).toThrow("known token count or null");
+      }
+      const forgotten = structuredClone(restored.runtime);
+      forgotten.completedSteps = [];
+      forgotten.completedStepIds = [];
+      expect(() =>
+        applyInvestigationRuntimeCheckpoint(restored, forgotten, { recordedAt }),
+      ).toThrow("ledger cannot discard");
+    },
+  );
 
   it("normalizes only same-version in-round plan references using trusted canonical content", () => {
     const { analysis } = setup();
@@ -940,7 +1069,7 @@ describe("complete investigation loop", () => {
     const revised = increaseInvestigationBudget(
       interrupted,
       task,
-      { ...task.budget, maxTokens: task.budget.maxTokens + 100 },
+      { ...task.budget, maxReportBytes: task.budget.maxReportBytes + 100 },
       { recordedAt },
     );
     const restored = restoreInvestigationCheckpoint({
@@ -1044,9 +1173,10 @@ describe("complete investigation loop", () => {
     ).toThrow("does not match its digest");
   });
 
-  it("resumes after an explicit monotonic budget increase without losing accepted findings", () => {
+  it("resumes after a storage allowance increase without losing findings or elapsed time", () => {
     const { task, attempt, analysis } = setup(137);
-    task.budget.maxRounds = 1;
+    const sufficientReportBytes = task.budget.maxReportBytes;
+    task.budget.maxReportBytes = 1;
     const checkpoint = createInvestigationCheckpoint({
       task,
       attemptId: attempt.id,
@@ -1058,7 +1188,7 @@ describe("complete investigation loop", () => {
     const revised = increaseInvestigationBudget(
       exhausted,
       task,
-      { ...task.budget, maxRounds: 4 },
+      { ...task.budget, maxReportBytes: sufficientReportBytes },
       { recordedAt },
     );
     const restored = restoreInvestigationCheckpoint({
@@ -1071,9 +1201,15 @@ describe("complete investigation loop", () => {
     expect(restored.analysis).toEqual(exhausted.analysis);
     expect(restored.runtime).toEqual(exhausted.runtime);
     expect(restored.consumed).toEqual(exhausted.consumed);
-    expect(restored.budget.maxRounds).toBe(4);
+    expect(restored.budget).toEqual({
+      maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+      maxReportBytes: sufficientReportBytes,
+    });
     expect(restored.analysis.findings).toHaveLength(137);
-    const directlyRevisedTask = { ...task, budget: { ...task.budget, maxRounds: 4 } };
+    const directlyRevisedTask = {
+      ...task,
+      budget: { ...task.budget, maxReportBytes: sufficientReportBytes },
+    };
     expect(
       restoreInvestigationCheckpoint({
         checkpoint: exhausted,
@@ -1081,16 +1217,32 @@ describe("complete investigation loop", () => {
         attemptId: "direct-extension",
         leaseVersion: 2,
         recordedAt,
-      }).budget.maxRounds,
-    ).toBe(4);
+      }).budget.maxReportBytes,
+    ).toBe(sufficientReportBytes);
     expect(() =>
       increaseInvestigationBudget(
         exhausted,
         task,
-        { ...task.budget, maxTokens: task.budget.maxTokens - 1 },
+        { ...task.budget, maxReportBytes: 0 },
+        { recordedAt },
+      ),
+    ).toThrow("positive safe integers");
+    expect(() =>
+      increaseInvestigationBudget(
+        revised.checkpoint,
+        revised.task,
+        { ...revised.task.budget, maxReportBytes: sufficientReportBytes - 1 },
         { recordedAt },
       ),
     ).toThrow("cannot decrease");
+    expect(() =>
+      increaseInvestigationBudget(
+        exhausted,
+        task,
+        { ...task.budget, maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS + 1 },
+        { recordedAt },
+      ),
+    ).toThrow("fixed two-hour limit");
     const changedScope = structuredClone(directlyRevisedTask);
     changedScope.scope.includedUnits[0]!.requiredWork = "A narrower task";
     expect(() =>
@@ -1460,6 +1612,49 @@ describe("trusted complete PR source coverage", () => {
 });
 
 describe("ledger token projection", () => {
+  it("accepts unavailable analysis usage across recovery while preserving the known aggregate", () => {
+    const { task, analysis, result } = setup();
+    task.budget.maxRounds = 1;
+    task.budget.maxTokens = 1;
+    const initial = createInvestigationCheckpoint({
+      task,
+      attemptId: "unknown-analysis-attempt",
+      checkpointId: "unknown-analysis-checkpoint",
+      leaseVersion: 1,
+      recordedAt,
+    });
+    const precharged = projectInvestigationTokenConsumption(initial, 37);
+    const unavailableUsage = { ...options.usage, tokens: null };
+    const accepted = applyInvestigationLoopRound(precharged, round(precharged, analysis), {
+      ...options,
+      usage: unavailableUsage,
+    });
+    expect(accepted.stopReason).toBe("continuing");
+    expect(accepted.consumed).toMatchObject({ tokens: 37, rounds: 1, durationMs: 10 });
+    const restored = restoreInvestigationCheckpoint({
+      checkpoint: JSON.parse(JSON.stringify(interruptInvestigationLoop(accepted, "interrupted"))),
+      task,
+      attemptId: "unknown-analysis-recovery",
+      leaseVersion: 2,
+      recordedAt,
+    });
+    expect(restored.consumed.tokens).toBe(37);
+    const completed = applyInvestigationLoopRound(
+      restored,
+      round(restored, finalAnalysis(result, analysis, 2), "finalize"),
+      { ...options, usage: unavailableUsage },
+    );
+    expect(completed.stopReason).toBe("complete");
+    expect(completed.consumed).toMatchObject({ tokens: 37, rounds: 2, durationMs: 20 });
+    for (const tokens of [-1, Number.NaN])
+      expect(() =>
+        applyInvestigationLoopRound(initial, round(initial, analysis), {
+          ...options,
+          usage: { ...options.usage, tokens },
+        }),
+      ).toThrow("nonnegative safe integer");
+  });
+
   it("replaces the compatibility total without charging a pre-accounted analysis twice", () => {
     const { task, analysis } = setup(0, true);
     task.budget.maxTokens = 50;
@@ -1483,13 +1678,14 @@ describe("ledger token projection", () => {
       accountedTokens: 70,
     });
     expect(exceeded.consumed.tokens).toBe(70);
-    expect(exceeded.stopReason).toBe("budget_exhausted");
+    expect(exceeded.stopReason).toBe("complete");
   });
 
-  it("stops continuing work at the token limit and reseals the compatibility snapshot", () => {
+  it("records tokens above a legacy limit without stopping and reseals the compatibility snapshot", () => {
     const { checkpoint } = setup();
-    const projected = projectInvestigationTokenConsumption(checkpoint, checkpoint.budget.maxTokens);
-    expect(projected.stopReason).toBe("budget_exhausted");
+    const projected = projectInvestigationTokenConsumption(checkpoint, 1_000_000_000);
+    expect(projected.stopReason).toBe("continuing");
+    expect(projected.consumed.tokens).toBe(1_000_000_000);
     const { digest, ...content } = projected;
     expect(digest).toBe(investigationContentDigest(content));
     expect(() => projectInvestigationTokenConsumption(checkpoint, -1)).toThrow(/nonnegative/u);

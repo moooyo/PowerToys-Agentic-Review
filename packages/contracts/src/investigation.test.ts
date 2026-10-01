@@ -3,11 +3,14 @@ import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
 import {
+  getInvestigationExecutionDurationLimitMs,
+  INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
   type InvestigationAnalysisEvidence,
   type InvestigationAnalysisV1,
   InvestigationAnalysisV1Schema,
   type InvestigationArtifactV1,
   InvestigationAttemptV1Schema,
+  InvestigationBudgetSchema,
   InvestigationCheckpointRequestSchema,
   InvestigationModelExecutionSchema,
   InvestigationModelIdentitySchema,
@@ -19,6 +22,7 @@ import {
   InvestigationUnacceptedModelUsageSchema,
   investigationCanonicalJson,
   investigationPlanDigestPayload,
+  normalizeInvestigationBudget,
   validateInvestigationAnalysisForTask,
   validateInvestigationResult,
   validateInvestigationTask,
@@ -155,6 +159,65 @@ function inheritedPatchFixture(selectedPatch = false, producingTaskId = "parent-
 }
 
 describe("investigation structural contracts", () => {
+  it("accepts time and storage budgets while preserving legacy counters without executing them", () => {
+    const current = {
+      maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+      maxReportBytes: 10_000,
+    };
+    const legacy = { ...current, maxDurationMs: 1, maxRounds: 1, maxTokens: 1 };
+    const historical = { ...legacy, maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS * 2 };
+    for (const budget of [current, legacy, historical]) {
+      const before = structuredClone(budget);
+      expect(Value.Check(InvestigationBudgetSchema, budget)).toBe(true);
+      expect(getInvestigationExecutionDurationLimitMs(budget)).toBe(
+        INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+      );
+      expect(normalizeInvestigationBudget(budget)).toEqual(current);
+      expect(budget).toEqual(before);
+    }
+  });
+
+  it("accepts complete reports with usage above deprecated token and round counters", () => {
+    const { result } = createInvestigationFixture("pr");
+    result.report.loop.budget = {
+      maxDurationMs: 30 * 60_000,
+      maxReportBytes: result.report.loop.budget.maxReportBytes,
+      maxTokens: 1,
+      maxRounds: 1,
+    };
+    result.report.loop.completedRounds = 100;
+    result.report.loop.consumed.rounds = 100;
+    result.report.loop.consumed.tokens = 1_000_000_000;
+    result.report.loop.consumed.durationMs = 90 * 60_000;
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("keeps previously sealed reports with a larger historical duration allowance readable", () => {
+    const { result } = createInvestigationFixture("pr");
+    result.report.loop.budget = {
+      ...result.report.loop.budget,
+      maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS * 2,
+      maxTokens: 8_000_000,
+      maxRounds: 8,
+    };
+    result.report.loop.consumed.durationMs = INVESTIGATION_EXECUTION_DURATION_LIMIT_MS + 1;
+    const original = structuredClone(result);
+    expect(validateInvestigationResult(result)).toEqual({ valid: true, errors: [] });
+    expect(result).toEqual(original);
+  });
+
+  it("rejects complete current reports beyond two hours even when their raw duration is larger", () => {
+    const { result } = createInvestigationFixture("pr");
+    result.report.loop.budget = {
+      maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS * 2,
+      maxReportBytes: result.report.loop.budget.maxReportBytes,
+    };
+    result.report.loop.consumed.durationMs = INVESTIGATION_EXECUTION_DURATION_LIMIT_MS + 1;
+    expect(validateInvestigationResult(result).errors).toContainEqual(
+      expect.objectContaining({ code: "COMPLETION_EXCEEDS_BUDGET" }),
+    );
+  });
+
   it.each(["pr", "bug", "feature"] as const)(
     "accepts a complete %s task, attempt, and report",
     (kind) => {
@@ -414,6 +477,20 @@ describe("trusted investigation model identity", () => {
       usage: { durationMs: 10, tokens: 100, reportBytes: 1_000 },
     };
     expect(Value.Check(InvestigationCheckpointRequestSchema, request)).toBe(true);
+    for (const tokens of [0, 100, null])
+      expect(
+        Value.Check(InvestigationCheckpointRequestSchema, {
+          ...request,
+          usage: { ...request.usage, tokens },
+        }),
+      ).toBe(true);
+    for (const tokens of [-1, Number.NaN])
+      expect(
+        Value.Check(InvestigationCheckpointRequestSchema, {
+          ...request,
+          usage: { ...request.usage, tokens },
+        }),
+      ).toBe(false);
     for (const model of ["gpt-6-astra", null]) {
       expect(
         Value.Check(InvestigationCheckpointRequestSchema, {
@@ -428,6 +505,16 @@ describe("trusted investigation model identity", () => {
         modelIdentity: { engine: "codex", model: "" },
       }),
     ).toBe(false);
+  });
+
+  it("preserves unavailable completed-step usage while rejecting invalid known counts", () => {
+    const modelUsageSchema =
+      InvestigationRuntimeStateSchema.properties.completedSteps.items.properties.modelUsage;
+    for (const tokens of [0, 100, null])
+      expect(Value.Check(modelUsageSchema, { tokens, durationMs: 20 })).toBe(true);
+    for (const tokens of [-1, Number.NaN])
+      expect(Value.Check(modelUsageSchema, { tokens, durationMs: 20 })).toBe(false);
+    expect(Value.Check(modelUsageSchema, { tokens: null, durationMs: null })).toBe(false);
   });
 
   it("accepts legacy reports without model history and mixed identities from adopted attempts", () => {

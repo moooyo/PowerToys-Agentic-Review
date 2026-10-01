@@ -2341,10 +2341,10 @@ describe("investigation model turn runner", () => {
     expect(result.sourceUnitIds).toEqual(p.descriptors.map((chunk) => chunk.id));
     expect(context.turn.budgetState.consumed.tokens).toBe(94_954);
     expect(context.turn.budgetState.remaining).toMatchObject({
-      rounds: 21,
-      durationMs: 1_174_060,
-      tokens: 25_046,
+      durationMs: 4_774_060,
     });
+    expect(context.turn.budgetState.remaining).not.toHaveProperty("rounds");
+    expect(context.turn.budgetState.remaining).not.toHaveProperty("tokens");
     expect(prompt).toContain("Each turn is stateless");
     expect(prompt).toContain("A low budget never permits invented evidence");
     expect(prompt).toContain("A non-finalize batch cannot finish");
@@ -4707,7 +4707,7 @@ describe("static app-server invocation budgets", () => {
       schema: InvestigationModelEditsV1Schema,
       hardTimeoutMs: 30_000,
       maximumResultBytes: 1024 * 1024,
-      invocationBudget: { remainingTokens: 100, deadlineAtMs: Date.now() + 30_000 },
+      invocationBudget: { deadlineAtMs: Date.now() + 30_000 },
     };
     return {
       f,
@@ -4745,6 +4745,7 @@ describe("static app-server invocation budgets", () => {
         notification("turn/completed", {
           turn: { id: turnId, status: "completed", items: [] },
         }),
+      compact: () => notification("thread/compacted", {}),
       finishProcess: (stdoutError?: Error) => {
         if (processExited) return;
         processExited = true;
@@ -4861,24 +4862,38 @@ describe("static app-server invocation budgets", () => {
     };
   }
 
-  it("interrupts an alive over-budget turn, drains it, and retains the actual excess usage", async () => {
+  it("keeps an alive turn beyond old limits and interrupts at the shared two-hour deadline", async () => {
     const f = await trackedFixture();
+    vi.useFakeTimers();
     const onUsage = vi.fn();
     let settled = false;
-    const execution = f.runner.execute({ ...f.input, onUsage }).then(
-      (value) => {
-        settled = true;
-        return { value };
-      },
-      (error: unknown) => {
-        settled = true;
-        return { error };
-      },
-    );
+    const execution = f.runner
+      .execute({
+        ...f.input,
+        onUsage,
+        hardTimeoutMs: 7_200_000,
+        invocationBudget: { deadlineAtMs: Date.now() + 7_200_000 },
+      })
+      .then(
+        (value) => {
+          settled = true;
+          return { value };
+        },
+        (error: unknown) => {
+          settled = true;
+          return { error };
+        },
+      );
     try {
       await f.turnStarted;
       f.finalMessage();
-      f.usage(80, 45);
+      f.usage(12_000_000, 45);
+      await f.partialRecorded;
+      await vi.advanceTimersByTimeAsync(600_001);
+      expect(f.requests.some((request) => request.method === "turn/interrupt")).toBe(false);
+      expect(settled).toBe(false);
+      expect(f.f.start.mock.calls[0]![0].limits.hardTimeoutMs).toBe(7_200_000);
+      await vi.advanceTimersByTimeAsync(6_599_999);
       await Promise.all([f.interrupted, f.partialRecorded, f.inputClosed]);
       expect(f.processExited()).toBe(false);
       expect(settled).toBe(false);
@@ -4886,10 +4901,10 @@ describe("static app-server invocation budgets", () => {
       expect(f.receipts.at(-1)).toMatchObject({
         state: "running",
         completeness: "partial",
-        usage: { inputTokens: 80, outputTokens: 45, totalTokens: 125 },
+        usage: { inputTokens: 12_000_000, outputTokens: 45, totalTokens: 12_000_045 },
       });
       expect(onUsage).toHaveBeenCalledWith(
-        expect.objectContaining({ tokens: 125, source: "cli", completeness: "partial" }),
+        expect.objectContaining({ tokens: 12_000_045, source: "cli", completeness: "partial" }),
       );
       expect(f.requests.filter((request) => request.method === "turn/interrupt")).toEqual([
         expect.objectContaining({
@@ -4898,13 +4913,13 @@ describe("static app-server invocation budgets", () => {
       ]);
       f.finishProcess();
       await expect(execution).resolves.toMatchObject({
-        error: { code: "MODEL_BUDGET_EXCEEDED", kind: "tokens" },
+        error: { code: "MODEL_BUDGET_EXCEEDED", kind: "duration" },
       });
       expect(f.receipts.at(-1)).toMatchObject({
         state: "failed",
         disposition: "rejected",
         completeness: "partial",
-        usage: { totalTokens: 125 },
+        usage: { totalTokens: 12_000_045 },
       });
       expect(f.receipts.some((receipt) => receipt.completeness === "complete")).toBe(false);
       expect(f.diagnostics).toHaveBeenLastCalledWith(
@@ -4914,6 +4929,7 @@ describe("static app-server invocation budgets", () => {
     } finally {
       f.finishProcess();
       await execution;
+      vi.useRealTimers();
       await rm(f.directory, { recursive: true, force: true });
     }
   });
@@ -4993,30 +5009,129 @@ describe("static app-server invocation budgets", () => {
     }
   });
 
-  it.each(["tokens", "duration"] as const)(
-    "does not dispatch an exhausted %s allowance",
-    async (kind) => {
-      const f = appServerFixture();
-      const onUsage = vi.fn();
-      await expect(
-        f.runner.execute({
-          ...f.input,
-          onUsage,
-          invocationBudget: {
-            remainingTokens: kind === "tokens" ? 0 : 100,
-            deadlineAtMs: kind === "duration" ? Date.now() - 1 : Date.now() + 30_000,
+  it("accepts a completed final turn just before the remaining task deadline", async () => {
+    vi.useFakeTimers();
+    const f = appServerFixture();
+    const execution = f.runner.execute({
+      ...f.input,
+      hardTimeoutMs: 7_200_000,
+      invocationBudget: { deadlineAtMs: Date.now() + 100 },
+    });
+    try {
+      await f.turnStarted;
+      await vi.advanceTimersByTimeAsync(99);
+      f.usage(12_000_000, 19);
+      f.finalMessage();
+      f.completeTurn();
+      await f.inputClosed;
+      f.finishProcess();
+      await expect(execution).resolves.toMatchObject({
+        value: proposal,
+        usage: { tokens: 12_000_019, completeness: "complete" },
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.requests.some((request) => request.method === "turn/interrupt")).toBe(false);
+      expect(f.f.terminate).not.toHaveBeenCalled();
+      expect(f.f.io.removeDirectory).toHaveBeenCalledOnce();
+    } finally {
+      f.finishProcess();
+      await execution.catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["missing", "compaction"] as const)(
+    "accepts valid model JSON with %s accounting and preserves the unknown usage receipt",
+    async (accounting) => {
+      const f = await trackedFixture();
+      const execution = f.runner.execute(f.input);
+      try {
+        await f.turnStarted;
+        if (accounting === "compaction") {
+          f.usage(31, 19);
+          await f.partialRecorded;
+          f.compact();
+        }
+        f.finalMessage();
+        f.completeTurn();
+        await f.inputClosed;
+        f.finishProcess();
+        await expect(execution).resolves.toMatchObject({
+          value: proposal,
+          usage: {
+            tokens: accounting === "missing" ? null : 50,
+            completeness: accounting === "missing" ? "unavailable" : "partial",
           },
-        }),
-      ).rejects.toMatchObject({ code: "MODEL_BUDGET_EXCEEDED", kind });
-      expect(f.f.start).not.toHaveBeenCalled();
-      expect(f.f.io.createPrivateDirectory).not.toHaveBeenCalled();
-      expect(f.stdin.write).not.toHaveBeenCalled();
-      expect(onUsage).not.toHaveBeenCalled();
+        });
+        expect(f.receipts.at(-1)).toMatchObject({
+          state: "completed",
+          completeness: accounting === "missing" ? "unavailable" : "partial",
+          usage: { totalTokens: accounting === "missing" ? null : 50 },
+        });
+        expect(f.requests.some((request) => request.method === "turn/interrupt")).toBe(false);
+        expect(f.f.io.removeDirectory).toHaveBeenCalledOnce();
+      } finally {
+        f.finishProcess();
+        await execution.catch(() => undefined);
+        await rm(f.directory, { recursive: true, force: true });
+      }
     },
   );
 
-  it("keeps an unconfirmed stream drain visible instead of masking it with the token budget", async () => {
+  it("cancels and drains an active turn before removing its owned files", async () => {
+    const f = appServerFixture();
+    const cancellation = new AbortController();
+    const usageObserved = Promise.withResolvers<void>();
+    const execution = f.runner
+      .execute({
+        ...f.input,
+        signal: cancellation.signal,
+        onUsage: (usage) => {
+          if (usage.tokens === 12_000_019) usageObserved.resolve();
+        },
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    try {
+      await f.turnStarted;
+      f.usage(12_000_000, 19);
+      await usageObserved.promise;
+      cancellation.abort(new Error("Controlled task cancellation."));
+      await Promise.all([f.interrupted, f.inputClosed]);
+      expect(f.f.io.removeDirectory).not.toHaveBeenCalled();
+      f.finishProcess();
+      expect(await execution).toMatchObject({ message: "Controlled task cancellation." });
+      expect(f.requests.filter((request) => request.method === "turn/interrupt")).toHaveLength(1);
+      expect(f.f.io.removeDirectory).toHaveBeenCalledOnce();
+    } finally {
+      f.finishProcess();
+      await execution;
+    }
+  });
+
+  it("does not dispatch an exhausted duration allowance", async () => {
+    const f = appServerFixture();
+    const onUsage = vi.fn();
+    await expect(
+      f.runner.execute({
+        ...f.input,
+        onUsage,
+        invocationBudget: {
+          deadlineAtMs: Date.now() - 1,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "MODEL_BUDGET_EXCEEDED", kind: "duration" });
+    expect(f.f.start).not.toHaveBeenCalled();
+    expect(f.f.io.createPrivateDirectory).not.toHaveBeenCalled();
+    expect(f.stdin.write).not.toHaveBeenCalled();
+    expect(onUsage).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unconfirmed stream drain visible instead of masking it with the duration limit", async () => {
     const f = await trackedFixture();
+    vi.useFakeTimers();
     const execution = f.runner.execute(f.input).then(
       () => null,
       (error: unknown) => error,
@@ -5024,6 +5139,8 @@ describe("static app-server invocation budgets", () => {
     try {
       await f.turnStarted;
       f.usage(80, 45);
+      await f.partialRecorded;
+      await vi.advanceTimersByTimeAsync(30_000);
       await Promise.all([f.interrupted, f.partialRecorded, f.inputClosed]);
       f.finishProcess(new Error("The controlled stdout drain failed."));
       const errors: unknown[] = [await execution];
@@ -5052,6 +5169,7 @@ describe("static app-server invocation budgets", () => {
     } finally {
       f.finishProcess();
       await execution;
+      vi.useRealTimers();
       await rm(f.directory, { recursive: true, force: true });
     }
   });

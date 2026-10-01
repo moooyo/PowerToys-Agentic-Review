@@ -327,7 +327,7 @@ export function loadInvestigationWorkerRuntimeConfig(
   const processLimits: ProcessResourceLimits = {
     hardTimeoutMs: integer(
       value("PROCESS_TIMEOUT_MS"),
-      600_000,
+      7_200_000,
       10_000,
       7_200_000,
       "PROCESS_TIMEOUT_MS",

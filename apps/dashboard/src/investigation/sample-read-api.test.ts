@@ -1,4 +1,5 @@
 import {
+  INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
   InvestigationOutputPageSchema,
   InvestigationPublicationDirectoryPageSchema,
   InvestigationReportDirectoryPageSchema,
@@ -13,6 +14,7 @@ import { Value } from "@sinclair/typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InvestigationApi } from "./api";
 import { createSampleInvestigationApi } from "./sample-adapter";
+import { createSampleReadApi } from "./sample-read-api";
 import { createSessionScopedSampleApi } from "./sample-workspace-access";
 
 const repositoryId = "repo-powertoys-fork";
@@ -63,6 +65,33 @@ afterEach(() => {
 });
 
 describe("explicit development read fixtures", () => {
+  it("normalizes execution defaults without rewriting retained legacy budgets", async () => {
+    const detail = await createSampleInvestigationApi().task(taskId);
+    detail.task.budget = {
+      maxRounds: 1,
+      maxTokens: 1,
+      maxDurationMs: 1_000,
+      maxReportBytes: 16_384,
+    };
+    const original = structuredClone(detail);
+    const api = createSampleReadApi({
+      repositories: () => [],
+      workItems: () => [],
+      tasks: () => [detail],
+      reports: () => [],
+      artifacts: () => [],
+      publications: () => [],
+    });
+    const defaults = await api.taskDefaults();
+    expect(defaults.budget).toEqual({
+      maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+      maxReportBytes: 16_384,
+    });
+    expect(detail).toEqual(original);
+    defaults.budget.maxReportBytes = 1;
+    expect((await api.taskDefaults()).budget.maxReportBytes).toBe(16_384);
+  });
+
   it("uses shared contracts for every added sample read", async () => {
     const api = createSampleInvestigationApi();
     for (const [schema, value] of [

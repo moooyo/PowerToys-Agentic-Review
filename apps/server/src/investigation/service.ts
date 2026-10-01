@@ -39,6 +39,7 @@ import type {
 } from "@agentic-review/contracts";
 import {
   EntityIdSchema,
+  getInvestigationExecutionDurationLimitMs,
   InvestigationCreateTaskRequestV1Schema,
   InvestigationInputSnapshotV1Schema,
   InvestigationResultV1Schema,
@@ -47,6 +48,7 @@ import {
   investigationTaskRequiresE2e,
   isCorrectableInvestigationModelOutputIssue,
   isInvestigationStaticTaskKind,
+  normalizeInvestigationBudget,
   Sha256Schema,
   validateInvestigationAnalysisForTask,
   validateInvestigationResult,
@@ -169,7 +171,7 @@ interface IdempotencyRecord {
 interface CheckpointAcceptanceRecord {
   digest: string;
   checkpoint: InvestigationLoopCheckpointV1;
-  usageTokens?: number;
+  usageTokens?: number | null;
 }
 export interface InvestigationServiceOptions {
   store: InvestigationStore;
@@ -273,28 +275,30 @@ export class InvestigationService {
       "invalid_report_resource_limit",
       "The configured report byte limit must be a positive safe integer no larger than 512 MiB.",
     );
-    const budget =
+    const budget: Readonly<Omit<InvestigationBudget, "maxReportBytes">> =
       options.defaultTaskBudget === undefined
-        ? { maxRounds: 24, maxDurationMs: 1_800_000, maxTokens: 120_000 }
+        ? { maxDurationMs: getInvestigationExecutionDurationLimitMs() }
         : options.defaultTaskBudget;
     requireCondition(
       budget !== null &&
         typeof budget === "object" &&
         !Array.isArray(budget) &&
-        Object.keys(budget).length === 3 &&
-        [budget.maxRounds, budget.maxDurationMs, budget.maxTokens].every(
-          (value) => Number.isSafeInteger(value) && value > 0,
+        Object.keys(budget).every((field) =>
+          ["maxRounds", "maxDurationMs", "maxTokens"].includes(field),
         ) &&
-        budget.maxDurationMs <= 2_147_483_647,
+        Number.isSafeInteger(budget.maxDurationMs) &&
+        budget.maxDurationMs > 0 &&
+        budget.maxDurationMs <= getInvestigationExecutionDurationLimitMs() &&
+        [budget.maxRounds, budget.maxTokens].every(
+          (value) => value === undefined || (Number.isSafeInteger(value) && value > 0),
+        ),
       500,
       "invalid_default_task_budget",
-      "Default task budgets require positive safe integer rounds, tokens, and duration no larger than 2147483647 milliseconds.",
+      "Default task budgets require a positive duration no larger than the fixed two-hour execution limit. Legacy rounds and tokens must be positive safe integers when present.",
     );
     // Deployment configuration affects only future Tasks and cannot be mutated after startup.
     this.defaultTaskBudget = Object.freeze({
-      maxRounds: budget.maxRounds,
-      maxDurationMs: budget.maxDurationMs,
-      maxTokens: budget.maxTokens,
+      maxDurationMs: getInvestigationExecutionDurationLimitMs(),
       maxReportBytes: this.maxReportBytes,
     });
     this.actions = new InvestigationActions({
@@ -587,6 +591,13 @@ export class InvestigationService {
       400,
       "report_budget_exceeds_server_limit",
       `The report budget exceeds the configured ${this.maxReportBytes}-byte server limit.`,
+    );
+    requireCondition(
+      request.budget === undefined ||
+        request.budget.maxDurationMs <= getInvestigationExecutionDurationLimitMs(),
+      400,
+      "duration_budget_exceeds_task_limit",
+      "The total task execution duration cannot exceed the fixed two-hour limit.",
     );
     const importedInput =
       importedSource === undefined
@@ -905,7 +916,7 @@ export class InvestigationService {
         allowRepositoryExecution: mode === "execute",
         authorizationRef: mode === "execute" ? actor.id : null,
       },
-      budget: structuredClone(request.budget ?? this.defaultTaskBudget),
+      budget: normalizeInvestigationBudget(request.budget ?? this.defaultTaskBudget),
       profileRef: request.profileRef ??
         parent?.context.profileRef ?? {
           id: "investigation-default",
@@ -1446,7 +1457,9 @@ export class InvestigationService {
             checkpoint.leaseVersion === request.lease.fence &&
             checkpoint.stopReason === "continuing" &&
             Date.parse(record.leaseExpiresAt) > this.now().getTime() &&
-            this.usageSummary(taskId).reportedTokens < task.budget.maxTokens));
+            checkpoint.consumed.durationMs +
+              Math.max(0, this.now().getTime() - Date.parse(checkpoint.recordedAt)) <
+              getInvestigationExecutionDurationLimitMs(task.budget)));
       if (!executionAllowed && request.receipt.revision > 1)
         requireCondition(
           ["failed", "cancelled"].includes(request.receipt.state) &&
@@ -1639,10 +1652,12 @@ export class InvestigationService {
     const checkpoint = this.store.get<InvestigationLoopCheckpointV1>("checkpoints", id);
     let resumeTask = task;
     let resumeCheckpoint = checkpoint;
+    const requestedBudget =
+      request.budget === undefined ? undefined : normalizeInvestigationBudget(request.budget);
     const budgetChanged =
-      request.budget !== undefined &&
-      investigationContentDigest(request.budget) !== investigationContentDigest(task.budget);
-    if (request.budget !== undefined) {
+      requestedBudget !== undefined &&
+      investigationContentDigest(requestedBudget) !== investigationContentDigest(task.budget);
+    if (request.budget !== undefined && requestedBudget !== undefined) {
       requireCondition(
         request.budget.maxReportBytes <= this.maxReportBytes,
         400,
@@ -1650,17 +1665,21 @@ export class InvestigationService {
         `The report budget exceeds the configured ${this.maxReportBytes}-byte server limit.`,
       );
       requireCondition(
-        Object.entries(task.budget).every(
-          ([key, value]) => request.budget![key as keyof typeof task.budget] >= value,
-        ),
+        request.budget.maxDurationMs <= getInvestigationExecutionDurationLimitMs(),
+        400,
+        "duration_budget_exceeds_task_limit",
+        "The total task execution duration cannot exceed two hours, including resumed attempts.",
+      );
+      requireCondition(
+        request.budget.maxReportBytes >= task.budget.maxReportBytes,
         400,
         "budget_cannot_decrease",
-        "A resumed task may only increase its existing budget fields.",
+        "A resumed task may only increase its retained report byte limit.",
       );
       if (budgetChanged) {
-        if (checkpoint === undefined) resumeTask = { ...task, budget: request.budget };
+        if (checkpoint === undefined) resumeTask = { ...task, budget: requestedBudget };
         else {
-          const increased = increaseInvestigationBudget(checkpoint, task, request.budget, {
+          const increased = increaseInvestigationBudget(checkpoint, task, requestedBudget, {
             recordedAt: this.time(),
           });
           resumeTask = increased.task;
@@ -2255,7 +2274,6 @@ export class InvestigationService {
               : ["analysis", "recheck"].includes(invocation.purpose)) &&
             invocation.state === "completed" &&
             invocation.disposition !== "rejected" &&
-            invocation.completeness === "complete" &&
             invocation.usage.totalTokens === request.usage.tokens &&
             (request.modelIdentity === undefined ||
               (request.modelIdentity.engine === invocation.engine &&
@@ -2382,8 +2400,7 @@ export class InvestigationService {
         requireCondition(
           acceptedRejection.attemptId === record.attempt.id &&
             acceptedRejection.round === modelUsage!.round &&
-            interruptedInvocation?.disposition === "rejected" &&
-            interruptedInvocation.completeness === "complete",
+            interruptedInvocation?.disposition === "rejected",
           409,
           "model_usage_receipt_conflict",
           "A retained rejected invocation must match its original correction checkpoint.",
@@ -2406,8 +2423,10 @@ export class InvestigationService {
           "model_usage_receipt_conflict",
           "Accepted model usage must identify this task, attempt, and analysis round.",
         );
+        // A bound ledger invocation may receive later monotonic accounting revisions.
         requireCondition(
-          request.modelUsage!.tokens === null ||
+          request.modelUsage!.invocationId !== undefined ||
+            request.modelUsage!.tokens === null ||
             acceptedAnalysis.usageTokens === undefined ||
             acceptedAnalysis.usageTokens === request.modelUsage!.tokens,
           409,
@@ -2711,21 +2730,17 @@ export class InvestigationService {
           invocation.attemptId === record.attempt.id &&
           ["analysis", "recheck"].includes(invocation.purpose) &&
           ["completed", "failed"].includes(invocation.state) &&
-          invocation.disposition === "rejected" &&
-          invocation.completeness === "complete" &&
-          invocation.usage.totalTokens !== null,
+          invocation.disposition === "rejected",
         409,
         "rejected_analysis_usage_mismatch",
-        "Correction must identify a rejected terminal model invocation with complete trusted usage for this attempt.",
+        "Correction must identify the rejected terminal model invocation and its trusted usage receipt for this attempt.",
       );
       const usage = this.usageSummary(taskId);
       requireCondition(
-        usage.activeInvocationCount === 0 &&
-          usage.unknownInvocationCount === 0 &&
-          usage.usage.totalTokens !== null,
+        usage.activeInvocationCount === 0,
         409,
         "rejected_analysis_usage_unsettled",
-        "Every model invocation must have complete terminal usage before another correction is admitted.",
+        "Every model invocation must be terminal before another correction is admitted.",
       );
       requireCondition(
         !this.store.has("idempotency", `model-usage-analysis:${request.invocationId}`),

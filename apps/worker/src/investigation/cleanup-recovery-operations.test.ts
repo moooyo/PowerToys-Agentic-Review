@@ -1,4 +1,4 @@
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ManagedProcess,
@@ -112,6 +112,158 @@ describe("native managed cleanup recovery operations", () => {
     expect(JSON.stringify(spec.arguments)).not.toContain(identity.guardOwnerToken);
     expect(JSON.stringify(spec.environment)).not.toContain(identity.guardOwnerToken);
     expect(JSON.stringify(spec)).not.toContain(identity.lease.leaseToken);
+  });
+
+  it("does not start guard acquisition when its caller signal is already aborted", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    const reason = new Error("The task duration was exhausted.");
+    controller.abort(reason);
+    await expect(f.operations.acquireGuard(identity, controller.signal)).rejects.toBe(reason);
+    expect(f.start).not.toHaveBeenCalled();
+  });
+
+  it("passes guard cancellation to the Host and waits for process completion and output drain", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    const reason = new Error("The task duration was exhausted.");
+    const started = Promise.withResolvers<void>();
+    const cancelled = Promise.withResolvers<void>();
+    const completed = Promise.withResolvers<ProcessExitedEvent>();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    f.start.mockImplementation(async (_spec, signal, onDispatch) => {
+      onDispatch?.();
+      expect(signal).toBe(controller.signal);
+      signal.addEventListener("abort", () => cancelled.resolve(), { once: true });
+      started.resolve();
+      return {
+        ...managedProcess(),
+        completed: completed.promise,
+        stdout,
+        stderr,
+      };
+    });
+    let settled = false;
+    const settlement = f.operations.acquireGuard(identity, controller.signal).then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    await started.promise;
+    controller.abort(reason);
+    await cancelled.promise;
+    expect(settled).toBe(false);
+    completed.reject(reason);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    stdout.end();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    stderr.end();
+    const error = await settlement;
+    expect(error).toBe(reason);
+    expect(settled).toBe(true);
+  });
+
+  it.each(["cleanup-unconfirmed", "native-host-fault"] as const)(
+    "preserves a sanitized %s failure when guard cancellation also occurs",
+    async (failureKind) => {
+      const f = fixture();
+      const controller = new AbortController();
+      const reason = new Error("The task duration was exhausted.");
+      const failure = new Error("Private native cleanup details.");
+      if (failureKind === "cleanup-unconfirmed")
+        Object.assign(failure, { code: "SOURCE_PROCESS_CLEANUP_UNCONFIRMED" });
+      else failure.name = "ProcessHostProtocolError";
+      const started = Promise.withResolvers<void>();
+      const completed = Promise.withResolvers<ProcessExitedEvent>();
+      f.start.mockImplementation(async (_spec, signal, onDispatch) => {
+        onDispatch?.();
+        signal.addEventListener("abort", () => completed.reject(failure), { once: true });
+        started.resolve();
+        return { ...managedProcess(), completed: completed.promise };
+      });
+      const execution = f.operations
+        .acquireGuard(identity, controller.signal)
+        .catch((error: unknown) => error);
+      await started.promise;
+      controller.abort(reason);
+      const error = await execution;
+      expect(error).toMatchObject({ code: "CLEANUP_RECOVERY_FAILED" });
+      expect(error).not.toBe(reason);
+      expect(error).not.toHaveProperty("cause");
+      expect(String(error)).not.toContain("Private");
+    },
+  );
+
+  it("does not report task cancellation when the helper output failed to drain", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    const reason = new Error("The task duration was exhausted.");
+    const draining = Promise.withResolvers<void>();
+    const releaseOutput = Promise.withResolvers<void>();
+    const completed = Promise.withResolvers<ProcessExitedEvent>();
+    const stdout = Readable.from(
+      // biome-ignore lint/correctness/useYield: This drain fixture rejects before producing output.
+      (async function* () {
+        draining.resolve();
+        await releaseOutput.promise;
+        throw new Error("Private output drain failure.");
+      })(),
+    );
+    f.start.mockImplementation(async (_spec, _signal, onDispatch) => {
+      onDispatch?.();
+      return { ...managedProcess(), completed: completed.promise, stdout };
+    });
+    const execution = f.operations
+      .acquireGuard(identity, controller.signal)
+      .catch((error: unknown) => error);
+    await draining.promise;
+    controller.abort(reason);
+    completed.reject(reason);
+    releaseOutput.resolve();
+    const error = await execution;
+    expect(error).toMatchObject({ code: "CLEANUP_RECOVERY_FAILED" });
+    expect(error).not.toBe(reason);
+    expect(error).not.toHaveProperty("cause");
+    expect(String(error)).not.toContain("Private");
+  });
+
+  it.each(["workspace", "guard"] as const)(
+    "caps %s cleanup grace at sixty seconds without cancelling its independent signal",
+    async (operation) => {
+      const f = fixture();
+      const limits = { ...f.options.limits, hardTimeoutMs: 7_200_000 };
+      const operations = createCleanupRecoveryOperations({
+        ...f.options,
+        limits,
+      });
+      if (operation === "workspace") await operations.cleanupWorkspace(identity, ownership);
+      else await operations.releaseGuard(identity);
+      const [spec, signal] = f.start.mock.calls[0]!;
+      expect(spec.limits.hardTimeoutMs).toBe(60_000);
+      expect(signal.aborted).toBe(false);
+      expect(limits.hardTimeoutMs).toBe(7_200_000);
+    },
+  );
+
+  it("preserves the configured process limit for cancellable guard acquisition", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    const operations = createCleanupRecoveryOperations({
+      ...f.options,
+      limits: { ...f.options.limits, hardTimeoutMs: 7_200_000 },
+    });
+    await operations.acquireGuard(identity, controller.signal);
+    const [spec, signal] = f.start.mock.calls[0]!;
+    expect(spec.limits.hardTimeoutMs).toBe(7_200_000);
+    expect(signal).toBe(controller.signal);
   });
 
   it("sends only the exact workspace owner through native stdin, without Server or guard credentials", async () => {

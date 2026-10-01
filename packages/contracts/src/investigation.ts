@@ -217,13 +217,29 @@ export const InvestigationPrerequisiteSchema = object({
   description: text,
 });
 export type InvestigationPrerequisite = Static<typeof InvestigationPrerequisiteSchema>;
+export const INVESTIGATION_EXECUTION_DURATION_LIMIT_MS = 7_200_000;
+
+/** Legacy counters remain readable in sealed history but never limit execution. */
 export const InvestigationBudgetSchema = object({
-  maxRounds: PositiveIntegerSchema,
+  maxRounds: Type.Optional(PositiveIntegerSchema),
   maxDurationMs: PositiveIntegerSchema,
-  maxTokens: PositiveIntegerSchema,
+  maxTokens: Type.Optional(PositiveIntegerSchema),
   maxReportBytes: PositiveIntegerSchema,
 });
 export type InvestigationBudget = Static<typeof InvestigationBudgetSchema>;
+
+/** Every execution attempt shares the same total duration limit, including legacy tasks. */
+export function getInvestigationExecutionDurationLimitMs(_budget?: InvestigationBudget): number {
+  return INVESTIGATION_EXECUTION_DURATION_LIMIT_MS;
+}
+
+/** Use only for new or explicitly revised budgets; sealed history must retain its original shape. */
+export function normalizeInvestigationBudget(budget: InvestigationBudget): InvestigationBudget {
+  return {
+    maxDurationMs: INVESTIGATION_EXECUTION_DURATION_LIMIT_MS,
+    maxReportBytes: budget.maxReportBytes,
+  };
+}
 export const InvestigationExecutionPolicySchema = object({
   mode: Type.Union([
     Type.Literal("snapshot_only"),
@@ -875,7 +891,10 @@ export const InvestigationRuntimeStateSchema = object({
       diagnostics: Type.Array(InvestigationDiagnosticSchema),
       subjects: Type.Array(InvestigationSubjectV1Schema),
       modelUsage: Type.Optional(
-        object({ tokens: NonNegativeIntegerSchema, durationMs: NonNegativeIntegerSchema }),
+        object({
+          tokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]),
+          durationMs: NonNegativeIntegerSchema,
+        }),
       ),
     }),
   ),
@@ -1268,7 +1287,11 @@ export const InvestigationCheckpointRequestSchema = Type.Union([
     invocationId: Type.Optional(EntityIdSchema),
     lease: InvestigationWorkerLeaseSchema,
     round: InvestigationLoopRoundV1Schema,
-    usage: Type.Omit(InvestigationConsumptionSchema, ["rounds"]),
+    usage: object({
+      durationMs: NonNegativeIntegerSchema,
+      tokens: Type.Union([NonNegativeIntegerSchema, Type.Null()]),
+      reportBytes: NonNegativeIntegerSchema,
+    }),
     modelIdentity: Type.Optional(InvestigationModelIdentitySchema),
     sourceUnitIds: Type.Optional(ids),
   }),
@@ -2957,12 +2980,12 @@ export function validateInvestigationResult(
   if (complete) {
     const budget = result.report.loop.budget;
     const consumed = result.report.loop.consumed;
-    if (
-      consumed.rounds > budget.maxRounds ||
-      consumed.durationMs > budget.maxDurationMs ||
-      consumed.tokens > budget.maxTokens ||
-      consumed.reportBytes > budget.maxReportBytes
-    )
+    // Previously sealed reports may carry an explicitly larger historical duration allowance.
+    const durationLimitMs =
+      budget.maxRounds !== undefined || budget.maxTokens !== undefined
+        ? Math.max(budget.maxDurationMs, INVESTIGATION_EXECUTION_DURATION_LIMIT_MS)
+        : INVESTIGATION_EXECUTION_DURATION_LIMIT_MS;
+    if (consumed.durationMs > durationLimitMs || consumed.reportBytes > budget.maxReportBytes)
       add(
         "/report/loop/consumed",
         "COMPLETION_EXCEEDS_BUDGET",

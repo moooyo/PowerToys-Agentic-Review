@@ -1,5 +1,6 @@
 import {
   EntityIdSchema,
+  getInvestigationExecutionDurationLimitMs,
   InvestigationAnalysisEvidenceSchema,
   type InvestigationAnalysisV1,
   InvestigationAssessmentSchema,
@@ -243,7 +244,7 @@ export interface ModelTurnProjectionContext {
     readonly subjectRef: string;
     readonly primarySubject: InvestigationTaskV1["subjects"][number];
     readonly executionPolicy: Omit<InvestigationTaskV1["executionPolicy"], "allowedSubjectRefs">;
-    readonly budget: InvestigationTaskV1["budget"];
+    readonly budget: Pick<InvestigationTaskV1["budget"], "maxDurationMs" | "maxReportBytes">;
     readonly profileRef: InvestigationTaskV1["profileRef"];
     readonly promptRef: InvestigationTaskV1["promptRef"];
   };
@@ -253,7 +254,10 @@ export interface ModelTurnProjectionContext {
   readonly phase: Phase;
   readonly budgetState: {
     readonly consumed: InvestigationLoopCheckpointV1["consumed"];
-    readonly remaining: InvestigationLoopCheckpointV1["consumed"];
+    readonly remaining: Pick<
+      InvestigationLoopCheckpointV1["consumed"],
+      "durationMs" | "reportBytes"
+    >;
   };
   readonly subjects: InvestigationTaskV1["subjects"];
   /** Historical findings are context only; their references are never current evidence. */
@@ -510,7 +514,10 @@ export function prepareModelTurnProjection(input: {
         subjectRef: task.subjectRef,
         primarySubject: structuredClone(primarySubject),
         executionPolicy,
-        budget: task.budget,
+        budget: {
+          maxDurationMs: getInvestigationExecutionDurationLimitMs(task.budget),
+          maxReportBytes: task.budget.maxReportBytes,
+        },
         profileRef: task.profileRef,
         promptRef: task.promptRef,
       },
@@ -524,9 +531,10 @@ export function prepareModelTurnProjection(input: {
       budgetState: {
         consumed: initial.consumed,
         remaining: {
-          rounds: Math.max(0, task.budget.maxRounds - initial.consumed.rounds),
-          durationMs: Math.max(0, task.budget.maxDurationMs - initial.consumed.durationMs),
-          tokens: Math.max(0, task.budget.maxTokens - initial.consumed.tokens),
+          durationMs: Math.max(
+            0,
+            getInvestigationExecutionDurationLimitMs(task.budget) - initial.consumed.durationMs,
+          ),
           reportBytes: Math.max(0, task.budget.maxReportBytes - initial.consumed.reportBytes),
         },
       },

@@ -32,7 +32,7 @@ const session = vi.hoisted(() => ({
     displayName: "Viewer",
     email: null,
     isAdmin: false,
-    permissions: [],
+    permissions: [] as ("task:create" | "task:cancel")[],
     repositoryIds: ["repo-powertoys-fork"],
     actionCapabilities: [],
     allowRepositoryExecution: false,
@@ -66,6 +66,73 @@ function client() {
 }
 
 describe("task workspace runtime information", () => {
+  it("shows the fixed execution limit and retained usage for a legacy task", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-partial-task");
+    if (!detail.checkpoint) throw new Error("A checkpoint fixture is required.");
+    const legacy: TaskDetail = {
+      ...detail,
+      task: {
+        ...detail.task,
+        budget: { ...detail.task.budget, maxDurationMs: 1, maxTokens: 1, maxRounds: 1 },
+      },
+      checkpoint: {
+        ...detail.checkpoint,
+        consumed: { ...detail.checkpoint.consumed, rounds: 50, durationMs: 900_000 },
+      },
+      usage,
+    };
+    const queryClient = client();
+    queryClient.setQueryData(taskDetailQueryKey(sessionIdentity(session), detail.task.id), legacy);
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[`/tasks?taskId=${detail.task.id}&tab=details`]}>
+          <TaskDetails taskId={detail.task.id} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(html).toContain("2 hours across all attempts");
+    expect(html).toContain("Execution time used");
+    expect(html).toContain("15 minutes");
+    expect(html).toContain("700 tokens");
+    expect(html).toContain("Review rounds");
+    expect(html).not.toContain("Token budget");
+    expect(html).not.toContain("50 / 1");
+  });
+
+  it("explains exhausted execution time independently of otherwise valid recovery permissions", async () => {
+    const detail = await createSampleInvestigationApi().task("sample-pr-partial-task");
+    if (!detail.checkpoint) throw new Error("A checkpoint fixture is required.");
+    const exhausted: TaskDetail = {
+      ...detail,
+      task: { ...detail.task, state: "cancelled" },
+      checkpoint: {
+        ...detail.checkpoint,
+        stopReason: "budget_exhausted",
+        consumed: { ...detail.checkpoint.consumed, durationMs: 7_200_000 },
+      },
+    };
+    const permissions = session.user.permissions;
+    session.user.permissions = ["task:create"];
+    try {
+      const queryClient = client();
+      queryClient.setQueryData(
+        taskDetailQueryKey(sessionIdentity(session), detail.task.id),
+        exhausted,
+      );
+      const html = renderToStaticMarkup(
+        <QueryClientProvider client={queryClient}>
+          <MemoryRouter>
+            <TaskDetails taskId={detail.task.id} />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      expect(html).toContain("The 2-hour total execution limit is exhausted");
+      expect(html).not.toContain("Recovery requires Create tasks access");
+    } finally {
+      session.user.permissions = permissions;
+    }
+  });
+
   it("restores copied output filters while keeping the explicitly selected attempt", async () => {
     const detail = await createSampleInvestigationApi().task("sample-pr-partial-task");
     const attempt = detail.attempts[0];

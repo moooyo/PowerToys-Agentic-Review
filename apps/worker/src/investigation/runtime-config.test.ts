@@ -36,6 +36,12 @@ function msbuildEnvironment(): Record<string, string> {
 }
 
 describe("native investigation Worker configuration", () => {
+  it("allows the default managed process to use the task's full two-hour duration", () => {
+    expect(loadInvestigationWorkerRuntimeConfig(environment()).processLimits.hardTimeoutMs).toBe(
+      7_200_000,
+    );
+  });
+
   it("selects the explicit Codex transport without changing model or provider configuration", () => {
     const config = loadInvestigationWorkerRuntimeConfig({
       ...environment(),

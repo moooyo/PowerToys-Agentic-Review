@@ -10,6 +10,10 @@ extensions. The dated decisions below supersede the initial gap descriptions;
 those descriptions remain as historical context. It is not a visual, test,
 runtime, or deployment acceptance receipt.
 
+The later [2026-10-02 execution policy](2026-10-02-time-only-execution-budget.md)
+supersedes item 8 below: execution is capped only by a cumulative two-hour
+allowance. The initial decision and gap snapshot remain historical context.
+
 ## Product decisions and implementation status, 2026-10-01
 
 The following decisions are reflected in the current implementation change. See

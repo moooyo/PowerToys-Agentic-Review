@@ -13,6 +13,7 @@ import {
   type RetainedCommentCommand,
   scheduleCommentCommand,
 } from "../investigation/comment-publication-state";
+import { investigationExecutionDurationExhausted } from "../investigation/resume-task";
 import { sessionIdentity, useInvestigationSession } from "../investigation/session";
 import { outputAccessDenied } from "../investigation/task-output";
 import {
@@ -1055,10 +1056,14 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
     detail?.resourceLeases?.some(
       (lease) => lease.taskId === record.taskId && lease.state !== "released",
     ) === true;
+  const durationExhausted = investigationExecutionDurationExhausted(detail?.checkpoint ?? null);
+  const executionRecoveryExhausted =
+    durationExhausted && record.problem?.type !== "upload" && record.problem?.type !== "intake";
   const resumeAllowed =
     !!session.user?.permissions.includes("task:create") &&
     (record.task?.executionPolicy.mode !== "execute" || session.user.allowRepositoryExecution) &&
     !cleanupPending &&
+    !durationExhausted &&
     !detailQuery.isError;
   const publicationAllowed =
     !!record.publication &&
@@ -1355,7 +1360,12 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
                     "Worker 正在清理，清理完成后才能继续",
                     "Worker cleanup must finish before continuing",
                   )
-                : problemHint(record, text)}
+                : executionRecoveryExhausted
+                  ? text(
+                      "累计执行已达到 2 小时上限，无法重置或追加时间。已保存的报告和进度仍可查看。",
+                      "The 2-hour total execution limit is exhausted and cannot be reset or extended. Saved reports and progress remain available.",
+                    )
+                  : problemHint(record, text)}
             </small>
             {unavailableAction && (
               <small>
@@ -1364,10 +1374,15 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
                       "服务端尚未提供可重发的评论，请检查自动回复设置",
                       "The service has no comment to repost. Check automatic reply settings.",
                     )
-                  : text(
-                      "当前状态或账号权限不允许执行该操作",
-                      "The current state or account permissions do not allow this action",
-                    )}
+                  : executionRecoveryExhausted
+                    ? text(
+                        "执行时间已耗尽，无法继续此任务",
+                        "Execution time is exhausted; this task cannot continue",
+                      )
+                    : text(
+                        "当前状态或账号权限不允许执行该操作",
+                        "The current state or account permissions do not allow this action",
+                      )}
               </small>
             )}
           </div>

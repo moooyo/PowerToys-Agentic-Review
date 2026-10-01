@@ -650,7 +650,8 @@ describe("assembleInvestigationReport", () => {
       recordedAt: "2026-09-19T00:00:00Z",
     });
     checkpoint.stopReason = "budget_exhausted";
-    checkpoint.consumed.tokens = task.budget.maxTokens + 1;
+    checkpoint.consumed.tokens = 128_001;
+    checkpoint.consumed.durationMs = 7_200_000;
     checkpoint.runtime.e2eExecution = {
       attemptId: attempt.id,
       status: "completed",

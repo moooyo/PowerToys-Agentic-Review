@@ -146,15 +146,14 @@ the same GitHub conversation comment; every saved report and delivery revision
 remains available. Exact-report receipts identify previously posted results
 without asserting that their old body is still the current comment.
 
-## Retained limits and removed disposition
+## Execution limits and removed disposition
 
-The existing default limits remain 120,000 reported tokens, 24 analysis rounds,
-30 minutes, and a 64 MiB report resource limit. They are enforced limits rather
-than prototype placeholders. This capability work adds no budget editor and does
-not change defaults or exhausted-task recovery policy. A resume request can still
-be rejected under its saved budget. Reported usage is not a guaranteed provider
-total or a hard provider spending limit. Future policy changes require a separate
-product discussion.
+The 2026-10-01 capability change retained the then-existing token, round, and
+duration limits. The subsequent 2026-10-02 product decision replaces execution
+quotas with a fixed cumulative two-hour allowance, removes token and round caps,
+and preserves report capacity as a storage safeguard. See the
+[time-only execution policy](2026-10-02-time-only-execution-budget.md) for current
+behavior, resume boundaries, and historical compatibility.
 
 Ignore/dismissal controls, undo, the dismissed group, and reads of old browser
 dismissal storage are removed. Old stored choices therefore cannot continue to

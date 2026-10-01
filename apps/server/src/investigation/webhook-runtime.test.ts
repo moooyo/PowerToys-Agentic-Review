@@ -393,15 +393,20 @@ async function completedReceipt(
 }
 
 describe("production webhook runtime integration", () => {
-  it("applies deployment defaults to signed assignment intake", async () => {
-    const budget = { maxTokens: 5_000_000, maxRounds: 8, maxDurationMs: 7_200_000 };
-    const test = await fixture({ defaultTaskBudget: budget });
-    await enable(test.app, test.cookie);
-    expect((await test.app.inject(test.delivery())).statusCode).toBe(202);
-    await completedReceipt(test.app, test.cookie);
-    const tasks = stored(test.config, (store) => store.list<InvestigationTaskV1>("tasks"));
-    expect(tasks[0]?.budget).toMatchObject(budget);
-  });
+  it.each([60_000, 7_200_000, 14_400_000])(
+    "ignores legacy deployment limits on assignment intake at duration %s",
+    async (maxDurationMs) => {
+      const budget = { maxTokens: 1, maxRounds: 1, maxDurationMs };
+      const test = await fixture({ defaultTaskBudget: budget });
+      await enable(test.app, test.cookie);
+      expect((await test.app.inject(test.delivery())).statusCode).toBe(202);
+      await completedReceipt(test.app, test.cookie);
+      const tasks = stored(test.config, (store) => store.list<InvestigationTaskV1>("tasks"));
+      expect(tasks[0]?.budget).toMatchObject({ maxDurationMs: 7_200_000 });
+      expect(tasks[0]?.budget).not.toHaveProperty("maxTokens");
+      expect(tasks[0]?.budget).not.toHaveProperty("maxRounds");
+    },
+  );
   it("routes a signed trusted comment through E2E intake without an assignment or static report", async () => {
     const budget = { maxTokens: 5_000_000, maxRounds: 8, maxDurationMs: 7_200_000 };
     const test = await fixture({ kind: "pull_request", e2e: true, defaultTaskBudget: budget });
@@ -424,7 +429,7 @@ describe("production webhook runtime integration", () => {
       planRef: null,
       parentReportRef: null,
       executionPolicy: { mode: "execute" },
-      budget,
+      budget: { maxDurationMs: 7_200_000 },
     });
     expect(test.execute).not.toHaveBeenCalled();
   });

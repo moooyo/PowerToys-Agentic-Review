@@ -5,11 +5,7 @@ import {
 } from "../execution/process-host-protocol.js";
 import { type ParsedCliModelUsage, parseCliModelUsage } from "./model-usage-parser.js";
 
-export type CodexAppServerStopReason =
-  | "token_budget"
-  | "usage_unavailable"
-  | "protocol_error"
-  | "model_mismatch";
+export type CodexAppServerStopReason = "protocol_error" | "model_mismatch";
 
 export interface CodexAppServerSessionOptions {
   readonly model: string;
@@ -17,7 +13,6 @@ export interface CodexAppServerSessionOptions {
   readonly prompt: string;
   readonly outputSchema: unknown;
   readonly passiveProposal: boolean;
-  readonly maximumTokens: number;
   readonly maximumResultBytes: number;
   readonly onUsage: (usage: ParsedCliModelUsage) => void;
   readonly onEvent: (event: Uint8Array) => void;
@@ -46,8 +41,6 @@ export function createCodexAppServerSession(
 ): CodexAppServerSession {
   if (
     !options.model.trim() ||
-    !Number.isSafeInteger(options.maximumTokens) ||
-    options.maximumTokens < 1 ||
     !Number.isSafeInteger(options.maximumResultBytes) ||
     options.maximumResultBytes < 1
   )
@@ -72,9 +65,10 @@ export function createCodexAppServerSession(
   let interruptRequested = false;
   let stopReason: CodexAppServerStopReason | undefined;
   let latestUsage: ParsedCliModelUsage | undefined;
+  // Later counters can improve the observed total without repairing earlier accounting gaps.
+  let accountingIncomplete = false;
   let lastUsageFingerprint: string | undefined;
   let message = "";
-  let equalityCheck: NodeJS.Immediate | undefined;
   let resolveTurnEnded: () => void = () => {};
   const turnEnded = new Promise<void>((resolve) => {
     resolveTurnEnded = resolve;
@@ -87,7 +81,6 @@ export function createCodexAppServerSession(
   const stop = (reason: CodexAppServerStopReason): void => {
     if (stopReason !== undefined) return;
     stopReason = reason;
-    if (equalityCheck !== undefined) clearImmediate(equalityCheck);
     options.onStop(reason);
   };
   const protocolFailure = (): void => {
@@ -161,6 +154,15 @@ export function createCodexAppServerSession(
   const acceptUsage = (params: JsonObject): void => {
     if (!bound(params)) return;
     const total = object(object(params.tokenUsage)?.total);
+    const hasCoreCounters =
+      total !== null &&
+      [
+        "cachedInputTokens",
+        "inputTokens",
+        "outputTokens",
+        "reasoningOutputTokens",
+        "totalTokens",
+      ].every((key) => count(total[key]));
     const counters =
       total === null
         ? null
@@ -170,7 +172,9 @@ export function createCodexAppServerSession(
             output_tokens: total.outputTokens,
             reasoning_tokens: total.reasoningOutputTokens,
             cache_write_tokens:
-              total.cacheWriteInputTokens === undefined ? 0 : total.cacheWriteInputTokens,
+              total.cacheWriteInputTokens === undefined && hasCoreCounters
+                ? 0
+                : total.cacheWriteInputTokens,
             total_tokens: total.totalTokens,
           };
     const parsed = parseCliModelUsage(
@@ -180,23 +184,17 @@ export function createCodexAppServerSession(
     if (
       total === null ||
       parsed.completeness !== "complete" ||
-      ![
-        "cachedInputTokens",
-        "inputTokens",
-        "outputTokens",
-        "reasoningOutputTokens",
-        "totalTokens",
-      ].every((key) => count(total[key])) ||
+      !hasCoreCounters ||
       (total.cacheWriteInputTokens !== undefined && !count(total.cacheWriteInputTokens)) ||
       parsed.usage.totalTokens === null ||
       parsed.usage.inputTokens === null ||
       parsed.usage.outputTokens === null
     ) {
+      accountingIncomplete = true;
       if (latestUsage === undefined && parsed.completeness !== "unavailable") {
         latestUsage = { ...parsed, completeness: "partial", completedTurns: 0 };
         options.onUsage(structuredClone(latestUsage));
       }
-      stop("usage_unavailable");
       return;
     }
     if (latestUsage !== undefined) {
@@ -204,7 +202,7 @@ export function createCodexAppServerSession(
         const previous = latestUsage.usage[key];
         const current = parsed.usage[key];
         if (previous !== null && (current === null || current < previous)) {
-          stop("usage_unavailable");
+          accountingIncomplete = true;
           return;
         }
       }
@@ -215,14 +213,6 @@ export function createCodexAppServerSession(
       lastUsageFingerprint = fingerprint;
       options.onUsage(structuredClone(latestUsage));
     }
-    if (parsed.usage.totalTokens > options.maximumTokens) stop("token_budget");
-    else if (parsed.usage.totalTokens === options.maximumTokens && equalityCheck === undefined) {
-      // A final completion already present in this stdout batch may finish exactly at the limit.
-      equalityCheck = setImmediate(() => {
-        equalityCheck = undefined;
-        if (!completed && !ended) stop("token_budget");
-      });
-    }
   };
   const acceptItem = (itemValue: unknown, event: "item.started" | "item.completed"): void => {
     const item = object(itemValue);
@@ -231,7 +221,7 @@ export function createCodexAppServerSession(
       return;
     }
     if (item.type === "contextCompaction") {
-      stop("usage_unavailable");
+      accountingIncomplete = true;
       return;
     }
     if (item.type === "agentMessage") {
@@ -303,7 +293,7 @@ export function createCodexAppServerSession(
     else if (value.method === "model/rerouted" && bound(params)) {
       if (params.toModel !== options.model) stop("model_mismatch");
     } else if (value.method === "thread/compacted" && params.threadId === threadId) {
-      stop("usage_unavailable");
+      accountingIncomplete = true;
     } else if (
       (value.method === "item/started" || value.method === "item/completed") &&
       bound(params)
@@ -320,9 +310,8 @@ export function createCodexAppServerSession(
       terminal = true;
       completed = turn.status === "completed";
       if (!completed && turn.status !== "interrupted") stop("protocol_error");
-      if (completed && latestUsage === undefined) stop("usage_unavailable");
+      if (completed && latestUsage === undefined) accountingIncomplete = true;
       if (turn.status === "interrupted") interrupted = true;
-      if (equalityCheck !== undefined) clearImmediate(equalityCheck);
       resolveTurnEnded();
       if (!interruptRequested) void close().catch(() => {});
     }
@@ -411,7 +400,6 @@ export function createCodexAppServerSession(
     finish() {
       if (ended) return;
       ended = true;
-      if (equalityCheck !== undefined) clearImmediate(equalityCheck);
       try {
         consume(decoder.decode());
         if (buffer.trim()) line(buffer);
@@ -444,7 +432,11 @@ export function createCodexAppServerSession(
       snapshot.completeness =
         latestUsage === undefined
           ? "unavailable"
-          : completeTransport && completed && !interrupted && stopReason === undefined
+          : completeTransport &&
+              completed &&
+              !interrupted &&
+              stopReason === undefined &&
+              !accountingIncomplete
             ? "complete"
             : "partial";
       snapshot.completedTurns = completed ? 1 : 0;

@@ -3,6 +3,7 @@ import type { Stats } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getInvestigationExecutionDurationLimitMs } from "@agentic-review/contracts";
 import {
   deriveWorkerProcessHostInstanceKey,
   StdioProcessHostClient,
@@ -52,6 +53,7 @@ import {
   InvestigationLoopCoordinator,
   type InvestigationLoopCoordinatorOptions,
 } from "./loop-coordinator.js";
+import { ModelBudgetExceededError } from "./model-budget.js";
 import { createModelEditAdapter, type ModelEditRunnerOptions } from "./model-edit-runner.js";
 import {
   createModelTurnRunner,
@@ -602,6 +604,7 @@ export async function createInvestigationExecutionRuntime(
     });
     const executor: InvestigationClaimExecutor = {
       async execute(claim, signal) {
+        const executionStartedAtMs = Date.now();
         assertInvestigationClaimPool(claim);
         const pool = investigationTaskPool(claim.task.kind);
         if (
@@ -609,6 +612,49 @@ export async function createInvestigationExecutionRuntime(
           (config.role !== undefined && config.role !== "all" && config.role !== pool)
         )
           throw new Error("The investigation claim is outside this Worker's configured task role.");
+        const remainingDurationMs =
+          getInvestigationExecutionDurationLimitMs(claim.task.budget) -
+          (claim.checkpoint?.consumed.durationMs ?? 0);
+        const executionDeadlineAtMs = executionStartedAtMs + remainingDurationMs;
+        const executionBudget = new AbortController();
+        if (remainingDurationMs <= 0)
+          executionBudget.abort(new ModelBudgetExceededError("duration"));
+        const executionDeadline = setTimeout(
+          () => executionBudget.abort(new ModelBudgetExceededError("duration")),
+          Math.max(1, executionDeadlineAtMs - Date.now()),
+        );
+        executionDeadline.unref();
+        const admissionSignal = AbortSignal.any([signal, executionBudget.signal]);
+        const raceWithExecutionSignal = async <T>(
+          operation: Promise<T>,
+          onLate?: (value: T) => Promise<void>,
+        ): Promise<T> => {
+          const observed = operation.then((value) => {
+            if (admissionSignal.aborted) {
+              if (onLate !== undefined)
+                void onLate(value).catch(() => {
+                  logger.warn("A late preparation receipt remains in the cleanup journal.");
+                });
+              throw admissionSignal.reason;
+            }
+            return value;
+          });
+          // A late filesystem completion remains observed even when admission was already stopped.
+          void observed.catch(() => undefined);
+          let onAbort: (() => void) | undefined;
+          try {
+            admissionSignal.throwIfAborted();
+            return await Promise.race([
+              observed,
+              new Promise<never>((_resolve, reject) => {
+                onAbort = () => reject(admissionSignal.reason);
+                admissionSignal.addEventListener("abort", onAbort, { once: true });
+              }),
+            ]);
+          } finally {
+            if (onAbort !== undefined) admissionSignal.removeEventListener("abort", onAbort);
+          }
+        };
         const outputReporter = createInvestigationOutputReporter({
           journal: outputJournal,
           taskId: claim.task.id,
@@ -617,7 +663,8 @@ export async function createInvestigationExecutionRuntime(
             dependencies.outputInitializationTimeoutMs ?? 1_000,
             Math.max(
               1,
-              claim.task.budget.maxDurationMs - (claim.checkpoint?.consumed.durationMs ?? 0),
+              getInvestigationExecutionDurationLimitMs(claim.task.budget) -
+                (claim.checkpoint?.consumed.durationMs ?? 0),
             ),
           ),
           onFailure: () =>
@@ -625,7 +672,13 @@ export async function createInvestigationExecutionRuntime(
         });
         outputReporters.set(claim.attempt.id, outputReporter);
         try {
-          await outputReporter.start(signal);
+          try {
+            await outputReporter.start(admissionSignal);
+          } catch (error) {
+            signal.throwIfAborted();
+            if (!executionBudget.signal.aborted) throw error;
+            // The coordinator seals a duration interruption even when output admission expires.
+          }
           signal.throwIfAborted();
           let cleanupIdentity: AttemptCleanupIdentity | undefined;
           const executeAttempt = async (
@@ -724,6 +777,8 @@ export async function createInvestigationExecutionRuntime(
               planExecutor,
               logger,
               terminalTimeoutMs: config.shutdownTimeoutMs,
+              executionDeadlineAtMs,
+              executionStartedAtMs,
               ...cleanupHooks,
               onNodeFault: (code) => {
                 nodeFault ??= new Error(
@@ -744,7 +799,7 @@ export async function createInvestigationExecutionRuntime(
           }
           activeCleanupAttempts.add(claim.attempt.id);
           try {
-            const identity = await cleanupJournal.register({
+            const registration = cleanupJournal.register({
               taskId: claim.task.id,
               attemptId: claim.attempt.id,
               workerId: claim.attempt.workerId ?? "unidentified-worker",
@@ -758,34 +813,63 @@ export async function createInvestigationExecutionRuntime(
               }),
               processHostRecovery: processHost.recovery?.() ?? null,
             });
+            let identity: AttemptCleanupIdentity;
+            try {
+              identity = await raceWithExecutionSignal(registration, async (lateIdentity) => {
+                // Registration cannot dispatch a guard, source, or model after this branch expires.
+                await cleanupJournal.localCleanupConfirmed(lateIdentity.attemptId);
+                await cleanupJournal.guardReleased(lateIdentity.attemptId);
+              });
+            } catch (error) {
+              if (error !== admissionSignal.reason) throw error;
+              activeCleanupAttempts.delete(claim.attempt.id);
+              await executeAttempt();
+              return;
+            }
             cleanupIdentity = identity;
             let physicalGuard: AttemptDesktopGuard;
-            if (dependencies.acquireDesktopGuard !== undefined) {
-              physicalGuard = await dependencies.acquireDesktopGuard({
-                lockDirectory: config.desktopLockDirectory,
-                ownerId: identity.guardOwnerId,
-                ownerToken: identity.guardOwnerToken,
+            try {
+              if (dependencies.acquireDesktopGuard !== undefined) {
+                physicalGuard = await dependencies.acquireDesktopGuard({
+                  lockDirectory: config.desktopLockDirectory,
+                  ownerId: identity.guardOwnerId,
+                  ownerToken: identity.guardOwnerToken,
+                  signal: admissionSignal,
+                });
+              } else {
+                await cleanupOperations.acquireGuard(identity, admissionSignal);
+                // The helper closed its handle while retaining the durable marker. This parent-side
+                // object contains only logical state and cannot create, replace, or delete any file.
+                let state: AttemptDesktopGuard["state"] = "held";
+                physicalGuard = {
+                  ownerToken: identity.guardOwnerToken,
+                  get state() {
+                    return state;
+                  },
+                  async releaseRestored() {
+                    throw new Error("A managed guard requires managed release.");
+                  },
+                  async quarantine() {
+                    if (state === "held") state = "quarantined";
+                  },
+                  async settleManagedCleanup(next) {
+                    if (state !== "released") state = next;
+                  },
+                };
+              }
+            } catch (error) {
+              if (error !== admissionSignal.reason) throw error;
+              // A confirmed cancelled helper may already have published its owned marker.
+              await cleanupOperations.releaseGuard(identity);
+              await executeAttempt({
+                onAttemptCleanupConfirmed: async () => {
+                  await cleanupJournal.localCleanupConfirmed(claim.attempt.id);
+                  await cleanupJournal.guardReleased(claim.attempt.id);
+                },
+                onAttemptCleanupUnconfirmed: (code) =>
+                  cleanupJournal.failed(claim.attempt.id, code),
               });
-            } else {
-              await cleanupOperations.acquireGuard(identity);
-              // The helper closed its handle while retaining the durable marker. This parent-side
-              // object contains only logical state and cannot create, replace, or delete any file.
-              let state: AttemptDesktopGuard["state"] = "held";
-              physicalGuard = {
-                ownerToken: identity.guardOwnerToken,
-                get state() {
-                  return state;
-                },
-                async releaseRestored() {
-                  throw new Error("A managed guard requires managed release.");
-                },
-                async quarantine() {
-                  if (state === "held") state = "quarantined";
-                },
-                async settleManagedCleanup(next) {
-                  if (state !== "released") state = next;
-                },
-              };
+              return;
             }
             // Filesystem release runs inside a managed helper in the native named Job. The parent
             // only closes its retained handle, so Host failure cannot leave it unlinking a new owner.
@@ -804,14 +888,45 @@ export async function createInvestigationExecutionRuntime(
               settleManagedCleanup: (state) => physicalGuard.settleManagedCleanup(state),
             };
             await executeWithAttemptDesktopGuard(guard, async (hooks) => {
-              await cleanupJournal.executionStarted(claim.attempt.id);
+              const startRecord = cleanupJournal.executionStarted(claim.attempt.id);
+              let deferredStartRecord = false;
+              try {
+                await raceWithExecutionSignal(startRecord);
+              } catch (error) {
+                if (error !== admissionSignal.reason) throw error;
+                deferredStartRecord = true;
+                activeCleanupAttempts.delete(claim.attempt.id);
+              }
               await executeAttempt({
                 onAttemptCleanupConfirmed: async () => {
+                  if (deferredStartRecord) {
+                    await hooks.onAttemptCleanupConfirmed();
+                    void startRecord
+                      .then(async () => {
+                        await cleanupJournal.localCleanupConfirmed(claim.attempt.id);
+                        await cleanupJournal.guardReleased(claim.attempt.id);
+                      })
+                      .catch(() => {
+                        logger.warn(
+                          "A late execution-start receipt remains in the cleanup journal.",
+                        );
+                      });
+                    return;
+                  }
                   await cleanupJournal.localCleanupConfirmed(claim.attempt.id);
                   await hooks.onAttemptCleanupConfirmed();
                   await cleanupJournal.guardReleased(claim.attempt.id);
                 },
                 onAttemptCleanupUnconfirmed: async (code) => {
+                  if (deferredStartRecord) {
+                    void startRecord
+                      .then(() => cleanupJournal.failed(claim.attempt.id, code))
+                      .catch(() => {
+                        logger.warn("A late cleanup failure remains in the cleanup journal.");
+                      });
+                    await hooks.onAttemptCleanupUnconfirmed(code);
+                    return;
+                  }
                   await cleanupJournal.failed(claim.attempt.id, code);
                   await hooks.onAttemptCleanupUnconfirmed(code);
                 },
@@ -821,6 +936,7 @@ export async function createInvestigationExecutionRuntime(
             activeCleanupAttempts.delete(claim.attempt.id);
           }
         } finally {
+          clearTimeout(executionDeadline);
           await outputReporter.close();
           outputReporters.delete(claim.attempt.id);
           cancellationObserved.delete(claim.attempt.id);

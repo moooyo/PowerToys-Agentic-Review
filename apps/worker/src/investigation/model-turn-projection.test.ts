@@ -1251,27 +1251,28 @@ describe("bounded investigation model context", () => {
       { rounds: 0, durationMs: 0, tokens: 0, reportBytes: 0 },
       { rounds: 7, durationMs: 1234, tokens: 4567, reportBytes: 8910 },
       {
-        rounds: budget.maxRounds,
+        rounds: 24,
         durationMs: budget.maxDurationMs,
-        tokens: budget.maxTokens,
+        tokens: 12_000_000,
         reportBytes: budget.maxReportBytes,
       },
       {
-        rounds: budget.maxRounds + 1,
+        rounds: 25,
         durationMs: budget.maxDurationMs + 1,
-        tokens: budget.maxTokens + 1,
+        tokens: 12_000_001,
         reportBytes: budget.maxReportBytes + 1,
       },
     ]) {
       f.checkpoint.consumed = consumed;
       const projection = prepareModelTurnProjection({ ...f, maximumContextBytes: 32 * 1024 });
-      expect(projection.context.task.budget).toEqual(budget);
+      expect(projection.context.task.budget).toEqual({
+        maxDurationMs: 7_200_000,
+        maxReportBytes: budget.maxReportBytes,
+      });
       expect(projection.context.budgetState).toEqual({
         consumed,
         remaining: {
-          rounds: Math.max(0, budget.maxRounds - consumed.rounds),
-          durationMs: Math.max(0, budget.maxDurationMs - consumed.durationMs),
-          tokens: Math.max(0, budget.maxTokens - consumed.tokens),
+          durationMs: Math.max(0, 7_200_000 - consumed.durationMs),
           reportBytes: Math.max(0, budget.maxReportBytes - consumed.reportBytes),
         },
       });

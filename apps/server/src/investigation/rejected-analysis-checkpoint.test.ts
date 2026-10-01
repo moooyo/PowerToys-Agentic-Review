@@ -6,6 +6,7 @@ import {
   type InvestigationTaskV1,
   unavailableInvestigationTokenUsage,
 } from "@agentic-review/contracts";
+import { investigationContentDigest } from "@agentic-review/domain";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildInvestigationApp } from "../../dist/investigation/app.js";
@@ -156,7 +157,7 @@ function fixture(budget: Partial<InvestigationTaskV1["budget"]> = {}) {
 function analysisRequest(
   f: ReturnType<typeof fixture>,
   checkpoint: InvestigationLoopCheckpointV1,
-  tokens: number,
+  tokens: number | null,
 ): InvestigationCheckpointRequest {
   return {
     kind: "analysis",
@@ -226,6 +227,56 @@ describe("trusted rejected analysis checkpoints", () => {
     expect(f.store.get("checkpoints", f.task.id)).toEqual(next);
   });
 
+  it.each([
+    { completeness: "partial", tokens: 65 },
+    { completeness: "partial", tokens: null },
+    { completeness: "unavailable", tokens: null },
+  ] as const)(
+    "corrects rejected output with $completeness usage and $tokens known tokens",
+    ({ completeness, tokens }) => {
+      const f = fixture();
+      f.bill("rejected-invocation", 65, {
+        completeness,
+        usage: { ...unavailableInvestigationTokenUsage(), totalTokens: tokens },
+      });
+      const rejected = f.accept();
+      expect(rejected.stopReason).toBe("continuing");
+      expect(rejected.consumed.tokens).toBe(tokens ?? 0);
+      f.bill("corrected-invocation", 18, { disposition: "accepted" });
+      const corrected = f.service.workerCheckpoint(
+        f.worker,
+        f.task.id,
+        analysisRequest(f, rejected, 18),
+      ).checkpoint;
+      expect(corrected.round).toBe(1);
+      expect(corrected.consumed.tokens).toBe((tokens ?? 0) + 18);
+      expect(f.service.usageSummary(f.task.id)).toMatchObject({
+        reportedTokens: (tokens ?? 0) + 18,
+        unknownInvocationCount: 1,
+        usage: { totalTokens: null },
+      });
+    },
+  );
+
+  it("allows correction after another terminal invocation retains unknown usage", () => {
+    const f = fixture();
+    f.bill();
+    f.bill("terminal-unknown-invocation", 0, {
+      state: "failed",
+      completeness: "unavailable",
+      usage: unavailableInvestigationTokenUsage(),
+    });
+    const corrected = f.accept();
+    expect(corrected.stopReason).toBe("continuing");
+    expect(corrected.consumed.tokens).toBe(65);
+    expect(f.service.usageSummary(f.task.id)).toMatchObject({
+      reportedTokens: 65,
+      activeInvocationCount: 0,
+      unknownInvocationCount: 1,
+      usage: { totalTokens: null },
+    });
+  });
+
   it("returns current state after a lost rejection acknowledgement and preserves exact final invocation accounting", () => {
     const f = fixture();
     f.bill();
@@ -251,28 +302,39 @@ describe("trusted rejected analysis checkpoints", () => {
   });
 
   it.each(["tokens", "duration"] as const)(
-    "stops the durable correction at the trusted %s budget boundary",
+    "keeps correcting after a legacy %s budget boundary",
     (boundary) => {
       const f = fixture(boundary === "tokens" ? { maxTokens: 65 } : { maxDurationMs: 125 });
       f.bill();
       if (boundary === "duration") f.advance(125);
       const next = f.accept();
-      expect(next.stopReason).toBe("budget_exhausted");
+      expect(next.stopReason).toBe("continuing");
       expect(next.round).toBe(0);
       expect(next.runtime.modelOutputRejections).toHaveLength(1);
       expect(f.accept()).toEqual(next);
     },
   );
 
+  it("stops durable correction only at the cumulative two-hour duration boundary", () => {
+    const f = fixture({ maxDurationMs: 125, maxTokens: 1 });
+    f.bill();
+    f.checkpoint.consumed.durationMs = 7_199_999;
+    const { digest: _digest, ...content } = f.checkpoint;
+    f.checkpoint.digest = investigationContentDigest(content);
+    f.store.put("checkpoints", f.task.id, f.checkpoint);
+    f.advance(1);
+    const next = f.accept();
+    expect(next.stopReason).toBe("budget_exhausted");
+    expect(next.consumed.durationMs).toBe(7_200_000);
+    expect(next.round).toBe(0);
+    expect(next.runtime.modelOutputRejections).toHaveLength(1);
+    expect(f.accept()).toEqual(next);
+  });
+
   it.each([
     { name: "pending disposition", overrides: { disposition: "pending" } },
     { name: "cancelled invocation", overrides: { state: "cancelled" } },
     { name: "wrong purpose", overrides: { purpose: "e2e" } },
-    { name: "incomplete usage", overrides: { completeness: "partial" } },
-    {
-      name: "unknown usage",
-      overrides: { completeness: "unavailable", usage: unavailableInvestigationTokenUsage() },
-    },
   ] satisfies {
     name: string;
     overrides: Partial<InvestigationModelInvocationReceipt>;
@@ -283,16 +345,13 @@ describe("trusted rejected analysis checkpoints", () => {
     expect(f.store.get("checkpoints", f.task.id)).toEqual(f.checkpoint);
   });
 
-  it.each(["running", "failed"] as const)(
-    "blocks correction when another invocation has %s unsettled usage",
-    (state) => {
-      const f = fixture();
-      f.bill();
-      f.bill("unsettled-invocation", 5, { state, completeness: "partial" });
-      expect(() => f.accept()).toThrow(/Every model invocation/);
-      expect(f.store.get("checkpoints", f.task.id)).toEqual(f.checkpoint);
-    },
-  );
+  it("blocks correction while another model invocation is still running", () => {
+    const f = fixture();
+    f.bill();
+    f.bill("unsettled-invocation", 5, { state: "running", completeness: "partial" });
+    expect(() => f.accept()).toThrow(/Every model invocation/);
+    expect(f.store.get("checkpoints", f.task.id)).toEqual(f.checkpoint);
+  });
 
   it.each(["taskId", "attemptId"] as const)(
     "rejects a rejected invocation belonging to another %s",
@@ -432,41 +491,55 @@ describe("trusted rejected analysis checkpoints", () => {
     });
   });
 
-  it("does not add legacy usage when a rejection acknowledgement is lost before interruption", async () => {
-    const f = fixture();
-    f.bill();
-    const app = buildInvestigationApp({
-      ...f.options,
-      authenticateWorker: () => f.worker,
-      authenticateOperator: () => null,
-    });
-    apps.push(app);
-    const rejectionResponse = await app.inject({
-      method: "POST",
-      url: `/api/worker/tasks/${f.task.id}/checkpoints`,
-      payload: f.rejection(),
-    });
-    expect(rejectionResponse.statusCode, rejectionResponse.body).toBe(200);
-    // Discard the acknowledgement: the Worker still holds the original pending usage.
-    const response = await app.inject({
-      method: "POST",
-      url: `/api/worker/tasks/${f.task.id}/checkpoints`,
-      payload: {
-        kind: "interrupt",
-        lease: f.claim.lease,
-        reason: "error",
-        diagnostics: [],
-        modelUsage: { invocationId: "rejected-invocation", round: 1, tokens: 65 },
-      },
-    });
-    expect(response.statusCode, response.body).toBe(200);
-    const interrupted = response.json<{ checkpoint: InvestigationLoopCheckpointV1 }>().checkpoint;
-    expect(interrupted.stopReason).toBe("error");
-    expect(interrupted.consumed.tokens).toBe(65);
-    expect(f.service.usageSummary(f.task.id).reportedTokens).toBe(65);
-    expect(interrupted.runtime.modelOutputRejections).toHaveLength(1);
-    expect(interrupted.runtime.unacceptedModelUsage).toBeUndefined();
-  });
+  it.each([
+    { completeness: "complete", tokens: 65 },
+    { completeness: "partial", tokens: 65 },
+    { completeness: "partial", tokens: null },
+    { completeness: "unavailable", tokens: null },
+  ] as const)(
+    "retains $completeness usage after a lost rejection acknowledgement",
+    async ({ completeness, tokens }) => {
+      const f = fixture();
+      f.bill("rejected-invocation", 65, {
+        completeness,
+        usage: { ...unavailableInvestigationTokenUsage(), totalTokens: tokens },
+      });
+      const app = buildInvestigationApp({
+        ...f.options,
+        authenticateWorker: () => f.worker,
+        authenticateOperator: () => null,
+      });
+      apps.push(app);
+      const rejectionResponse = await app.inject({
+        method: "POST",
+        url: `/api/worker/tasks/${f.task.id}/checkpoints`,
+        payload: f.rejection(),
+      });
+      expect(rejectionResponse.statusCode, rejectionResponse.body).toBe(200);
+      // Discard the acknowledgement: the Worker still holds the original pending usage.
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/worker/tasks/${f.task.id}/checkpoints`,
+        payload: {
+          kind: "interrupt",
+          lease: f.claim.lease,
+          reason: "error",
+          diagnostics: [],
+          modelUsage: { invocationId: "rejected-invocation", round: 1, tokens },
+        },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      const interrupted = response.json<{ checkpoint: InvestigationLoopCheckpointV1 }>().checkpoint;
+      expect(interrupted.stopReason).toBe("error");
+      expect(interrupted.consumed.tokens).toBe(tokens ?? 0);
+      expect(f.service.usageSummary(f.task.id).reportedTokens).toBe(tokens ?? 0);
+      expect(f.service.usageSummary(f.task.id).usage.totalTokens).toBe(
+        completeness === "complete" ? tokens : null,
+      );
+      expect(interrupted.runtime.modelOutputRejections).toHaveLength(1);
+      expect(interrupted.runtime.unacceptedModelUsage).toBeUndefined();
+    },
+  );
 
   it("accounts a failed correction separately and strips its transport invocation identity", () => {
     const f = fixture();
@@ -486,6 +559,48 @@ describe("trusted rejected analysis checkpoints", () => {
     ]);
     expect(interrupted.runtime.modelOutputRejections).toHaveLength(1);
   });
+
+  it.each([
+    { completeness: "partial", tokens: 18 },
+    { completeness: "partial", tokens: null },
+    { completeness: "unavailable", tokens: null },
+  ] as const)(
+    "accepts later accounting after analysis with $completeness usage and $tokens tokens",
+    ({ completeness, tokens }) => {
+      const f = fixture();
+      f.bill();
+      const rejected = f.accept();
+      const receipt = f.bill("corrected-invocation", 18, {
+        disposition: "accepted",
+        completeness,
+        usage: { ...unavailableInvestigationTokenUsage(), totalTokens: tokens },
+      });
+      f.service.workerCheckpoint(f.worker, f.task.id, analysisRequest(f, rejected, tokens));
+      f.service.workerModelUsage(f.worker, f.task.id, {
+        lease: f.claim.lease,
+        receipt: {
+          ...receipt,
+          revision: 3,
+          completeness: "complete",
+          usage: { ...unavailableInvestigationTokenUsage(), totalTokens: 20 },
+        },
+      });
+      const interrupted = f.service.workerCheckpoint(f.worker, f.task.id, {
+        kind: "interrupt",
+        lease: f.claim.lease,
+        reason: "error",
+        diagnostics: [],
+        modelUsage: { invocationId: "corrected-invocation", round: 1, tokens: 20 },
+      }).checkpoint;
+      expect(interrupted.consumed.tokens).toBe(85);
+      expect(interrupted.runtime.unacceptedModelUsage).toBeUndefined();
+      expect(f.service.usageSummary(f.task.id)).toMatchObject({
+        reportedTokens: 85,
+        unknownInvocationCount: 0,
+        usage: { totalTokens: 85 },
+      });
+    },
+  );
 
   it("requires an exact invocation when recovering a lost accepted-analysis acknowledgement", () => {
     const f = fixture();
