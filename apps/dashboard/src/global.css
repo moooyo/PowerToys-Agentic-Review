@@ -1,5 +1,5 @@
 :root {
-  --app-canvas: var(--mui-palette-background-default, #faf9fd);
+  --app-canvas: var(--mui-palette-background-default, #f1f4fa);
   --app-surface: var(--mui-palette-background-paper, #fff);
   --app-text: var(--mui-palette-text-primary, #1b1d24);
   --app-muted: var(--mui-palette-text-secondary, #505966);
@@ -7,7 +7,7 @@
   --app-accent: var(--mui-palette-primary-main, #345ead);
   --app-accent-soft: var(--app-primary-container, #dce6ff);
   --app-hover: var(--mui-palette-action-hover, rgb(52 94 173 / 8%));
-  --app-body-font: "Roboto", "Segoe UI", sans-serif;
+  --app-body-font: "Roboto Flex", "Noto Sans SC", system-ui, sans-serif;
   --app-display-font: var(--app-body-font);
   --app-heading-font: var(--app-body-font);
   --app-code-font: "Roboto Mono", monospace;
@@ -21,6 +21,8 @@ body,
 }
 body {
   min-width: 320px;
+  font-family: var(--app-body-font);
+  -webkit-font-smoothing: antialiased;
 }
 * {
   box-sizing: border-box;

@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
+import { useConsolePreferences } from "../console/preferences";
 import {
   type AuthApi,
   authApi,
@@ -74,6 +75,7 @@ export function InvestigationSessionProvider({
   children: ReactNode;
   api?: AuthApi;
 }) {
+  const { text } = useConsolePreferences();
   const queryClient = useQueryClient();
   const [session, setSession] = useState<InvestigationSession>();
   const [loading, setLoading] = useState(true);
@@ -244,7 +246,9 @@ export function InvestigationSessionProvider({
       <Box sx={{ p: 6 }} role="status">
         <CircularProgress size={28} />
         <Typography sx={{ mt: 2 }}>
-          {mutationInProgress.current ? "Updating your account…" : "Opening your workspace…"}
+          {mutationInProgress.current
+            ? text("正在更新账号…", "Updating your account…")
+            : text("正在打开控制台…", "Opening your workspace…")}
         </Typography>
       </Box>
     );

@@ -1,0 +1,362 @@
+.console-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  color: var(--console-text);
+}
+
+.console-prompts-types {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.console-prompts-type {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--console-border);
+  border-radius: 16px;
+  background: var(--console-surface);
+  color: var(--console-text);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.console-prompts-type.is-selected {
+  padding: 15px;
+  border: 2px solid var(--console-primary);
+  background: var(--console-subtle);
+}
+
+.console-prompts-type:hover {
+  box-shadow: inset 0 0 0 400px color-mix(in srgb, var(--console-text) 3%, transparent);
+}
+
+.console-prompts-type:focus-visible,
+.console-prompts-versions button:focus-visible,
+.console-prompts-error button:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 3px;
+}
+
+.console-prompts-type-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--console-primary-container);
+  color: var(--console-on-primary-container);
+}
+
+.console-prompts-type-icon.is-issue {
+  background: var(--console-warning-container, var(--console-selected));
+  color: var(--console-on-warning-container, var(--console-on-selected));
+}
+
+.console-prompts-type-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.console-prompts-type-title {
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-prompts-type-ref {
+  overflow: hidden;
+  color: var(--console-secondary);
+  font-family: "Roboto Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-prompts-type-badge {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: var(--console-tool);
+  color: var(--console-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+.console-prompts-type-badge.has-reference {
+  background: var(--console-success-container);
+  color: var(--console-success-text);
+}
+
+.console-prompts-viewer {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--console-border);
+  border-radius: 16px;
+}
+
+.console-prompts-viewer-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 12px 12px 20px;
+  border-bottom: 1px solid var(--console-border);
+  background: var(--console-tool);
+  color: var(--console-secondary);
+}
+
+.console-prompts-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--console-text);
+  font-family: "Roboto Mono", monospace;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.console-prompts-versions {
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  max-width: 100%;
+  height: 32px;
+  overflow-x: auto;
+  border: 1px solid var(--console-outline-variant);
+  border-radius: 16px;
+}
+
+.console-prompts-versions button {
+  flex: none;
+  min-width: 48px;
+  padding: 0 14px;
+  border: 0;
+  background: transparent;
+  color: var(--console-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.console-prompts-versions button + button {
+  border-left: 1px solid var(--console-outline-variant);
+}
+
+.console-prompts-versions button.is-selected {
+  background: var(--console-selected);
+  color: var(--console-on-selected);
+}
+
+.console-prompts-versions button:hover {
+  background: color-mix(in srgb, var(--console-text) 6%, var(--console-tool));
+}
+
+.console-prompts-versions button.is-selected:hover {
+  background: color-mix(in srgb, var(--console-text) 6%, var(--console-selected));
+}
+
+.console-prompts-versions button:focus-visible {
+  outline-offset: -3px;
+}
+
+.console-prompts-readonly {
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.console-prompts-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 520px;
+  padding: 20px 24px 24px;
+  overflow-y: auto;
+  background: var(--console-surface);
+}
+
+.console-prompts-body h2,
+.console-prompts-body h3,
+.console-prompts-body p {
+  margin: 0;
+}
+
+.console-prompts-body h2 {
+  margin-bottom: 4px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.console-prompts-body h3 {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.console-prompts-body p {
+  color: var(--console-secondary);
+  font-size: 14px;
+  line-height: 22px;
+  text-wrap: pretty;
+}
+
+.console-prompts-reference {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 8px;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.console-prompts-reference > div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.console-prompts-reference dt {
+  color: var(--console-secondary);
+}
+
+.console-prompts-reference dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.console-prompts-reference code {
+  font-family: "Roboto Mono", monospace;
+  font-size: 12px;
+}
+
+.console-prompts-record-time {
+  margin-left: 12px;
+  color: var(--console-secondary);
+}
+
+.console-prompts-unavailable {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--console-subtle);
+  color: var(--console-secondary);
+}
+
+.console-prompts-unavailable > .console-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.console-prompts-unavailable h3 {
+  margin-bottom: 4px;
+  color: var(--console-text);
+}
+
+.console-prompts-unavailable p + p {
+  margin-top: 8px;
+}
+
+.console-prompts-state,
+.console-prompts-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-prompts-error {
+  color: var(--console-error);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.console-prompts-error button {
+  flex: none;
+  margin-left: auto;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 20px;
+  background: transparent;
+  color: var(--console-primary);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.console-prompts-error button:hover {
+  background: var(--console-subtle);
+}
+
+.console-prompts-error button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.console-prompts-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--console-outline-variant);
+  border-top-color: var(--console-primary);
+  border-radius: 50%;
+  animation: console-prompts-spin 900ms linear infinite;
+}
+
+.console-prompts-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--console-secondary);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+@keyframes console-prompts-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .console-prompts-type {
+    transition: none;
+  }
+
+  .console-prompts-spinner {
+    animation: none;
+  }
+}

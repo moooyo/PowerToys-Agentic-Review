@@ -1,0 +1,357 @@
+.console-icon {
+  display: block;
+  flex: none;
+  overflow: hidden;
+  font-family: "Material Symbols Rounded", sans-serif;
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+}
+
+.console-language-toggle {
+  display: flex;
+  flex: none;
+  height: 36px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--console-outline);
+  border-radius: 18px;
+}
+
+.console-language-toggle button {
+  border: 0;
+  padding: 0 14px;
+  background: transparent;
+  color: var(--console-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.console-language-toggle button + button {
+  border-left: 1px solid var(--console-outline);
+}
+
+.console-language-toggle button[aria-pressed="true"] {
+  background: var(--console-selected);
+  color: var(--console-on-selected);
+}
+
+.console-language-toggle button:hover {
+  box-shadow: inset 0 0 0 40px rgba(var(--console-overlay), 0.08);
+}
+
+.console-language-toggle button:focus-visible {
+  outline-offset: -3px;
+}
+
+.console-theme-toggle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 20px;
+  padding: 0;
+  background: transparent;
+  color: var(--console-secondary);
+  cursor: pointer;
+}
+
+.console-theme-toggle:hover {
+  background: rgba(var(--console-overlay), 0.08);
+}
+
+.console-theme-toggle:active {
+  background: rgba(var(--console-overlay), 0.12);
+}
+
+.console-login {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 24px;
+  background: var(--console-background);
+  color: var(--console-text);
+  font-family: var(--app-body-font);
+}
+
+.console-login-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: min(420px, 100%);
+  flex: none;
+}
+
+.console-login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 40px 40px 32px;
+  border-radius: 28px;
+  background: var(--console-surface);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
+}
+
+.console-login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.console-login-logo {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: var(--console-primary);
+  color: var(--console-on-primary);
+}
+
+.console-login-brand-copy,
+.console-login-heading {
+  display: flex;
+  flex-direction: column;
+}
+
+.console-login-brand-name {
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 24px;
+}
+
+.console-login-repository {
+  color: var(--console-secondary);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.console-login-heading {
+  gap: 4px;
+}
+
+.console-login-heading h1 {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 400;
+  line-height: 40px;
+}
+
+.console-login-heading p {
+  margin: 0;
+  color: var(--console-secondary);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.console-login-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: var(--console-primary-tint);
+  color: var(--console-on-primary-container);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.console-login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.console-login-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.console-login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.console-login-label {
+  color: var(--console-body);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.console-login-input {
+  width: 100%;
+  height: 56px;
+  border: 1px solid var(--console-outline);
+  border-radius: 4px;
+  outline: 0;
+  padding: 0 16px;
+  background: var(--console-surface);
+  color: var(--console-text);
+  font-size: 16px;
+}
+
+.console-login-input:focus {
+  border: 2px solid var(--console-primary);
+  padding: 0 15px;
+}
+
+.console-login-input[aria-invalid="true"] {
+  border-color: var(--console-error);
+}
+
+.console-login-input:disabled {
+  opacity: 0.7;
+}
+
+.console-login-password {
+  position: relative;
+  display: block;
+}
+
+.console-login-password .console-login-input {
+  padding-right: 56px;
+}
+
+.console-login-password .console-login-input:focus {
+  padding-right: 55px;
+}
+
+.console-login-password-toggle {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border: 0;
+  border-radius: 24px;
+  padding: 0;
+  background: transparent;
+  color: var(--console-secondary);
+  cursor: pointer;
+}
+
+.console-login-password-toggle:hover {
+  background: rgba(var(--console-overlay), 0.08);
+}
+
+.console-login-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--console-error);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.console-login-submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 48px;
+  border: 0;
+  border-radius: 24px;
+  padding: 0 24px;
+  background: var(--console-primary);
+  color: var(--console-on-primary);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.console-login-submit:hover {
+  background: var(--console-primary-hover);
+}
+
+.console-login-submit:disabled {
+  cursor: wait;
+}
+
+.console-login-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: console-login-spin 0.8s linear infinite;
+}
+
+.console-login-retry {
+  align-self: center;
+  border: 0;
+  border-radius: 20px;
+  padding: 10px 14px;
+  background: transparent;
+  color: var(--console-primary);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.console-login-retry:hover {
+  background: rgba(var(--console-overlay-primary), 0.08);
+}
+
+.console-login-preferences {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.console-login-demo {
+  border-radius: 12px;
+  padding: 0 12px;
+  color: var(--console-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.console-login-demo summary {
+  justify-content: center;
+  font-size: 12px;
+}
+
+.console-login-demo p {
+  margin: 8px 0;
+}
+
+.console-login-demo button {
+  border: 0;
+  border-radius: 20px;
+  padding: 8px 12px;
+  background: var(--console-selected);
+  color: var(--console-on-selected);
+  cursor: pointer;
+}
+
+@keyframes console-login-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

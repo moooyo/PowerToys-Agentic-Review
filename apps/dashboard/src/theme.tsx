@@ -1,6 +1,13 @@
 import type { PaletteMode } from "@mui/material";
 import { alpha, CssBaseline, createTheme, ThemeProvider } from "@mui/material";
-import { createContext, type ReactNode, useContext, useMemo, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useState,
+} from "react";
 
 const ModeContext = createContext<{ mode: PaletteMode; toggle: () => void }>({
   mode: "light",
@@ -13,52 +20,155 @@ const overlayContainer = () => document.getElementById("dashboard-session") ?? d
 
 function materialTheme(mode: PaletteMode) {
   const dark = mode === "dark";
-  const colors = dark
+  const tokens = dark
     ? {
-        primary: "#B2C7FF",
-        onPrimary: "#002E6D",
-        primaryContainer: "#24467E",
-        onPrimaryContainer: "#DBE5FF",
-        secondary: "#BAC2D0",
-        secondaryContainer: "#303A50",
-        onSecondaryContainer: "#DBE5FF",
-        surface: "#181C24",
-        canvas: "#10141B",
-        surfaceLow: "#181C24",
-        container: "#20252F",
-        containerHigh: "#2B313D",
-        onSurface: "#E3E5ED",
-        onSurfaceVariant: "#BAC2D0",
-        outline: "#8994A5",
-        outlineVariant: "#414A58",
+        background: "#111318",
+        surface: "#1D2026",
+        elevated: "#2A2D34",
+        "surface-high": "#2C2F36",
+        chip: "#2E3138",
+        "chip-subtle": "#2E3138",
+        tool: "#262930",
+        "tool-hover": "#30333A",
+        subtle: "#23262C",
+        session: "#191C21",
+        "worker-icon": "#262930",
+        text: "#E2E2E9",
+        body: "#D0D3DC",
+        "body-strong": "#D6D9E2",
+        secondary: "#C4C6D0",
+        outline: "#8E9099",
+        faint: "#7D828C",
+        "outline-variant": "#44474F",
+        border: "#3A3D44",
+        divider: "#33363D",
+        "divider-subtle": "#2A2D33",
+        primary: "#AFC6FF",
+        "primary-hover": "#C6D5FF",
+        "on-primary": "#1D2026",
+        selected: "#3E4759",
+        "on-selected": "#DAE2F9",
+        "tonal-hover": "#4A5468",
+        "primary-container": "#234786",
+        "on-primary-container": "#D8E2FF",
+        "primary-tint": "#1E2A42",
+        "selected-card": "#1E2433",
+        ring: "#3A5490",
+        inverse: "#E2E2E9",
+        "on-inverse": "#2F3036",
+        "inverse-primary": "#345EAD",
+        error: "#FFB4AB",
+        "on-error": "#1D2026",
+        "error-container": "#4A1E1B",
+        "on-error-container": "#FFDAD6",
+        "error-icon": "#6B2722",
+        warning: "#FFB95C",
+        "warning-container": "#4A3510",
+        "on-warning-container": "#FFDDB3",
+        "warning-strong": "#5C4212",
+        "warning-text": "#FFDDB3",
+        "warning-code": "#3D2F12",
+        "issue-icon": "#4F3A12",
+        "stale-dot": "#FFB95C",
+        success: "#8BD5B5",
+        "success-container": "#1F3B2F",
+        "on-success-container": "#A6F2D0",
+        "success-banner": "#1A3329",
+        "success-banner-soft": "#1A3329",
+        "success-text": "#BDEFD6",
+        "success-dot": "#6DD3A5",
+        "alternate-avatar": "#4A2F52",
+        "on-alternate-avatar": "#F5D9FF",
       }
     : {
-        primary: "#345EAD",
-        onPrimary: "#FFFFFF",
-        primaryContainer: "#DCE6FF",
-        onPrimaryContainer: "#173D79",
-        secondary: "#505966",
-        secondaryContainer: "#DFE6F4",
-        onSecondaryContainer: "#25344E",
+        background: "#F1F4FA",
         surface: "#FFFFFF",
-        canvas: "#FAF9FD",
-        surfaceLow: "#F3F4FA",
-        container: "#EDF0F7",
-        containerHigh: "#E7EBF4",
-        onSurface: "#1B1D24",
-        onSurfaceVariant: "#505966",
+        elevated: "#FFFFFF",
+        "surface-high": "#E3E8F2",
+        chip: "#E7EBF4",
+        "chip-subtle": "#EDF0F7",
+        tool: "#EEF1F7",
+        "tool-hover": "#E6EAF3",
+        subtle: "#F6F8FC",
+        session: "#FBFCFE",
+        "worker-icon": "#EEF1F8",
+        text: "#1B1D24",
+        body: "#434A57",
+        "body-strong": "#3A4250",
+        secondary: "#505966",
         outline: "#737D8C",
-        outlineVariant: "#D4DAE5",
+        faint: "#9AA3B2",
+        "outline-variant": "#C4CAD6",
+        border: "#D4DAE5",
+        divider: "#E1E5EE",
+        "divider-subtle": "#EEF1F6",
+        primary: "#345EAD",
+        "primary-hover": "#2C54A0",
+        "on-primary": "#FFFFFF",
+        selected: "#DAE2F9",
+        "on-selected": "#131C2B",
+        "tonal-hover": "#CCD6F2",
+        "primary-container": "#DCE6FF",
+        "on-primary-container": "#173D79",
+        "primary-tint": "#EEF3FF",
+        "selected-card": "#F6F8FF",
+        ring: "#C9D8FF",
+        inverse: "#2F3036",
+        "on-inverse": "#F1F0F7",
+        "inverse-primary": "#AFC6FF",
+        error: "#B3261E",
+        "on-error": "#FFFFFF",
+        "error-container": "#FCEAE9",
+        "on-error-container": "#8C1D18",
+        "error-icon": "#F9D3D0",
+        warning: "#8B5000",
+        "warning-container": "#FFF0D4",
+        "on-warning-container": "#6A3D00",
+        "warning-strong": "#FFE3B0",
+        "warning-text": "#775000",
+        "warning-code": "#FFF4DE",
+        "issue-icon": "#FFE9C2",
+        "stale-dot": "#D08A12",
+        success: "#25634E",
+        "success-container": "#E1F0E6",
+        "on-success-container": "#1D5A45",
+        "success-banner": "#EAF5EE",
+        "success-banner-soft": "#EEF7F1",
+        "success-text": "#1D4A3A",
+        "success-dot": "#2F9E6E",
+        "alternate-avatar": "#F3DDF5",
+        "on-alternate-avatar": "#5B2C6F",
       };
-  const semanticColors = {
-    error: dark ? "#F2B8B5" : "#B3261E",
-    success: dark ? "#91D4B4" : "#25634E",
-    warning: dark ? "#F1C779" : "#775000",
-    info: dark ? "#A8C7FA" : "#365E9D",
+  const colors = {
+    primary: tokens.primary,
+    onPrimary: tokens["on-primary"],
+    primaryContainer: tokens["primary-container"],
+    onPrimaryContainer: tokens["on-primary-container"],
+    secondary: tokens.secondary,
+    secondaryContainer: tokens.selected,
+    onSecondaryContainer: tokens["on-selected"],
+    surface: tokens.surface,
+    canvas: tokens.background,
+    surfaceLow: tokens.subtle,
+    container: tokens.chip,
+    containerHigh: tokens["surface-high"],
+    onSurface: tokens.text,
+    onSurfaceVariant: tokens.secondary,
+    outline: tokens.outline,
+    outlineVariant: tokens["outline-variant"],
   };
-  const semanticContainers = dark
-    ? { error: "#4A2527", success: "#1D372E", warning: "#3C3020", info: "#20364F" }
-    : { error: "#FCEAE9", success: "#E6F1EA", warning: "#FFF0D4", info: "#E4ECF9" };
+  const semanticColors = {
+    error: tokens.error,
+    success: tokens.success,
+    warning: tokens.warning,
+    info: tokens.primary,
+  };
+  const semanticContainers = {
+    error: tokens["error-container"],
+    success: tokens["success-container"],
+    warning: tokens["warning-container"],
+    info: tokens["primary-tint"],
+  };
   const chipTones = {
     primary: { color: colors.onPrimaryContainer, backgroundColor: colors.primaryContainer },
     secondary: { color: colors.onSecondaryContainer, backgroundColor: colors.secondaryContainer },
@@ -80,13 +190,13 @@ function materialTheme(mode: PaletteMode) {
       secondary: { main: colors.secondary },
       background: { default: colors.canvas, paper: colors.surface },
       text: { primary: colors.onSurface, secondary: colors.onSurfaceVariant },
-      divider: colors.outlineVariant,
-      error: { main: semanticColors.error },
+      divider: tokens.divider,
+      error: { main: semanticColors.error, contrastText: tokens["on-error"] },
       success: { main: semanticColors.success },
       warning: { main: semanticColors.warning },
       info: { main: semanticColors.info },
       action: {
-        hover: alpha(colors.primary, 0.08),
+        hover: alpha(colors.onSurface, 0.08),
         selected: alpha(colors.primary, 0.12),
         focus: alpha(colors.primary, 0.12),
       },
@@ -94,7 +204,7 @@ function materialTheme(mode: PaletteMode) {
     // Keep the sx radius unit at 4px; M3 surface and dialog roles are explicit below.
     shape: { borderRadius: 4 },
     typography: {
-      fontFamily: '"Roboto", "Segoe UI", sans-serif',
+      fontFamily: '"Roboto Flex", "Noto Sans SC", system-ui, sans-serif',
       fontSize: 14,
       fontWeightRegular: 400,
       fontWeightMedium: 500,
@@ -103,35 +213,35 @@ function materialTheme(mode: PaletteMode) {
         fontSize: "1.75rem",
         lineHeight: "2.25rem",
         fontWeight: 400,
-        letterSpacing: "-.35px",
+        letterSpacing: 0,
       },
       h2: { fontSize: "1.375rem", lineHeight: "1.75rem", fontWeight: 400, letterSpacing: 0 },
       h3: { fontSize: "1rem", lineHeight: 1.5, fontWeight: 500, letterSpacing: 0 },
       h4: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
       h5: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
       h6: { fontSize: "1.375rem", lineHeight: 1.2727, fontWeight: 400, letterSpacing: 0 },
-      subtitle1: { fontSize: "1rem", lineHeight: 1.5, fontWeight: 500, letterSpacing: ".15px" },
+      subtitle1: { fontSize: "1rem", lineHeight: 1.5, fontWeight: 500, letterSpacing: 0 },
       subtitle2: {
         fontSize: ".875rem",
         lineHeight: 1.4286,
         fontWeight: 500,
-        letterSpacing: ".1px",
+        letterSpacing: 0,
       },
-      body1: { fontSize: "1rem", lineHeight: 1.5, letterSpacing: ".25px" },
-      body2: { fontSize: ".875rem", lineHeight: 1.4286, letterSpacing: ".25px" },
-      caption: { fontSize: ".75rem", lineHeight: 1.3333, letterSpacing: ".4px" },
+      body1: { fontSize: "1rem", lineHeight: 1.5, letterSpacing: 0 },
+      body2: { fontSize: ".875rem", lineHeight: 1.4286, letterSpacing: 0 },
+      caption: { fontSize: ".75rem", lineHeight: 1.3333, letterSpacing: 0 },
       overline: {
         fontSize: ".875rem",
         lineHeight: 1.4286,
         fontWeight: 500,
-        letterSpacing: ".1px",
+        letterSpacing: 0,
         textTransform: "none",
       },
       button: {
         fontSize: ".875rem",
         lineHeight: 1.4286,
         fontWeight: 500,
-        letterSpacing: ".1px",
+        letterSpacing: 0,
         textTransform: "none",
       },
     },
@@ -139,6 +249,14 @@ function materialTheme(mode: PaletteMode) {
       MuiCssBaseline: {
         styleOverrides: {
           ":root": {
+            ...Object.fromEntries(
+              Object.entries(tokens).map(([name, value]) => [`--console-${name}`, value]),
+            ),
+            "--console-overlay": dark ? "226,226,233" : "27,29,36",
+            "--console-overlay-primary": dark ? "175,198,255" : "52,94,173",
+            "--console-overlay-success": dark ? "139,213,181" : "37,99,78",
+            "--console-overlay-error": dark ? "255,180,171" : "179,38,30",
+            colorScheme: mode,
             "--app-primary-container": colors.primaryContainer,
             "--app-on-primary-container": colors.onPrimaryContainer,
             "--app-secondary-container": colors.secondaryContainer,
@@ -151,7 +269,7 @@ function materialTheme(mode: PaletteMode) {
             "--app-shape-surface": "16px",
             "--app-shape-dialog": "28px",
           },
-          body: { margin: 0 },
+          body: { margin: 0, WebkitFontSmoothing: "antialiased" },
           ":focus-visible": { outline: `3px solid ${colors.primary}`, outlineOffset: 3 },
         },
       },
@@ -229,8 +347,8 @@ function materialTheme(mode: PaletteMode) {
             borderRadius: "50%",
             flexShrink: 0,
             transition: "background-color 160ms ease",
-            "&:hover": { backgroundColor: alpha(colors.primary, 0.08) },
-            "&:active": { backgroundColor: alpha(colors.primary, 0.12) },
+            "&:hover": { backgroundColor: alpha(colors.onSurface, 0.08) },
+            "&:active": { backgroundColor: alpha(colors.onSurface, 0.12) },
           },
         },
       },
@@ -458,7 +576,7 @@ function materialTheme(mode: PaletteMode) {
         styleOverrides: {
           paper: {
             borderRadius: 28,
-            backgroundColor: colors.containerHigh,
+            backgroundColor: tokens.elevated,
             backgroundImage: "none",
             minWidth: 0,
             "@media (max-width: 599px)": {
@@ -510,18 +628,18 @@ function materialTheme(mode: PaletteMode) {
       MuiPopover: { defaultProps: { container: overlayContainer } },
       MuiPopper: { defaultProps: { container: overlayContainer } },
       MuiMenu: {
-        styleOverrides: { paper: { backgroundColor: colors.container, borderRadius: 12 } },
+        styleOverrides: { paper: { backgroundColor: tokens.elevated, borderRadius: 16 } },
       },
       MuiSnackbarContent: {
         styleOverrides: {
           root: {
-            color: colors.canvas,
-            backgroundColor: colors.onSurface,
+            color: tokens["on-inverse"],
+            backgroundColor: tokens.inverse,
             borderRadius: 4,
             boxShadow: "0 3px 8px rgb(0 0 0 / 20%)",
           },
           action: {
-            color: dark ? "#345EAD" : "#B2C7FF",
+            color: tokens["inverse-primary"],
             "& .MuiButton-root, & .MuiIconButton-root": { color: "inherit" },
           },
         },
@@ -564,7 +682,29 @@ function materialTheme(mode: PaletteMode) {
 }
 
 export function MaterialTheme({ children }: { children: ReactNode }) {
-  const [mode, setMode] = useState<PaletteMode>("light");
+  const [mode, setMode] = useState<PaletteMode>(() => {
+    try {
+      return typeof window !== "undefined" &&
+        window.localStorage.getItem("agentic-review-theme") === "dark"
+        ? "dark"
+        : "light";
+    } catch {
+      return "light";
+    }
+  });
+  useLayoutEffect(() => {
+    document.documentElement.style.colorScheme = mode;
+    document.documentElement.style.backgroundColor = mode === "dark" ? "#111318" : "#F1F4FA";
+    document.documentElement.dataset.consoleTheme = mode;
+    document
+      .querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+      ?.setAttribute("content", mode === "dark" ? "#111318" : "#F1F4FA");
+    try {
+      window.localStorage.setItem("agentic-review-theme", mode);
+    } catch {
+      // Theme switching remains available when browser storage is unavailable.
+    }
+  }, [mode]);
   const value = useMemo(
     () => ({
       mode,

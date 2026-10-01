@@ -1,0 +1,620 @@
+.console-accounts-settings,
+.console-profile-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  color: var(--console-text, #1b1d24);
+}
+
+.console-account-toolbar {
+  margin-top: -64px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-account-button {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 20px;
+  background: transparent;
+  color: var(--console-primary, #345ead);
+  font:
+    500 14px / 20px "Roboto Flex",
+    "Noto Sans SC",
+    system-ui,
+    sans-serif;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.console-account-button:hover {
+  background: color-mix(in srgb, var(--console-primary, #345ead) 8%, transparent);
+}
+.console-account-button.filled {
+  padding: 0 20px;
+  background: var(--console-primary, #345ead);
+  color: var(--console-on-primary, #fff);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 20%);
+}
+.console-account-button.filled:hover {
+  background: var(--console-primary-hover, #2c54a0);
+}
+.console-account-button.outlined {
+  padding: 0 16px 0 12px;
+  border: 1px solid var(--console-outline, #737d8c);
+}
+.console-account-button:disabled,
+.console-account-icon-button:disabled,
+.console-account-reveal:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+.console-account-button:disabled:hover,
+.console-account-icon-button:disabled:hover {
+  background: transparent;
+}
+.console-account-button.filled:disabled:hover {
+  background: var(--console-primary, #345ead);
+}
+.console-account-button:focus-visible,
+.console-account-icon-button:focus-visible,
+.console-account-reveal:focus-visible,
+.console-account-switch:focus-visible,
+.console-account-check input:focus-visible,
+.console-account-repository-ids summary:focus-visible {
+  outline: 2px solid var(--console-primary, #345ead);
+  outline-offset: 3px;
+}
+
+.console-account-list {
+  border: 1px solid var(--console-divider, #e1e5ee);
+  border-radius: 16px;
+  overflow: hidden;
+}
+.console-account-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 12px 14px 20px;
+}
+.console-account-row + .console-account-row {
+  border-top: 1px solid var(--console-divider, #e1e5ee);
+}
+.console-account-row.disabled {
+  opacity: 0.6;
+}
+.console-account-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--console-primary-container, #dce6ff);
+  color: var(--console-on-primary-container, #173d79);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+.console-account-avatar.tone-1 {
+  background: var(--console-success-container, #e1f0e6);
+  color: var(--console-success, #1d5a45);
+}
+.console-account-avatar.tone-2 {
+  background: var(--console-warning-container, #ffe9c2);
+  color: var(--console-on-warning-container, #6a3d00);
+}
+.console-account-avatar.tone-3 {
+  background: var(--console-selected, #dae2f9);
+  color: var(--console-on-selected, #131c2b);
+}
+.console-account-avatar.tone-4 {
+  background: var(--console-chip, #e7ebf4);
+  color: var(--console-body, #434a57);
+}
+.console-account-info {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.console-account-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.console-account-identity strong {
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+}
+.console-account-username {
+  font-size: 13px;
+  color: var(--console-secondary, #505966);
+}
+.console-account-badge {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 11px;
+  font-size: 12px;
+  line-height: 22px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+.console-account-badge.admin {
+  background: var(--console-primary-container, #dce6ff);
+  color: var(--console-on-primary-container, #173d79);
+}
+.console-account-badge.member {
+  background: var(--console-chip, #edf0f7);
+  color: var(--console-body, #434a57);
+}
+.console-account-badge.you {
+  border: 1px solid var(--console-outline-variant, #c4cad6);
+  line-height: 20px;
+}
+.console-account-badge.off {
+  background: var(--console-error-container, #fceae9);
+  color: var(--console-on-error-container, #8c1d18);
+}
+.console-account-summary,
+.console-account-scope {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--console-secondary, #505966);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.console-account-scope {
+  font-size: 12px;
+  line-height: 16px;
+}
+.console-account-icon-button,
+.console-account-reveal {
+  width: 40px;
+  height: 40px;
+  border: 0;
+  padding: 0;
+  border-radius: 20px;
+  background: transparent;
+  color: var(--console-secondary, #505966);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex: none;
+}
+.console-account-icon-button:hover,
+.console-account-reveal:hover {
+  background: color-mix(in srgb, var(--console-text, #1b1d24) 8%, transparent);
+}
+.console-account-empty {
+  padding: 32px 20px;
+  color: var(--console-secondary, #505966);
+  font-size: 14px;
+  text-align: center;
+}
+
+.console-account-dialog .MuiBackdrop-root {
+  background: rgb(0 0 0 / 36%);
+}
+.console-account-dialog-paper.MuiPaper-root {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  width: 480px;
+  max-width: calc(100% - 48px);
+  max-height: calc(100% - 48px);
+  margin: 24px;
+  padding: 24px;
+  box-sizing: border-box;
+  border-radius: 28px;
+  background: var(--console-elevated, #fff);
+  color: var(--console-text, #1b1d24);
+  box-shadow:
+    0 8px 12px 6px rgb(0 0 0 / 12%),
+    0 4px 4px rgb(0 0 0 / 20%);
+  font-family: "Roboto Flex", "Noto Sans SC", system-ui, sans-serif;
+}
+.console-account-dialog-paper h2 {
+  flex: none;
+  margin: 0 0 16px;
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 400;
+}
+.console-account-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.console-account-dialog-paper > .console-account-form {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  gap: 0;
+}
+.console-account-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.console-account-modal-body > * {
+  flex: none;
+}
+.console-account-scope-options {
+  color: var(--console-secondary, #505966);
+  font-size: 12px;
+}
+.console-account-scope-options > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  cursor: pointer;
+  list-style: none;
+  padding: 0;
+}
+.console-account-scope-options > summary::after {
+  display: none;
+}
+.console-account-scope-options > :where(summary) > :where(span) {
+  flex: none;
+  font-weight: 500;
+}
+.console-account-scope-options > :where(summary) > :where(small) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+.console-account-scope-options:where([open]) > :where(summary) .console-icon {
+  transform: rotate(180deg);
+}
+.console-account-scope-options > fieldset {
+  padding-top: 8px;
+}
+.console-account-scope-options > summary:focus-visible {
+  outline: 3px solid var(--console-primary, #345ead);
+  outline-offset: 2px;
+}
+.console-account-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.console-account-field > label {
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--console-body, #434a57);
+}
+.console-account-input-wrap {
+  position: relative;
+  display: flex;
+}
+.console-account-input-wrap input {
+  width: 100%;
+  min-width: 0;
+  height: 48px;
+  border: 1px solid var(--console-outline, #737d8c);
+  border-radius: 4px;
+  padding: 0 14px;
+  font:
+    400 15px / 22px "Roboto Flex",
+    "Noto Sans SC",
+    system-ui,
+    sans-serif;
+  color: var(--console-text, #1b1d24);
+  background: var(--console-surface, #fff);
+  outline: 0;
+  box-sizing: border-box;
+}
+.console-account-input-wrap:has(.console-account-reveal) input {
+  padding-right: 48px;
+}
+.console-account-input-wrap input:focus {
+  border: 2px solid var(--console-primary, #345ead);
+  padding-left: 13px;
+}
+.console-account-field.invalid input {
+  border-color: var(--console-error, #b3261e);
+}
+.console-account-field.invalid input:focus {
+  border-color: var(--console-error, #b3261e);
+}
+.console-account-input-wrap input:disabled {
+  opacity: 0.6;
+}
+.console-account-reveal {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+}
+.console-account-field-help {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--console-secondary, #505966);
+}
+.console-account-field-help > :last-child {
+  font-variant-numeric: tabular-nums;
+}
+.console-account-field.invalid .console-account-field-help {
+  color: var(--console-error, #b3261e);
+}
+.console-account-admin {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 0;
+}
+.console-account-admin > div {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+.console-account-admin span {
+  font-size: 15px;
+  line-height: 22px;
+}
+.console-account-admin small {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--console-secondary, #505966);
+}
+.console-account-switch {
+  width: 52px;
+  height: 32px;
+  padding: 0;
+  border: 2px solid var(--console-outline, #737d8c);
+  border-radius: 16px;
+  background: var(--console-surface-high, #e3e8f2);
+  position: relative;
+  flex: none;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.console-account-switch > span {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--console-outline, #737d8c);
+  position: absolute;
+  top: 50%;
+  left: 6px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    left 0.15s,
+    background 0.15s,
+    width 0.15s,
+    height 0.15s;
+}
+.console-account-switch[aria-checked="true"] {
+  background: var(--console-primary, #345ead);
+  border-color: var(--console-primary, #345ead);
+}
+.console-account-switch[aria-checked="true"] > span {
+  width: 24px;
+  height: 24px;
+  left: 22px;
+  background: var(--console-on-primary, #fff);
+  color: var(--console-primary, #345ead);
+}
+.console-account-switch:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+.console-account-permissions {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.console-account-permissions legend {
+  padding: 0 0 4px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--console-body, #434a57);
+}
+.console-account-check {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.console-account-check:hover {
+  background: color-mix(in srgb, var(--console-text, #1b1d24) 4%, transparent);
+}
+.console-account-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--console-primary, #345ead);
+  flex: none;
+  cursor: pointer;
+  margin: 0;
+}
+.console-account-check:has(input:disabled) {
+  cursor: default;
+}
+.console-account-check input:disabled {
+  cursor: default;
+}
+.console-account-helper {
+  margin: 0;
+  color: var(--console-secondary, #505966);
+  font-size: 12px;
+  line-height: 18px;
+}
+.console-account-repository-ids {
+  font-size: 12px;
+  color: var(--console-primary, #345ead);
+  margin-top: 4px;
+}
+.console-account-repository-ids summary {
+  cursor: pointer;
+  padding: 6px 0;
+}
+.console-account-repository-ids .console-account-field {
+  margin: 6px 0 10px;
+}
+.console-account-modal-actions {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.console-account-dialog-paper .console-account-modal-actions {
+  margin-top: 16px;
+  background: var(--console-elevated, #fff);
+}
+.console-account-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--console-secondary, #505966);
+  font-size: 13px;
+  line-height: 18px;
+}
+.console-account-notice > .console-icon {
+  flex: none;
+}
+.console-account-notice.error {
+  color: var(--console-error, #b3261e);
+}
+.console-account-conflict {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.console-account-conflict > .console-account-button {
+  align-self: flex-start;
+}
+.console-account-latest {
+  padding: 14px;
+  border: 1px solid var(--console-outline-variant, #c4cad6);
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+.console-account-latest strong {
+  font-weight: 500;
+}
+.console-account-latest p {
+  margin: 8px 0;
+  color: var(--console-secondary, #505966);
+}
+.console-account-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  box-sizing: border-box;
+  animation: console-account-spin 0.8s linear infinite;
+  flex: none;
+}
+
+.console-profile-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--console-background, #f1f4fa);
+}
+.console-profile-header > .console-account-avatar {
+  width: 56px;
+  height: 56px;
+  font-size: 20px;
+  font-weight: 500;
+}
+.console-profile-identity {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.console-profile-identity > span {
+  font-size: 20px;
+  line-height: 28px;
+}
+.console-profile-identity small {
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--console-secondary, #505966);
+}
+.console-profile-password {
+  max-width: 480px;
+  padding: 20px;
+  border: 1px solid var(--console-divider, #e1e5ee);
+  border-radius: 16px;
+  box-sizing: border-box;
+}
+.console-profile-password h3 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+}
+.console-profile-password-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.console-profile-password-actions > span {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--console-secondary, #505966);
+}
+
+@keyframes console-account-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .console-account-switch,
+  .console-account-switch > span {
+    transition: none;
+  }
+  .console-account-spinner {
+    animation-duration: 1.6s;
+  }
+}

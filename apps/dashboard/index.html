@@ -1,9 +1,23 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#18243c" />
+    <meta name="theme-color" content="#F1F4FA" />
+    <script>
+      try {
+        const mode = localStorage.getItem("agentic-review-theme") === "dark" ? "dark" : "light";
+        document.documentElement.dataset.consoleTheme = mode;
+        document.documentElement.style.colorScheme = mode;
+        document.documentElement.style.backgroundColor = mode === "dark" ? "#111318" : "#F1F4FA";
+      } catch {}
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,300..700&amp;family=Noto+Sans+SC:wght@400;500;700&amp;family=Roboto+Mono:wght@400;500&amp;family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0..1,0&amp;display=swap"
+    />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Agentic Review</title>
   </head>

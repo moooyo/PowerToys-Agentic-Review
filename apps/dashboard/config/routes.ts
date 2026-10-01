@@ -1,15 +1,5 @@
 export default [
-  { path: "/", hideInMenu: true, component: "./WorkspaceRedirect" },
-  { path: "/work-items", hideInMenu: true, component: "./WorkspaceRedirect" },
-  { path: "/pull-requests", name: "Pull requests", component: "./PullRequests" },
-  { path: "/issues", name: "Issues", component: "./Issues" },
-  { path: "/tasks", name: "Tasks", component: "./InvestigationTasks" },
-  { path: "/comments", name: "Comments", component: "./InvestigationComments" },
-  { path: "/webhooks", name: "Webhook events", component: "./InvestigationWebhooks" },
-  { path: "/workers", name: "Workers", component: "./InvestigationWorkers", adminOnly: true },
-  { path: "/reports", name: "Reports", component: "./InvestigationReport" },
-  { path: "/repositories", name: "Repositories", component: "./InvestigationRepositories" },
-  { path: "/account", name: "My account", component: "./MyAccount" },
-  { path: "/accounts", name: "Accounts", component: "./Accounts", adminOnly: true },
-  { path: "/*", hideInMenu: true, component: "./NotFound" },
+  { path: "/", hideInMenu: true, redirect: "/inbox" },
+  { path: "/inbox", name: "Inbox", component: "./ReviewConsole" },
+  { path: "/settings", name: "Settings", component: "./ConsoleSettings" },
 ];
