@@ -1,8 +1,10 @@
 import {
   DateTimeSchema,
   EntityIdSchema,
+  type InvestigationAttemptV1,
   type InvestigationTaskKind,
   InvestigationTaskKindSchema,
+  type InvestigationTaskV1,
   type InvestigationWorkerControl,
   type InvestigationWorkerControlUpdate,
   InvestigationWorkerControlUpdateSchema,
@@ -25,6 +27,7 @@ const StoredControlSchema = Type.Object(
   {
     recordType: Type.Literal("InvestigationWorkerControlV1"),
     id: EntityIdSchema,
+    displayName: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
     repositoryIds: Type.Array(EntityIdSchema, { uniqueItems: true }),
     e2eEnabled: Type.Boolean(),
     version: PositiveIntegerSchema,
@@ -40,7 +43,13 @@ const StoredControlSchema = Type.Object(
 );
 type StoredControl = Omit<
   InvestigationWorkerControl,
-  "effectiveKinds" | "status" | "activeE2eTaskIds" | "cleanupPendingAttemptIds"
+  | "effectiveKinds"
+  | "status"
+  | "contactStatus"
+  | "activityStatus"
+  | "activeTaskIds"
+  | "activeE2eTaskIds"
+  | "cleanupPendingAttemptIds"
 > & { recordType: "InvestigationWorkerControlV1" };
 
 export interface InvestigationWorkerControlAudit {
@@ -191,6 +200,7 @@ export class InvestigationWorkerControls {
         ? {
             recordType: "InvestigationWorkerControlV1",
             id: worker.id,
+            displayName: worker.displayName ?? worker.id,
             repositoryIds: [...worker.repositoryIds],
             e2eEnabled: false,
             version: 1,
@@ -199,10 +209,15 @@ export class InvestigationWorkerControls {
             lastSeenAt: null,
             advertisedKinds: null,
           }
-        : { ...previous, repositoryIds: [...worker.repositoryIds] };
+        : {
+            ...previous,
+            displayName: worker.displayName ?? worker.id,
+            repositoryIds: [...worker.repositoryIds],
+          };
     this.validate(next);
     if (
       previous === undefined ||
+      previous.displayName !== next.displayName ||
       JSON.stringify(previous.repositoryIds) !== JSON.stringify(next.repositoryIds)
     )
       this.store.put("idempotency", controlKey(worker.id), next);
@@ -255,14 +270,41 @@ export class InvestigationWorkerControls {
   private project(record: StoredControl): InvestigationWorkerControl {
     const outstanding = this.store.list<InvestigationResourceLease>(
       "resourceLeases",
-      (lease) => lease.workerId === record.id && lease.pool === "e2e" && lease.state !== "released",
+      (lease) => lease.workerId === record.id && lease.state !== "released",
     );
+    const outstandingE2e = outstanding.filter((lease) => lease.pool === "e2e");
+    const ownedAttempts = this.store.list<{ attempt: InvestigationAttemptV1 }>(
+      "attempts",
+      ({ attempt }) =>
+        attempt.workerId === record.id &&
+        (attempt.state === "leased" || attempt.state === "running") &&
+        this.store.get<InvestigationTaskV1>("tasks", attempt.taskId)?.state === "running",
+    );
+    const activeTaskIds = [
+      ...new Set([
+        ...outstanding.map((lease) => lease.taskId),
+        ...ownedAttempts.map(({ attempt }) => attempt.taskId),
+      ]),
+    ];
+    const cleanupPendingAttemptIds = outstanding
+      .filter((lease) => lease.state === "needs_cleanup")
+      .map((lease) => lease.attemptId);
     const effectiveKinds = this.policyResponse(record).effectiveKinds;
-    const online =
-      record.lastSeenAt !== null &&
-      this.now().getTime() - Date.parse(record.lastSeenAt) < this.onlineWindowMs;
+    const contactAge =
+      record.lastSeenAt === null ? null : this.now().getTime() - Date.parse(record.lastSeenAt);
+    const online = contactAge !== null && contactAge >= 0 && contactAge < this.onlineWindowMs;
+    const contactStatus = contactAge === null ? "never" : online ? "recent" : "stale";
+    // Ownership outlives contact freshness. Recent contact is not a process health probe.
+    const activityStatus =
+      cleanupPendingAttemptIds.length > 0
+        ? "cleaning"
+        : activeTaskIds.length > 0
+          ? "busy"
+          : online
+            ? "online"
+            : "offline";
     const status =
-      !record.e2eEnabled && outstanding.length > 0
+      !record.e2eEnabled && outstandingE2e.length > 0
         ? online
           ? "disabling"
           : "awaiting_confirmation"
@@ -274,12 +316,14 @@ export class InvestigationWorkerControls {
     const { recordType: _recordType, ...control } = record;
     return {
       ...control,
+      displayName: record.displayName ?? record.id,
       effectiveKinds,
       status,
-      activeE2eTaskIds: [...new Set(outstanding.map((lease) => lease.taskId))],
-      cleanupPendingAttemptIds: outstanding
-        .filter((lease) => lease.state === "needs_cleanup")
-        .map((lease) => lease.attemptId),
+      contactStatus,
+      activityStatus,
+      activeTaskIds,
+      activeE2eTaskIds: [...new Set(outstandingE2e.map((lease) => lease.taskId))],
+      cleanupPendingAttemptIds,
     };
   }
 

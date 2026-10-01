@@ -17,6 +17,7 @@ import {
   defaultInvestigationEvidencePolicy,
   type InvestigationEvidencePolicy,
 } from "./evidence-store.js";
+import { canonicalInvestigationWebhookUrl } from "./intake-details.js";
 import type { InvestigationWorkerPrincipal } from "./types.js";
 import {
   type InvestigationWebhookConfig,
@@ -50,6 +51,7 @@ export interface InvestigationRuntimeConfig {
   readonly https: { key: string; cert: string; passphrase?: string } | undefined;
   readonly github: { token: string; expectedGitHubUserId: number } | undefined;
   readonly webhook?: InvestigationWebhookConfig;
+  readonly webhookPublicUrl?: string;
   readonly enableExternalWrites: boolean;
   readonly executionBindingsPath: string | undefined;
   readonly sourceImportMaximumBytes: number;
@@ -271,8 +273,13 @@ export function loadInvestigationRuntimeConfig(
       throw new Error(
         "worker.token must contain 43 to 256 base64url characters generated from a cryptographically random source.",
       );
+    const displayName =
+      value.displayName === undefined ? undefined : exact(value.displayName, "worker.displayName");
+    if (displayName !== undefined && displayName.length > 120)
+      throw new Error("worker.displayName must contain at most 120 characters.");
     return {
       id: entityId(value.id, "worker.id"),
+      ...(displayName === undefined ? {} : { displayName }),
       token,
       repositoryIds: stringList(value.repositoryIds, "worker.repositoryIds").map((id) =>
         entityId(id, "worker.repositoryIds"),
@@ -304,6 +311,10 @@ export function loadInvestigationRuntimeConfig(
   );
   if (webhook !== undefined && githubToken === undefined)
     throw new Error("Webhook intake requires GitHub credentials for complete source reads.");
+  const webhookPublicUrl =
+    environment.INVESTIGATION_GITHUB_WEBHOOK_PUBLIC_URL === undefined
+      ? undefined
+      : canonicalInvestigationWebhookUrl(environment.INVESTIGATION_GITHUB_WEBHOOK_PUBLIC_URL);
   const databasePath = resolve(
     environment.INVESTIGATION_DATABASE_PATH ?? ".data/investigation.sqlite",
   );
@@ -327,6 +338,7 @@ export function loadInvestigationRuntimeConfig(
     enableExternalWrites,
     media: parseInvestigationMediaRuntimeConfig(environment),
     ...(webhook === undefined ? {} : { webhook }),
+    ...(webhookPublicUrl === undefined ? {} : { webhookPublicUrl }),
     executionBindingsPath:
       environment.INVESTIGATION_EXECUTION_BINDINGS_PATH === undefined
         ? undefined

@@ -1,8 +1,4 @@
-import {
-  type InvestigationTaskV1,
-  type InvestigationWorkerControl,
-  isInvestigationStaticTaskKind,
-} from "@agentic-review/contracts";
+import type { InvestigationIntakeDetails } from "@agentic-review/contracts";
 import { Dialog, DialogActions, DialogContent, DialogTitle, Snackbar } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
@@ -39,12 +35,13 @@ import {
   webhookSettingsFormIsDirty,
   webhookSettingsFormValues,
 } from "../investigation/webhook-settings-form";
-import { workerAdmissionInput, workersQueryKey } from "../investigation/workers-page";
-import { formatDuration, stageLabel } from "./model";
+import { workersQueryKey } from "../investigation/workers-page";
+import { triggerLabel } from "./model";
 import { ConsoleIcon, useConsolePreferences } from "./preferences";
 import { AccountsSettings, ProfileSettings } from "./settings-accounts";
 import PromptSettings from "./settings-prompts";
 import { defaultReplyTemplates } from "./settings-template-defaults";
+import WorkerSettings from "./settings-workers";
 import "./settings.css";
 
 type SettingsSection =
@@ -218,6 +215,12 @@ function IntakeSettings({
     queryFn: () => investigationApi.webhookDeliveries({ repositoryId: repository.id, limit: 8 }),
     refetchInterval: 10_000,
   });
+  const intakeDetails = useQuery({
+    queryKey: ["console", "intake-details", repository.id],
+    queryFn: () => investigationApi.repositoryIntakeDetails(repository.id),
+    refetchInterval: 10_000,
+    retry: false,
+  });
   return (
     <>
       <QueryState
@@ -229,6 +232,8 @@ function IntakeSettings({
         <IntakeForm
           repository={repository}
           settings={query.data}
+          intakeDetails={intakeDetails.data}
+          intakeDetailsError={intakeDetails.isError}
           canManage={!!session.user?.permissions.includes("repository:manage")}
           onDraft={onDraft}
           onToast={onToast}
@@ -239,15 +244,61 @@ function IntakeSettings({
   );
 }
 
+function GitHubUserBadge({ repositoryId, userId }: { repositoryId: string; userId: string }) {
+  const { text } = useConsolePreferences();
+  const [failedAvatarUrl, setFailedAvatarUrl] = useState<string | null>(null);
+  const [lookupReadyId, setLookupReadyId] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setLookupReadyId(userId), 500);
+    return () => clearTimeout(timer);
+  }, [userId]);
+  const identity = useQuery({
+    queryKey: ["console", "github-user", repositoryId, userId],
+    queryFn: () => investigationApi.repositoryGitHubUser(repositoryId, userId),
+    staleTime: 15 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    enabled:
+      lookupReadyId === userId &&
+      /^[1-9][0-9]*$/u.test(userId) &&
+      Number.isSafeInteger(Number(userId)),
+  });
+  return (
+    <span className="console-settings-user-identity">
+      <span className="console-settings-avatar small">
+        {identity.data?.avatarUrl && identity.data.avatarUrl !== failedAvatarUrl ? (
+          <img
+            src={identity.data.avatarUrl}
+            alt=""
+            loading="lazy"
+            onError={() => setFailedAvatarUrl(identity.data?.avatarUrl ?? null)}
+          />
+        ) : (
+          <ConsoleIcon name="person" size={16} />
+        )}
+      </span>
+      <span>
+        {identity.data ? `@${identity.data.login}` : text("用户名未解析", "Username unresolved")}
+      </span>
+      <span className="console-settings-mono">ID {userId}</span>
+    </span>
+  );
+}
+
 function IntakeForm({
   repository,
   settings,
+  intakeDetails,
+  intakeDetailsError,
   canManage,
   onDraft,
   onToast,
 }: {
   repository: Repository;
   settings: RepositoryWebhookSettings;
+  intakeDetails?: InvestigationIntakeDetails;
+  intakeDetailsError: boolean;
   canManage: boolean;
   onDraft: (bar: DraftBar | null) => void;
   onToast: (message: string) => void;
@@ -256,6 +307,7 @@ function IntakeForm({
   const client = useQueryClient();
   const mounted = useMounted();
   const lock = useRef(false);
+  const identityLock = useRef(false);
   const [saved, setSaved] = useState(settings);
   const [form, setForm] = useState(() => webhookSettingsFormValues(settings));
   const [busy, setBusy] = useState(false);
@@ -263,6 +315,9 @@ function IntakeForm({
   const [error, setError] = useState<string>();
   const [newId, setNewId] = useState("");
   const [newIdError, setNewIdError] = useState<string>();
+  const [identityBusy, setIdentityBusy] = useState(false);
+  const [reviewerLookupError, setReviewerLookupError] = useState<string>();
+  const [visibleActors, setVisibleActors] = useState(24);
   const dirty = webhookSettingsFormIsDirty(form, saved);
   const fieldErrors = webhookSettingsFieldErrors(form);
   const valid = !Object.keys(fieldErrors).length;
@@ -270,24 +325,25 @@ function IntakeForm({
     setForm(webhookSettingsFormValues(saved));
     setNewId("");
     setNewIdError(undefined);
+    setReviewerLookupError(undefined);
     setError(undefined);
   }, [saved]);
   useUnsavedChanges(dirty, {
-    busy,
+    busy: busy || identityBusy,
     description: text("事件接收有未保存的更改。", "Event intake has unsaved changes."),
     onDiscard: discard,
     allowPresentationNavigation: true,
     presentationParameters: ["section"],
   });
   useEffect(() => {
-    if (settings.version <= saved.version || busy) return;
+    if (settings.version <= saved.version || busy || identityBusy) return;
     if (dirty) setConflict(true);
     else {
       setSaved(settings);
       setForm(webhookSettingsFormValues(settings));
       setConflict(false);
     }
-  }, [settings, saved.version, busy, dirty]);
+  }, [settings, saved.version, busy, identityBusy, dirty]);
   const accept = useCallback(
     (updated: RepositoryWebhookSettings) => {
       setSaved(updated);
@@ -298,7 +354,7 @@ function IntakeForm({
     [client, repository.id],
   );
   const save = useCallback(async () => {
-    if (lock.current || !canManage || conflict || !valid || !dirty) return;
+    if (lock.current || identityLock.current || !canManage || conflict || !valid || !dirty) return;
     lock.current = true;
     setBusy(true);
     setError(undefined);
@@ -345,12 +401,12 @@ function IntakeForm({
   useEffect(() => {
     onDraft({
       dirty,
-      busy,
-      valid: valid && canManage && !conflict,
+      busy: busy || identityBusy,
+      valid: valid && canManage && !conflict && !identityBusy,
       save: () => void save(),
       discard,
     });
-  }, [dirty, busy, valid, canManage, conflict, save, discard, onDraft]);
+  }, [dirty, busy, identityBusy, valid, canManage, conflict, save, discard, onDraft]);
   useEffect(() => () => onDraft(null), [onDraft]);
   const reload = async () => {
     if (lock.current) return;
@@ -379,11 +435,48 @@ function IntakeForm({
       if (mounted.current) setBusy(false);
     }
   };
-  const disabled = !canManage || busy || conflict;
+  const disabled = !canManage || busy || conflict || identityBusy;
   const actorIds = form.allowedActorUserIdsText.split(/\s+/u).filter(Boolean);
-  const addActor = () => {
+  const lookupIdentity = async (lookup: string) => {
+    const identity = await investigationApi.repositoryGitHubUser(repository.id, lookup.trim());
+    client.setQueryData(
+      ["console", "github-user", repository.id, String(identity.githubUserId)],
+      identity,
+    );
+    return identity;
+  };
+  const resolveReviewer = async () => {
+    if (disabled || identityLock.current) return;
+    identityLock.current = true;
+    setIdentityBusy(true);
+    setReviewerLookupError(undefined);
     try {
-      const values = parseGitHubUserIds(newId.trim());
+      const identity = await lookupIdentity(form.reviewerUserIdText);
+      if (mounted.current)
+        setForm((current) => ({ ...current, reviewerUserIdText: String(identity.githubUserId) }));
+    } catch {
+      if (mounted.current)
+        setReviewerLookupError(
+          text(
+            "无法解析账号，请检查用户名或 ID 后重试。",
+            "Could not resolve the account. Check the username or ID and try again.",
+          ),
+        );
+    } finally {
+      identityLock.current = false;
+      if (mounted.current) setIdentityBusy(false);
+    }
+  };
+  const addActor = async () => {
+    if (disabled || identityLock.current) return;
+    identityLock.current = true;
+    setIdentityBusy(true);
+    try {
+      const lookup = newId.trim();
+      const values = /^[1-9][0-9]*$/u.test(lookup)
+        ? parseGitHubUserIds(lookup)
+        : [(await lookupIdentity(lookup)).githubUserId];
+      if (!mounted.current) return;
       if (values.length !== 1) throw new Error("single");
       if (actorIds.includes(String(values[0]))) {
         setNewIdError(text("已在列表中", "Already in the list"));
@@ -400,14 +493,21 @@ function IntakeForm({
       setNewId("");
       setNewIdError(undefined);
     } catch {
-      setNewIdError(text("请输入数字 ID，不是用户名", "Enter a numeric ID, not a username"));
+      if (mounted.current)
+        setNewIdError(
+          text(
+            "无法解析用户，请输入有效的 GitHub 用户名或数字 ID。",
+            "Could not resolve the user. Enter a valid GitHub username or numeric ID.",
+          ),
+        );
+    } finally {
+      identityLock.current = false;
+      if (mounted.current) setIdentityBusy(false);
     }
   };
-  const webhookUrl =
-    typeof window === "undefined"
-      ? "/api/github/webhook"
-      : new URL("/api/github/webhook", window.location.origin).href;
+  const webhookUrl = intakeDetails?.canonicalWebhookUrl;
   const copyUrl = async () => {
+    if (!webhookUrl) return;
     try {
       await navigator.clipboard.writeText(webhookUrl);
       onToast(text("已复制 Webhook 地址", "Webhook URL copied"));
@@ -424,23 +524,60 @@ function IntakeForm({
           <ConsoleIcon name="webhook" size={22} />
         </span>
         <div className="console-settings-grow">
-          <div className="console-settings-mono console-settings-ellipsis">{webhookUrl}</div>
-          <div className={`console-settings-status${saved.receiverConfigured ? " success" : ""}`}>
+          <div className="console-settings-mono console-settings-webhook-url">
+            {webhookUrl ??
+              (intakeDetailsError
+                ? text("Webhook 地址读取失败", "Webhook URL unavailable")
+                : text("正在读取 Webhook 地址…", "Reading webhook URL…"))}
+          </div>
+          <div className="console-settings-status">
             <span className="console-settings-dot" />
-            {saved.receiverConfigured
+            {(intakeDetails?.receiverConfigured ?? saved.receiverConfigured)
               ? text("接收器已配置", "Receiver configured")
               : text("接收器尚未配置", "Receiver not configured")}
           </div>
+          {intakeDetails && (
+            <div className="console-settings-row-description">
+              {intakeDetails.webhookUrlSource === "explicit"
+                ? text("地址来源：服务端 Webhook 配置", "URL source: server webhook configuration")
+                : text(
+                    "候选地址由服务端公开地址配置生成；公网可达性未验证。",
+                    "Candidate URL derived from the server public origin; public reachability is unverified.",
+                  )}
+            </div>
+          )}
         </div>
         <button
           type="button"
           className="console-settings-icon-button"
           onClick={() => void copyUrl()}
+          disabled={!webhookUrl}
           aria-label={text("复制 Webhook 地址", "Copy webhook URL")}
         >
           <ConsoleIcon name="content_copy" size={20} />
         </button>
       </div>
+      {intakeDetailsError && (
+        <Notice error>
+          {text(
+            "无法读取服务端 Webhook 地址，请稍后重试。",
+            "The server webhook URL could not be read. Try again later.",
+          )}
+        </Notice>
+      )}
+      {intakeDetails && (
+        <Notice>
+          {intakeDetails.lastDelivery
+            ? text(
+                `最近保留的签名事件：${intakeDetails.lastDelivery.receivedAt} · ${intakeDetails.lastDelivery.eventName} · ${intakeDetails.lastDelivery.deliveryId}。这条收据只证明当时收到事件。`,
+                `Latest retained signed event: ${intakeDetails.lastDelivery.receivedAt} · ${intakeDetails.lastDelivery.eventName} · ${intakeDetails.lastDelivery.deliveryId}. This receipt only confirms reception at that time.`,
+              )
+            : text(
+                "尚无该仓库的签名事件收据，当前连通性未验证。",
+                "No signed event receipt is retained for this repository. Current connectivity is unverified.",
+              )}
+        </Notice>
+      )}
       <div className="console-settings-toggle-list">
         <ToggleRow
           title={text("请求 Review 或分配时自动 Review", "Review when requested or assigned")}
@@ -463,27 +600,46 @@ function IntakeForm({
       </div>
       <div className="console-settings-field">
         <label htmlFor="console-reviewer-id">
-          {text("接收账号（GitHub 用户 ID）", "Reviewer account (GitHub user ID)")}
+          {text("接收账号（GitHub 用户名或 ID）", "Reviewer account (GitHub username or ID)")}
         </label>
         <input
           id="console-reviewer-id"
           className="console-settings-numeric"
           value={form.reviewerUserIdText}
-          inputMode="numeric"
           disabled={disabled}
           aria-invalid={!!fieldErrors.reviewerUserIdText}
-          onChange={(event) =>
-            setForm((current) => ({ ...current, reviewerUserIdText: event.target.value }))
-          }
+          onChange={(event) => {
+            setReviewerLookupError(undefined);
+            setForm((current) => ({ ...current, reviewerUserIdText: event.target.value }));
+          }}
         />
         <span className={fieldErrors.reviewerUserIdText ? "error" : ""}>
           {fieldErrors.reviewerUserIdText
-            ? text("请输入有效的数字 ID，不是用户名", "Enter a valid numeric ID, not a username")
+            ? text(
+                "输入用户名后点击解析账号，或直接输入数字 ID",
+                "Resolve a username below, or enter a numeric ID directly",
+              )
             : text(
                 "保存后按这个 ID 接收 Review 请求和分配",
                 "Review requests and assignments use this ID after saving",
               )}
         </span>
+        <button
+          type="button"
+          className="console-settings-button outlined"
+          disabled={disabled || !form.reviewerUserIdText.trim()}
+          onClick={() => void resolveReviewer()}
+        >
+          {identityBusy ? text("正在解析…", "Resolving…") : text("解析账号", "Resolve account")}
+        </button>
+        {reviewerLookupError && (
+          <span className="error" role="alert">
+            {reviewerLookupError}
+          </span>
+        )}
+        {/^[1-9][0-9]*$/u.test(form.reviewerUserIdText) && (
+          <GitHubUserBadge repositoryId={repository.id} userId={form.reviewerUserIdText} />
+        )}
       </div>
       <div className="console-settings-trusted">
         <div className="console-settings-label-row">
@@ -493,10 +649,9 @@ function IntakeForm({
           </span>
         </div>
         <div className="console-settings-chip-row">
-          {actorIds.map((id) => (
+          {actorIds.slice(0, visibleActors).map((id) => (
             <span key={id} className="console-settings-trusted-chip">
-              <span className="console-settings-avatar small">#</span>
-              <span className="console-settings-mono">{id}</span>
+              <GitHubUserBadge repositoryId={repository.id} userId={id} />
               <button
                 type="button"
                 className="console-settings-icon-button small"
@@ -514,13 +669,21 @@ function IntakeForm({
             </span>
           ))}
         </div>
+        {actorIds.length > visibleActors && (
+          <button
+            type="button"
+            className="console-settings-button"
+            onClick={() => setVisibleActors((count) => count + 24)}
+          >
+            {text("显示更多用户", "Show more users")}
+          </button>
+        )}
         <div className="console-settings-add-user">
           <div>
             <input
-              aria-label={text("添加 GitHub 用户 ID", "Add GitHub user ID")}
-              placeholder={text("添加 GitHub 用户 ID", "Add GitHub user ID")}
+              aria-label={text("添加 GitHub 用户名或 ID", "Add GitHub username or ID")}
+              placeholder={text("添加 GitHub 用户名或 ID", "Add GitHub username or ID")}
               value={newId}
-              inputMode="numeric"
               disabled={disabled}
               aria-invalid={!!newIdError}
               onChange={(event) => {
@@ -530,20 +693,24 @@ function IntakeForm({
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  addActor();
+                  void addActor();
                 }
               }}
             />
-            {newIdError && <span className="error">{newIdError}</span>}
+            {newIdError && (
+              <span className="error" role="alert">
+                {newIdError}
+              </span>
+            )}
           </div>
           <button
             type="button"
             className="console-settings-button tonal"
             disabled={disabled}
-            onClick={addActor}
+            onClick={() => void addActor()}
           >
             <ConsoleIcon name="add" size={18} />
-            {text("添加", "Add")}
+            {identityBusy ? text("正在解析…", "Resolving…") : text("添加", "Add")}
           </button>
         </div>
       </div>
@@ -623,7 +790,11 @@ function RecentIntake({
                 delivery.taskId ?? (failed ? `intake:${delivery.canonicalDeliveryId}` : null);
               const clickable = !ignored && recordId !== null;
               const state = completed
-                ? text("已创建 Review", "Review created")
+                ? delivery.triggerKind === "e2e_revision"
+                  ? text("已记录版本变化", "Revision observed")
+                  : delivery.reason === "active_e2e_revision"
+                    ? text("已关联当前 E2E", "Linked to current E2E")
+                    : text("已关联 Review", "Review linked")
                 : ignored
                   ? text("已忽略", "Ignored")
                   : failed
@@ -664,6 +835,9 @@ function RecentIntake({
                     <span className="console-settings-event-title">
                       <code>{delivery.eventName}</code>
                       <strong>#{delivery.number}</strong>
+                    </span>
+                    <span className="console-settings-row-description">
+                      {triggerLabel(delivery, text)}
                     </span>
                     <span
                       className={`console-settings-event-status ${failed ? "error" : ignored ? "" : "success"}`}
@@ -1348,278 +1522,6 @@ function ExecutionSettings({ onToast }: { onToast: (message: string) => void }) 
   );
 }
 
-function WorkerTaskSummary({
-  taskId,
-  task,
-  cleanup,
-}: {
-  taskId: string;
-  task?: InvestigationTaskV1;
-  cleanup: boolean;
-}) {
-  const { text } = useConsolePreferences();
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const detail = useQuery({
-    queryKey: ["console", "worker-task", taskId],
-    queryFn: ({ signal }) => investigationApi.task(taskId, signal),
-    enabled: !!task,
-    refetchInterval: 5_000,
-  });
-  const attempt = detail.data?.attempts
-    .filter((entry) => entry.taskId === taskId)
-    .sort((left, right) => right.number - left.number)[0];
-  const observedUntil = task?.state === "running" ? now : task ? Date.parse(task.updatedAt) : now;
-  return (
-    <div className="console-settings-worker-task">
-      <ConsoleIcon name={cleanup ? "hourglass_empty" : "autorenew"} size={18} />
-      <span>{task ? `#${task.workItem.number} ${task.workItem.title}` : taskId}</span>
-      <span>
-        {cleanup
-          ? text("等待清理确认", "Awaiting cleanup")
-          : detail.isError
-            ? text("阶段信息读取失败", "Stage unavailable")
-            : `${stageLabel(detail.data?.progress?.stage ?? undefined, text)}${attempt?.startedAt ? ` · ${formatDuration(observedUntil - Date.parse(attempt.startedAt))}` : ""}`}
-      </span>
-    </div>
-  );
-}
-
-function WorkerSettings({ onToast }: { onToast: (message: string) => void }) {
-  const { text } = useConsolePreferences();
-  const { session } = useInvestigationSession();
-  const client = useQueryClient();
-  const mounted = useMounted();
-  const lock = useRef(false);
-  const [busyId, setBusyId] = useState<string>();
-  const [disableWorker, setDisableWorker] = useState<InvestigationWorkerControl>();
-  const [error, setError] = useState<string>();
-  const query = useQuery({
-    queryKey: workersQueryKey,
-    queryFn: investigationApi.workers,
-    enabled: session.user?.isAdmin === true,
-    refetchInterval: busyId ? false : 10_000,
-  });
-  const scheduler = useQuery({
-    queryKey: schedulerQueryKey,
-    queryFn: investigationApi.scheduler,
-    enabled: session.user?.isAdmin === true,
-    refetchInterval: busyId ? false : 5_000,
-  });
-  const tasks = useQuery({
-    queryKey: ["console", "tasks"],
-    queryFn: ({ signal }) => investigationApi.tasks(undefined, signal),
-    enabled: session.user?.isAdmin === true,
-    refetchInterval: 5_000,
-  });
-  useUnsavedChanges(false, { busy: !!busyId });
-  const update = async (
-    worker: InvestigationWorkerControl,
-    enabled: boolean,
-    confirmed = false,
-  ) => {
-    if (lock.current || !session.user?.isAdmin) return;
-    lock.current = true;
-    setBusyId(worker.id);
-    setError(undefined);
-    setDisableWorker(undefined);
-    try {
-      const input = workerAdmissionInput(worker, enabled, worker.version, confirmed);
-      await client.cancelQueries({ queryKey: workersQueryKey });
-      const updated = await investigationApi.updateWorkerE2e(worker.id, input);
-      await client.cancelQueries({ queryKey: workersQueryKey });
-      if (!mounted.current) return;
-      client.setQueryData<Awaited<ReturnType<typeof investigationApi.workers>>>(
-        workersQueryKey,
-        (current) => ({
-          items: (current?.items ?? []).map((item) => (item.id === updated.id ? updated : item)),
-        }),
-      );
-      void client.invalidateQueries({ queryKey: workersQueryKey });
-      void client.invalidateQueries({ queryKey: schedulerQueryKey });
-      onToast(
-        updated.status === "awaiting_confirmation" || updated.status === "disabling"
-          ? text(
-              `已保存 ${worker.id} 的准入设置，等待 Worker 确认`,
-              `${worker.id} admission settings saved; awaiting worker confirmation`,
-            )
-          : enabled
-            ? text(`已允许 ${worker.id} 接收 E2E`, `${worker.id} may admit E2E work`)
-            : text(`${worker.id} 已关闭 E2E 准入`, `${worker.id} E2E admission disabled`),
-      );
-    } catch (cause) {
-      if (!mounted.current) return;
-      if (cause instanceof InvestigationHttpError && cause.status === 409) void query.refetch();
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : text("Worker 设置更新失败。", "Worker settings could not be updated."),
-      );
-    } finally {
-      lock.current = false;
-      if (mounted.current) setBusyId(undefined);
-    }
-  };
-  if (!session.user?.isAdmin)
-    return (
-      <Notice>
-        {text(
-          "需要管理员权限才能查看和管理 Workers。",
-          "Administrator access is required to view and manage Workers.",
-        )}
-      </Notice>
-    );
-  return (
-    <>
-      <QueryState
-        pending={query.isPending}
-        error={query.error}
-        retry={() => void query.refetch()}
-      />
-      {query.data?.items.length === 0 && (
-        <div className="console-settings-empty">
-          {text("尚未注册 Worker", "No workers registered")}
-        </div>
-      )}
-      {query.data?.items.map((worker) => {
-        const recent = !!worker.lastSeenAt && Date.now() - Date.parse(worker.lastSeenAt) < 120_000;
-        const owners =
-          scheduler.data?.leases.filter(
-            (lease) => lease.workerId === worker.id && lease.state !== "released",
-          ) ?? [];
-        const active = owners.length > 0 || worker.activeE2eTaskIds.length > 0;
-        const scopeComplete = worker.repositoryIds.every((id) =>
-          session.user?.repositoryIds.includes(id),
-        );
-        const status = !recent
-          ? "offline"
-          : active
-            ? "working"
-            : scopeComplete && scheduler.data && !scheduler.isError
-              ? "idle"
-              : "unconfirmed";
-        const taskId = owners[0]?.taskId ?? worker.activeE2eTaskIds[0];
-        const task = tasks.data?.items.find((item) => item.id === taskId);
-        const cleanup =
-          worker.cleanupPendingAttemptIds.length > 0 ||
-          owners.some((lease) => lease.state === "needs_cleanup");
-        const awaiting = worker.status === "awaiting_confirmation" || worker.status === "disabling";
-        const hasStatic = worker.effectiveKinds.some(isInvestigationStaticTaskKind);
-        const hasExecution = worker.effectiveKinds.some(
-          (kind) => !isInvestigationStaticTaskKind(kind),
-        );
-        return (
-          <article className="console-settings-worker" key={worker.id}>
-            <div className="console-settings-worker-top">
-              <span className="console-settings-leading-icon">
-                <ConsoleIcon name="computer" size={24} />
-              </span>
-              <div className="console-settings-grow">
-                <div className="console-settings-worker-name">
-                  <strong>{worker.id}</strong>
-                  <span className={`console-settings-worker-state ${status}`}>
-                    <span className="console-settings-dot" />
-                    {status === "offline"
-                      ? text("无最近联系", "No recent contact")
-                      : status === "working"
-                        ? text("工作中", "Working")
-                        : status === "idle"
-                          ? text("空闲", "Idle")
-                          : text("状态待确认", "Status unconfirmed")}
-                  </span>
-                </div>
-                <div className="console-settings-row-description">
-                  {relativeTime(worker.lastSeenAt, text)} ·{" "}
-                  {hasStatic && hasExecution
-                    ? text("静态 Review + E2E", "Static Review + E2E")
-                    : hasExecution
-                      ? "E2E"
-                      : hasStatic
-                        ? text("静态 Review", "Static Review")
-                        : text("执行能力未确认", "Capabilities unconfirmed")}
-                </div>
-              </div>
-              <div className="console-settings-worker-switch">
-                <span>{text("允许 E2E", "Allow E2E")}</span>
-                <SettingsSwitch
-                  label={text(`允许 ${worker.id} 运行 E2E`, `Allow ${worker.id} to run E2E`)}
-                  checked={worker.e2eEnabled}
-                  disabled={!!busyId || (!worker.e2eEnabled && (cleanup || awaiting))}
-                  onChange={() =>
-                    worker.e2eEnabled ? setDisableWorker(worker) : void update(worker, true)
-                  }
-                />
-              </div>
-            </div>
-            {taskId && <WorkerTaskSummary taskId={taskId} task={task} cleanup={cleanup} />}
-            {!recent && (
-              <div className="console-settings-worker-offline">
-                {worker.lastSeenAt
-                  ? text(
-                      `${relativeTime(worker.lastSeenAt, text)}联系，当前联系状态需确认。`,
-                      `Last contact ${relativeTime(worker.lastSeenAt, text)}; current availability is unconfirmed.`,
-                    )
-                  : text(
-                      "尚未收到 Worker 联系，当前可用状态未确认。",
-                      "The worker has never contacted the service; availability is unconfirmed.",
-                    )}
-              </div>
-            )}
-            {awaiting && (
-              <div className="console-settings-worker-pending">
-                {text(
-                  "已保存准入设置，等待 Worker 确认；执行和清理所有权仍保留。",
-                  "Admission policy is saved and awaiting worker confirmation. Execution and cleanup ownership remain held.",
-                )}
-              </div>
-            )}
-          </article>
-        );
-      })}
-      {error && <Notice error>{error}</Notice>}
-      <Dialog
-        open={!!disableWorker}
-        onClose={() => setDisableWorker(undefined)}
-        className="console-settings-dialog"
-        maxWidth="xs"
-        fullWidth
-        aria-labelledby="console-worker-disable-title"
-      >
-        <DialogTitle id="console-worker-disable-title">
-          {text("关闭 E2E 并请求停止当前执行？", "Disable E2E and request execution to stop?")}
-        </DialogTitle>
-        <DialogContent>
-          <p>
-            {text(
-              `${disableWorker?.id ?? ""} 的 E2E 准入将关闭；服务会请求停止尚在执行的 E2E 任务。已结束执行的结果仍需发布，桌面和进程的清理所有权会保留至确认。`,
-              `E2E admission for ${disableWorker?.id ?? ""} will be disabled, and the service requests active E2E execution to stop. Completed execution results still require delivery. Desktop and process cleanup ownership remains held until confirmed.`,
-            )}
-          </p>
-        </DialogContent>
-        <DialogActions>
-          <button
-            type="button"
-            className="console-settings-button"
-            onClick={() => setDisableWorker(undefined)}
-          >
-            {text("取消", "Cancel")}
-          </button>
-          <button
-            type="button"
-            className="console-settings-button filled"
-            onClick={() => disableWorker && void update(disableWorker, false, true)}
-          >
-            {text("关闭准入", "Disable admission")}
-          </button>
-        </DialogActions>
-      </Dialog>
-    </>
-  );
-}
-
 export default function Settings({
   repository,
   section,
@@ -1659,12 +1561,15 @@ export default function Settings({
       "Review 完成后自动把结论发布为 GitHub 评论",
       "Automatically publish conclusions as GitHub comments when Review completes",
     ),
-    prompts: text("每类 Review 使用的预定义 Prompt", "Predefined prompts for each type of Review"),
+    prompts: text(
+      "管理此仓库 PR 和 Issue 的 Review Prompt 版本",
+      "Manage PR and Issue review prompt versions for this repository",
+    ),
     execution: text("所有仓库共享", "Shared across all repositories"),
     workers: workers.data
       ? text(
-          `${workers.data.items.filter((worker) => !!worker.lastSeenAt && Date.now() - Date.parse(worker.lastSeenAt) < 120_000).length} / ${workers.data.items.length} 最近联系`,
-          `${workers.data.items.filter((worker) => !!worker.lastSeenAt && Date.now() - Date.parse(worker.lastSeenAt) < 120_000).length} / ${workers.data.items.length} contacted recently`,
+          `${workers.data.items.filter((worker) => worker.contactStatus === "recent").length} / ${workers.data.items.length} 最近联系`,
+          `${workers.data.items.filter((worker) => worker.contactStatus === "recent").length} / ${workers.data.items.length} contacted recently`,
         )
       : text("Worker 联系状态和执行准入", "Worker contact status and execution admission"),
     accounts: text("控制台账号和权限", "Console accounts and permissions"),
@@ -1693,9 +1598,7 @@ export default function Settings({
     },
     { title: text("个人", "Personal"), items: [["profile", "person"]] },
   ];
-  const online = workers.data?.items.filter(
-    (worker) => !!worker.lastSeenAt && Date.now() - Date.parse(worker.lastSeenAt) < 120_000,
-  ).length;
+  const online = workers.data?.items.filter((worker) => worker.contactStatus === "recent").length;
   const bar = selected === "intake" ? intakeDraft : selected === "replies" ? replyDraft : null;
   const pages: SettingsSection[] = [
     "intake",

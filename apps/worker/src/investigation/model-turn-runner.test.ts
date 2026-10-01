@@ -728,6 +728,71 @@ function attachReviewBaseline(
 }
 
 describe("investigation model turn runner", () => {
+  it("sends the frozen Issue snapshot template to the model before task context", async () => {
+    const f = fixture({ findingCount: 0 });
+    const content = {
+      localCheckout: "Apply the unique frozen Issue source checklist from native version 4.",
+      snapshot: "Apply the unique frozen Issue snapshot checklist from native version 4.",
+    };
+    const ref = {
+      id: "native-issue-wire-version-4",
+      version: 4,
+      digest: investigationContentDigest(content),
+    };
+    f.input.task.promptRef = ref;
+    f.input.task.promptSnapshot = { kind: "issue-investigate", ref: { ...ref }, content };
+
+    await f.runner.execute(f.input);
+
+    expect(f.start).toHaveBeenCalledOnce();
+    const prompt = f.start.mock.calls[0]![0].standardInput!;
+    const contextStart = prompt.indexOf("<frozen_investigation_context>\n");
+    expect(contextStart).toBeGreaterThan(0);
+    const instructions = prompt.slice(0, contextStart);
+    expect(instructions).toContain(content.snapshot);
+    expect(instructions).not.toContain(content.localCheckout);
+    expect(instructions).not.toContain("sourceDiscovery describes lexical references");
+    expect(instructions).toContain(
+      "Only analyze the supplied snapshots and complete source files.",
+    );
+    expect(instructions).toContain("no separate finalize invocation is required");
+    expect(prompt.slice(contextStart)).toContain("Synthetic frozen issue text");
+  });
+
+  it("sends the frozen PR checkout template while retaining the prior-review baseline", async () => {
+    const p = prChunkFixture({ findingCount: 1, status: "modified" });
+    const content = {
+      localCheckout: "Apply the unique frozen PR source checklist from native version 5.",
+      snapshot: "Apply the unique frozen PR snapshot checklist from native version 5.",
+    };
+    const ref = {
+      id: "native-pr-wire-version-5",
+      version: 5,
+      digest: investigationContentDigest(content),
+    };
+    const task: InvestigationTaskV1 = p.task;
+    task.promptRef = ref;
+    task.promptSnapshot = { kind: "pr-review", ref: { ...ref }, content };
+    const reviewBaseline = attachReviewBaseline(p);
+
+    await p.f.runner.execute({ ...p.input, reviewBaseline });
+
+    expect(p.f.start).toHaveBeenCalledOnce();
+    const prompt = p.f.start.mock.calls[0]![0].standardInput!;
+    const contextStart = prompt.indexOf("<local_source_review_context>\n");
+    expect(contextStart).toBeGreaterThan(0);
+    const instructions = prompt.slice(0, contextStart);
+    expect(instructions).toContain(content.localCheckout);
+    expect(instructions).not.toContain(content.snapshot);
+    expect(instructions).not.toContain("Prefer bounded searches and targeted source reads.");
+    expect(instructions).toContain(
+      "STATIC REVIEW ONLY: Do not restore dependencies, build, run tests",
+    );
+    expect(instructions).toContain("Review the complete current merge-base-to-head PR diff");
+    expect(instructions).toContain("Omitted candidates remain pending; omission never means fixed");
+    expect(prompt.slice(contextStart)).toContain("previous-review-task");
+  });
+
   it("supplies full historical findings separately while rereviewing the complete current PR", async () => {
     const p = prChunkFixture({ findingCount: 3, status: "modified" });
     const reviewBaseline = attachReviewBaseline(p);

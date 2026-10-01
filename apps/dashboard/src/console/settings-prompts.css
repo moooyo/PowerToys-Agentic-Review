@@ -345,6 +345,180 @@
   line-height: 18px;
 }
 
+.console-prompts-directory {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.console-prompts-directory select,
+.console-prompts-draft input,
+.console-prompts-draft textarea {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--console-outline-variant);
+  border-radius: 8px;
+  background: var(--console-surface);
+  color: var(--console-text);
+  font: inherit;
+}
+
+.console-prompts-directory select {
+  flex: 1;
+  min-height: 44px;
+}
+
+.console-prompts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.console-prompts-binding {
+  margin-right: auto;
+  color: var(--console-success-text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.console-prompts-primary,
+.console-prompts-secondary {
+  min-height: 44px;
+  padding: 10px 18px;
+  border: 1px solid var(--console-outline-variant);
+  border-radius: 24px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.console-prompts-primary {
+  border-color: transparent;
+  background: var(--console-primary);
+  color: var(--console-on-primary);
+}
+
+.console-prompts-secondary {
+  background: var(--console-surface);
+  color: var(--console-primary);
+}
+
+.console-prompts-primary:focus-visible,
+.console-prompts-secondary:focus-visible,
+.console-prompts-directory select:focus-visible,
+.console-prompts-draft input:focus-visible,
+.console-prompts-draft textarea:focus-visible,
+.console-prompts-constraints summary:focus-visible {
+  outline: 3px solid var(--console-primary);
+  outline-offset: 3px;
+}
+
+.console-prompts button:disabled,
+.console-prompts select:disabled,
+.console-prompts input:disabled,
+.console-prompts textarea:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.console-prompts-modes {
+  align-self: flex-start;
+  min-height: 44px;
+  margin: 8px 0;
+  border-radius: 24px;
+}
+
+.console-prompts-content {
+  margin: 0;
+  padding: 20px;
+  border: 1px solid var(--console-border);
+  border-radius: 12px;
+  background: var(--console-subtle);
+  color: var(--console-text);
+  font-family: "Roboto Mono", monospace;
+  font-size: 13px;
+  line-height: 22px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.console-prompts-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.console-prompts-draft label {
+  font-weight: 500;
+}
+
+.console-prompts-draft textarea {
+  min-height: 320px;
+  resize: vertical;
+  font-family: "Roboto Mono", monospace;
+  font-size: 13px;
+  line-height: 22px;
+}
+
+.console-prompts-constraints {
+  margin-top: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--console-border);
+}
+
+.console-prompts-constraints summary {
+  padding: 8px 0;
+  color: var(--console-primary);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.console-prompts-constraints p {
+  margin: 4px 0 12px;
+}
+
+.console-prompts-success {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--console-success-text);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+@media (max-width: 540px) {
+  .console-prompts-body {
+    padding: 16px;
+  }
+
+  .console-prompts-directory {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .console-prompts-type-badge {
+    display: none;
+  }
+
+  .console-prompts-reference > div {
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .console-prompts-content {
+    padding: 14px;
+  }
+}
+
 @keyframes console-prompts-spin {
   to {
     transform: rotate(360deg);

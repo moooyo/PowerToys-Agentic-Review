@@ -48,6 +48,7 @@ async function fixture() {
   const now = () => new Date(time);
   const worker: InvestigationWorkerPrincipal = {
     id: "synthetic-worker",
+    displayName: "Synthetic Windows Worker",
     repositoryIds: [original.repository.id],
   };
   const otherWorker = { ...worker, id: "synthetic-other-worker" };
@@ -161,12 +162,68 @@ describe("authenticated Worker controls and task admission", () => {
       }),
       expect.objectContaining({
         id: f.worker.id,
+        displayName: f.worker.displayName,
         e2eEnabled: false,
         version: 1,
         status: "static_only",
         lastSeenAt: null,
+        contactStatus: "never",
+        activityStatus: "offline",
       }),
     ]);
+  });
+
+  it("records authenticated contact even when task ownership validation rejects the request", async () => {
+    const f = await fixture();
+    const task = await f.createTask("pr-review");
+    const claimed = requireClaim(await f.claim(["pr-review"]));
+    f.advance(120_000);
+    expect(f.workerControls.get(f.worker.id)).toMatchObject({
+      contactStatus: "stale",
+      activityStatus: "busy",
+      activeTaskIds: [task.id],
+    });
+    const payload = { lease: { ...claimed.lease, fence: claimed.lease.fence + 1 } };
+    expect(
+      (await post(f.app, `/api/worker/tasks/${task.id}/heartbeat`, payload, "unknown-worker"))
+        .statusCode,
+    ).toBe(401);
+    expect(f.workerControls.get(f.worker.id)?.contactStatus).toBe("stale");
+    expect(
+      (await post(f.app, `/api/worker/tasks/${task.id}/heartbeat`, payload, "worker")).statusCode,
+    ).toBe(409);
+    expect(f.workerControls.get(f.worker.id)).toMatchObject({
+      displayName: f.worker.displayName,
+      lastSeenAt: f.now().toISOString(),
+      contactStatus: "recent",
+      activityStatus: "busy",
+      activeTaskIds: [task.id],
+    });
+  });
+
+  it("releases expired static ownership while expired execution retains pending cleanup", async () => {
+    const f = await fixture();
+    const review = await f.createTask("pr-review");
+    await f.claim(["pr-review"]);
+    await f.enable(f.otherWorker);
+    const execution = await f.createTask("pr-e2e");
+    const claimed = requireClaim(await f.claim(["pr-e2e"], "other-worker"));
+    f.advance(300_001);
+    const response = await get(f.app, "/api/workers");
+    expect(response.statusCode, response.body).toBe(200);
+    const workers = response.json<InvestigationWorkerControlList>().items;
+    expect(workers.find((worker) => worker.id === f.worker.id)).toMatchObject({
+      contactStatus: "stale",
+      activityStatus: "offline",
+      activeTaskIds: [],
+    });
+    expect(workers.find((worker) => worker.id === f.otherWorker.id)).toMatchObject({
+      contactStatus: "stale",
+      activityStatus: "cleaning",
+      activeTaskIds: [execution.id],
+      cleanupPendingAttemptIds: [claimed.attempt.id],
+    });
+    expect(f.store.get<InvestigationTaskV1>("tasks", review.id)?.state).toBe("interrupted");
   });
 
   it("requires an administrator and exact version for every E2E policy change", async () => {

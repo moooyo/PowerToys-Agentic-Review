@@ -21,6 +21,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { FastifyInstance } from "fastify";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
+import { readGitHubUserIdentity } from "./github-identity.js";
 import type { InvestigationStore } from "./store.js";
 import type {
   InvestigationOperatorAuthenticator,
@@ -712,6 +713,7 @@ export class InvestigationSourceImporter {
       "invalid_source_response",
       "GitHub returned an invalid work item state.",
     );
+    const author = readGitHubUserIdentity(upstream.user);
     const workItem: InvestigationWorkItemRecord = {
       id,
       repositoryId,
@@ -727,6 +729,7 @@ export class InvestigationSourceImporter {
           : state,
       subject,
       updatedAt,
+      ...(author === null ? {} : { author }),
     };
     const snapshotDigest = digest(inputSnapshot);
     const snapshot: SnapshotRecord = {

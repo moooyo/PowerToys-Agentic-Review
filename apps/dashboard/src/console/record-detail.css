@@ -342,6 +342,23 @@
   gap: 16px;
   border-radius: 16px;
 }
+.rc-publication-recovery {
+  padding: 16px 20px;
+  border-radius: 16px;
+  background: var(--console-subtle);
+  font-size: 14px;
+  line-height: 20px;
+}
+.rc-publication-recovery p {
+  margin: 0 0 10px;
+}
+.rc-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .rc-status-card h2 {
   margin: 0;
   font-size: 16px;

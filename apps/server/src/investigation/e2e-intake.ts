@@ -6,6 +6,7 @@ import type {
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
+import { githubIdentityUrl } from "./github-identity.js";
 import type { InvestigationService } from "./service.js";
 import type {
   InvestigationPullRequestRevision,
@@ -127,6 +128,7 @@ export interface InvestigationE2eReceipt {
   readonly receivedAt: string;
   readonly actorUserId: number;
   readonly actorLogin?: string;
+  readonly actorAvatarUrl?: string;
   readonly reviewerUserId: number;
   readonly command: {
     readonly commentId: number;
@@ -295,6 +297,7 @@ export class InvestigationE2eIntake {
       };
     } else if (object(object(item.base).repo).id !== repository.githubRepositoryId)
       return { status: "ignored", reason: "e2e_repository_mismatch" };
+    const actorAvatarUrl = githubIdentityUrl(sender.avatar_url);
     const receipt: InvestigationE2eReceipt = {
       id,
       deliveryId: input.deliveryId,
@@ -307,6 +310,7 @@ export class InvestigationE2eIntake {
       ...(typeof sender.login === "string" && loginPattern.test(sender.login)
         ? { actorLogin: sender.login }
         : {}),
+      ...(actorAvatarUrl === null ? {} : { actorAvatarUrl }),
       reviewerUserId: binding.reviewerUserId,
       command,
       state: "accepted",

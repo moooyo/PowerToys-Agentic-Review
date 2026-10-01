@@ -141,6 +141,36 @@ function harness(
 }
 
 describe("read-only GitHub source import", () => {
+  it.each(["issue", "pull_request"] as const)(
+    "preserves the upstream %s author without expanding source metadata",
+    async (kind) => {
+      const sourceAuthor = {
+        id: 42,
+        login: "fixture-author",
+        avatar_url: "https://avatars.githubusercontent.com/u/42",
+        html_url: "https://github.com/fixture-author",
+      };
+      const { store, importer } = harness({
+        kind,
+        comments: 0,
+        override: (path, _ordinal, upstream) =>
+          path === `/repos/fixture/repository/${kind === "issue" ? "issues" : "pulls"}/7`
+            ? Response.json({ ...upstream, user: sourceAuthor })
+            : undefined,
+      });
+      const imported = await importer.importWorkItem(operator, repository.id, { kind, number: 7 });
+      expect(imported.workItem.author).toEqual({
+        githubUserId: 42,
+        login: "fixture-author",
+        avatarUrl: sourceAuthor.avatar_url,
+        htmlUrl: sourceAuthor.html_url,
+      });
+      expect(store.get("workItems", imported.workItem.id)).toEqual(imported.workItem);
+      expect(imported.workItem).not.toHaveProperty("labels");
+      expect(imported.workItem).not.toHaveProperty("module");
+    },
+  );
+
   it("imports every Issue comment page and preserves the complete frozen task input", async () => {
     const { store, importer, calls, upstream } = harness();
     const imported = await importer.importWorkItem(operator, repository.id, {

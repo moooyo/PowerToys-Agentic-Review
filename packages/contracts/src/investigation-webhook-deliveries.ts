@@ -6,6 +6,7 @@ import {
   NonNegativeIntegerSchema,
   PositiveIntegerSchema,
 } from "./common.js";
+import { InvestigationIntakeTriggerKindSchema } from "./investigation-intake-details.js";
 
 const object = <T extends TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -57,6 +58,11 @@ export const InvestigationWebhookDeliverySchema = object({
   number: PositiveIntegerSchema,
   actorUserId: PositiveIntegerSchema,
   assigneeUserId: PositiveIntegerSchema,
+  triggerKind: Type.Optional(InvestigationIntakeTriggerKindSchema),
+  actorLogin: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+  actorAvatarUrl: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })),
+  assigneeLogin: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+  assigneeAvatarUrl: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })),
   receivedAt: DateTimeSchema,
   state: InvestigationWebhookDeliveryStateSchema,
   attempts: NonNegativeIntegerSchema,

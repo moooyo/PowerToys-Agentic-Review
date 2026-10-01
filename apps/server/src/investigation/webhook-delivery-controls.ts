@@ -1,4 +1,6 @@
 import type {
+  InvestigationIntakeTriggerKind,
+  InvestigationTaskV1,
   InvestigationWebhookAttempt,
   InvestigationWebhookDelivery,
   InvestigationWebhookDeliveryList,
@@ -147,6 +149,36 @@ export function projectWebhookDelivery(
     "The canonical receipt belongs to another intake scope.",
   );
   const attemptHistory = history(store, receipt.id);
+  const assignment = "assignment" in receipt ? receipt.assignment : undefined;
+  const actorLogin =
+    assignment?.actorLogin ?? ("actorLogin" in receipt ? receipt.actorLogin : undefined);
+  const actorAvatarUrl =
+    assignment?.actorAvatarUrl ??
+    ("actorAvatarUrl" in receipt ? receipt.actorAvatarUrl : undefined);
+  const assigneeLogin =
+    assignment?.assigneeLogin ??
+    receipt.admission?.trigger.assigneeLogin ??
+    canonical.admission?.trigger.assigneeLogin;
+  const task =
+    canonical.taskId === null
+      ? undefined
+      : store.get<InvestigationTaskV1>("tasks", canonical.taskId);
+  const baselineBelongsToRequest =
+    assignment !== undefined &&
+    task?.repository?.id === repository.id &&
+    task.workItem.kind === assignment.kind &&
+    task.workItem.number === assignment.number &&
+    task.reviewBaseline !== undefined;
+  const triggerKind: InvestigationIntakeTriggerKind =
+    assignment === undefined
+      ? "command" in receipt && receipt.command !== null
+        ? "e2e_command"
+        : "e2e_revision"
+      : assignment.requestKind === "review_request"
+        ? receipt.id === canonical.id && baselineBelongsToRequest
+          ? "review_rerequest"
+          : "review_request"
+        : "assignment";
   return {
     deliveryId: receipt.deliveryId,
     version: webhookDeliveryVersion(receipt),
@@ -159,6 +191,13 @@ export function projectWebhookDelivery(
     actorUserId: "assignment" in receipt ? receipt.assignment.actorUserId : receipt.actorUserId,
     assigneeUserId:
       "assignment" in receipt ? receipt.assignment.assigneeUserId : receipt.reviewerUserId,
+    triggerKind,
+    ...(actorLogin === undefined ? {} : { actorLogin }),
+    ...(assigneeLogin === undefined ? {} : { assigneeLogin }),
+    ...(actorAvatarUrl === undefined ? {} : { actorAvatarUrl }),
+    ...(assignment?.assigneeAvatarUrl === undefined
+      ? {}
+      : { assigneeAvatarUrl: assignment.assigneeAvatarUrl }),
     receivedAt: receipt.receivedAt,
     state: receipt.state,
     attempts: receipt.attempts,

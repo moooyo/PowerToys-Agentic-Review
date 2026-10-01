@@ -4,6 +4,8 @@ import type {
   InvestigationCommentCommand,
   InvestigationCommentPublicationSummary,
   InvestigationLoopCheckpointV1,
+  InvestigationPublicationRecoveryBlocker,
+  InvestigationReportRef,
   InvestigationResultV1,
   InvestigationTaskV1,
   InvestigationUsageSummary,
@@ -102,6 +104,17 @@ interface Reference {
   readonly admission?: TrustedAssignmentAdmission;
   readonly attachedTaskId?: string;
 }
+interface SavedReportRecoveryFence {
+  readonly taskId: string;
+  readonly reportRef: InvestigationReportRef;
+  readonly revisionId: string;
+  readonly taskCreatedAt: string;
+  readonly taskKind: InvestigationTaskV1["kind"];
+  readonly repository: InvestigationTaskV1["repository"];
+  readonly workItem: InvestigationTaskV1["workItem"];
+}
+const savedReportRecoveryFence = (taskId: string, reportRef: InvestigationReportRef) =>
+  `publication-recovery:report:${investigationContentDigest([taskId, reportRef])}`;
 const oldTaskId = (taskId: string) => `progress-reply:task:${taskId}`;
 const taskIndex = (taskId: string) => `progress-reply:task-index:${taskId}`;
 const assignmentIndex = (receiptId: string) =>
@@ -652,6 +665,202 @@ export class InvestigationProgressReplies {
     id: string,
   ): InvestigationCommentPublicationSummary {
     return this.#summary(actor, this.#authorizedRecord(actor, id));
+  }
+  /** Reading upstream comment state must not migrate or schedule retained publications. */
+  getCommentReadOnly(
+    actor: InvestigationOperatorPrincipal,
+    id: string,
+  ): InvestigationCommentPublicationSummary {
+    const record = this.options.store.get<CommentPublication>("idempotency", id);
+    requireCondition(
+      record !== undefined && record.id === id && typeof record.repository?.id === "string",
+      404,
+      "comment_not_found",
+      "The comment publication is unavailable.",
+    );
+    this.#scope(actor, record.repository.id);
+    requireCondition(
+      record.schemaVersion === 2,
+      409,
+      "legacy_comment_readback_unavailable",
+      "Current comment readback requires a native publication record.",
+    );
+    return this.#summary(actor, record);
+  }
+  /** A recovery read never migrates legacy records, grants authority, or queues publication. */
+  savedReportRecovery(
+    actor: InvestigationOperatorPrincipal,
+    task: InvestigationTaskV1,
+  ): {
+    publication: InvestigationCommentPublicationSummary | null;
+    blocker: InvestigationPublicationRecoveryBlocker | null;
+    version: string;
+  } {
+    this.#scope(actor, task.repository.id);
+    const candidates = this.options.store.list<CommentPublication>(
+      "idempotency",
+      (record) =>
+        record?.schemaVersion === 2 &&
+        typeof record.id === "string" &&
+        (record.id.startsWith("progress-reply:task:") ||
+          record.id.startsWith("progress-reply:assignment:")) &&
+        record.retiredTo === undefined &&
+        record.repository?.id === task.repository.id &&
+        record.target?.kind === task.workItem.kind &&
+        record.target.number === task.workItem.number &&
+        (record.desired?.context.mode === "e2e") === (task.kind === "pr-e2e"),
+    );
+    const record = candidates[0];
+    const publication = record === undefined ? null : this.#summary(actor, record);
+    const policy = this.#policy(task.repository.id);
+    const result = (blocker: InvestigationPublicationRecoveryBlocker | null) => ({
+      publication,
+      blocker,
+      version: investigationContentDigest({
+        publication: publication?.version ?? null,
+        policy,
+        blocker,
+        actor: { permissions: actor.permissions, capabilities: actor.actionCapabilities },
+      }),
+    });
+    const indexed = this.options.store.get<Reference>("idempotency", taskIndex(task.id));
+    const attached = this.options.store.get<{ schemaVersion?: number }>(
+      "idempotency",
+      indexed?.recordId ?? oldTaskId(task.id),
+    );
+    if (attached !== undefined && attached.schemaVersion !== 2) return result("legacy_publication");
+    if (candidates.length > 1 || record?.conversationConflict || record?.legacyConflict)
+      return result("publication_conflict");
+    if (record !== undefined && !equal(record.repository, task.repository))
+      return result("repository_identity_changed");
+    const target = this.options.store.get<InvestigationWorkItemRecord>(
+      "workItems",
+      task.workItem.id,
+    );
+    if (
+      record !== undefined &&
+      record.target.githubWorkItemId !== undefined &&
+      target?.githubWorkItemId !== record.target.githubWorkItemId
+    )
+      return result("work_item_identity_changed");
+    if (
+      record !== undefined &&
+      (record.receivedAt > task.createdAt ||
+        (record.taskCreatedAt !== null && record.taskCreatedAt > task.createdAt) ||
+        (record.taskId !== null &&
+          record.taskId !== task.id &&
+          record.taskCreatedAt === task.createdAt) ||
+        (record.taskId === task.id &&
+          record.desired.reportRef !== null &&
+          !equal(record.desired.reportRef, task.latestReportRef)))
+    )
+      return result("newer_publication");
+    if (record?.taskId === task.id && equal(record.desired.reportRef, task.latestReportRef))
+      return result(null);
+    if (record?.operation?.dispatched || record?.state === "unconfirmed")
+      return result("reconcile_required");
+    if (record?.state === "conflict") return result("publication_conflict");
+    if ((record?.claim?.expiresAt ?? 0) > this.#now().valueOf()) return result("publication_busy");
+    // Legacy conclusion-only receipts retain their separate ActionIntent workflow.
+    const legacy = this.options.store.list<{ id: string; taskId: string; reportId: string }>(
+      "idempotency",
+      (entry) =>
+        typeof entry?.id === "string" &&
+        entry.id.startsWith("auto-reply:report:") &&
+        (entry.taskId === task.id || entry.reportId === task.latestReportRef?.id),
+    );
+    const legacyConversation = inspectLegacyConversationReplies({
+      store: this.options.store,
+      repository: task.repository,
+      target: task.workItem,
+      channel: task.kind === "pr-e2e" ? "e2e" : "static",
+    });
+    if (
+      legacy.length > 0 ||
+      legacyConversation.blocked ||
+      (record === undefined && legacyConversation.confirmed !== null)
+    )
+      return result("legacy_publication");
+    if (!this.options.enableExternalWrites) return result("external_writes_disabled");
+    if (policy === null || !policy.enabled) return result("automatic_replies_disabled");
+    if (
+      this.options.transport?.publishProgressComment === undefined ||
+      this.options.transport.reconcileProgressComment === undefined ||
+      this.options.transport.readPublisherIdentity === undefined ||
+      !this.options.transport.supportedActions.includes("comment")
+    )
+      return result("publisher_unavailable");
+    if (
+      !actor.permissions.includes("action:prepare") ||
+      !actor.permissions.includes("action:execute") ||
+      !actor.actionCapabilities.includes("comment")
+    )
+      return result("permission_denied");
+    const authorizer = this.options.resolveOperator(policy.authorizedById);
+    if (
+      authorizer === null ||
+      !authorizer.repositoryIds.includes(task.repository.id) ||
+      !["repository:manage", "action:prepare", "action:execute"].every((permission) =>
+        authorizer.permissions.includes(permission as (typeof authorizer.permissions)[number]),
+      ) ||
+      !authorizer.actionCapabilities.includes("comment")
+    )
+      return result("authorization_unavailable");
+    return result(null);
+  }
+  /** Explicit delivery-only recovery uses the same conversation and immutable report renderer. */
+  enqueueSavedReport(
+    actor: InvestigationOperatorPrincipal,
+    task: InvestigationTaskV1,
+    report: InvestigationResultV1,
+  ): InvestigationCommentPublicationSummary {
+    return this.#atomic(() => {
+      requireCondition(
+        equal(this.options.store.get("tasks", task.id) ?? null, task) &&
+          task.state === "completed" &&
+          task.parentTaskId === null &&
+          task.latestReportRef?.id === report.report.id,
+        409,
+        "publication_recovery_task_changed",
+        "The completed task no longer matches the exact saved report request.",
+      );
+      const recovery = this.savedReportRecovery(actor, task);
+      requireCondition(
+        recovery.blocker === null,
+        409,
+        "publication_recovery_unavailable",
+        "The saved report cannot be queued under the current publication conditions.",
+      );
+      this.enqueueResult(report, task);
+      const record = this.#task(task.id);
+      requireCondition(
+        record !== undefined && record.taskId === task.id,
+        409,
+        "publication_recovery_not_enrolled",
+        "The saved report was superseded before publication enrollment.",
+      );
+      this.#assertReport(record, task, report);
+      requireCondition(
+        equal(record.desired.reportRef, task.latestReportRef),
+        409,
+        "publication_recovery_report_changed",
+        "The publication does not refer to the exact saved report.",
+      );
+      this.options.store.put(
+        "idempotency",
+        savedReportRecoveryFence(task.id, task.latestReportRef!),
+        {
+          taskId: task.id,
+          reportRef: task.latestReportRef!,
+          revisionId: record.desired.id,
+          taskCreatedAt: task.createdAt,
+          taskKind: task.kind,
+          repository: task.repository,
+          workItem: task.workItem,
+        } satisfies SavedReportRecoveryFence,
+      );
+      return this.#summary(actor, record);
+    });
   }
   taskSummary(
     actor: InvestigationOperatorPrincipal,
@@ -1875,6 +2084,7 @@ export class InvestigationProgressReplies {
   }
   #assertRevision(revision: PublicationRevision): InvestigationResultV1 | undefined {
     if (revision.reportRef === null) return undefined;
+    this.#assertSavedReportRecoveryCurrent(revision);
     const report = this.options.store.get<InvestigationResultV1>("reports", revision.reportRef.id);
     requireCondition(
       report !== undefined &&
@@ -1886,6 +2096,48 @@ export class InvestigationProgressReplies {
       "The immutable source report is unavailable or changed.",
     );
     return report;
+  }
+  /** Only manually recovered reports carry this fence, including later usage/media revisions. */
+  #assertSavedReportRecoveryCurrent(revision: PublicationRevision): void {
+    if (revision.taskId === undefined || revision.taskId === null || revision.reportRef === null)
+      return;
+    const fence = this.options.store.get<SavedReportRecoveryFence>(
+      "idempotency",
+      savedReportRecoveryFence(revision.taskId, revision.reportRef),
+    );
+    if (fence === undefined) return;
+    const task = this.options.store.get<InvestigationTaskV1>("tasks", fence.taskId);
+    requireCondition(
+      task !== undefined &&
+        task.state === "completed" &&
+        task.parentTaskId === null &&
+        task.parentReportRef === null &&
+        task.planRef === null &&
+        task.createdAt === fence.taskCreatedAt &&
+        task.kind === fence.taskKind &&
+        equal(task.repository, fence.repository) &&
+        equal(task.workItem, fence.workItem) &&
+        equal(task.latestReportRef, fence.reportRef),
+      409,
+      "progress_reply_saved_report_recovery_changed",
+      "The recovered report no longer belongs to its exact completed root task.",
+    );
+    requireCondition(
+      this.options.store.list<InvestigationTaskV1>(
+        "tasks",
+        (candidate) =>
+          candidate.id !== task.id &&
+          candidate.parentTaskId === null &&
+          candidate.repository.id === task.repository.id &&
+          candidate.workItem.kind === task.workItem.kind &&
+          candidate.workItem.number === task.workItem.number &&
+          (candidate.kind === "pr-e2e") === (task.kind === "pr-e2e") &&
+          candidate.createdAt >= task.createdAt,
+      ).length === 0,
+      409,
+      "progress_reply_saved_report_recovery_obsolete",
+      "A newer root task superseded the queued saved report recovery before dispatch.",
+    );
   }
   #owns(record: CommentPublication, claim: PublicationClaim): boolean {
     return (
@@ -1933,6 +2185,7 @@ export class InvestigationProgressReplies {
       "The publication processing lease was superseded.",
     );
     this.#assertTarget(record);
+    this.#assertSavedReportRecoveryCurrent(record.desired);
     requireCondition(
       this.options.enableExternalWrites,
       503,

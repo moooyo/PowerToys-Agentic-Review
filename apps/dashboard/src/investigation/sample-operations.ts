@@ -16,6 +16,7 @@ const sampleTime = "2026-09-19T03:00:00.000Z";
 export function sampleWorkers(now = new Date().toISOString()): InvestigationWorkerControl[] {
   const base: InvestigationWorkerControl = {
     id: "sample-static-worker",
+    displayName: "Static Review Worker",
     repositoryIds: [repositoryId],
     e2eEnabled: false,
     version: 1,
@@ -25,6 +26,9 @@ export function sampleWorkers(now = new Date().toISOString()): InvestigationWork
     advertisedKinds: ["pr-review", "issue-investigate"],
     effectiveKinds: ["pr-review", "issue-investigate"],
     status: "static_only",
+    contactStatus: "recent",
+    activityStatus: "online",
+    activeTaskIds: [],
     activeE2eTaskIds: [],
     cleanupPendingAttemptIds: [],
   };
@@ -33,6 +37,7 @@ export function sampleWorkers(now = new Date().toISOString()): InvestigationWork
     {
       ...structuredClone(base),
       id: "sample-desktop-worker",
+      displayName: "Windows Desktop Worker",
       e2eEnabled: true,
       advertisedKinds: ["pr-review", "issue-investigate", "pr-e2e"],
       effectiveKinds: ["pr-review", "issue-investigate", "pr-e2e"],
@@ -41,7 +46,10 @@ export function sampleWorkers(now = new Date().toISOString()): InvestigationWork
     {
       ...structuredClone(base),
       id: "sample-new-worker",
+      displayName: "New Review Worker",
       lastSeenAt: null,
+      contactStatus: "never",
+      activityStatus: "offline",
       advertisedKinds: null,
       effectiveKinds: [],
     },

@@ -17,7 +17,7 @@ English and both light and dark themes are available without reloading.
 | `/inbox` | Review records for the selected accessible repository. |
 | `/settings?section=intake` | Event intake configuration and recent deliveries. |
 | `/settings?section=replies` | Automatic conclusion and progress replies and templates. |
-| `/settings?section=prompts` | Recorded native Prompt references and availability limits. |
+| `/settings?section=prompts` | Native Prompt content, immutable versions, and the binding for future Reviews. |
 | `/settings?section=execution` | Shared static concurrency and fixed E2E capacity. |
 | `/settings?section=workers` | Administrator Worker admission controls and contact information. |
 | `/settings?section=accounts` | Administrator local account management. |
@@ -29,19 +29,29 @@ English and both light and dark themes are available without reloading.
 corresponding Settings section. Other paths open the Inbox shell. The old separate
 PR, Issue, Task, Report, and Comment page navigation is no longer registered.
 
-The Inbox groups records by needs attention, in progress, published, completed
-with unconfirmed publication, and dismissed. Completed reports without a confirmed
+The Inbox groups records by needs attention, in progress, published, and completed
+with unconfirmed publication. Completed reports without a confirmed
 publication are kept outside the attention badge and are not labelled published.
 It prefers the first record needing attention, then the first active record.
 Search matches the number, title, and any available module metadata without case
 sensitivity; matching records are displayed without groups. Selecting a repository
 uses that account's explicit repository grants.
 
+Ignore, dismissal, undo, and the dismissed group have been removed. The console
+does not read old dismissal storage, so a prior browser reminder choice cannot
+hide a Review. Intake's protocol-level `ignored` receipt state still describes an
+event rejected by intake policy; it is not an operator disposition.
+
 Each record has a four-step Trigger, Review, Report, and Publish presentation.
 The detail reader checks report ownership against the exact repository, source,
 and native execution identity. Repeated Reviews retain their own source revision
 and report identity; a successful older publication must not establish that a
 newer Review has been published.
+
+The source author is shown when recorded metadata is available. Older work items
+can obtain author metadata through a read-only GitHub lookup that checks the saved
+repository and work-item identities. That lookup does not refresh historical
+source snapshots or add module and Issue-label metadata.
 
 Related reproduction, E2E, repair, and verification work is grouped under its
 original Review record. The detail selector opens each related activity's own
@@ -63,8 +73,17 @@ selected report version. PR conclusions use the recorded assessment rather than
 the number of findings. Findings show their priority, source location, impact,
 and suggested repair. Issue results preserve their actual Bug, Feature, or other
 classification, including information, verification, and decision requirements.
-Coverage is displayed as scope units rather than claiming every unit is a file.
-E2E counts come from saved feature outcomes.
+Scope-unit coverage counts and coverage details are no longer displayed in the
+console, including the former E2E pass/total count. Native reports still retain
+their coverage ledger and saved E2E feature outcomes.
+
+A finding can open original source context for its exact saved report, finding,
+and location. The Server reads the pinned commit, resolves its Git tree and blob,
+and checks the blob bytes before returning numbered context lines. Recorded
+submodule paths use the saved child repository and commit. No mutable branch is
+used as a substitute. A finding without an accessible immutable source revision,
+including a `local_patch` subject, shows unavailable context rather than a repair
+suggestion or guessed current source.
 
 The Session tab reads normalized assistant messages, command output, system
 events, and gaps. It merges append/replace events by their saved item identity.
@@ -78,6 +97,11 @@ The Comments tab reads retained delivery history. Its preview is a previously
 confirmed applied body, not an unsuccessful proposed update. Sending, failed,
 cancelled, and uncertain outcomes remain distinct. These retained observations
 do not assert that an external user has not subsequently edited a GitHub comment.
+An explicit current-comment read performs GitHub GET requests only and distinguishes
+present, edited, deleted, not published, and unavailable observations. It retains
+the last confirmation separately and does not rewrite publication receipts,
+enqueue delivery, or repair a comment. Older progress-record formats retain their
+saved preview and report current readback as unavailable without migrating them.
 
 ## Recovery and permission boundaries
 
@@ -102,9 +126,13 @@ into a simulated success.
 - Legacy result publications retain their original operation workflow. They do
   not become eligible for shared progress-comment synchronization merely because
   a newer console displays them.
-- Dismissal hides an attention reminder in the current browser session and
-  supports undo. It does not change the Review, delete evidence, stop work, or
-  disable server retries. It is not a shared server-side disposition.
+- Saved-report delivery recovery uses the exact complete final report of an
+  eligible completed native root Review. The Server blocks older results when a
+  newer root Review or publication owns the same conversation and channel. A
+  missing publication can be enrolled with its current version and an idempotency
+  key; an existing native publication keeps its `sync`/`reconcile` workflow.
+  Uncertain writes must be reconciled before delivery advances. Recovery does
+  not rerun the Review, create a Worker attempt, or consume a new model call.
 
 Normal native result publication uses the shared comment publisher, which updates
 the same progress comment with its bound completed report. Historical legacy
@@ -124,6 +152,19 @@ invalid and duplicate IDs and enforces the server's required recipient and actor
 settings when intake is enabled. Recent deliveries navigate to their linked
 record when one is available.
 
+Optional GitHub profile lookup accepts a login or numeric user ID and displays
+the resolved login and avatar while keeping numeric IDs as the saved authority.
+Delivery metadata distinguishes assignment, review request, review re-request,
+E2E comment command, and E2E revision observation. A re-request label requires the
+canonical task's frozen prior-review baseline; aliases preserve their own actor
+metadata rather than borrowing the canonical event's attribution.
+
+Intake Settings displays the configured public Webhook URL when
+`INVESTIGATION_GITHUB_WEBHOOK_PUBLIC_URL` is supplied. Otherwise it displays a
+candidate derived from the public origin. The latest retained signed delivery is
+a dated receipt observation. Neither that receipt nor receiver configuration is
+a verified connectivity or health claim.
+
 Automatic replies have separate conclusion and progress switches and six
 templates: PR result, Issue result, received, started, failed, and completed. The
 Stopped selector edits the protocol's `failed` template, which also covers other
@@ -140,13 +181,29 @@ Conflicting server versions require reloading and reviewing current values.
 Other supported settings actions take effect after their server acknowledgement.
 Navigation and logout use the shared unsaved-change guard.
 
+Native Prompt Settings has separate PR review and Issue investigation catalogs.
+Repository managers can read both source-review and snapshot-analysis Markdown,
+edit a draft, and publish an immutable version. Publishing does not switch the
+active binding; setting a version as current is a separate versioned operation.
+New native tasks freeze the selected content, reference, and digest. Later edits
+or binding changes do not change existing tasks or resumed work. The Worker uses
+that frozen content and verifies its reference and digest. Protocol, execution,
+permissions, result rules, and dynamic recipe/baseline constraints remain outside
+editable versions. Catalog or binding conflicts require a fresh read, and failed
+catalog reads disable writes.
+
 Static concurrency is shared across repositories and ranges from 1 to 16. Only
 administrators can change it. E2E capacity remains one exclusive desktop. Worker
 E2E controls are administrator-only and use a versioned admission policy. A
 Worker must also advertise the required task kind. Disabling E2E can require
 current execution to stop and cleanup to be confirmed; it is not an immediate
-claim that the desktop is idle. Contact age and activity leases are displayed as
-observations rather than an independent health probe.
+claim that the desktop is idle. Worker display names fall back to the saved ID.
+The Server projects contact freshness separately from activity: active task
+ownership and cleanup leases remain visible when contact has expired. The console
+uses Online, Busy, Offline, Cleanup pending, or an explicit unconfirmed label,
+with the recent recorded task stage when available. These are contact and
+ownership observations rather than an independent process-health probe. Failed
+Worker reads also disable an already-open admission confirmation.
 
 Accounts use built-in username/password authentication, with no public
 registration or third-party sign-in. Usernames contain 3-64 lowercase ASCII
@@ -158,26 +215,25 @@ business access. Account updates and password resets preserve versions and
 surface conflicts. The current account cannot disable itself. Password changes
 and resets revoke the affected sessions.
 
-## Capability limits
+## Retained limits and deferred decisions
 
-The native service does not expose a default Prompt configuration, version
-catalogue, or Markdown body. The Prompt section therefore shows references
-recorded by actual Reviews and cannot set a new active version. Historical
-references do not establish the current default.
+The existing default task limits are real: 120,000 reported tokens, 24 analysis
+rounds, and 30 minutes, with a 64 MiB report resource limit. This work does not
+change those defaults or add a budget editor. A Review exhausted under its saved
+limits can still receive a resume rejection. Reported usage is not a guaranteed
+provider total or a hard provider spending limit; future budget policy remains a
+separate discussion.
 
-Optional author, module, source snippet, publisher login, and GitHub ID-to-login
-metadata are not fabricated when absent from the native contracts. Receiver and
-publisher configuration flags do not establish public URL connectivity or
-credential scope verification. Precise trigger attribution requires recorded
-metadata; a static intake alone does not prove whether the event was an
-assignment or a Code Review request.
+Publishing-account identity and token-scope diagnostics are not added. Historical
+legacy result publications are readable but have no new repost operation. Numeric
+command exit codes are not added to normalized session output. Optional module
+and Issue-label fields remain absent when the native data does not provide them.
+The related-activity selector remains in its current form pending a later product
+discussion. Repeated Reviews continue to update the same GitHub comment while
+preserving every saved report and its delivery history.
 
-These limits should be distinguished from visual implementation defects during
-design acceptance. Existing backend workflows remain available to their native
-consumers; a feature not shown in the new console is not automatically removed
-from the Server or Worker.
-See the [capability gap and design extension record](../../docs/design/2026-10-01-review-console-capability-gaps.md)
-for the concrete product decisions left open by the handoff.
+See the [current capability decisions and implementation](../../docs/design/2026-10-01-review-console-capabilities.md)
+and the [historical gap and design extension record](../../docs/design/2026-10-01-review-console-capability-gaps.md).
 
 ## Production transport and local development
 
@@ -195,10 +251,10 @@ storage. Theme and language preferences use `agentic-review-theme` and
 | Authentication | `/api/auth/session`, `/api/auth/login`, `/api/auth/logout`, `/api/auth/password` |
 | Accounts | `/api/accounts`, `/api/accounts/:id/update`, `/api/accounts/:id/password` |
 | Records | `/api/repositories`, `/api/work-items`, `/api/tasks`, `/api/tasks/:id` |
-| Output and reports | `/api/tasks/:id/output-events`, `/api/reports/:id`, `/api/reports/:id/findings` |
-| Publications | `/api/publications`, `/api/comment-deliveries`, `/api/comments/:id/sync`, `/api/comments/:id/reconcile` |
-| Intake | `/api/github/webhook-deliveries`, `/api/github/webhook-deliveries/:id/retry` |
-| Configuration | `/api/repositories/:id/webhook-settings`, `/api/repositories/:id/auto-reply-settings`, `/api/investigation/scheduler` |
+| Output and reports | `/api/tasks/:id/output-events`, `/api/reports/:id`, `/api/reports/:id/findings`, `/api/reports/:id/findings/:findingId/source` |
+| Publications | `/api/publications`, `/api/comment-deliveries`, `/api/comments/:id/current`, `/api/comments/:id/sync`, `/api/comments/:id/reconcile`, `/api/tasks/:id/publication-recovery` |
+| Source metadata and intake | `/api/work-items/:id/author`, `/api/repositories/:id/github-users/:lookup`, `/api/repositories/:id/intake-details`, `/api/github/webhook-deliveries`, `/api/github/webhook-deliveries/:id/retry` |
+| Configuration | `/api/repositories/:id/webhook-settings`, `/api/repositories/:id/auto-reply-settings`, `/api/repositories/:repositoryId/native-prompts`, `/api/repositories/:repositoryId/native-prompts/:kind/versions`, `/api/repositories/:repositoryId/native-prompts/:kind/binding`, `/api/investigation/scheduler` |
 | Worker controls | `/api/workers`, `/api/workers/:id/e2e` |
 
 Install the workspace dependencies with the repository's supported Node and pnpm

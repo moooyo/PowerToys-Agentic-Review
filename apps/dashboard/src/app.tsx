@@ -5,7 +5,6 @@ import { createBrowserRouter, RouterProvider, useLocation, useNavigate } from "r
 import {
   loadReviewRecords,
   type ReviewRecord,
-  readIgnoredRecordIds,
   recordStatusLabel,
   relativeTime,
 } from "./console/model";
@@ -60,19 +59,17 @@ function RecordRow({
     stopped: "pause_circle",
   };
   const icon =
-    record.status === "ignored"
-      ? "notifications_off"
-      : record.status === "attention"
-        ? record.problem
-          ? problemIcons[record.problem.type]
-          : "info"
-        : record.status === "queued"
-          ? "hourglass_empty"
-          : record.status === "publishing"
-            ? "cloud_upload"
-            : record.kind === "issue"
-              ? "bug_report"
-              : "check_circle";
+    record.status === "attention"
+      ? record.problem
+        ? problemIcons[record.problem.type]
+        : "info"
+      : record.status === "queued"
+        ? "hourglass_empty"
+        : record.status === "publishing"
+          ? "cloud_upload"
+          : record.kind === "issue"
+            ? "bug_report"
+            : "check_circle";
   return (
     <button
       type="button"
@@ -142,7 +139,6 @@ function ApplicationShell() {
   const [repositoryMenu, setRepositoryMenu] = useState<HTMLElement | null>(null);
   const [error, setError] = useState<string>();
   const [now, setNow] = useState(Date.now());
-  const [ignoredRecords, setIgnoredRecords] = useState(() => readIgnoredRecordIds(identity));
   const repositories = useQuery({
     queryKey: ["console-repositories", identity],
     queryFn: () => investigationApi.repositories(),
@@ -159,15 +155,7 @@ function ApplicationShell() {
     enabled: Boolean(repository),
     refetchInterval: 2500,
   });
-  const records = useMemo(() => {
-    return (recordsQuery.data || []).map((record) =>
-      ignoredRecords.has(record.id) &&
-      record.status === "attention" &&
-      !record.completedWithoutPublication
-        ? { ...record, status: "ignored" as const }
-        : record,
-    );
-  }, [recordsQuery.data, ignoredRecords]);
+  const records = recordsQuery.data || [];
   const attention = records.filter(
     (record) => record.status === "attention" && !record.completedWithoutPublication,
   );
@@ -176,7 +164,6 @@ function ApplicationShell() {
     .filter((record) => ["running", "queued", "publishing"].includes(record.status))
     .sort((a, b) => (activeOrder[a.status] ?? 3) - (activeOrder[b.status] ?? 3));
   const posted = records.filter((record) => record.status === "posted");
-  const ignored = records.filter((record) => record.status === "ignored");
   const searchValue = search.trim().toLocaleLowerCase();
   const matches = records
     .filter((record) =>
@@ -212,7 +199,6 @@ function ApplicationShell() {
     } else destination("/settings", { section });
   };
   const refresh = () => {
-    setIgnoredRecords(readIgnoredRecordIds(identity));
     void queryClient.invalidateQueries({ queryKey: ["console-records", identity] });
   };
   const initials = (session.user?.displayName || session.user?.username || "AR")
@@ -424,17 +410,6 @@ function ApplicationShell() {
                               </small>
                             </div>
                             {showRows(completed)}
-                          </>
-                        )}
-                        {ignored.length > 0 && (
-                          <>
-                            <div className="console-group-heading">
-                              <span>{text("已忽略", "Dismissed")}</span>
-                              <small>
-                                {text(`${ignored.length} 条`, `${ignored.length} records`)}
-                              </small>
-                            </div>
-                            {showRows(ignored)}
                           </>
                         )}
                       </>

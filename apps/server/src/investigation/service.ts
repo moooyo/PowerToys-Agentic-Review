@@ -81,6 +81,7 @@ import { validateRootE2eRuntime } from "./e2e-runtime.js";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
 import { type InvestigationEvidencePolicy, InvestigationEvidenceStore } from "./evidence-store.js";
 import { constantTimeEqual, encodeCursor, parseCursor } from "./integrity.js";
+import { InvestigationNativePrompts } from "./native-prompts.js";
 import {
   type InvestigationDirectoryQuery,
   type InvestigationFindingsQuery,
@@ -215,6 +216,7 @@ export class InvestigationService {
   readonly workerControls: InvestigationWorkerControls;
   readonly output: InvestigationTaskOutput;
   readonly workspace: InvestigationWorkspaceReads;
+  readonly prompts: InvestigationNativePrompts;
   private readonly store: InvestigationStore;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
@@ -233,6 +235,7 @@ export class InvestigationService {
     this.workspace = new InvestigationWorkspaceReads(this.store, this.evidence);
     this.workspace.initializeReports();
     this.idFactory = options.idFactory ?? randomUUID;
+    this.prompts = new InvestigationNativePrompts(this.store, this.now, this.idFactory);
     this.leaseDurationMs = options.leaseDurationMs ?? 120_000;
     this.resourceScheduler = new InvestigationResourceScheduler(
       this.store,
@@ -876,6 +879,10 @@ export class InvestigationService {
         "The initial scope must include the complete original diff or issue snapshot.",
       );
     const now = this.time();
+    const nativePrompt =
+      request.kind === "pr-review" || request.kind === "issue-investigate"
+        ? this.prompts.freeze(repository.id, request.kind, request.promptRef)
+        : undefined;
     const task: InvestigationTaskV1 = {
       schemaVersion: "InvestigationTaskV1",
       id,
@@ -905,7 +912,9 @@ export class InvestigationService {
           version: 1,
           digest: investigationContentDigest("investigation-default-v1"),
         },
-      promptRef: request.promptRef ??
+      ...(nativePrompt ? { promptSnapshot: nativePrompt } : {}),
+      promptRef: nativePrompt?.ref ??
+        request.promptRef ??
         parent?.context.promptRef ?? {
           id: request.kind === "pr-e2e" ? "investigation-e2e" : "investigation-loop",
           version: 1,

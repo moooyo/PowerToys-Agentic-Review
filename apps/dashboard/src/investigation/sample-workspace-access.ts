@@ -5,10 +5,15 @@ import type {
   InvestigationActionKind,
   InvestigationCommentCommand,
   InvestigationCommentPublicationSummary,
+  InvestigationNativePromptCatalog,
+  InvestigationPublicationRecoveryStatus,
   InvestigationSession,
   InvestigationWebhookDelivery,
 } from "@agentic-review/contracts";
-import { InvestigationWebhookRetryRequestSchema } from "@agentic-review/contracts";
+import {
+  InvestigationPublicationRecoveryRequestSchema,
+  InvestigationWebhookRetryRequestSchema,
+} from "@agentic-review/contracts";
 import { Value } from "@sinclair/typebox/value";
 import type { InvestigationApi, RepositoryAutoReplySettings } from "./api";
 import type { InvestigationReadApi } from "./read-api";
@@ -104,6 +109,11 @@ export function createSessionScopedSampleApi(
     string,
     { version: number; authorizedById: string | null; updatedById: string | null }
   >();
+  const nativePromptOwners = new Map<
+    string,
+    { version: number; digest: string; createdBy: string }
+  >();
+  const nativePromptBindingOwners = new Map<string, { version: number; updatedBy: string }>();
 
   function expired(): never {
     onExpired?.();
@@ -155,6 +165,30 @@ export function createSessionScopedSampleApi(
       : settings;
   }
 
+  function scopedNativePrompts(
+    value: InvestigationNativePromptCatalog,
+  ): InvestigationNativePromptCatalog {
+    return {
+      ...value,
+      items: value.items.map((item) => {
+        const bindingOwner = nativePromptBindingOwners.get(`${value.repositoryId}:${item.kind}`);
+        return {
+          ...item,
+          binding:
+            bindingOwner?.version === item.binding.version
+              ? { ...item.binding, updatedBy: bindingOwner.updatedBy }
+              : item.binding,
+          versions: item.versions.map((version) => {
+            const owner = nativePromptOwners.get(version.id);
+            return owner?.version === version.version && owner.digest === version.digest
+              ? { ...version, createdBy: owner.createdBy }
+              : version;
+          }),
+        };
+      }),
+    };
+  }
+
   async function workItem(user: User, id: string) {
     const item = await api.workItem(id);
     await currentAccess(user, item.repositoryId);
@@ -174,12 +208,26 @@ export function createSessionScopedSampleApi(
     return `sample-account:${encodeURIComponent(user.id)}:${key}`;
   }
 
-  async function scopedWebhookKey(user: User, key: string): Promise<string> {
+  async function scopedDigestKey(user: User, key: string, prefix: string): Promise<string> {
     const digest = await crypto.subtle.digest(
       "SHA-256",
       new TextEncoder().encode(JSON.stringify([user.id, key])),
     );
-    return `sample-webhook:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    return `${prefix}:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  function scopePublicationRecovery(
+    value: InvestigationPublicationRecoveryStatus,
+    user: User,
+  ): InvestigationPublicationRecoveryStatus {
+    const allowed =
+      canPerform(user, { permission: "action:prepare", action: "comment" }) &&
+      canPerform(user, { permission: "action:execute", action: "comment" });
+    return {
+      ...value,
+      publication: value.publication ? scopeComment(value.publication, user) : null,
+      availableActions: allowed ? value.availableActions : [],
+    };
   }
 
   function ownedIntent(
@@ -302,6 +350,118 @@ export function createSessionScopedSampleApi(
   };
 
   return {
+    async workItemAuthor(id, signal) {
+      signal?.throwIfAborted();
+      const user = await currentUser();
+      const item = await workItem(user, id);
+      const value = await api.workItemAuthor(id, signal);
+      const scoped = await result(user, value, item.repositoryId);
+      signal?.throwIfAborted();
+      return scoped;
+    },
+    async publicationRecovery(taskId, signal) {
+      signal?.throwIfAborted();
+      const user = await currentUser();
+      const detail = await api.task(taskId);
+      await currentAccess(user, detail.task.repository.id);
+      const value = await api.publicationRecovery(taskId, signal);
+      const current = await currentAccess(user, detail.task.repository.id);
+      signal?.throwIfAborted();
+      return structuredClone(scopePublicationRecovery(value, current));
+    },
+    async recoverPublication(taskId, input) {
+      const snapshot = structuredClone(input);
+      const user = await currentUser();
+      const prepare: Grant = { permission: "action:prepare", action: "comment" };
+      const execute: Grant = { permission: "action:execute", action: "comment" };
+      requireGrant(user, prepare);
+      requireGrant(user, execute);
+      if (!Value.Check(InvestigationPublicationRecoveryRequestSchema, snapshot)) {
+        throw new InvestigationHttpError(
+          400,
+          "The sample publication recovery request is invalid.",
+        );
+      }
+      const detail = await api.task(taskId);
+      const idempotencyKey = await scopedDigestKey(
+        user,
+        snapshot.idempotencyKey,
+        "sample-publication-recovery",
+      );
+      const current = await currentAccess(user, detail.task.repository.id, prepare);
+      requireGrant(current, execute);
+      const value = await api.recoverPublication(taskId, { ...snapshot, idempotencyKey });
+      const latest = await currentAccess(user, detail.task.repository.id, prepare);
+      requireGrant(latest, execute);
+      return structuredClone(scopePublicationRecovery(value, latest));
+    },
+    async nativePrompts(repositoryId, signal) {
+      signal?.throwIfAborted();
+      const user = await currentUser();
+      authorize(user, repositoryId);
+      const value = await api.nativePrompts(repositoryId, signal);
+      const scoped = await result(user, scopedNativePrompts(value), repositoryId);
+      signal?.throwIfAborted();
+      return scoped;
+    },
+    async publishNativePrompt(repositoryId, kind, input) {
+      const snapshot = structuredClone(input);
+      const user = await currentUser();
+      const grant: Grant = { permission: "repository:manage" };
+      await currentAccess(user, repositoryId, grant);
+      const value = await api.publishNativePrompt(repositoryId, kind, snapshot);
+      await currentAccess(user, repositoryId, grant);
+      nativePromptOwners.set(value.id, {
+        version: value.version,
+        digest: value.digest,
+        createdBy: user.id,
+      });
+      return structuredClone({ ...value, createdBy: user.id });
+    },
+    async bindNativePrompt(repositoryId, kind, input) {
+      const snapshot = structuredClone(input);
+      const user = await currentUser();
+      const grant: Grant = { permission: "repository:manage" };
+      await currentAccess(user, repositoryId, grant);
+      const value = await api.bindNativePrompt(repositoryId, kind, snapshot);
+      await currentAccess(user, repositoryId, grant);
+      nativePromptBindingOwners.set(`${repositoryId}:${kind}`, {
+        version: value.version,
+        updatedBy: user.id,
+      });
+      return structuredClone({ ...value, updatedBy: user.id });
+    },
+    async repositoryIntakeDetails(repositoryId) {
+      const user = await currentUser();
+      authorize(user, repositoryId);
+      const value = await api.repositoryIntakeDetails(repositoryId);
+      return result(user, value, repositoryId);
+    },
+    async repositoryGitHubUser(repositoryId, lookup) {
+      const user = await currentUser();
+      authorize(user, repositoryId);
+      const value = await api.repositoryGitHubUser(repositoryId, lookup);
+      return result(user, value, repositoryId);
+    },
+    async currentComment(id, signal) {
+      signal?.throwIfAborted();
+      const user = await currentUser();
+      const comment = await readComment(user, id);
+      const value = await api.currentComment(id, signal);
+      const scoped = await result(user, value, comment.repositoryId);
+      signal?.throwIfAborted();
+      return scoped;
+    },
+    async findingSource(reportId, findingId, query = {}, signal) {
+      signal?.throwIfAborted();
+      const snapshot = structuredClone(query);
+      const user = await currentUser();
+      const header = await report(user, reportId);
+      const value = await api.findingSource(reportId, findingId, snapshot, signal);
+      const scoped = await result(user, value, header.context.repository.id);
+      signal?.throwIfAborted();
+      return scoped;
+    },
     async taskDefaults(signal) {
       signal?.throwIfAborted();
       const user = await currentUser();
@@ -428,7 +588,7 @@ export function createSessionScopedSampleApi(
       requireGrant(user, { permission: "task:create" });
       if (!Value.Check(InvestigationWebhookRetryRequestSchema, snapshot))
         throw new InvestigationHttpError(400, "The webhook retry request is invalid.");
-      const idempotencyKey = await scopedWebhookKey(user, snapshot.idempotencyKey);
+      const idempotencyKey = await scopedDigestKey(user, snapshot.idempotencyKey, "sample-webhook");
       const value = await api.webhookDelivery(id);
       const current = await currentAccess(user, value.repositoryId, webhookRetryGrant(value));
       requireGrant(current, { permission: "repository:manage" });

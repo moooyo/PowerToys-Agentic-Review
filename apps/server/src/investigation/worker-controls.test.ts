@@ -1,4 +1,6 @@
+import { createInvestigationPreview } from "@agentic-review/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import type { InvestigationResourceLease } from "../../dist/investigation/resource-scheduler.js";
 import { InvestigationStore } from "../../dist/investigation/store.js";
 import type {
   InvestigationOperatorPrincipal,
@@ -46,12 +48,16 @@ describe("durable Worker E2E controls", () => {
     expect(f.controls.list(f.admin).items).toMatchObject([
       {
         id: "worker-1",
+        displayName: "worker-1",
         e2eEnabled: false,
         version: 1,
         lastSeenAt: null,
         advertisedKinds: null,
         effectiveKinds: [],
         status: "static_only",
+        contactStatus: "never",
+        activityStatus: "offline",
+        activeTaskIds: [],
       },
     ]);
     expect(
@@ -66,7 +72,151 @@ describe("durable Worker E2E controls", () => {
       advertisedKinds: ["pr-review", "pr-e2e", "issue-fix"],
       updatedAt: before!.updatedAt,
       lastSeenAt: f.clock().toISOString(),
+      contactStatus: "recent",
+      activityStatus: "online",
     });
+  });
+
+  it("updates friendly names from trusted configuration without changing admission history", () => {
+    const f = fixture();
+    const named = { ...f.worker, displayName: "Windows Review Worker" };
+    f.controls.initialize([named]);
+    f.controls.policy(named, { supportedKinds: ["pr-review"] });
+    f.controls.update(f.admin, named.id, { version: 1, e2eEnabled: true }, () => {});
+    const before = f.controls.get(named.id)!;
+    f.advance(1_000);
+    const renamed = { ...named, displayName: "Windows Desktop Worker" };
+    f.controls.initialize([renamed]);
+    expect(f.controls.get(named.id)).toMatchObject({
+      displayName: renamed.displayName,
+      version: before.version,
+      e2eEnabled: true,
+      updatedAt: before.updatedAt,
+      lastSeenAt: before.lastSeenAt,
+    });
+    expect(f.store.pagePrefix("idempotency", "worker-control-audit:v1:", 10)).toHaveLength(1);
+    const restarted = new InvestigationWorkerControls(f.store, f.clock);
+    expect(restarted.get(named.id)?.displayName).toBe(renamed.displayName);
+    restarted.initialize([f.worker]);
+    expect(restarted.get(named.id)?.displayName).toBe(named.id);
+  });
+
+  it("projects legacy controls without a saved friendly name and migrates them on initialization", () => {
+    const f = fixture();
+    const key = "worker-control:v1:worker-1";
+    const { displayName: _displayName, ...legacy } = f.store.get<Record<string, unknown>>(
+      "idempotency",
+      key,
+    )!;
+    f.store.put("idempotency", key, legacy);
+    expect(f.controls.get(f.worker.id)).toMatchObject({ displayName: f.worker.id, version: 1 });
+    f.controls.initialize([{ ...f.worker, displayName: "Migrated Worker" }]);
+    expect(f.store.get("idempotency", key)).toMatchObject({ displayName: "Migrated Worker" });
+  });
+
+  it("preserves maximum-length legacy worker IDs as unnamed display values", () => {
+    const f = fixture();
+    const worker = { ...f.worker, id: "W".repeat(128) };
+    f.controls.initialize([worker]);
+    expect(f.controls.get(worker.id)?.displayName).toBe(worker.id);
+  });
+
+  it("uses the server clock for contact expiry without treating it as a process health probe", () => {
+    const f = fixture();
+    f.controls.observe(f.worker);
+    f.advance(119_999);
+    expect(f.controls.get(f.worker.id)).toMatchObject({
+      contactStatus: "recent",
+      activityStatus: "online",
+    });
+    f.advance(1);
+    expect(f.controls.get(f.worker.id)).toMatchObject({
+      contactStatus: "stale",
+      activityStatus: "offline",
+    });
+    f.controls.observe(f.worker);
+    expect(f.controls.get(f.worker.id)).toMatchObject({
+      contactStatus: "recent",
+      activityStatus: "online",
+      version: 1,
+    });
+  });
+
+  it("retains static and E2E ownership after contact expires and prioritizes pending cleanup", () => {
+    const f = fixture();
+    f.controls.observe(f.worker);
+    const lease: InvestigationResourceLease = {
+      attemptId: "static-attempt",
+      taskId: "static-task",
+      workerId: f.worker.id,
+      fence: 1,
+      pool: "static",
+      state: "held",
+      acquiredAt: f.clock().toISOString(),
+      updatedAt: f.clock().toISOString(),
+      releasedAt: null,
+      reason: null,
+    };
+    f.store.insert("resourceLeases", lease.attemptId, lease);
+    expect(f.controls.get(f.worker.id)).toMatchObject({
+      activityStatus: "busy",
+      activeTaskIds: ["static-task"],
+      activeE2eTaskIds: [],
+      status: "static_only",
+    });
+    f.advance(120_000);
+    expect(f.controls.get(f.worker.id)).toMatchObject({
+      contactStatus: "stale",
+      activityStatus: "busy",
+      activeTaskIds: ["static-task"],
+    });
+    const cleanup: InvestigationResourceLease = {
+      ...lease,
+      attemptId: "e2e-attempt",
+      taskId: "finished-e2e-task",
+      pool: "e2e",
+      state: "needs_cleanup",
+    };
+    f.store.insert("resourceLeases", cleanup.attemptId, cleanup);
+    expect(f.controls.get(f.worker.id)).toMatchObject({
+      contactStatus: "stale",
+      activityStatus: "cleaning",
+      activeTaskIds: ["finished-e2e-task", "static-task"],
+      activeE2eTaskIds: ["finished-e2e-task"],
+      cleanupPendingAttemptIds: ["e2e-attempt"],
+    });
+    f.store.put("resourceLeases", cleanup.attemptId, { ...cleanup, state: "released" });
+    expect(f.controls.get(f.worker.id)?.activityStatus).toBe("busy");
+    f.store.put("resourceLeases", lease.attemptId, { ...lease, state: "released" });
+    expect(f.controls.get(f.worker.id)).toMatchObject({
+      activityStatus: "offline",
+      activeTaskIds: [],
+      cleanupPendingAttemptIds: [],
+    });
+  });
+
+  it("includes active task ownership when no capacity lease exists and excludes historical owners", () => {
+    const f = fixture();
+    const preview = createInvestigationPreview("pr", { findingCount: 0 });
+    const task = { ...preview.task, state: "running" as const };
+    const attempt = {
+      ...preview.attempt,
+      workerId: f.worker.id,
+      state: "running" as const,
+      finishedAt: null,
+    };
+    f.store.insert("tasks", task.id, task);
+    f.store.insert("attempts", attempt.id, { attempt });
+    expect(f.controls.get(f.worker.id)).toMatchObject({
+      contactStatus: "never",
+      activityStatus: "busy",
+      activeTaskIds: [task.id],
+    });
+    f.store.put("attempts", attempt.id, { attempt: { ...attempt, state: "completed" } });
+    expect(f.controls.get(f.worker.id)?.activityStatus).toBe("offline");
+    f.store.put("attempts", attempt.id, { attempt });
+    f.store.put("tasks", task.id, { ...task, state: "completed" });
+    expect(f.controls.get(f.worker.id)?.activeTaskIds).toEqual([]);
   });
 
   it("persists administrator changes, audits them, and never raises a static local role", () => {

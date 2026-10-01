@@ -6,6 +6,7 @@ import type {
 } from "@agentic-review/contracts";
 import { investigationContentDigest } from "@agentic-review/domain";
 import { InvestigationRequestError, requireCondition } from "./errors.js";
+import { githubIdentityUrl } from "./github-identity.js";
 import type { InvestigationProgressTrigger } from "./progress-reply-template.js";
 import type { InvestigationService } from "./service.js";
 import type { InvestigationSourceImporter } from "./source-import.js";
@@ -43,6 +44,8 @@ interface Assignment {
   readonly assigneeUserId: number;
   readonly actorLogin?: string;
   readonly assigneeLogin?: string;
+  readonly actorAvatarUrl?: string;
+  readonly assigneeAvatarUrl?: string;
   readonly updatedAt: string;
   readonly baseSha?: string;
   readonly headSha?: string;
@@ -428,10 +431,14 @@ export class InvestigationWebhookIntake {
     };
     const actorLogin = optionalLogin(sender.login);
     const assigneeLogin = optionalLogin(assignee.login);
+    const actorAvatarUrl = githubIdentityUrl(sender.avatar_url);
+    const assigneeAvatarUrl = githubIdentityUrl(assignee.avatar_url);
     const assignment: Assignment = {
       ...assignmentIdentity,
       ...(actorLogin === undefined ? {} : { actorLogin }),
       ...(assigneeLogin === undefined ? {} : { assigneeLogin }),
+      ...(actorAvatarUrl === null ? {} : { actorAvatarUrl }),
+      ...(assigneeAvatarUrl === null ? {} : { assigneeAvatarUrl }),
     };
     const receiptId = `${deliveryPrefix}${input.deliveryId}`;
     // GitHub redeliveries retain their delivery ID. A fresh review request can have an unchanged

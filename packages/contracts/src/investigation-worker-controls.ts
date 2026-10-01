@@ -12,6 +12,7 @@ const kinds = Type.Array(InvestigationTaskKindSchema, { uniqueItems: true });
 export const InvestigationWorkerControlSchema = Type.Object(
   {
     id: EntityIdSchema,
+    displayName: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
     repositoryIds: Type.Array(EntityIdSchema, { uniqueItems: true }),
     e2eEnabled: Type.Boolean(),
     version: PositiveIntegerSchema,
@@ -20,6 +21,20 @@ export const InvestigationWorkerControlSchema = Type.Object(
     lastSeenAt: Type.Union([DateTimeSchema, Type.Null()]),
     advertisedKinds: Type.Union([kinds, Type.Null()]),
     effectiveKinds: kinds,
+    // Optional for older API payloads; the server always projects these operational fields.
+    // Contact freshness and retained task ownership do not certify operating-system health.
+    contactStatus: Type.Optional(
+      Type.Union([Type.Literal("recent"), Type.Literal("stale"), Type.Literal("never")]),
+    ),
+    activityStatus: Type.Optional(
+      Type.Union([
+        Type.Literal("offline"),
+        Type.Literal("online"),
+        Type.Literal("busy"),
+        Type.Literal("cleaning"),
+      ]),
+    ),
+    activeTaskIds: Type.Optional(Type.Array(EntityIdSchema, { uniqueItems: true })),
     status: Type.Union([
       Type.Literal("e2e_enabled"),
       Type.Literal("static_only"),

@@ -2,6 +2,7 @@ import {
   DateTimeSchema,
   EntityIdSchema,
   InvestigationBudgetSchema,
+  InvestigationGitHubUserSchema,
   InvestigationSubjectV1Schema,
 } from "@agentic-review/contracts";
 import { type Static, Type } from "@sinclair/typebox";
@@ -22,6 +23,7 @@ export const InvestigationWorkItemRecordSchema = Type.Object(
     kind: Type.Union([Type.Literal("pull_request"), Type.Literal("issue")]),
     number: Type.Integer({ minimum: 1 }),
     title: Type.String({ minLength: 1 }),
+    author: Type.Optional(InvestigationGitHubUserSchema),
     body: Type.String(),
     state: Type.Union([Type.Literal("open"), Type.Literal("closed"), Type.Literal("merged")]),
     subject: InvestigationSubjectV1Schema,

@@ -22,6 +22,7 @@ import {
   InvestigationModelOutputRejectionIssueSchema,
   InvestigationModelOutputRejectionSchema,
 } from "./investigation-model-output.js";
+import { InvestigationNativePromptSnapshotSchema } from "./investigation-native-prompts.js";
 import {
   getInvestigationRecipeStepIssues,
   InvestigationRecipeStepSchema,
@@ -302,6 +303,7 @@ export const InvestigationTaskV1Schema = object({
   budget: InvestigationBudgetSchema,
   profileRef: InvestigationVersionRefSchema,
   promptRef: InvestigationVersionRefSchema,
+  promptSnapshot: Type.Optional(InvestigationNativePromptSnapshotSchema),
   state: Type.Union([Type.Literal("queued"), Type.Literal("running"), InvestigationOutcomeSchema]),
   latestReportRef: Type.Union([InvestigationReportRefSchema, Type.Null()]),
   createdAt: DateTimeSchema,

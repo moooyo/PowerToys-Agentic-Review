@@ -2,6 +2,7 @@ import type {
   ActionContextV1,
   InvestigationActionIntentV1,
   InvestigationActionKind,
+  InvestigationGitHubUser,
   InvestigationPlanV1,
   InvestigationResultV1,
   InvestigationSubjectV1,
@@ -34,6 +35,7 @@ export interface InvestigationOperatorPrincipal {
 
 export interface InvestigationWorkerPrincipal {
   readonly id: string;
+  readonly displayName?: string;
   readonly repositoryIds: readonly string[];
 }
 
@@ -61,6 +63,7 @@ export interface InvestigationCommentTarget {
 }
 
 export interface InvestigationWorkItemRecord extends InvestigationCommentTarget {
+  readonly author?: InvestigationGitHubUser;
   readonly title: string;
   readonly body: string;
   readonly state: "open" | "closed" | "merged";

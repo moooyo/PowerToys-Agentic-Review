@@ -13,9 +13,21 @@ import {
   InvestigationCommentPublicationSummarySchema,
   type InvestigationCreateActionIntentRequest,
   type InvestigationCreateTaskRequestV1,
+  InvestigationCurrentCommentSchema,
+  InvestigationFindingSourceSchema,
   InvestigationFindingsPageV1Schema,
+  InvestigationGitHubUserSchema,
+  InvestigationIntakeDetailsSchema,
   InvestigationLoopCheckpointV1Schema,
   InvestigationModelInvocationReceiptSchema,
+  InvestigationNativePromptBindingSchema,
+  type InvestigationNativePromptBindRequest,
+  InvestigationNativePromptCatalogSchema,
+  type InvestigationNativePromptKind,
+  type InvestigationNativePromptPublishRequest,
+  InvestigationNativePromptVersionSchema,
+  type InvestigationPublicationRecoveryRequest,
+  InvestigationPublicationRecoveryStatusSchema,
   InvestigationReportHeaderV1Schema,
   InvestigationRepositorySchema,
   InvestigationResourceLeaseSchema,
@@ -32,6 +44,7 @@ import {
   InvestigationWorkerControlListSchema,
   InvestigationWorkerControlSchema,
   type InvestigationWorkerControlUpdate,
+  InvestigationWorkItemAuthorSchema,
   Sha256Schema,
 } from "@agentic-review/contracts";
 import { type Static, Type } from "@sinclair/typebox";
@@ -57,6 +70,7 @@ export const WorkItemSchema = object({
   kind: Type.Union([Type.Literal("pull_request"), Type.Literal("issue")]),
   number: Type.Integer({ minimum: 1 }),
   title: Type.String({ minLength: 1 }),
+  author: Type.Optional(InvestigationGitHubUserSchema),
   body: Type.String(),
   state: Type.Union([Type.Literal("open"), Type.Literal("closed"), Type.Literal("merged")]),
   subject: InvestigationSubjectV1Schema,
@@ -205,6 +219,112 @@ export interface CommentSummaryQuery {
 export function createInvestigationApi(transport: InvestigationTransport) {
   return {
     ...createInvestigationReadApi(transport),
+    nativePrompts: async (repositoryId: string, signal?: AbortSignal) => {
+      const catalog = await transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/native-prompts`,
+        InvestigationNativePromptCatalogSchema,
+        { signal },
+      );
+      if (
+        catalog.repositoryId !== repositoryId ||
+        catalog.items.some((item) =>
+          item.versions.some(
+            (version) => version.repositoryId !== repositoryId || version.kind !== item.kind,
+          ),
+        )
+      )
+        throw new Error("The prompt catalog belongs to another repository.");
+      return catalog;
+    },
+    publishNativePrompt: (
+      repositoryId: string,
+      kind: InvestigationNativePromptKind,
+      input: InvestigationNativePromptPublishRequest,
+    ) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/native-prompts/${encodeURIComponent(kind)}/versions`,
+        InvestigationNativePromptVersionSchema,
+        { method: "POST", body: input },
+      ),
+    bindNativePrompt: (
+      repositoryId: string,
+      kind: InvestigationNativePromptKind,
+      input: InvestigationNativePromptBindRequest,
+    ) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/native-prompts/${encodeURIComponent(kind)}/binding`,
+        InvestigationNativePromptBindingSchema,
+        { method: "POST", body: input },
+      ),
+    repositoryIntakeDetails: async (repositoryId: string) => {
+      const value = await transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/intake-details`,
+        InvestigationIntakeDetailsSchema,
+      );
+      if (value.repositoryId !== repositoryId)
+        throw new Error("The intake details belong to another repository.");
+      return value;
+    },
+    repositoryGitHubUser: (repositoryId: string, lookup: string) =>
+      transport(
+        `/api/repositories/${encodeURIComponent(repositoryId)}/github-users/${encodeURIComponent(lookup)}`,
+        InvestigationGitHubUserSchema,
+      ),
+    workItemAuthor: async (id: string, signal?: AbortSignal) => {
+      const value = await transport(
+        `/api/work-items/${encodeURIComponent(id)}/author`,
+        InvestigationWorkItemAuthorSchema,
+        { signal },
+      );
+      if (value.workItemId !== id)
+        throw new Error("The author metadata belongs to another source.");
+      return value;
+    },
+    publicationRecovery: async (id: string, signal?: AbortSignal) => {
+      const value = await transport(
+        `/api/tasks/${encodeURIComponent(id)}/publication-recovery`,
+        InvestigationPublicationRecoveryStatusSchema,
+        { signal },
+      );
+      if (value.taskId !== id)
+        throw new Error("The publication recovery belongs to another review.");
+      return value;
+    },
+    recoverPublication: (id: string, input: InvestigationPublicationRecoveryRequest) =>
+      transport(
+        `/api/tasks/${encodeURIComponent(id)}/publication-recovery`,
+        InvestigationPublicationRecoveryStatusSchema,
+        { method: "POST", body: input },
+      ),
+    currentComment: async (id: string, signal?: AbortSignal) => {
+      const value = await transport(
+        `/api/comments/${encodeURIComponent(id)}/current`,
+        InvestigationCurrentCommentSchema,
+        { signal },
+      );
+      if (value.commentId !== id)
+        throw new Error("The current comment belongs to another publication.");
+      return value;
+    },
+    findingSource: async (
+      reportId: string,
+      findingId: string,
+      query: { locationIndex?: number } = {},
+      signal?: AbortSignal,
+    ) => {
+      const value = await transport(
+        `/api/reports/${encodeURIComponent(reportId)}/findings/${encodeURIComponent(findingId)}/source${queryString(query)}`,
+        InvestigationFindingSourceSchema,
+        { signal },
+      );
+      if (
+        value.reportRef.id !== reportId ||
+        value.findingId !== findingId ||
+        value.locationIndex !== (query.locationIndex ?? 0)
+      )
+        throw new Error("The source context belongs to another finding.");
+      return value;
+    },
     workers: () => transport("/api/workers", InvestigationWorkerControlListSchema),
     updateWorkerE2e: (id: string, input: InvestigationWorkerControlUpdate) =>
       transport(`/api/workers/${encodeURIComponent(id)}/e2e`, InvestigationWorkerControlSchema, {

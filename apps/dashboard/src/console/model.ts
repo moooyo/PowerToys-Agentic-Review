@@ -1,6 +1,7 @@
 import type {
   InvestigationCommentDelivery,
   InvestigationCommentPublicationSummary,
+  InvestigationGitHubUser,
   InvestigationReportHeaderV1,
   InvestigationSchedulerStatus,
   InvestigationTaskV1,
@@ -15,7 +16,7 @@ import {
 } from "../investigation/task-output-state";
 
 export type ConsoleText = (zh: string, en: string) => string;
-export type ReviewStatus = "attention" | "running" | "queued" | "publishing" | "posted" | "ignored";
+export type ReviewStatus = "attention" | "running" | "queued" | "publishing" | "posted";
 export type ReviewProblemType = "upload" | "review" | "worker" | "intake" | "stopped";
 
 export interface ReviewRecord {
@@ -27,6 +28,7 @@ export interface ReviewRecord {
   kind: "pr" | "issue";
   number: number;
   title: string;
+  author?: InvestigationGitHubUser;
   area: string;
   updatedAt: string;
   status: ReviewStatus;
@@ -42,6 +44,7 @@ export interface ReviewRecord {
   header?: InvestigationReportHeaderV1;
   publication?: InvestigationCommentPublicationSummary;
   progressPublication?: InvestigationCommentPublicationSummary;
+  currentPublication?: InvestigationCommentPublicationSummary;
   webhook?: InvestigationWebhookDelivery;
   queueReason?: "capacity" | "worker" | "unknown";
   occupied?: number;
@@ -110,7 +113,14 @@ export function triggerLabel(
   text: ConsoleText,
 ): string {
   if (!delivery) return text("触发方式未记录", "Trigger not recorded");
-  return `${delivery.mode === "e2e" ? text("E2E 命令", "E2E command") : text("Review 请求或分配", "Review request or assignment")} · ID ${delivery.actorUserId}`;
+  const labels = {
+    assignment: text("分配触发", "Assignment"),
+    review_request: text("Review 请求", "Review request"),
+    review_rerequest: text("重新请求 Review", "Review re-request"),
+    e2e_command: text("E2E 命令", "E2E command"),
+    e2e_revision: text("E2E 提交更新", "E2E revision update"),
+  };
+  return `${delivery.triggerKind ? labels[delivery.triggerKind] : delivery.mode === "e2e" ? text("E2E 命令", "E2E command") : text("Review 请求或分配", "Review request or assignment")} · ${delivery.actorLogin ? `@${delivery.actorLogin}` : `ID ${delivery.actorUserId}`}`;
 }
 
 export function problemMessage(record: ReviewRecord, text: ConsoleText): string {
@@ -224,8 +234,6 @@ export function recordStatusLabel(
   text: ConsoleText,
   now = Date.now(),
 ): string {
-  if (record.status === "ignored")
-    return `${text("已忽略", "Ignored")} · ${problemLabel(record.problem?.type, text)}`;
   if (record.status === "attention")
     if (record.completedWithoutPublication)
       return text("Review 已完成 · 发布状态未确认", "Review completed · Publication unconfirmed");
@@ -248,31 +256,6 @@ export function recordStatusLabel(
   return record.kind === "pr" && record.header
     ? `${conclusion} · ${text(`${record.header.report.collections.findings} 个问题`, `${record.header.report.collections.findings} findings`)}`
     : conclusion;
-}
-
-export const ignoredRecordStoragePrefix = "agentic-review.console.ignored.v1.";
-
-export function readIgnoredRecordIds(identity: string): Set<string> {
-  try {
-    const raw: unknown = JSON.parse(
-      sessionStorage.getItem(ignoredRecordStoragePrefix + encodeURIComponent(identity)) ?? "[]",
-    );
-    return new Set(
-      Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [],
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-export function setReviewRecordIgnored(identity: string, id: string, ignored: boolean): void {
-  const records = readIgnoredRecordIds(identity);
-  if (ignored) records.add(id);
-  else records.delete(id);
-  sessionStorage.setItem(
-    ignoredRecordStoragePrefix + encodeURIComponent(identity),
-    JSON.stringify([...records]),
-  );
 }
 
 function publicationMatches(
@@ -321,6 +304,19 @@ export function mapReviewTask(
     (entry) => !!task.latestReportRef && entry.reportId === task.latestReportRef.id,
   );
   const progressPublication = comments.find((entry) => entry.mode === "progress");
+  const currentPublication = publications
+    .filter(
+      (entry) =>
+        entry.mode === "progress" &&
+        entry.repositoryId === task.repository.id &&
+        entry.workItemId === task.workItem.id &&
+        entry.workItemKind === task.workItem.kind &&
+        entry.workItemNumber === task.workItem.number &&
+        (entry.producerTaskKind === undefined
+          ? publicationMatches(task, entry)
+          : (entry.producerTaskKind === "pr-e2e") === (task.kind === "pr-e2e")),
+    )
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
   const attempt = detail?.attempts
     .filter((entry) => entry.taskId === task.id)
     .sort((left, right) => right.number - left.number)[0];
@@ -346,6 +342,7 @@ export function mapReviewTask(
     detail,
     publication,
     progressPublication,
+    currentPublication,
     webhook,
   };
   if (task.state === "queued") {
@@ -412,6 +409,7 @@ export function mapIntakeFailure(
     number: delivery.number,
     title:
       item?.title ?? `${delivery.kind === "pull_request" ? "PR" : "Issue"} #${delivery.number}`,
+    ...(item?.author ? { author: item.author } : {}),
     area: "",
     updatedAt: delivery.attemptHistory.at(-1)?.finishedAt ?? delivery.receivedAt,
     status: "attention",
@@ -740,8 +738,21 @@ export async function loadReviewRecords(
       detail?.status === "fulfilled" ? detail.value : undefined,
       publications,
       scheduler,
-      deliveries.find((entry) => entry.taskId === task.id),
+      deliveries.find(
+        (entry) =>
+          entry.taskId === task.id &&
+          entry.canonicalDeliveryId === entry.deliveryId &&
+          entry.repositoryId === task.repository.id &&
+          entry.kind === task.workItem.kind &&
+          entry.number === task.workItem.number &&
+          entry.triggerKind !== "e2e_revision" &&
+          !["active_e2e_revision", "revision_observed"].includes(entry.reason ?? ""),
+      ),
     );
+    const item = items.find(
+      (item) => item.id === task.workItem.id && item.repositoryId === task.repository.id,
+    );
+    if (item?.author) record.author = item.author;
     if (detail?.status === "rejected" || commentsResponse.status === "rejected") {
       record.readWarning =
         "Some review details are unavailable. Refresh to check the current state.";

@@ -36,6 +36,10 @@ import {
   sampleIssueAutoReplyTemplate,
   samplePullRequestAutoReplyTemplate,
 } from "./sample-auto-reply-templates";
+import {
+  createSampleConsoleCapabilities,
+  sampleWorkItemAuthor,
+} from "./sample-console-capabilities";
 import { createSampleOperationsApi } from "./sample-operations";
 import { createSampleReadApi } from "./sample-read-api";
 import { InvestigationHttpError } from "./transport";
@@ -409,6 +413,7 @@ export function createSampleInvestigationApi(): InvestigationApi {
     workItems.set(fixture.task.workItem.id, {
       ...fixture.task.workItem,
       repositoryId: repository.id,
+      author: sampleWorkItemAuthor(),
       body: "This work item is an isolated development sample. No live repository was accessed.",
       state: "open",
       subject,
@@ -1009,6 +1014,14 @@ export function createSampleInvestigationApi(): InvestigationApi {
 
   const api: InvestigationApi = {
     ...createSampleOperationsApi(),
+    ...createSampleConsoleCapabilities({
+      repository: () => repository,
+      workItems: () => [...workItems.values()],
+      tasks: () => [...tasks.values()],
+      reports: () => [...reports.values()],
+      comments: () => [...comments.values()],
+      commentBodies: () => commentBodies,
+    }),
     ...createSampleReadApi({
       repositories: () => [repository],
       workItems: () => [...workItems.values()],

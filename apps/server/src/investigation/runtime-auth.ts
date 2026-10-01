@@ -144,7 +144,11 @@ export class InvestigationRuntimeAuth {
     );
     this.#workers = config.workers.map((worker) => ({
       digest: createHash("sha256").update(worker.token).digest(),
-      principal: { id: worker.id, repositoryIds: [...worker.repositoryIds] },
+      principal: {
+        id: worker.id,
+        repositoryIds: [...worker.repositoryIds],
+        ...(worker.displayName ? { displayName: worker.displayName } : {}),
+      },
     }));
   }
 

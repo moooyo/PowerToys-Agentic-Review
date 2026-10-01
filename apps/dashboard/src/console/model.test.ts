@@ -4,7 +4,7 @@ import type {
   InvestigationTaskV1,
   InvestigationWebhookDelivery,
 } from "@agentic-review/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createSampleInvestigationApi } from "../investigation/sample-adapter";
 import {
   aggregateRelatedWork,
@@ -13,9 +13,7 @@ import {
   formatDuration,
   mapIntakeFailure,
   mapReviewTask,
-  readIgnoredRecordIds,
   relativeTime,
-  setReviewRecordIgnored,
 } from "./model";
 
 async function fixture() {
@@ -87,6 +85,24 @@ describe("review console source truth", () => {
         { ...publication(task, "synced"), mode: "progress", reportId: null },
       ]).completedWithoutPublication,
     ).toBe(true);
+  });
+  it("reads the current shared comment without presenting a newer round as this saved report's publication", async () => {
+    const { task, detail } = await fixture();
+    const current = {
+      ...publication(task, "synced"),
+      mode: "progress" as const,
+      taskId: "newer-review",
+      reportId: "newer-report",
+      producerTaskKind: task.kind,
+    };
+    const record = mapReviewTask({ ...task, state: "completed" }, detail, [current]);
+    expect(record.publication).toBeUndefined();
+    expect(record.completedWithoutPublication).toBe(true);
+    expect(record.currentPublication?.id).toBe(current.id);
+    expect(
+      mapReviewTask(task, detail, [{ ...current, workItemId: "another-source" }])
+        .currentPublication,
+    ).toBeUndefined();
   });
 
   it("does not accept an initial progress comment, old report, or matching number from another source", async () => {
@@ -299,32 +315,7 @@ describe("review console source truth", () => {
   });
 });
 
-describe("browser-scoped ignore state and elapsed time", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("isolates ignored review records by account identity and supports undo", () => {
-    const values = new Map<string, string>();
-    vi.stubGlobal("sessionStorage", {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => {
-        values.set(key, value);
-      },
-      removeItem: (key: string) => {
-        values.delete(key);
-      },
-      clear: () => values.clear(),
-      key: (index: number) => [...values.keys()][index] ?? null,
-      get length() {
-        return values.size;
-      },
-    });
-    setReviewRecordIgnored("account-a", "record-1", true);
-    expect(readIgnoredRecordIds("account-a").has("record-1")).toBe(true);
-    expect(readIgnoredRecordIds("account-b").has("record-1")).toBe(false);
-    setReviewRecordIgnored("account-a", "record-1", false);
-    expect(readIgnoredRecordIds("account-a").size).toBe(0);
-  });
-
+describe("observed elapsed time", () => {
   it("formats observed durations across an hour and clamps clock skew", () => {
     expect(formatDuration(65_000)).toBe("1:05");
     expect(formatDuration(3_661_000)).toBe("1:01:01");

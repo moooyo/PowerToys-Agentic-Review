@@ -47,6 +47,7 @@ import Fastify, {
   type FastifyServerOptions,
 } from "fastify";
 import { InvestigationRequestError } from "./errors.js";
+import { registerInvestigationNativePromptRoutes } from "./native-prompts-http.js";
 import {
   type InvestigationActionContextQuery,
   type InvestigationDirectoryQuery,
@@ -233,6 +234,7 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
       );
     }
     workers.set(request, principal);
+    service.workerControls.observe(principal);
     reply.header("cache-control", "no-store");
   }
 
@@ -705,6 +707,11 @@ export function buildInvestigationApp(options: InvestigationAppOptions = {}): Fa
       await service.workerFinalize(worker(request), request.params.id, request.body),
   );
 
+  if (options.authenticateOperator)
+    registerInvestigationNativePromptRoutes(app, {
+      prompts: service.prompts,
+      authenticateOperator: options.authenticateOperator,
+    });
   options.registerIngressRoutes?.(app, service);
   return app;
 }

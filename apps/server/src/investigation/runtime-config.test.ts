@@ -11,6 +11,24 @@ afterEach(async () => {
 });
 
 describe("password runtime configuration", () => {
+  it("loads an explicit public webhook URL independently of the dashboard origin", () => {
+    const config = loadInvestigationRuntimeConfig({
+      INVESTIGATION_PUBLIC_ORIGIN: "https://console.example.test",
+      INVESTIGATION_GITHUB_WEBHOOK_PUBLIC_URL: "https://gateway.example.test/receive",
+    });
+    expect(config.webhookPublicUrl).toBe("https://gateway.example.test/receive");
+    expect(config.auth.publicOrigin).toBe("https://console.example.test");
+    expect(config.webhook).toBeUndefined();
+    for (const url of [
+      "/receive",
+      "https://user:secret@example.test/receive",
+      "https://example.test/receive?token=x",
+    ])
+      expect(() =>
+        loadInvestigationRuntimeConfig({ INVESTIGATION_GITHUB_WEBHOOK_PUBLIC_URL: url }),
+      ).toThrow("public webhook URL");
+  });
+
   it("defaults to password authentication without any predefined credentials", () => {
     const config = loadInvestigationRuntimeConfig({});
     expect(config.host).toBe("127.0.0.1");
@@ -241,5 +259,25 @@ describe("password runtime configuration", () => {
         INVESTIGATION_WORKERS_JSON: JSON.stringify([{ ...worker, token: "short" }]),
       }),
     ).toThrow("43 to 256");
+  });
+
+  it("accepts optional friendly worker names without changing their stable identities", () => {
+    const worker = {
+      id: "worker-1",
+      displayName: "Windows Review Worker",
+      token: "T".repeat(43),
+      repositoryIds: ["repo-1"],
+    };
+    expect(
+      loadInvestigationRuntimeConfig({ INVESTIGATION_WORKERS_JSON: JSON.stringify([worker]) })
+        .workers,
+    ).toEqual([worker]);
+    for (const displayName of ["", " ", " Worker", "Worker ", "W".repeat(121), 1, null]) {
+      expect(() =>
+        loadInvestigationRuntimeConfig({
+          INVESTIGATION_WORKERS_JSON: JSON.stringify([{ ...worker, displayName }]),
+        }),
+      ).toThrow("worker.displayName");
+    }
   });
 });

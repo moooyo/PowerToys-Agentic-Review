@@ -1,6 +1,7 @@
 import type {
   InvestigationCommentDelivery,
   InvestigationFindingV1,
+  InvestigationReportHeaderV1,
 } from "@agentic-review/contracts";
 import { Dialog, Snackbar } from "@mui/material";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -22,6 +23,8 @@ import {
   selectedTaskAttempt,
   type TaskOutputState,
 } from "../investigation/task-output-state";
+import { CommentCurrent } from "./comment-current";
+import { FindingSource } from "./finding-source";
 import {
   applyHistoricalPublication,
   assertReviewDetailBinding,
@@ -37,11 +40,11 @@ import {
   relatedWorkLabel,
   relativeTime,
   reportConclusion,
-  setReviewRecordIgnored,
   stageLabel,
   triggerLabel,
 } from "./model";
 import { ConsoleIcon, useConsolePreferences } from "./preferences";
+import PublicationRecovery from "./publication-recovery";
 import "./record-detail.css";
 
 interface Props {
@@ -290,7 +293,17 @@ function Workflow({ record, now, text }: { record: ReviewRecord; now: number; te
   );
 }
 
-function Finding({ finding, text }: { finding: InvestigationFindingV1; text: ConsoleText }) {
+function Finding({
+  finding,
+  text,
+  header,
+  identity,
+}: {
+  finding: InvestigationFindingV1;
+  text: ConsoleText;
+  header: InvestigationReportHeaderV1;
+  identity: string;
+}) {
   const [open, setOpen] = useState(false);
   const contentId = useId();
   const location = finding.locations[0];
@@ -321,6 +334,7 @@ function Finding({ finding, text }: { finding: InvestigationFindingV1; text: Con
       </button>
       {open && (
         <div id={contentId} className="rc-finding-body">
+          <FindingSource header={header} finding={finding} identity={identity} />
           <div>
             <span>{text("影响", "Impact")}</span>
             <p>{finding.impact.description}</p>
@@ -394,7 +408,6 @@ function ReportPanel({ record, identity }: { record: ReviewRecord; identity: str
     counts[finding.priority] = (counts[finding.priority] ?? 0) + 1;
     return counts;
   }, {});
-  const e2e = header.context.e2e;
   const rawSteps =
     assessment.kind === "bug"
       ? [...assessment.bugAssessment.missingInformation, ...assessment.bugAssessment.hypotheses]
@@ -420,15 +433,6 @@ function ReportPanel({ record, identity }: { record: ReviewRecord; identity: str
               {priority} · {priorities[priority]}
             </span>
           ))}
-        <span className="rc-report-coverage">
-          {text(
-            `覆盖 ${header.report.coverage.completedUnitCount} / ${header.report.coverage.includedUnitCount} 个范围单元`,
-            `Coverage ${header.report.coverage.completedUnitCount} / ${header.report.coverage.includedUnitCount} scope units`,
-          )}
-          {e2e
-            ? ` · E2E ${e2e.features.filter((feature) => feature.outcome === "passed").length} / ${e2e.features.length}`
-            : ""}
-        </span>
       </div>
       <p className="rc-report-summary">{header.report.summary}</p>
       {header.report.completeness === "partial" &&
@@ -457,7 +461,13 @@ function ReportPanel({ record, identity }: { record: ReviewRecord; identity: str
           )}
           {!outputAccessDenied(findings.error) &&
             findings.data?.map((finding) => (
-              <Finding key={`${finding.id}:${finding.version}`} finding={finding} text={text} />
+              <Finding
+                key={`${finding.id}:${finding.version}`}
+                finding={finding}
+                text={text}
+                header={header}
+                identity={identity}
+              />
             ))}
         </div>
       ) : (
@@ -775,6 +785,8 @@ function CommentsPanel({ record, identity }: { record: ReviewRecord; identity: s
     (delivery) =>
       delivery.state === "succeeded" && delivery.effect === "applied" && delivery.body !== null,
   );
+  const currentPublication =
+    record.currentPublication ?? record.publication ?? record.progressPublication;
   const currentByComment = new Map<string, InvestigationCommentDelivery>();
   for (const delivery of deliveries)
     if (!currentByComment.has(delivery.commentId))
@@ -793,6 +805,9 @@ function CommentsPanel({ record, identity }: { record: ReviewRecord; identity: s
     );
   return (
     <div className="rc-comments-panel">
+      {currentPublication && (
+        <CommentCurrent publication={currentPublication} identity={identity} />
+      )}
       {query.isPending && (
         <div className="rc-detail-loading">
           <Spinner />
@@ -909,6 +924,29 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
     initialRecord.currentWorkId ?? initialRecord.taskId,
   );
   const selectedSource = related.find((work) => work.taskId === selectedWorkId) ?? initialRecord;
+  const authorQuery = useQuery({
+    queryKey: [
+      "console-work-item-author",
+      identity,
+      selectedSource.repositoryId,
+      selectedSource.workItemId,
+    ],
+    enabled: !selectedSource.author && !!selectedSource.workItemId,
+    queryFn: async ({ signal }) => {
+      const value = await investigationApi.workItemAuthor(selectedSource.workItemId, signal);
+      if (
+        value.workItemId !== selectedSource.workItemId ||
+        value.repositoryId !== selectedSource.repositoryId
+      )
+        throw new Error("The author metadata is not bound to this source.");
+      return value;
+    },
+    staleTime: 300_000,
+    retry: false,
+  });
+  const author =
+    selectedSource.author ??
+    (authorQuery.isError ? undefined : (authorQuery.data?.author ?? undefined));
   const [tab, setTab] = useState<"report" | "session" | "comment">(
     ["running", "queued"].includes(initialRecord.status) ? "session" : "report",
   );
@@ -950,9 +988,11 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
       ? mapReviewTask(
           detail.task,
           detail,
-          [selectedSource.publication, selectedSource.progressPublication].filter(
-            (value): value is NonNullable<typeof value> => !!value,
-          ),
+          [
+            selectedSource.publication,
+            selectedSource.progressPublication,
+            selectedSource.currentPublication,
+          ].filter((value): value is NonNullable<typeof value> => !!value),
           undefined,
           selectedSource.webhook,
         )
@@ -962,6 +1002,7 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
     : mapped;
   const record: ReviewRecord = {
     ...fresh,
+    ...(author ? { author } : {}),
     id: initialRecord.id,
     queueReason: selectedSource.queueReason,
     occupied: selectedSource.occupied,
@@ -971,7 +1012,6 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
     !fresh.publication
       ? { completedWithoutPublication: true, problem: undefined }
       : {}),
-    ...(initialRecord.status === "ignored" ? { status: "ignored" as const } : {}),
   };
   const output = useReviewOutput(record, identity);
   const command = useQuery<RetainedCommentCommand | null>({
@@ -1063,21 +1103,6 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
           : record.problem?.type === "stopped"
             ? "pause_circle"
             : "error";
-  const ignore = (ignored: boolean) => {
-    try {
-      setReviewRecordIgnored(identity, record.id, ignored);
-      onRefresh();
-      setNotice({
-        text: text(
-          `${ignored ? "已忽略" : "已撤销忽略"} · #${record.number}`,
-          `${ignored ? "Ignored" : "Ignore undone"} · #${record.number}`,
-        ),
-        undo: ignored,
-      });
-    } catch {
-      setError(text("无法保存当前浏览器的忽略状态", "Could not save this browser's ignored state"));
-    }
-  };
   const primary = async () => {
     if (busy || !retryAllowed) return;
     setBusy(true);
@@ -1116,7 +1141,6 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
         setNotice({ text: text(`已重新排队 · #${record.number}`, `Requeued · #${record.number}`) });
       }
       invalidateReviewRecordCache();
-      if (initialRecord.status === "ignored") setReviewRecordIgnored(identity, record.id, false);
       if (record.taskId) await detailQuery.refetch();
       onRefresh();
     } catch (cause) {
@@ -1182,6 +1206,11 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
           </div>
           <h1>{record.title}</h1>
           <div className="rc-detail-meta">
+            {record.author && (
+              <span>
+                <ConsoleIcon name="person" size={18} />@{record.author.login}
+              </span>
+            )}
             {record.webhook && (
               <span>
                 <ConsoleIcon name="bolt" size={18} />
@@ -1285,7 +1314,7 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
           </button>
         </div>
       )}
-      {record.completedWithoutPublication && record.status !== "ignored" && (
+      {record.completedWithoutPublication && (
         <section className="rc-status-card rc-status-completed">
           <ConsoleIcon name="check_circle" size={24} filled />
           <div className="rc-status-copy">
@@ -1298,6 +1327,14 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
             </small>
           </div>
         </section>
+      )}
+      {record.completedWithoutPublication && (
+        <PublicationRecovery
+          record={record}
+          identity={identity}
+          onRefresh={onRefresh}
+          onSettings={onSettings}
+        />
       )}
       {record.status === "attention" && !record.completedWithoutPublication && (
         <section
@@ -1335,9 +1372,6 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
             )}
           </div>
           <div className="rc-status-actions">
-            <DetailButton onClick={() => ignore(true)} disabled={busy}>
-              {text("忽略", "Ignore")}
-            </DetailButton>
             <DetailButton
               filled
               icon={busy ? undefined : primaryIcon}
@@ -1452,13 +1486,6 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
               {text("在 GitHub 查看", "View on GitHub")}
             </a>
           )}
-        </section>
-      )}
-      {record.status === "ignored" && (
-        <section className="rc-status-card rc-status-ignored">
-          <ConsoleIcon name="notifications_off" size={24} />
-          <span>{text("已忽略，不会再提醒", "Ignored; reminders are hidden")}</span>
-          <DetailButton onClick={() => ignore(false)}>{text("撤销", "Undo")}</DetailButton>
         </section>
       )}
       <div
@@ -1604,11 +1631,6 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
       >
         <div role="status" className="rc-snackbar-content">
           <span>{notice?.text}</span>
-          {notice?.undo && (
-            <button type="button" onClick={() => ignore(false)}>
-              {text("撤销", "Undo")}
-            </button>
-          )}
           <button
             type="button"
             aria-label={text("关闭提示", "Dismiss notification")}

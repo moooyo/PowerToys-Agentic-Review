@@ -1,0 +1,166 @@
+.console-settings-workers {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.console-settings-worker {
+  border: 1px solid var(--console-border);
+  border-radius: 16px;
+  padding: 16px 16px 16px 20px;
+}
+.console-settings-worker-top {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.console-settings-worker .console-settings-leading-icon {
+  background: var(--console-tool);
+  color: var(--console-secondary);
+}
+.console-settings-worker-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.console-settings-worker-name strong {
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+}
+.console-settings-worker-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 12px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+}
+.console-settings-workers .console-settings-worker-name strong {
+  font-family: inherit;
+  overflow-wrap: anywhere;
+}
+.console-settings-workers .console-settings-worker-state {
+  height: auto;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 4px 10px;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
+.console-settings-workers .console-settings-worker-state .console-settings-dot {
+  flex: none;
+}
+.console-settings-worker-id {
+  display: block;
+  margin-top: 2px;
+  font-family: "Roboto Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--console-secondary);
+  overflow-wrap: anywhere;
+}
+.console-settings-worker-state.online {
+  background: var(--console-success-container);
+  color: var(--console-success-text);
+}
+.console-settings-worker-state.online .console-settings-dot {
+  background: var(--console-success-dot);
+}
+.console-settings-worker-state.busy {
+  background: var(--console-primary-container);
+  color: var(--console-on-primary-container);
+}
+.console-settings-worker-state.busy .console-settings-dot {
+  background: var(--console-primary);
+}
+.console-settings-worker-state.cleaning {
+  background: var(--console-warning-container);
+  color: var(--console-on-warning-container);
+}
+.console-settings-worker-state.cleaning .console-settings-dot {
+  background: var(--console-on-warning-container);
+}
+.console-settings-worker-state.offline {
+  background: var(--console-error-container);
+  color: var(--console-on-error-container);
+}
+.console-settings-worker-state.offline .console-settings-dot {
+  background: var(--console-error);
+}
+.console-settings-worker-state.unconfirmed {
+  background: var(--console-chip);
+  color: var(--console-secondary);
+}
+.console-settings-worker-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--console-secondary);
+}
+.console-settings-worker-task {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: var(--console-primary-tint);
+  border-radius: 10px;
+  color: var(--console-on-primary-container);
+  font-size: 13px;
+  line-height: 18px;
+}
+.console-settings-worker-task > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.console-settings-worker-task > span:last-child {
+  color: var(--console-secondary);
+}
+.console-settings-worker-offline,
+.console-settings-worker-pending {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--console-error-container);
+  color: var(--console-on-error-container);
+  font-size: 13px;
+  line-height: 18px;
+}
+.console-settings-worker-pending {
+  background: var(--console-warning-container);
+  color: var(--console-on-warning-container);
+}
+.console-settings-worker-ownership {
+  margin-top: 8px;
+  color: var(--console-secondary);
+  font-size: 13px;
+  line-height: 18px;
+}
+.console-settings-worker-status-note {
+  color: var(--console-secondary);
+  font-size: 13px;
+  line-height: 18px;
+}
+@media (max-width: 600px) {
+  .console-settings-workers .console-settings-worker-top {
+    flex-wrap: wrap;
+  }
+  .console-settings-workers .console-settings-worker-switch {
+    margin-left: 52px;
+  }
+  .console-settings-workers .console-settings-worker-task {
+    flex-wrap: wrap;
+  }
+  .console-settings-workers .console-settings-worker-task > span:last-child {
+    margin-left: 28px;
+    flex-basis: calc(100% - 28px);
+  }
+}

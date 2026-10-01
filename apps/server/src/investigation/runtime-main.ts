@@ -19,9 +19,16 @@ import { registerInvestigationCommentRoutes } from "./comment-http.js";
 import { InvestigationE2eIntake } from "./e2e-intake.js";
 import { createInvestigationE2eMediaPublications } from "./e2e-media-runtime.js";
 import { requireCondition } from "./errors.js";
+import { InvestigationGitHubIdentityResolver } from "./github-identity.js";
 import { InvestigationGitHubTransport } from "./github-transport.js";
+import { InvestigationIntakeDetailsService } from "./intake-details.js";
+import { registerInvestigationIntakeDetailsRoutes } from "./intake-details-http.js";
+import { registerInvestigationNativeEvidenceRoutes } from "./native-evidence-http.js";
+import { InvestigationNativeEvidenceReads } from "./native-evidence-read.js";
 import { InvestigationOperations, registerInvestigationOperationsRoute } from "./operations.js";
 import { InvestigationProgressReplies } from "./progress-reply.js";
+import { InvestigationPublicationRecovery } from "./publication-recovery.js";
+import { registerInvestigationPublicationRecoveryRoutes } from "./publication-recovery-http.js";
 import { InvestigationRuntimeAuth } from "./runtime-auth.js";
 import {
   type InvestigationRuntimeConfig,
@@ -39,6 +46,7 @@ import { registerInvestigationWebhookDeliveryRoutes } from "./webhook-delivery-h
 import { registerInvestigationWebhookRoute } from "./webhook-http.js";
 import { InvestigationWebhookIntake } from "./webhook-intake.js";
 import { InvestigationWebhookSettings } from "./webhook-settings.js";
+import { InvestigationWorkItemAuthorReader } from "./work-item-author.js";
 import { InvestigationWorkerControls } from "./worker-controls.js";
 
 export interface InvestigationRuntimeDependencies {
@@ -46,6 +54,7 @@ export interface InvestigationRuntimeDependencies {
   readonly logger?: false;
   readonly sourceImportFetch?: typeof globalThis.fetch;
   readonly mediaUploadFetch?: typeof globalThis.fetch;
+  readonly nativeEvidenceFetch?: typeof globalThis.fetch;
 }
 
 export async function createInvestigationRuntime(
@@ -171,6 +180,24 @@ export async function createInvestigationRuntime(
       },
       ...(actionTransport === undefined ? {} : { actionTransport }),
       registerIngressRoutes: (ingressApp, service) => {
+        registerInvestigationIntakeDetailsRoutes(ingressApp, {
+          authenticateOperator: runtimeAuth.authenticateOperator,
+          authors: new InvestigationWorkItemAuthorReader({
+            store,
+            ...(config.github ? { token: config.github.token } : {}),
+            ...(dependencies.sourceImportFetch ? { fetch: dependencies.sourceImportFetch } : {}),
+          }),
+          details: new InvestigationIntakeDetailsService({
+            store,
+            settings: webhookSettings,
+            publicOrigin: config.auth.publicOrigin,
+            ...(config.webhookPublicUrl ? { webhookPublicUrl: config.webhookPublicUrl } : {}),
+          }),
+          identities: new InvestigationGitHubIdentityResolver({
+            ...(config.github ? { token: config.github.token } : {}),
+            ...(dependencies.sourceImportFetch ? { fetch: dependencies.sourceImportFetch } : {}),
+          }),
+        });
         reapTaskLeases = () => service.reapExpiredLeases();
         registerInvestigationOperationsRoute(ingressApp, {
           authenticateOperator: runtimeAuth.authenticateOperator,
@@ -281,6 +308,34 @@ export async function createInvestigationRuntime(
           progress,
           automaticReplies: publisher,
           workspace: service.workspace,
+        });
+        registerInvestigationNativeEvidenceRoutes(ingressApp, {
+          authenticateOperator: runtimeAuth.authenticateOperator,
+          reads: new InvestigationNativeEvidenceReads({
+            store,
+            readComment: (actor, id) =>
+              id.startsWith("auto-reply:report:")
+                ? publisher.getComment(actor, id)
+                : progress.getCommentReadOnly(actor, id),
+            readReport: (actor, id) => service.reportExport(actor, id),
+            ...(config.github ? { github: config.github } : {}),
+            fetch: (input, init) =>
+              (
+                dependencies.nativeEvidenceFetch ??
+                dependencies.sourceImportFetch ??
+                globalThis.fetch
+              )(input, {
+                ...init,
+                signal: AbortSignal.any([
+                  actionShutdown.signal,
+                  ...(init?.signal ? [init.signal] : []),
+                ]),
+              }),
+          }),
+        });
+        registerInvestigationPublicationRecoveryRoutes(ingressApp, {
+          authenticateOperator: runtimeAuth.authenticateOperator,
+          recovery: new InvestigationPublicationRecovery({ store, progress }),
         });
         ingressApp.get<{ Params: { id: string } }>(
           "/api/reports/:id/media-publication",

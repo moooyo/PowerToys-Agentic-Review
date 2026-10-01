@@ -392,6 +392,9 @@
   line-height: 16px;
   color: var(--console-secondary);
 }
+.console-settings-field > .console-settings-button {
+  align-self: flex-start;
+}
 .console-settings-trusted {
   display: flex;
   flex-direction: column;
@@ -451,6 +454,34 @@
   height: 24px;
   font-size: 11px;
   font-weight: 600;
+}
+.console-settings-avatar img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+.console-settings-user-identity {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 20px;
+}
+.console-settings-user-identity > span:not(.console-settings-avatar) {
+  overflow-wrap: anywhere;
+}
+.console-settings-trusted-chip {
+  min-height: 32px;
+  height: auto;
+}
+.console-settings-webhook-url {
+  overflow-wrap: anywhere;
+}
+.console-settings-webhook + .console-settings-notice span {
+  overflow-wrap: anywhere;
 }
 .console-settings-add-user {
   display: flex;
