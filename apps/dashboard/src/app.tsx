@@ -430,7 +430,11 @@ function ApplicationShell() {
               >
                 {selected ? (
                   <RecordDetail
-                    key={`${selected.id}:${params.get("recordId") || params.get("taskId") || params.get("reportId") || params.get("commentId") || ""}`}
+                    key={`${selected.id}:${JSON.stringify(
+                      ["recordId", "taskId", "reportId", "commentId", "workItemId"].map((key) =>
+                        params.get(key),
+                      ),
+                    )}`}
                     record={selected}
                     onRefresh={refresh}
                     onSettings={openSettings}

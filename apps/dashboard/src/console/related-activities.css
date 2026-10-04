@@ -1,0 +1,288 @@
+.rc-related-activities {
+  min-width: 0;
+  border: 1px solid var(--console-outline-variant);
+  border-radius: 16px;
+  padding: 16px;
+  color: var(--console-text);
+  background: var(--console-surface);
+}
+
+.rc-activities-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.rc-activities-heading h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 500;
+}
+
+.rc-activities-count {
+  color: var(--console-secondary);
+  font-size: 13px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.rc-activities-views {
+  display: inline-flex;
+  box-sizing: border-box;
+  min-width: 0;
+  margin: 0;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--console-outline-variant);
+  border-radius: 12px;
+}
+
+.rc-activities-views button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--console-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.rc-activities-views button[aria-pressed="true"] {
+  background: var(--console-surface-high);
+  color: var(--console-text);
+  box-shadow: inset 0 0 0 1px var(--console-outline);
+}
+
+.rc-activities-views button:hover {
+  background: var(--console-tonal-hover);
+}
+
+.rc-activities-note {
+  margin: 0 0 12px;
+  color: var(--console-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.rc-activities-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.rc-activities-rows li {
+  min-width: 0;
+}
+
+.rc-activity-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--console-outline-variant);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--console-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.rc-activity-row[aria-pressed="true"] {
+  background: var(--console-surface-high);
+  border-color: var(--console-text);
+  box-shadow: inset 3px 0 0 var(--console-text);
+}
+
+.rc-activity-row:hover:not(:disabled) {
+  background: var(--console-tonal-hover);
+}
+
+.rc-activity-row:disabled {
+  cursor: default;
+}
+
+.rc-related-activities button:focus-visible {
+  outline: 2px solid var(--console-primary);
+  outline-offset: 3px;
+}
+
+.rc-activity-primary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+}
+
+.rc-activity-name {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.rc-activity-selected {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--console-secondary);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.rc-activity-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.rc-activity-success {
+  background: var(--console-success-container);
+  color: var(--console-success);
+}
+
+.rc-activity-active {
+  background: var(--console-primary-container);
+  color: var(--console-primary);
+}
+
+.rc-activity-warning {
+  background: var(--console-warning-container);
+  color: var(--console-warning);
+}
+
+.rc-activity-danger {
+  background: var(--console-error-container);
+  color: var(--console-error);
+}
+
+.rc-activity-neutral {
+  background: var(--console-chip);
+  color: var(--console-secondary);
+}
+
+.rc-activity-time,
+.rc-activity-identity {
+  color: var(--console-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.rc-activity-identity code {
+  font-family: "Roboto Mono", ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.rc-activity-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  margin-top: 2px;
+  color: var(--console-secondary);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.rc-activity-publication-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--console-warning);
+}
+
+.rc-activities-timeline li {
+  position: relative;
+  padding-left: 24px;
+  margin-left: 4px;
+}
+
+.rc-activities-timeline li::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  bottom: -8px;
+  left: 3px;
+  width: 1px;
+  background: var(--console-outline-variant);
+}
+
+.rc-activities-timeline li:first-child::before {
+  top: 24px;
+}
+
+.rc-activities-timeline li:last-child::before {
+  bottom: calc(100% - 24px);
+}
+
+.rc-activities-timeline li::after {
+  content: "";
+  position: absolute;
+  top: 20px;
+  left: 0;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--console-outline);
+  border-radius: 50%;
+  box-sizing: border-box;
+  background: var(--console-surface);
+}
+
+@container rc-review (max-width: 440px) {
+  .rc-related-activities {
+    padding: 12px;
+  }
+  .rc-activities-heading {
+    align-items: flex-start;
+  }
+  .rc-activities-views {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .rc-activities-views button {
+    flex: 1;
+    padding: 0 8px;
+  }
+  .rc-activity-row {
+    padding: 10px;
+  }
+  .rc-activity-state {
+    margin-left: 0;
+  }
+  .rc-activities-timeline li {
+    padding-left: 18px;
+  }
+}

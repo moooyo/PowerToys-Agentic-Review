@@ -5,11 +5,12 @@ export function selectReviewRecord(
   records: ReviewRecord[],
   parameters: URLSearchParams,
 ): ReviewRecord | undefined {
-  const recordId = parameters.get("recordId") || parameters.get("taskId");
+  const recordId = parameters.get("recordId");
+  const taskId = parameters.get("taskId");
   const reportId = parameters.get("reportId");
   const commentId = parameters.get("commentId");
   const workItemId = parameters.get("workItemId");
-  if (!recordId && !reportId && !commentId && !workItemId) {
+  if (!recordId && !taskId && !reportId && !commentId && !workItemId) {
     return (
       records.find((record) => record.status === "attention" && record.problem) ||
       records.find((record) => record.status === "running") ||
@@ -19,11 +20,28 @@ export function selectReviewRecord(
     );
   }
   for (const record of records) {
-    if (recordId === record.id && !reportId && !commentId && !workItemId) return record;
-    const related = record.relatedWork || [record];
-    const work = related.find(
+    if (workItemId && record.workItemId !== workItemId) continue;
+    const related = (record.relatedWork ?? [record]).filter(
       (item) =>
-        (!recordId || record.id === recordId || item.taskId === recordId) &&
+        item.repositoryId === record.repositoryId &&
+        item.workItemId === record.workItemId &&
+        item.kind === record.kind &&
+        item.number === record.number,
+    );
+    const historical =
+      recordId && recordId !== record.id
+        ? related.find((item) => item.taskId === recordId)
+        : undefined;
+    if (recordId && recordId !== record.id && !historical) continue;
+    // A source or container link preserves its current activity; an explicit task selects history.
+    if (!taskId && !reportId && !commentId && !historical) return record;
+    const candidates = taskId
+      ? related.filter((item) => item.taskId === taskId)
+      : historical
+        ? [historical]
+        : related;
+    const work = candidates.find(
+      (item) =>
         (!reportId || item.header?.report.id === reportId) &&
         (!commentId ||
           item.publication?.id === commentId ||

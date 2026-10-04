@@ -122,8 +122,9 @@ a successful refresh is required before acting on current state.
 The **Completed · Publication unconfirmed** group remains. A complete Review can
 have automatic replies disabled, missing delivery, or an uncertain publication
 without becoming a failed Review or increasing the attention badge solely for
-missing publication. Related activities retain their current selector pending a
-later product discussion.
+missing publication. The subsequent [2026-10-04 decision](2026-10-04-related-activities.md)
+uses a persistent activity list by default and retains a timeline as an
+alternative presentation within the same Review family.
 
 `GET /api/tasks/:id/publication-recovery` determines whether the exact complete
 final report of an eligible completed native root task can be delivered. Supported

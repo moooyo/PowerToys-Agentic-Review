@@ -40,47 +40,6 @@
   gap: 16px;
 }
 
-.rc-related-work {
-  border: 0;
-  margin: 0;
-  padding: 0;
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.rc-related-work button {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--console-outline-variant);
-  border-radius: 20px;
-  color: var(--console-secondary);
-  background: transparent;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 18px;
-  font-weight: 500;
-  cursor: pointer;
-}
-.rc-related-work button[aria-pressed="true"] {
-  background: var(--console-selected);
-  border-color: var(--console-selected);
-  color: var(--console-on-selected);
-}
-.rc-related-status {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.8;
-}
-.rc-related-work button:hover {
-  background: var(--console-tonal-hover);
-}
-.rc-related-work button:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
 .rc-status-completed {
   padding: 12px 20px;
   background: var(--console-success-container);
@@ -1340,5 +1299,21 @@
   .rc-agent-working span,
   .rc-indeterminate::after {
     animation: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .rc-record-detail {
+    padding: 16px 12px 24px;
+  }
+  .rc-detail-heading {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .rc-detail-tabs {
+    flex-wrap: wrap;
+  }
+  .rc-detail-tabs button {
+    padding: 0 8px;
   }
 }

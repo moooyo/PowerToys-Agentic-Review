@@ -1,20 +1,103 @@
-import type {
-  InvestigationCommentDelivery,
-  InvestigationCommentPublicationSummary,
-  InvestigationTaskV1,
-  InvestigationWebhookDelivery,
+import {
+  createInvestigationPreview,
+  type InvestigationCommentDelivery,
+  type InvestigationCommentPublicationSummary,
+  type InvestigationTaskV1,
+  type InvestigationWebhookDelivery,
+  validateInvestigationTask,
 } from "@agentic-review/contracts";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { investigationApi } from "../investigation/api";
 import { createSampleInvestigationApi } from "../investigation/sample-adapter";
 import {
   aggregateRelatedWork,
   applyHistoricalPublication,
   assertReviewDetailBinding,
   formatDuration,
+  loadReviewRecords,
   mapIntakeFailure,
   mapReviewTask,
   relativeTime,
 } from "./model";
+
+afterEach(() => vi.restoreAllMocks());
+let syntheticLoadNumber = 0;
+
+function activityTask(
+  source: "pr" | "bug",
+  id: string,
+  createdAt: string,
+  patch: Partial<InvestigationTaskV1> = {},
+): InvestigationTaskV1 {
+  return {
+    ...createInvestigationPreview(source, { findingCount: 0 }).task,
+    id,
+    createdAt,
+    updatedAt: createdAt,
+    latestReportRef: null,
+    ...patch,
+  };
+}
+
+function followUpTask(
+  parent: InvestigationTaskV1,
+  id: string,
+  kind: "pr-verify" | "reproduction-setup" | "issue-fix" | "issue-verify",
+  createdAt: string,
+  state: InvestigationTaskV1["state"],
+): InvestigationTaskV1 {
+  const task = structuredClone(parent);
+  task.id = id;
+  task.kind = kind;
+  task.state = state;
+  task.createdAt = createdAt;
+  task.updatedAt = createdAt;
+  task.latestReportRef = null;
+  task.parentTaskId = parent.id;
+  task.parentReportRef = { id: `${parent.id}-report`, version: 1, digest: "a".repeat(64) };
+  task.planRef = { id: `${id}-plan`, version: 1, digest: "b".repeat(64) };
+  if (task.workItem.kind === "issue") {
+    const source = {
+      id: `${id}-source`,
+      kind: "source_commit" as const,
+      repositoryId: task.repository.id,
+      workItemId: task.workItem.id,
+      revisionKey: "c".repeat(64),
+      commitSha: "d".repeat(40),
+    };
+    task.subjects.push(source);
+    task.subjectRef = source.id;
+  }
+  task.executionPolicy = {
+    mode: "execute",
+    allowedSubjectRefs: task.subjects.map((subject) => subject.id),
+    allowRepositoryExecution: true,
+    authorizationRef: "synthetic-execution-authorization",
+  };
+  return task;
+}
+
+async function loadSyntheticTasks(tasks: InvestigationTaskV1[]) {
+  vi.spyOn(investigationApi, "tasks").mockResolvedValue({ items: tasks });
+  vi.spyOn(investigationApi, "workItems").mockResolvedValue({ items: [] });
+  vi.spyOn(investigationApi, "publicationDirectory").mockResolvedValue({
+    items: [],
+    nextCursor: null,
+  });
+  vi.spyOn(investigationApi, "scheduler").mockRejectedValue(
+    new Error("Synthetic scheduler unavailable."),
+  );
+  vi.spyOn(investigationApi, "webhookDeliveries").mockResolvedValue({
+    items: [],
+    nextCursor: null,
+  });
+  vi.spyOn(investigationApi, "task").mockImplementation(async (id) => {
+    const task = tasks.find((entry) => entry.id === id);
+    if (!task) throw new Error("A synthetic task was not found.");
+    return { task, attempts: [], checkpoint: null, latestReport: null, children: [] };
+  });
+  return loadReviewRecords(undefined, undefined, `synthetic:${++syntheticLoadNumber}`);
+}
 
 async function fixture() {
   const api = createSampleInvestigationApi();
@@ -265,6 +348,217 @@ describe("review console source truth", () => {
       latestReportRef: null,
     });
     expect(aggregateRelatedWork(root, [failed, completed]).status).toBe("posted");
+  });
+
+  it("loads independent PR reviews, standalone E2E and verification into one source record", async () => {
+    const review = activityTask("pr", "original-review", "2026-10-01T00:00:00Z");
+    const rereview = activityTask("pr", "rereview", "2026-10-01T03:00:00Z");
+    const e2e = activityTask("pr", "standalone-e2e", "2026-10-01T01:00:00Z", {
+      kind: "pr-e2e",
+      state: "failed",
+      executionPolicy: {
+        mode: "execute",
+        allowedSubjectRefs: [review.subjectRef],
+        allowRepositoryExecution: true,
+        authorizationRef: "synthetic-e2e-authorization",
+      },
+    });
+    const verify = followUpTask(review, "verify", "pr-verify", "2026-10-01T02:00:00Z", "running");
+    const tasks = [rereview, verify, e2e, review];
+    for (const task of tasks)
+      expect(validateInvestigationTask(task)).toEqual({ valid: true, errors: [] });
+    const records = await loadSyntheticTasks(tasks);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ id: review.id, taskId: e2e.id, currentWorkId: e2e.id });
+    expect(new Set(records[0]!.relatedWork?.map((work) => work.taskId))).toEqual(
+      new Set(tasks.map((task) => task.id)),
+    );
+    expect(
+      records[0]!.relatedWork?.find((work) => work.taskId === e2e.id)?.task?.parentTaskId,
+    ).toBeNull();
+  });
+
+  it("loads Issue reproduction, fixes, verification and later reviews without inventing PR activities", async () => {
+    const review = activityTask("bug", "issue-review", "2026-10-01T00:00:00Z");
+    const reproduction = followUpTask(
+      review,
+      "reproduction",
+      "reproduction-setup",
+      "2026-10-01T01:00:00Z",
+      "completed",
+    );
+    const fix = followUpTask(review, "fix", "issue-fix", "2026-10-01T02:00:00Z", "completed");
+    const verification = followUpTask(
+      fix,
+      "issue-verification",
+      "issue-verify",
+      "2026-10-01T03:00:00Z",
+      "running",
+    );
+    const rereview = activityTask("bug", "issue-rereview", "2026-10-01T04:00:00Z");
+    const tasks = [verification, rereview, fix, reproduction, review];
+    for (const task of tasks)
+      expect(validateInvestigationTask(task)).toEqual({ valid: true, errors: [] });
+    const records = await loadSyntheticTasks(tasks);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      id: review.id,
+      kind: "issue",
+      taskId: verification.id,
+      currentWorkId: verification.id,
+    });
+    expect(records[0]!.relatedWork).toHaveLength(5);
+    expect(records[0]!.relatedWork?.every((work) => work.task?.kind !== "pr-e2e")).toBe(true);
+  });
+
+  it("uses the latest same-kind root without dropping the earlier failed review", async () => {
+    const failed = activityTask("pr", "failed-review", "2026-10-01T00:00:00Z", {
+      state: "failed",
+    });
+    const completed = activityTask("pr", "completed-review", "2026-10-01T01:00:00Z");
+    const records = await loadSyntheticTasks([completed, failed]);
+    expect(records[0]).toMatchObject({
+      id: failed.id,
+      taskId: completed.id,
+      currentWorkId: completed.id,
+      completedWithoutPublication: true,
+    });
+    expect(records[0]!.relatedWork?.find((work) => work.taskId === failed.id)?.problem?.type).toBe(
+      "review",
+    );
+  });
+
+  it("keeps old-revision failures visible while selecting work for the latest root revision", async () => {
+    const oldReview = activityTask("pr", "old-revision-review", "2026-10-01T00:00:00Z", {
+      state: "failed",
+    });
+    const currentReview = activityTask("pr", "current-revision-review", "2026-10-01T01:00:00Z");
+    currentReview.subjects = currentReview.subjects.map((subject) => ({
+      ...subject,
+      revisionKey: "9".repeat(64),
+      ...(subject.kind === "original_pr" ? { headSha: "9".repeat(40) } : {}),
+    }));
+    const lateOldVerification = followUpTask(
+      oldReview,
+      "late-old-verification",
+      "pr-verify",
+      "2026-10-01T02:00:00Z",
+      "failed",
+    );
+    const records = await loadSyntheticTasks([lateOldVerification, currentReview, oldReview]);
+    expect(records[0]).toMatchObject({
+      id: oldReview.id,
+      taskId: currentReview.id,
+      currentWorkId: currentReview.id,
+    });
+    expect(records[0]!.relatedWork).toHaveLength(3);
+    expect(records[0]!.relatedWork?.filter((work) => work.problem?.type === "review")).toHaveLength(
+      2,
+    );
+  });
+
+  it("inherits the Issue snapshot revision through executable source subjects and parent tasks", async () => {
+    const oldReview = activityTask("bug", "old-issue-review", "2026-10-01T00:00:00Z");
+    const currentReview = activityTask("bug", "current-issue-review", "2026-10-01T01:00:00Z");
+    currentReview.subjects = currentReview.subjects.map((subject) => ({
+      ...subject,
+      revisionKey: "8".repeat(64),
+    }));
+    const oldFix = followUpTask(
+      oldReview,
+      "old-issue-fix",
+      "issue-fix",
+      "2026-10-01T03:00:00Z",
+      "failed",
+    );
+    const currentFix = followUpTask(
+      currentReview,
+      "current-issue-fix",
+      "issue-fix",
+      "2026-10-01T02:00:00Z",
+      "running",
+    );
+    currentFix.subjects = currentFix.subjects.filter(
+      (subject) => subject.kind !== "issue_snapshot",
+    );
+    currentFix.executionPolicy.allowedSubjectRefs = [currentFix.subjectRef];
+    currentFix.scope.includedUnits = [
+      {
+        id: "current-fix-source",
+        subjectRef: currentFix.subjectRef,
+        kind: "source_file",
+        paths: ["src/main.ts"],
+        requiredWork: "Inspect the executable source selected for this fix.",
+        status: "pending",
+        evidenceRefs: [],
+      },
+    ];
+    currentFix.scope.completedUnitRefs = [];
+    currentFix.scope.unresolvedUnitRefs = ["current-fix-source"];
+    expect(validateInvestigationTask(currentFix)).toEqual({ valid: true, errors: [] });
+    const records = await loadSyntheticTasks([oldFix, currentFix, currentReview, oldReview]);
+    expect(records[0]).toMatchObject({ taskId: currentFix.id, currentWorkId: currentFix.id });
+    expect(records[0]!.relatedWork).toHaveLength(4);
+  });
+
+  it("isolates repository, work item, kind and number identities when grouping source history", async () => {
+    const original = activityTask("pr", "source-one", "2026-10-01T00:00:00Z");
+    const anotherRepository = activityTask("pr", "other-repository", "2026-10-01T01:00:00Z");
+    anotherRepository.repository = {
+      ...anotherRepository.repository,
+      id: "other-repository",
+      fullName: "example/other",
+    };
+    anotherRepository.subjects = anotherRepository.subjects.map((subject) => ({
+      ...subject,
+      repositoryId: anotherRepository.repository.id,
+    }));
+    const anotherSource = activityTask("pr", "other-source", "2026-10-01T02:00:00Z");
+    anotherSource.workItem = { ...anotherSource.workItem, id: "other-source" };
+    anotherSource.subjects = anotherSource.subjects.map((subject) => ({
+      ...subject,
+      workItemId: anotherSource.workItem.id,
+    }));
+    const anotherNumber = activityTask("pr", "other-number", "2026-10-01T03:00:00Z");
+    anotherNumber.workItem = { ...anotherNumber.workItem, number: original.workItem.number + 1 };
+    const issue = activityTask("bug", "issue-source", "2026-10-01T04:00:00Z");
+    issue.workItem = {
+      ...issue.workItem,
+      id: original.workItem.id,
+      number: original.workItem.number,
+    };
+    issue.subjects = issue.subjects.map((subject) => ({
+      ...subject,
+      workItemId: issue.workItem.id,
+    }));
+    const records = await loadSyntheticTasks([
+      issue,
+      anotherNumber,
+      anotherSource,
+      anotherRepository,
+      original,
+    ]);
+    expect(records).toHaveLength(5);
+    expect(new Set(records.map((record) => record.id))).toEqual(
+      new Set([issue.id, anotherNumber.id, anotherSource.id, anotherRepository.id, original.id]),
+    );
+  });
+
+  it("chooses a stable container and same-kind winner for equal creation times in either response order", async () => {
+    const first = activityTask("pr", "review-a", "2026-10-01T00:00:00Z", { state: "failed" });
+    const second = activityTask("pr", "review-b", "2026-10-01T00:00:00Z");
+    for (const tasks of [
+      [first, second],
+      [second, first],
+    ]) {
+      const records = await loadSyntheticTasks(tasks);
+      expect(records[0]).toMatchObject({
+        id: first.id,
+        taskId: second.id,
+        currentWorkId: second.id,
+      });
+      expect(records[0]!.relatedWork).toHaveLength(2);
+    }
   });
 
   it("rejects a well-formed response for a different requested source", async () => {

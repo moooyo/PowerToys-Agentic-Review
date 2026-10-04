@@ -670,24 +670,95 @@ async function readRunningOutput(
     if (!liveIds.has(value.taskId)) runningOutput.delete(key);
 }
 
+function reviewSourceIdentity(record: ReviewRecord): string {
+  return JSON.stringify([record.repositoryId, record.workItemId, record.kind, record.number]);
+}
+
+function reviewCreationOrder(left: ReviewRecord, right: ReviewRecord): number {
+  const timestamp = (record: ReviewRecord) => {
+    const created = Date.parse(record.task?.createdAt ?? record.updatedAt);
+    const updated = Date.parse(record.updatedAt);
+    return Number.isFinite(created) ? created : Number.isFinite(updated) ? updated : 0;
+  };
+  return (
+    timestamp(left) - timestamp(right) ||
+    (left.taskId ?? left.id).localeCompare(right.taskId ?? right.id)
+  );
+}
+
+function reviewSourceRevision(record: ReviewRecord): string | undefined {
+  const task = record.task;
+  if (!task) return undefined;
+  const subjects = new Map(task.subjects.map((subject) => [subject.id, subject]));
+  const seen = new Set<string>();
+  let primary = subjects.get(task.subjectRef);
+  while (primary?.kind === "local_patch" && !seen.has(primary.id)) {
+    seen.add(primary.id);
+    primary = subjects.get(primary.baseSubjectRef);
+  }
+  const anchors = task.subjects.filter(
+    (subject) =>
+      (subject.kind === "original_pr" || subject.kind === "issue_snapshot") &&
+      subject.repositoryId === record.repositoryId &&
+      subject.workItemId === record.workItemId,
+  );
+  const anchor =
+    primary?.kind === "original_pr" || primary?.kind === "issue_snapshot"
+      ? primary
+      : anchors.length === 1
+        ? anchors[0]
+        : undefined;
+  return anchor?.revisionKey;
+}
+
 export function aggregateRelatedWork(
   root: ReviewRecord,
-  descendants: ReviewRecord[],
+  relatedRecords: ReviewRecord[],
 ): ReviewRecord {
-  if (!descendants.length) return root;
-  const related = [root, ...descendants].map((record) => {
+  if (!relatedRecords.length) return root;
+  const related = [root, ...relatedRecords].map((record) => {
     if (record.id === root.id || record.task?.state !== "completed" || record.publication)
       return record;
     return { ...record, problem: undefined, completedWithoutPublication: true };
   });
+  const byId = new Map(related.map((record) => [record.taskId, record]));
+  const sourceRevision = (record: ReviewRecord) => {
+    const seen = new Set<string>();
+    let current: ReviewRecord | undefined = record;
+    while (current) {
+      const revision = reviewSourceRevision(current);
+      if (revision !== undefined) return revision;
+      const parentId: string | null | undefined = current.task?.parentTaskId;
+      if (!parentId || seen.has(parentId)) return undefined;
+      seen.add(parentId);
+      current = byId.get(parentId);
+    }
+    return undefined;
+  };
+  const rootRecords = related.filter((record) => record.task?.parentTaskId === null);
+  const newestRoot = [...rootRecords]
+    .sort(reviewCreationOrder)
+    .reverse()
+    .find((record) => sourceRevision(record) !== undefined);
+  const currentRevision = newestRoot && sourceRevision(newestRoot);
+  const eligible =
+    currentRevision === undefined
+      ? related
+      : related.filter((record) => sourceRevision(record) === currentRevision);
   const latestKinds = new Map<string, ReviewRecord>();
-  for (const record of [...related].sort((left, right) =>
-    (left.task?.createdAt ?? left.updatedAt).localeCompare(
-      right.task?.createdAt ?? right.updatedAt,
-    ),
-  ))
+  for (const record of [...eligible].sort(reviewCreationOrder))
     latestKinds.set(record.task?.kind ?? record.id, record);
   const current = [...latestKinds.values()];
+  const defaultWork =
+    current.find(
+      (record) => record.task?.kind === "pr-review" || record.task?.kind === "issue-investigate",
+    ) ??
+    [...eligible]
+      .filter((record) => record.task?.parentTaskId === null)
+      .sort(reviewCreationOrder)
+      .at(-1) ??
+    current.at(-1) ??
+    root;
   const selected =
     current.find(
       (record) => record.status === "attention" && !record.completedWithoutPublication,
@@ -695,7 +766,7 @@ export function aggregateRelatedWork(
     current.find((record) => record.status === "running") ??
     current.find((record) => record.status === "publishing") ??
     current.find((record) => record.status === "queued") ??
-    root;
+    defaultWork;
   return { ...selected, id: root.id, relatedWork: related, currentWorkId: selected.taskId };
 }
 
@@ -769,25 +840,21 @@ export async function loadReviewRecords(
   await readRunningOutput(taskRecords, signal, identity);
   await readHistoricalPublications(taskRecords, signal, identity);
   signal?.throwIfAborted();
-  const byId = new Map(taskRecords.map((record) => [record.taskId, record]));
-  const rootId = (record: ReviewRecord): string | undefined => {
-    const seen = new Set<string>();
-    let current: ReviewRecord | undefined = record;
-    while (current?.task?.parentTaskId) {
-      if (seen.has(current.task.id)) return undefined;
-      seen.add(current.task.id);
-      current = byId.get(current.task.parentTaskId);
-    }
-    return current?.id;
-  };
-  const records = taskRecords
-    .filter((record) => record.task?.parentTaskId === null)
-    .map((root) =>
-      aggregateRelatedWork(
-        root,
-        taskRecords.filter((record) => record.id !== root.id && rootId(record) === root.id),
-      ),
+  const sourceGroups = new Map<string, ReviewRecord[]>();
+  for (const record of taskRecords) {
+    const key = reviewSourceIdentity(record);
+    const group = sourceGroups.get(key) ?? [];
+    group.push(record);
+    sourceGroups.set(key, group);
+  }
+  const records = [...sourceGroups.values()].map((group) => {
+    const roots = group.filter((record) => record.task?.parentTaskId === null);
+    const root = [...(roots.length ? roots : group)].sort(reviewCreationOrder)[0]!;
+    return aggregateRelatedWork(
+      root,
+      group.filter((record) => record.taskId !== root.taskId),
     );
+  });
   for (const delivery of deliveries) {
     if (
       delivery.state !== "failed" ||

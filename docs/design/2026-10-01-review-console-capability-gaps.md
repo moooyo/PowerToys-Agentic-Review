@@ -14,6 +14,11 @@ The later [2026-10-02 execution policy](2026-10-02-time-only-execution-budget.md
 supersedes item 8 below: execution is capped only by a cumulative two-hour
 allowance. The initial decision and gap snapshot remain historical context.
 
+The [2026-10-04 related-activity decision](2026-10-04-related-activities.md)
+supersedes item 16: the activity list remains visible by default, with a timeline
+available as an alternative. One Inbox record retains all native tasks for each
+PR or Issue, while exact activity links preserve their original task bindings.
+
 ## Product decisions and implementation status, 2026-10-01
 
 The following decisions are reflected in the current implementation change. See

@@ -9,6 +9,8 @@ The console follows the Review Console handoff: an 88px navigation rail, a 72px
 header, a grouped Inbox beside record details, and seven Settings sections.
 Desktop layouts around 1100px and wider are the primary scope. Both Chinese and
 English and both light and dark themes are available without reloading.
+At 760px and narrower, navigation becomes horizontal, the toolbar wraps, and the
+Inbox and detail panels stack with independent scrolling.
 
 ## Navigation and records
 
@@ -53,10 +55,14 @@ can obtain author metadata through a read-only GitHub lookup that checks the sav
 repository and work-item identities. That lookup does not refresh historical
 source snapshots or add module and Issue-label metadata.
 
-Related reproduction, E2E, repair, and verification work is grouped under its
-original Review record. The detail selector opens each related activity's own
-report, session, and recovery controls. Completed related work does not imply
-that it has its own GitHub comment or that the original conclusion was rewritten.
+All native tasks for the same PR or Issue share one Inbox record, including
+repeated root Reviews, standalone E2E work, and related reproduction, repair,
+and verification tasks. Details show all related activities in a persistent list
+by default, with a timeline available for inspecting their recorded chronology.
+Selecting an activity opens its own report, session, and recovery controls. The
+presentation switch preserves the selected activity and content tab. Completed
+related work does not imply that it has its own GitHub comment or that the
+original conclusion was rewritten.
 An exact related activity link selects that activity within its Review family.
 Explicit links that cannot be resolved show an unavailable state instead of
 silently opening another Review.
@@ -235,8 +241,8 @@ Publishing-account identity and token-scope diagnostics are not added. Historica
 legacy result publications are readable but have no new repost operation. Numeric
 command exit codes are not added to normalized session output. Optional module
 and Issue-label fields remain absent when the native data does not provide them.
-The related-activity selector remains in its current form pending a later product
-discussion. Repeated Reviews continue to update the same GitHub comment while
+The approved [related-activity presentation](../../docs/design/2026-10-04-related-activities.md)
+keeps every activity's own execution status visible. Repeated Reviews continue to update the same GitHub comment while
 preserving every saved report and its delivery history.
 
 See the [current capability decisions and implementation](../../docs/design/2026-10-01-review-console-capabilities.md)

@@ -38,7 +38,6 @@ import {
   problemMessage,
   type ReviewRecord,
   recordStatusLabel,
-  relatedWorkLabel,
   relativeTime,
   reportConclusion,
   stageLabel,
@@ -46,6 +45,7 @@ import {
 } from "./model";
 import { ConsoleIcon, useConsolePreferences } from "./preferences";
 import PublicationRecovery from "./publication-recovery";
+import { RelatedActivities } from "./related-activities";
 import "./record-detail.css";
 
 interface Props {
@@ -960,6 +960,7 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
   const resumeKey = useRef(crypto.randomUUID());
   const intakeKey = useRef(crypto.randomUUID());
   const tabsId = useId();
+  const refetchedSourceRevision = useRef<string | undefined>(undefined);
   const detailQuery = useQuery({
     queryKey: ["console-review-detail", identity, selectedSource.taskId],
     enabled: !!selectedSource.taskId,
@@ -977,6 +978,21 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
     refetchIntervalInBackground: false,
     retry: false,
   });
+  useEffect(() => {
+    const source = selectedSource.task;
+    const cached = detailQuery.data?.task;
+    if (!source || !cached || source.id !== cached.id) return;
+    const sourceTime = Date.parse(source.updatedAt);
+    const cachedTime = Date.parse(cached.updatedAt);
+    const sourceIsNewer =
+      Number.isFinite(sourceTime) &&
+      Number.isFinite(cachedTime) &&
+      (sourceTime > cachedTime || (sourceTime === cachedTime && source.state !== cached.state));
+    const revision = JSON.stringify([source.id, source.updatedAt, source.state]);
+    if (!sourceIsNewer || refetchedSourceRevision.current === revision) return;
+    refetchedSourceRevision.current = revision;
+    void detailQuery.refetch();
+  }, [selectedSource.task, detailQuery.data?.task, detailQuery.refetch]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(timer);
@@ -1249,35 +1265,17 @@ function RecordDetailReader({ record: initialRecord, onRefresh, onSettings }: Pr
         )}
       </header>
       {related.length > 1 && (
-        <fieldset
-          className="rc-related-work"
-          aria-label={text("相关 Review 流程", "Related review work")}
-        >
-          {related.map((work) => (
-            <button
-              type="button"
-              key={work.taskId}
-              aria-pressed={selectedSource.taskId === work.taskId}
-              disabled={busy}
-              onClick={() => {
-                setSelectedWorkId(work.taskId);
-                setTab(["running", "queued"].includes(work.status) ? "session" : "report");
-                setError(undefined);
-              }}
-            >
-              {relatedWorkLabel(work, text)}
-              <span className="rc-related-status">
-                {work.completedWithoutPublication || work.task?.state === "completed"
-                  ? text("已完成", "Completed")
-                  : work.status === "running"
-                    ? text("运行中", "Running")
-                    : work.status === "queued"
-                      ? text("排队中", "Queued")
-                      : problemLabel(work.problem?.type, text)}
-              </span>
-            </button>
-          ))}
-        </fieldset>
+        <RelatedActivities
+          records={related}
+          selectedTaskId={selectedSource.taskId}
+          selectedRecord={record}
+          busy={busy}
+          onSelect={(work) => {
+            setSelectedWorkId(work.taskId);
+            setTab(["running", "queued"].includes(work.status) ? "session" : "report");
+            setError(undefined);
+          }}
+        />
       )}
       <Workflow record={record} now={now} text={text} />
       {(detailQuery.isError || record.readWarning) && (
